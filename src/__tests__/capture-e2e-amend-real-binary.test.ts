@@ -20,11 +20,11 @@ import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { commitDiffScopedToPrompt } from '../git-capture.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
 const haveDist = fs.existsSync(BIN);
-const posix = process.platform !== 'win32';
 
 type Hit = { method: string; url: string; body: any };
 const hits: Hit[] = [];
@@ -156,7 +156,7 @@ async function killJournalWatcher(): Promise<void> {
 /** Every PATCH the session sent, oldest first. */
 const patches = () => hits.filter((h) => h.method === 'PATCH' && /^\/api\/mcp\/session\/e2e-amend-session-0001/.test(h.url)).map((h) => h.body);
 
-describe.skipIf(!haveDist || !posix)('git commit --amend end to end through the built binary', () => {
+describe.skipIf(!haveDist)('git commit --amend end to end through the built binary', () => {
   let tmp = '';
 
   beforeAll(async () => {
@@ -183,7 +183,7 @@ describe.skipIf(!haveDist || !posix)('git commit --amend end to end through the 
     git(['add', '.']);
     git(['commit', '-q', '-m', 'base']);
     baseSha = git(['rev-parse', 'HEAD']);
-  }, 60_000);
+  }, 60_000 * WINDOWS_SLOWDOWN);
 
   afterAll(async () => {
     await killJournalWatcher();
@@ -250,5 +250,5 @@ describe.skipIf(!haveDist || !posix)('git commit --amend end to end through the 
     expect(lastList, 'no commitShas reached the API').toBeTruthy();
     expect(lastList).toContain(amended);
     expect(lastList).not.toContain(original);
-  }, 120_000);
+  }, 120_000 * WINDOWS_SLOWDOWN);
 });

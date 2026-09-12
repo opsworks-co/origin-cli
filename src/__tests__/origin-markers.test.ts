@@ -185,4 +185,23 @@ describe('extractTranscriptText', () => {
     expect(m.decision).toEqual(['Prefix-strip — path.relative is host-only']);
     expect(m.intent).toBeUndefined();
   });
+
+  // [Origin: Closes] is the only marker that looks BACKWARDS — at a leftover an
+  // earlier session recorded. Without it in the parser, session end has no way
+  // to know a TODO was discharged, which is why `openTodos` grew forever.
+  it('parses Closes into its own bucket, on the same terms as the rest', () => {
+    const m = parseOriginMarkers([
+      '[Origin: Closes] 383702de',
+      '  - **[Origin: closes]** the shadow-ref leak still has no owner',
+      '[Origin: Closes] <something you finished>',
+      '[Origin: Open] still unsure about the sweep interval',
+    ].join('\n'))!;
+    expect(m.closes).toEqual(['383702de', 'the shadow-ref leak still has no owner']);
+    // Same bucket separation as every other marker — a close is not an open.
+    expect(m.open).toEqual(['still unsure about the sweep interval']);
+  });
+
+  it('ignores a Closes marker that is only the unfilled template', () => {
+    expect(parseOriginMarkers('[Origin: Closes] <id of an open TODO above>')).toBeUndefined();
+  });
 });

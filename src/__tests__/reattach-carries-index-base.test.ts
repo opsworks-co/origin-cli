@@ -49,8 +49,21 @@ describe('the re-attach carries what identifies a turn', () => {
     ['completedPromptMappings', 'the prior turns\' captured work'],
     ['promptShadows', 'per-turn baselines'],
     ['sessionCommitShas', 'which commits are this session\'s'],
+    ['rewrittenCommits', 'the (orphan → rewrite) pairs; without them the next Stop re-badges the originals'],
+    ['headShaAtStart', 'the conversation\'s baseline, not today\'s HEAD'],
   ])('carries %s — %s', (field) => {
     expect(literal).toContain(`${field}: priorState?.${field}`);
+  });
+
+  it('looks the prior state up by conversation when the tag misses', () => {
+    // Session 8a06aaf6 (2026-09-09): adopted from a worktree handshake, so its
+    // file lived under the handshake's tag; the re-attach after an 11h gap
+    // looked under the conversation's tag, found nothing, started empty.
+    const src = hooksSource();
+    const anchor = src.indexOf('auto-create re-attach — carrying prompt history');
+    const window = src.slice(Math.max(0, anchor - 2500), anchor);
+    expect(window).toContain('loadSessionState(repoPath, autoTag)');
+    expect(window).toContain('findPriorStateForConversation(');
   });
 
   it('does NOT carry activeTurn', () => {

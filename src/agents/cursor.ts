@@ -137,10 +137,85 @@ export function findCursorSubagentJsonls(mainJsonlPath: string): string[] {
  *
  * Each line: { role: "user"|"assistant", message: { content: [{ type, text }] } }
  *
- * There are no token counts in these files, but we can compute accurate
- * estimates by counting the actual conversation text (much better than
- * the previous chars/4 heuristic that only counted user prompts).
+ * There are no token counts in these files. We estimate from billed-looking
+ * text: user prompts, assistant text, thinking, tool-call args, and tool
+ * results. Tool I/O *is* billed (it sits in the context window); an earlier
+ * version skipped it and then multiplied user text by 3 to guess at file
+ * context, which both undercounted tools and double-guessed reads.
+ *
+ * Still an estimate — Cursor does not expose cache reads or the system
+ * prompt / rules payload — so we keep a small multiplier on *user prompt
+ * text only* for injected context that never appears in the JSONL.
  */
+export const CURSOR_CHARS_PER_TOKEN = 3.5;
+export const CURSOR_PROMPT_CONTEXT_MULTIPLIER = 2;
+
+export function estimateCursorTokens(counts: {
+  userChars: number;
+  toolResultChars: number;
+  assistantChars: number;
+  thinkingChars: number;
+  toolUseChars: number;
+}): { inputTokens: number; outputTokens: number; tokensUsed: number } {
+  const inputTokens =
+    Math.round(Math.max(counts.userChars, 0) / CURSOR_CHARS_PER_TOKEN) * CURSOR_PROMPT_CONTEXT_MULTIPLIER +
+    Math.round(Math.max(counts.toolResultChars, 0) / CURSOR_CHARS_PER_TOKEN);
+  const outputTokens = Math.round(
+    (Math.max(counts.assistantChars, 0) +
+      Math.max(counts.thinkingChars, 0) +
+      Math.max(counts.toolUseChars, 0)) / CURSOR_CHARS_PER_TOKEN,
+  );
+  return { inputTokens, outputTokens, tokensUsed: inputTokens + outputTokens };
+}
+
+function billedChars(value: unknown): number {
+  if (typeof value === 'string') return value.length;
+  if (value == null) return 0;
+  try { return JSON.stringify(value).length; } catch { return 0; }
+}
+
+/** Token buckets from Cursor JSONL lines — shared by discovery and tests. */
+export function measureCursorJsonlTokens(lines: string[]): ReturnType<typeof estimateCursorTokens> {
+  let userChars = 0;
+  let toolResultChars = 0;
+  let assistantChars = 0;
+  let thinkingChars = 0;
+  let toolUseChars = 0;
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let entry: any;
+    try { entry = JSON.parse(line); } catch { continue; }
+    const role = entry.role || 'unknown';
+    const content = entry.message?.content;
+    const addToolResult = (raw: unknown) => { toolResultChars += billedChars(raw); };
+
+    if (typeof content === 'string') {
+      if (role === 'user') userChars += content.length;
+      else assistantChars += content.length;
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+    for (const c of content as any[]) {
+      const t = c?.type;
+      if (t === 'text' && typeof c.text === 'string') {
+        if (role === 'user') userChars += c.text.length;
+        else assistantChars += c.text.length;
+      } else if (t === 'thinking') {
+        thinkingChars += billedChars(c.thinking || c.text || '');
+      } else if (t === 'tool_use') {
+        toolUseChars += billedChars(c.input ?? c.arguments ?? '');
+      } else if (t === 'tool_result') {
+        if (typeof c.content === 'string') addToolResult(c.content);
+        else if (Array.isArray(c.content)) {
+          addToolResult(c.content.map((b: any) => typeof b === 'string' ? b : (b?.text || b?.content || '')).filter(Boolean).join('\n'));
+        } else if (c.content) addToolResult(c.content);
+      }
+    }
+  }
+  return estimateCursorTokens({ userChars, toolResultChars, assistantChars, thinkingChars, toolUseChars });
+}
+
 export function discoverCursorTranscript(conversationId?: string, hookCwd?: string, opts: { verbose?: boolean } = {}): CursorTranscriptData | null {
   try {
     // STRICT ID-anchored discovery + staleness guard live in the shared
@@ -164,8 +239,7 @@ export function discoverCursorTranscript(conversationId?: string, hookCwd?: stri
     const truncate = (s: string) => s.length > TRUNC ? s.slice(0, TRUNC) + `… [+${s.length - TRUNC} chars]` : s;
 
     const turns: Array<{ role: string; content: string }> = [];
-    let totalInputChars = 0;
-    let totalOutputChars = 0;
+    const estimated = measureCursorJsonlTokens(lines);
 
     for (const line of lines) {
       try {
@@ -177,16 +251,13 @@ export function discoverCursorTranscript(conversationId?: string, hookCwd?: stri
         // Pull out everything we can render — text + structured tool I/O —
         // so reviewers see what the agent ran, not just the narration.
         const parts: string[] = [];
-        let plainText = '';
 
         if (typeof content === 'string') {
-          plainText = content;
           parts.push(content);
         } else if (Array.isArray(content)) {
           for (const c of content as any[]) {
             const t = c?.type;
             if (t === 'text' && typeof c.text === 'string') {
-              plainText += c.text;
               parts.push(c.text);
             } else if (t === 'thinking' && (c.thinking || c.text)) {
               // Collapse internal blank lines — the web's reasoning block ends
@@ -224,13 +295,6 @@ export function discoverCursorTranscript(conversationId?: string, hookCwd?: stri
         if (!cleaned) continue;
 
         turns.push({ role, content: cleaned });
-
-        // Token estimation uses plain text only (tool I/O isn't billed by Cursor)
-        if (role === 'user') {
-          totalInputChars += plainText.length;
-        } else {
-          totalOutputChars += plainText.length;
-        }
       } catch {
         // skip malformed lines
       }
@@ -238,30 +302,17 @@ export function discoverCursorTranscript(conversationId?: string, hookCwd?: stri
 
     if (turns.length === 0) return null;
 
-    // Token estimation from actual conversation text.
-    // ~3.5 chars per token for code-heavy content (better than the old 4.0).
-    // Input includes: user prompts + file context sent by Cursor (estimate 3x
-    // the visible prompt text for attached files, codebase context, etc.)
-    const CHARS_PER_TOKEN = 3.5;
-    const CONTEXT_MULTIPLIER = 3;  // Cursor sends ~3x the prompt text as file context
-    const visibleInputTokens = Math.round(totalInputChars / CHARS_PER_TOKEN);
-    const estimatedInputTokens = visibleInputTokens * CONTEXT_MULTIPLIER;
-    const estimatedOutputTokens = Math.round(totalOutputChars / CHARS_PER_TOKEN);
-    const totalTokens = estimatedInputTokens + estimatedOutputTokens;
-
     debugLog('cursor', 'parsed agent transcript', {
       turns: turns.length,
-      inputChars: totalInputChars,
-      outputChars: totalOutputChars,
-      estimatedInputTokens,
-      estimatedOutputTokens,
-      totalTokens,
+      estimatedInputTokens: estimated.inputTokens,
+      estimatedOutputTokens: estimated.outputTokens,
+      totalTokens: estimated.tokensUsed,
     });
 
     return {
-      inputTokens: estimatedInputTokens,
-      outputTokens: estimatedOutputTokens,
-      tokensUsed: totalTokens,
+      inputTokens: estimated.inputTokens,
+      outputTokens: estimated.outputTokens,
+      tokensUsed: estimated.tokensUsed,
       transcript: JSON.stringify(turns),
       jsonlPath: transcriptFileFinal,
     };

@@ -13,25 +13,31 @@
 
 import fs from 'fs';
 import { newCaptureStamp } from './capture-stamp.js';
+import { serverRowForLocalTurn } from './turn-index.js';
+import { promptChangesForSessionEnd } from './session-end-payload.js';
 import { commitLandedInTurn, turnIsClosed } from './turn-commit-scope.js';
 import { assessRestoreSafety } from './restore-safety.js';
 import os from 'os';
 import path from 'path';
 import { execFileSync, spawn } from 'child_process';
 import { getCurrentVersion, shouldRestartForUpgrade } from './version-check.js';
-import { transcriptIdleWindowMs, HOOK_DRIVEN_IDLE_MS } from './heartbeat-liveness.js';
+import { transcriptIdleWindowMs, HOOK_DRIVEN_IDLE_MS, turnInProgress } from './heartbeat-liveness.js';
 import { pruneRetiredStateFiles } from './session-state.js';
-import { createShadowCommit, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { createShadowCommit, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN, captureGitState } from './git-capture.js';
+import { combineApplyableTurnDiff, hasDuplicateFileSections } from './applyable-turn-diff.js';
 import { capDiff } from './diff-budget.js';
 import { applyLedgerToMappings } from './capture-from-ledger.js';
+import { preferCommitPatchForCommittedTurns } from './commit-patch-for-committed-turn.js';
+import { preferShadowRangeForTurns } from './prefer-shadow-range.js';
+import { inheritedBaselineForTurn, inheritedBeforeStatesForTurn } from './commands/hooks.js';
 import { readJournalEntries, journalPathsForTag } from './write-journal-watch.js';
-import { ensureInProcessJournal } from './ledger-producer.js';
+import { ensureInProcessJournal, stateLedgerIsContended } from './ledger-producer.js';
 import { stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
 import { fetchWithTimeout } from './fetch-timeout.js';
 import { buildCodexThreadByIdQuery, buildCodexThreadByCwdQuery } from './codex-thread-query.js';
 import { ensureSqlite, querySqlite } from './utils/sqlite.js';
 import { isCodexInternalSubroutine, findCodexRolloutByCwd, parseCodexRolloutLive } from './agents/codex.js';
-import { parentLooksDead, heartbeatSuperseded, isServerTerminalDefinitive } from './heartbeat-liveness.js';
+import { parentLooksDead, heartbeatSuperseded, isServerTerminalDefinitive, stateFileTakenOver } from './heartbeat-liveness.js';
 import { debugLog } from './debug-log.js';
 
 // Path of a file inside the git dir governing `repoPath` — worktree-aware
@@ -261,6 +267,28 @@ function isAgentActivelyWriting(): boolean {
   return false;
 }
 
+// Positive liveness from the hooks themselves: user-prompt-submit opened a
+// turn that Stop has not closed. The agent is working on it, whether or not
+// its transcript moves — Cursor writes its transcript only when a generation
+// ends, so a long generation showed the transcript signal NOTHING for the
+// whole turn and the 20-minute hookless-IDE window reaped the live session in
+// the middle of it (prod c1e361a4: reaped 23:36 inside a 23:14→23:45 turn;
+// the turn's edits then found no session and the next prompt minted a twin).
+// Both stamps are hook-written only; this daemon never touches them. See
+// turnInProgress in heartbeat-liveness.ts for the cap on a turn that died
+// without a Stop.
+function isTurnInProgress(): boolean {
+  if (!stateFile) return false;
+  try {
+    const st = JSON.parse(fs.readFileSync(stateFile, 'utf-8')) as {
+      currentTurnStartedAt?: number; lastTurnClosedAt?: number;
+    };
+    return turnInProgress(st);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Read the agent's current git branch from the session's repo path.
  * Hooks fire on prompt-submit which Gemini/Codex/etc don't always trigger,
@@ -343,6 +371,10 @@ async function pushInflightDiff(): Promise<void> {
       // Advanced by Stop (closeTurn). Read here so a turn Stop has finished is
       // left alone — see turnIsClosed.
       lastClosedTurnIndex?: number | null;
+      commitTurns?: Array<{ sha: string; turnId: string; at?: string }>;
+      // Server row of this launch's turn 0. Every local-numbered field above
+      // (prompts, shadows, ids) is lifted by it before it names a row.
+      promptIndexBase?: number | null;
     };
     // A session whose user-prompt-submit never started a journal (Codex's
     // hook is unreliable; a state file from before the journal existed) had
@@ -362,7 +394,7 @@ async function pushInflightDiff(): Promise<void> {
     // then under-reported the turn without a word.
     if (!state.writeJournalPath && state.sessionTag && state.repoPath && (state.prompts?.length || 0) > 0) {
       ensureInProcessJournal(state.sessionTag, state.repoPath, state.promptTurnIds || []);
-      const jp = journalPathsForTag(state.sessionTag);
+      const jp = journalPathsForTag(state.sessionTag, state.repoPath);
       state.writeJournalPath = jp.journalPath;
       state.writeSnapshotDir = jp.snapshotDir;
     }
@@ -371,7 +403,12 @@ async function pushInflightDiff(): Promise<void> {
     const prompts = state.prompts || [];
     if (!repoPath || !prePromptSha || prompts.length === 0) return;
 
+    // LOCAL turn number — indexes prompts, shadows and ids — and the SERVER
+    // row it is sent to. A resumed conversation has `promptIndexBase` turns
+    // before this launch's first; sending the local number aimed this tick at
+    // another turn's row (see turn-index.ts).
     const promptIndex = prompts.length - 1;
+    const promptRow = serverRowForLocalTurn(promptIndex, state.promptIndexBase);
     // Stop closed this turn: its capture is final and stamped. Every tick
     // after that re-derived the same turn from a shadow baseline and sent it
     // with a NEWER stamp, so the reconstruction outranked the observed
@@ -602,7 +639,27 @@ async function pushInflightDiff(): Promise<void> {
         if (m[1]) filesChanged.add(m[1]);
       }
     }
-    const fullDiff = (committedDiff + (uncommittedDiff ? '\n' + uncommittedDiff : '')).trim();
+    // Concatenating `git show` of two commits (or a commit + leftover
+    // uncommitted edit) stored two sections for one file — Codex/Gemini's
+    // primary capture path, the acd825ed producer. Pay for a working-tree
+    // view only when that would actually fire.
+    const naive = `${committedDiff}${uncommittedDiff ? `\n${uncommittedDiff}` : ''}`;
+    let workingTreeDiff = '';
+    if (
+      (hasDuplicateFileSections(naive) || hasDuplicateFileSections(committedDiff) || hasDuplicateFileSections(uncommittedDiff))
+      && promptBaseline && isHex(promptBaseline)
+    ) {
+      try {
+        workingTreeDiff = stripFiles(stripIgnoredSectionsFromDiff(
+          captureGitState(repoPath, promptBaseline, { fullContext: true }).workingTreeDiff || '',
+        ));
+      } catch { /* combine without it still coalesces to one section per file */ }
+    }
+    const fullDiff = combineApplyableTurnDiff({
+      committedDiff,
+      uncommittedDiff,
+      workingTreeDiff,
+    });
     const counted = fullDiff.split('\n');
     const linesAdded = counted.filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
     const linesRemoved = counted.filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
@@ -646,14 +703,19 @@ async function pushInflightDiff(): Promise<void> {
     // ledger only into Stop would have left exactly the agents with the least
     // evidence still deriving their diffs from a shadow baseline.
     const hbMapping: Record<string, unknown> = {
-      promptIndex,
+      // The server row: applyLedgerToMappings and the commit-patch pass resolve
+      // it back to the local turn through `state.promptIndexBase`.
+      promptIndex: promptRow,
       filesChanged: Array.from(filesChanged),
       diff: capDiff(fullDiff, MAX_PROMPT_DIFF_LEN),
       uncommittedDiff: capDiff(uncommittedDiff, MAX_PROMPT_DIFF_LEN),
       linesAdded,
       linesRemoved,
     };
-    applyLedgerToMappings(state as any, [hbMapping as any], {
+    applyLedgerToMappings({
+      ...state,
+      ledgerContended: stateLedgerIsContended(state as any, state.repoPath || ''),
+    } as any, [hbMapping as any], {
       readEntries: readJournalEntries,
       readAtRev: state.repoPath
         ? (sha: string, file: string) => readFileAtRev(state.repoPath as string, sha, file)
@@ -661,6 +723,21 @@ async function pushInflightDiff(): Promise<void> {
       ignoredFiles: state.repoPath
         ? (files: string[]) => gitIgnoredFiles(state.repoPath as string, files)
         : undefined,
+      inheritedBefore: state.repoPath
+        ? (baselineSha: string, localTurn: number) =>
+          inheritedBeforeStatesForTurn(state.repoPath as string, state as any, baselineSha, localTurn)
+        : undefined,
+    });
+    // Empty shadow window: leftover HEAD..worktree is not this turn. Changed
+    // window: git hunks, not a journal fragment at line 1.
+    preferShadowRangeForTurns(state as any, [hbMapping as any], repoPath);
+    // Same pass Stop runs: a committed turn's diff is the commit patch, not
+    // `baseline..HEAD`. Without this, a 30s tick after post-commit overwrites
+    // the badge-matching row with the fast-forward range (session 761adbe8).
+    preferCommitPatchForCommittedTurns(state as any, [hbMapping as any], repoPath, {
+      inheritedBaseline: (shadowSha, localTurn) => inheritedBaselineForTurn(
+        repoPath, state as any, shadowSha, localTurn,
+      ),
     });
     delete hbMapping.ledgerOwned; // internal marker; `diffSource` is what travels
 
@@ -675,7 +752,7 @@ async function pushInflightDiff(): Promise<void> {
             // ordering and can overwrite a fresher capture. See
             // capture-stamp.ts.
             ...newCaptureStamp('hb'),
-            promptIndex,
+            promptIndex: promptRow,
             // Identity, not just position. The heartbeat re-sends this turn
             // every tick, so if the prompt list renumbers underneath it (a
             // resume, a mid-turn interjection) the row would land on whichever
@@ -1160,6 +1237,31 @@ async function handleRestore(command: {
  * End the session on the API when the agent process dies.
  * Cleans up state file so the next session-start doesn't find stale state.
  */
+/**
+ * End OUR session after its state file was taken over by another registered
+ * session. Deliberately not endSession(): that reads the file, archives it and
+ * sends its prompts — all of which belong to the other session now. Only the
+ * id goes up, and only our own mirror comes down.
+ */
+async function endOrphanedSession(takenOverBy: string): Promise<void> {
+  try {
+    const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
+    fs.appendFileSync(`${homeDir}/.origin/hooks.log`,
+      `[${new Date().toISOString()}] [heartbeat] state file taken over by another registered session — ending ours and exiting ` +
+      JSON.stringify({ sessionId, takenOverBy, stateFile }) + '\n');
+    try { fs.unlinkSync(`${homeDir}/.origin/sessions/${sessionId.slice(0, 12)}.json`); } catch { /* never mirrored */ }
+  } catch { /* best effort */ }
+  // A placeholder id was never registered — nothing to end on the server.
+  if (!(apiKey && apiUrl) || sessionId.startsWith('local-')) return;
+  try {
+    await fetchWithTimeout(`${apiUrl}/api/mcp/session/end`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+      body: JSON.stringify({ sessionId }),
+    });
+  } catch { /* best effort */ }
+}
+
 async function endSession() {
   // Read state file to send accumulated data with end request
   let stateData: any = null;
@@ -1206,21 +1308,8 @@ async function endSession() {
           // Don't overwrite — server already has model from updateSession calls
         }
 
-        // Use saved per-prompt mappings (from stop handler) if available.
-        // Only build empty fallback if no real mappings exist — avoids
-        // overwriting real diffs that stop already sent to the API.
-        const savedMappings = stateData.completedPromptMappings;
-        if (savedMappings && Array.isArray(savedMappings) && savedMappings.length > 0) {
-          endPayload.promptChanges = savedMappings;
-        } else if (prompts.length > 0) {
-          endPayload.promptChanges = prompts.map((p: string, i: number) => ({
-            ...newCaptureStamp('hb'),
-            promptIndex: i,
-            promptText: p.slice(0, 1000),
-            filesChanged: [],
-            diff: '',
-          }));
-        }
+        const changes = promptChangesForSessionEnd(stateData);
+        if (changes) endPayload.promptChanges = changes;
       }
 
       await fetchWithTimeout(`${apiUrl}/api/mcp/session/end`, {
@@ -1426,6 +1515,25 @@ async function ping() {
       process.exit(0);
     }
 
+    // The state file now names ANOTHER registered session: a second
+    // registration landed on this conversation's tag. Nothing will write to
+    // our session again, and every tick from here would push the other
+    // session's turns under our id (see stateFileTakenOver). End ours on the
+    // server — it is an orphan; empty ones are swept, a filled one stops
+    // showing as live — WITHOUT touching the file or its mirror, which are the
+    // other session's now, and exit.
+    if (stateFile) {
+      let fileSessionId: string | undefined;
+      try {
+        fileSessionId = (JSON.parse(fs.readFileSync(stateFile, 'utf-8')) as { sessionId?: string }).sessionId;
+      } catch { fileSessionId = undefined; }
+      if (stateFileTakenOver({ ownSessionId: sessionId, fileSessionId })) {
+        await endOrphanedSession(fileSessionId || '');
+        try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
+        process.exit(0);
+      }
+    }
+
     // Liveness stamp: bump the pid file's mtime every tick. A live PID alone is
     // NOT proof of health — a heartbeat whose loop hung (an unresolved await, a
     // wedged fs/network call) stays alive as a PROCESS but stops pinging and
@@ -1459,6 +1567,7 @@ async function ping() {
       transcriptStale: isTranscriptStale(),
       stateFileStale: isStateFileStale(),
       agentActivelyWriting: isAgentActivelyWriting(),
+      turnInProgress: isTurnInProgress(),
     });
     if (looksDead) {
       parentDeadTickCount++;
@@ -1675,7 +1784,7 @@ async function ping() {
       //      grace: only tear down once the agent process is confirmed gone, so
       //      the live agent's next prompt doesn't orphan and the dashboard can
       //      still re-derive RUNNING/IDLE from lastActivityAt on later pings.
-      const dropLocalSessionAndExit = (): void => {
+      const dropLocalSessionAndExit = (serverTerminal: boolean): void => {
         try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
         if (stateFile) {
           try {
@@ -1683,6 +1792,11 @@ async function ping() {
             const state = JSON.parse(raw);
             state.status = 'ENDED';
             state.endedAt = new Date().toISOString();
+            // The archive is what a resumed conversation recovers from
+            // (user-prompt-submit, selectRecoverableArchiveSession). A row the
+            // user archived or deleted on the web must not come back that way,
+            // so say so in the archive itself.
+            if (serverTerminal) state.serverTerminal = true;
             const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
             const archiveDir = `${homeDir}/.origin/sessions`;
             fs.mkdirSync(archiveDir, { recursive: true });
@@ -1695,7 +1809,7 @@ async function ping() {
 
       if (isServerTerminalDefinitive(data)) {
         // Archived / deleted server-side → stop immediately, parent or not.
-        dropLocalSessionAndExit();
+        dropLocalSessionAndExit(true);
       }
       if (data.status && data.status !== 'RUNNING' && data.status !== 'IDLE') {
         // Same multi-tick confirmation as the reap loop above — a single
@@ -1703,8 +1817,11 @@ async function ping() {
         const parentDead = parentPid > 0 && !isProcessAlive(parentPid);
         const noParent = parentPid <= 0;
         const confirmed = parentDeadTickCount >= PARENT_DEAD_TICKS_BEFORE_END;
-        if (confirmed && (parentDead || (noParent && (isTranscriptStale() || isStateFileStale())))) {
-          dropLocalSessionAndExit();
+        // Same veto as the reap loop: with no pid to watch, a turn the hooks
+        // have opened and not closed outranks a quiet transcript.
+        const turnOpen = noParent && isTurnInProgress();
+        if (confirmed && (parentDead || (noParent && !turnOpen && (isTranscriptStale() || isStateFileStale())))) {
+          dropLocalSessionAndExit(false);
         }
         // Parent still alive: don't tear down. Continue pinging so the server
         // can re-derive RUNNING/IDLE from lastActivityAt on the next tick.

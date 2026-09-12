@@ -23,6 +23,22 @@ import { fileURLToPath } from 'url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const distPath = path.resolve(here, '../../dist/index.js');
 
+/**
+ * A throwaway git repo for the hook to resolve, inside the caller's isolated
+ * home. A real repo identity is part of what these tests exercise — the point
+ * is that stdout stays clean while the hook does its full job, not that it
+ * bails early — so this keeps that and takes the developer's tree out of it.
+ */
+function repoFor(home?: string): string | undefined {
+  if (!home) return undefined;
+  const repo = path.join(home, 'repo');
+  if (!fs.existsSync(repo)) {
+    fs.mkdirSync(repo, { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: repo, stdio: ['ignore', 'ignore', 'ignore'] });
+  }
+  return repo;
+}
+
 function runPreToolUse(opts: { home?: string; cwd?: string; filePath?: string } = {}): string {
   const payload = JSON.stringify({
     conversationId: `stdout-purity-${Math.random().toString(36).slice(2)}`,
@@ -37,7 +53,15 @@ function runPreToolUse(opts: { home?: string; cwd?: string; filePath?: string } 
     encoding: 'utf-8',
     // Discard stderr: this asserts on stdout, and a warning there is not a failure.
     stdio: ['pipe', 'pipe', 'ignore'],
-    cwd: opts.cwd ?? process.cwd(),
+    // NEVER the real cwd. This runs the built hook for real, and a hook that
+    // resolves a repo spawns a DETACHED journal watcher on it — so defaulting
+    // to process.cwd() pointed a recursive watch at the developer's own
+    // worktree, wrote its journal into the temp home below, and then outlived
+    // the test: a watcher refreshes its idle clock every time its journal
+    // grows, and a worktree someone is actively editing never goes quiet.
+    // Measured before this changed: 87 leaked home trees and a 57-minute-old
+    // watcher, against a 30-minute idle window it could never reach.
+    cwd: opts.cwd ?? repoFor(opts.home),
     // os.homedir() reads $HOME on POSIX but %USERPROFILE% on Windows. Set both,
     // or the isolation silently no-ops on the Windows runner and these tests
     // pass without exercising anything.

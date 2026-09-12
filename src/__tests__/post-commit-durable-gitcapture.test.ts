@@ -28,7 +28,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { hooksSource } from './helpers/hooks-source.js';
+import { hookModuleSource, hooksSource } from './helpers/hooks-source.js';
 
 const HOOKS = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -71,5 +71,44 @@ describe('post-commit sends its gitCapture durably', () => {
     expect(src).toMatch(
       /import\s*\{[^}]*\bdurableUpdateSession\b[^}]*\}\s*from\s*'\.\.\/update-queue\.js'/,
     );
+  });
+});
+
+describe('post-commit commitDetails carry the patch, not only the file list', () => {
+  // Session 49b1c722: the pill showed "7 files" with no +/- because the
+  // session PATCH created the Commit row from a thin commitDetails object
+  // (sha, message, author, filesChanged). Ingest has the patch, but if that
+  // call is late or dropped the skeleton stays forever. Both gitCapture
+  // constructions must reuse one object so gitCapture.diff (the session
+  // snapshot) cannot leak onto commitDetails[].patch.
+  it('builds one commitDetail with patch and line counts and sends it on both gitCapture paths', () => {
+    const pc = hookModuleSource('post-commit');
+    const at = pc.indexOf('const commitDetail = {');
+    expect(at).toBeGreaterThan(-1);
+    const block = pc.slice(at, pc.indexOf('const gitCapture:', at));
+    expect(block).toContain('linesAdded');
+    expect(block).toContain('linesRemoved');
+    expect(block).toContain('commitPatch');
+    expect(block).toContain('patch: commitPatch');
+    // One literal on the commit carrier; the session snapshot is built by
+    // spreading that same object, so the commitDetail cannot diverge.
+    const literal = pc.match(/commitDetails:\s*\[commitDetail\]/g) || [];
+    expect(literal.length).toBe(1);
+    const snapshot = pc.slice(pc.indexOf('const snapshotCapture = {'), pc.indexOf('snapshot: true as const'));
+    expect(snapshot).toContain('...gitCapture,');
+    // The session snapshot must not be the per-commit patch.
+    expect(block).not.toContain('sessionToDateDiff');
+  });
+
+  it('sends the per-commit PATCH before the expensive session-to-date snapshot', () => {
+    const pc = hookModuleSource('post-commit');
+    const send = pc.indexOf("debugLog('post-commit', 'sending incremental update'");
+    const snap = pc.indexOf("debugLog('post-commit', 'fullContext snapshot failed");
+    expect(send).toBeGreaterThan(-1);
+    expect(snap).toBeGreaterThan(send);
+  });
+
+  it('pre-persists the commit-carrying payload so a SIGKILL during git still replays', () => {
+    expect(postCommitSendBlock()).toContain('persistUpdateBeforeWork(');
   });
 });

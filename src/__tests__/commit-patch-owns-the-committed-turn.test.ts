@@ -166,28 +166,81 @@ describe('the ledger keeps the turn when it knows more than the commit', () => {
   });
 });
 
-describe('the pass is bounded to the turns that can have changed', () => {
-  it('skips a settled earlier turn on a later Stop', () => {
+describe('a mid-turn fast-forward does not become the turn\'s diff', () => {
+  it('scopes to the commit\'s files, not the leaked baseline..HEAD list', () => {
+    // Session 761adbe8 turn 5: the prompt landed on a stale checkout, then
+    // the agent fast-forwarded onto main and authored 4 files. Stop rebuilt
+    // the mapping as git diff <turn-baseline>..HEAD (41 files / +2615).
+    // Diffing THAT file list from the turn baseline to the commit reproduces
+    // the range — the number the commit badge disagrees with. The commit's
+    // own name-only list is the 4 files the badge shows.
+    const fork = git('rev-parse', 'HEAD');
+    write('theirs.ts', 'export const leaked = 1;\n');
+    git('add', '-A'); git('commit', '-qm', 'work from another PR');
+    write('ours.ts', 'export const mine = 1;\n');
+    git('add', 'ours.ts'); git('commit', '-qm', 'the turn\'s own commit');
+    const sha = git('rev-parse', 'HEAD');
+
+    const leaked = ['theirs.ts', 'ours.ts', 'vodka.py', 'README.md'];
+    // The old pathspec (the mapping's file list) is what made the card flap:
+    // baseline→commit over the leaked names includes the fast-forward.
+    const leakedScoped = commitDiffScopedToPrompt(repo, fork, sha, leaked)!;
+    expect(leakedScoped.diff).toContain('theirs.ts');
+    expect(pathsInDiff(leakedScoped.diff).sort()).toEqual(['ours.ts', 'theirs.ts']);
+
+    const state = {
+      promptTurnIds: ['t_0'],
+      commitTurns: [{ sha, turnId: 't_0' }],
+      promptShadows: [{ promptIndex: 0, shadowSha: fork }],
+      prePromptSha: fork,
+    };
+    const mapping = {
+      promptIndex: 0,
+      filesChanged: leaked,
+      diff: leakedScoped.diff,
+      uncommittedDiff: '',
+      linesAdded: leakedScoped.linesAdded,
+      linesRemoved: leakedScoped.linesRemoved,
+    };
+
+    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo)).toBe(1);
+    expect(mapping.filesChanged).toEqual(['ours.ts']);
+    expect(mapping.diff).toContain('ours.ts');
+    expect(mapping.diff).not.toContain('theirs.ts');
+    expect(mapping.linesAdded).toBeGreaterThan(0);
+  });
+});
+
+describe('a later Stop still owns a settled committed turn', () => {
+  it('replaces even when this Stop is for a later prompt', () => {
+    // Stop re-sends every turn with a newer stamp. Skipping a settled
+    // turn left the reconstructed baseline..HEAD range on the wire
+    // (session 761adbe8: +2615/41 files came back at session-end).
     const { state, mapping, sha } = committedTurn();
     const st = { ...state, commitTurns: [{ sha, turnId: 't_0', at: '2026-09-06T03:00:00.000Z' }] };
-    // Stop for turn 3; turn 0 committed before the previous Stop.
-    const n = preferCommitPatchForCommittedTurns(st, [mapping], repo, { currentPromptIndex: 3, since: '2026-09-06T03:10:00.000Z' });
-    expect(n).toBe(0);
-    expect(mapping.diff).toBe(LEDGER_DIFF);
-  });
-
-  it('still takes a turn whose commit landed after the previous Stop', () => {
-    const { state, mapping, sha } = committedTurn();
-    const st = { ...state, commitTurns: [{ sha, turnId: 't_0', at: '2026-09-06T03:20:00.000Z' }] };
-    const n = preferCommitPatchForCommittedTurns(st, [mapping], repo, { currentPromptIndex: 3, since: '2026-09-06T03:10:00.000Z' });
+    const n = preferCommitPatchForCommittedTurns(st, [mapping], repo);
     expect(n).toBe(1);
     expect(mapping.diff).not.toBe(LEDGER_DIFF);
   });
+});
 
-  it('always takes the turn this Stop closes', () => {
-    const { state, mapping, sha } = committedTurn();
-    const st = { ...state, commitTurns: [{ sha, turnId: 't_0', at: '2026-09-06T03:00:00.000Z' }] };
-    const n = preferCommitPatchForCommittedTurns(st, [mapping], repo, { currentPromptIndex: 0, since: '2026-09-06T03:10:00.000Z' });
-    expect(n).toBe(1);
+describe('a resumed conversation: the mapping is a server row, the id and shadow are local', () => {
+  it('finds the turn through the base', () => {
+    // Prod 8a626742: base 21. Row 21 is local turn 0 — its id is
+    // promptTurnIds[0] and its shadow is recorded at promptIndex 0.
+    const { shadowSha, sha, state, mapping } = committedTurn();
+    const expected = commitDiffScopedToPrompt(repo, shadowSha, sha, ['vodka.py'])!;
+    const resumed = { ...state, promptIndexBase: 21 };
+    const row21 = { ...mapping, promptIndex: 21 };
+    expect(preferCommitPatchForCommittedTurns(resumed, [row21], repo)).toBe(1);
+    expect(row21.diff).toBe(expected.diff);
+  });
+
+  it('THE BUG: a row from before the launch is not this launch\'s turn 0', () => {
+    const { state, mapping } = committedTurn();
+    const resumed = { ...state, promptIndexBase: 21 };
+    const rowZero = { ...mapping, promptIndex: 0 };
+    expect(preferCommitPatchForCommittedTurns(resumed, [rowZero], repo)).toBe(0);
+    expect(rowZero.diff).toBe(LEDGER_DIFF);
   });
 });

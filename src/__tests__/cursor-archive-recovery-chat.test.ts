@@ -41,12 +41,43 @@ describe('selectRecoverableArchiveSession (Cursor per-chat recovery)', () => {
     expect(got?.sessionId).toBe('legacy');
   });
 
-  it('still honours repo, age, agent, and ENDED filters', () => {
+  it('still honours repo and agent filters', () => {
     const wrongRepo = s({ sessionId: 'wrongrepo', repoPath: '/other', agentSessionId: 'chat-B' });
-    const tooOld = s({ sessionId: 'old', startedAt: startedAt(48 * 60 * 60 * 1000), agentSessionId: 'chat-B' });
-    const ended = s({ sessionId: 'ended', status: 'ENDED', endedAt: startedAt(5_000), agentSessionId: 'chat-B' });
     const wrongAgent = s({ sessionId: 'codex', model: 'gpt-5', agentSlug: 'codex', agentSessionId: 'chat-B' });
-    const got = selectRecoverableArchiveSession([wrongRepo, tooOld, ended, wrongAgent], { ...base, incomingChatId: 'chat-B' });
+    const got = selectRecoverableArchiveSession([wrongRepo, wrongAgent], { ...base, incomingChatId: 'chat-B' });
+    expect(got).toBeNull();
+  });
+
+  // Prod 2026-09-08: the heartbeat retired Cursor session 49b1c722 after 20
+  // idle minutes (23:04); the user kept typing in the same chat (7b2b1608) at
+  // 23:13; recovery skipped the ENDED archive, the prompt auto-created twin
+  // c1e361a4, and Cursor's transcript replay copied the first session's
+  // prompts into it. An archive that NAMES this chat is the agent's own id —
+  // the one case an ended row is a resume, not a guess.
+  it('THE FIX: resumes THIS chat\'s ENDED archive', () => {
+    const ended = s({ sessionId: 'ended', status: 'ENDED', endedAt: startedAt(5_000), agentSessionId: 'chat-B' });
+    const got = selectRecoverableArchiveSession([ended], { ...base, incomingChatId: 'chat-B' });
+    expect(got?.sessionId).toBe('ended');
+  });
+
+  it('positive identity also outranks the age cap (a chat reopened the next day)', () => {
+    const old = s({ sessionId: 'old', startedAt: startedAt(48 * 60 * 60 * 1000), agentSessionId: 'chat-B' });
+    const got = selectRecoverableArchiveSession([old], { ...base, incomingChatId: 'chat-B' });
+    expect(got?.sessionId).toBe('old');
+  });
+
+  it('an ENDED or too-old archive with NO chat id is still not recovered (a guess stays a guess)', () => {
+    const endedNoId = s({ sessionId: 'ended-noid', status: 'ENDED', endedAt: startedAt(5_000), agentSessionId: undefined });
+    const oldNoId = s({ sessionId: 'old-noid', startedAt: startedAt(48 * 60 * 60 * 1000), agentSessionId: undefined });
+    const got = selectRecoverableArchiveSession([endedNoId, oldNoId], { ...base, incomingChatId: 'chat-B' });
+    expect(got).toBeNull();
+  });
+
+  it('never resurrects a row the user archived or deleted on the web', () => {
+    // The heartbeat stamps serverTerminal when it drops a session because the
+    // server reported it archived / gone (dropLocalSessionAndExit).
+    const archived = s({ sessionId: 'archived', status: 'ENDED', endedAt: startedAt(5_000), agentSessionId: 'chat-B', serverTerminal: true });
+    const got = selectRecoverableArchiveSession([archived], { ...base, incomingChatId: 'chat-B' });
     expect(got).toBeNull();
   });
 

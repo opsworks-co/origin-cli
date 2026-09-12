@@ -1103,9 +1103,10 @@ export function renderFileDiff(
 // merges them by path (as the dashboard does) renders only the first. Those
 // files are re-rendered as a single diff from the turn's start to its end.
 //
-// `read` is optional and failure is never fatal: with no reader, an unreadable
-// file, or context that can't be matched, this degrades to exactly what
-// converting each patch on its own produces.
+// `read` is optional and failure is never fatal. A repeated file whose patches
+// cannot be reconciled is retained in `filesChanged` but marked unavailable:
+// emitting its individually-converted blocks would store a malformed,
+// non-applyable duplicate-file diff.
 export function codexApplyPatchesToDiff(
   patches: string[],
   repoRoot?: string,
@@ -1114,7 +1115,13 @@ export function codexApplyPatchesToDiff(
   // Supplied on its own is enough: a turn whose only unreadable file is one it
   // deleted still needs its removed lines counted.
   deleted?: CodexBaselineResolver,
-): { diff: string; linesAdded: number; linesRemoved: number; filesChanged: string[] } {
+): {
+  diff: string;
+  linesAdded: number;
+  linesRemoved: number;
+  filesChanged: string[];
+  contentUnavailableFiles: string[];
+} {
   // Per-file running content across the turn, plus how many of the file's
   // sections we managed to reconcile against it.
   const view = new Map<string, { tail: string; reconciled: number }>();
@@ -1141,7 +1148,10 @@ export function codexApplyPatchesToDiff(
     : undefined;
 
   const all: CodexPatchSection[] = [];
-  const out = { diff: '', linesAdded: 0, linesRemoved: 0, filesChanged: [] as string[] };
+  const out = {
+    diff: '', linesAdded: 0, linesRemoved: 0,
+    filesChanged: [] as string[], contentUnavailableFiles: [] as string[],
+  };
   const files = new Set<string>();
   for (const p of patches) {
     const r = codexApplyPatchToDiff(p, repoRoot, access);
@@ -1180,12 +1190,19 @@ export function codexApplyPatchesToDiff(
   }
 
   const collapsed = new Map<string, { diff: string; linesAdded: number; linesRemoved: number }>();
+  const unavailable = new Set<string>();
   for (const [f, sections] of byFile) {
     if (transient.has(f)) continue;
     if (sections.length < 2) continue;
-    if (sections.some((s) => s.kind === 'delete')) continue; // deleted content is unrecoverable
+    if (sections.some((s) => s.kind === 'delete')) {
+      unavailable.add(f); // deleted content is unrecoverable
+      continue;
+    }
     const v = view.get(f);
-    if (!v || v.reconciled !== sections.length) continue;
+    if (!v || v.reconciled !== sections.length) {
+      unavailable.add(f);
+      continue;
+    }
     // Walk BACKWARD from the final content to recover the file as the turn
     // found it. Un-applying is the only way that works no matter where the
     // baseline was captured: the shadow can sit before the turn, between two of
@@ -1199,15 +1216,24 @@ export function codexApplyPatchesToDiff(
       if (!undone) { walkable = false; break; }
       head = undone.result;
     }
-    if (!walkable) continue; // could not walk it back — keep the per-patch blocks
+    if (!walkable) {
+      unavailable.add(f);
+      continue;
+    }
     const merged = renderFileDiff(f, head, v.tail);
     if (merged) collapsed.set(f, merged);
+    else unavailable.add(f);
   }
 
   const emitted = new Set<string>();
   const blocks: string[] = [];
   for (const s of all) {
     if (transient.has(s.file)) continue; // created and removed again — nothing to show
+    if (unavailable.has(s.file)) {
+      out.linesAdded -= s.linesAdded;
+      out.linesRemoved -= s.linesRemoved;
+      continue;
+    }
     const merged = collapsed.get(s.file);
     if (!merged) { blocks.push(s.diff); continue; }
     if (emitted.has(s.file)) continue;
@@ -1222,6 +1248,7 @@ export function codexApplyPatchesToDiff(
     out.linesRemoved += merged.linesRemoved - delSum;
   }
   out.filesChanged = [...files];
+  out.contentUnavailableFiles = [...unavailable];
   out.diff = blocks.join('\n');
   return out;
 }
@@ -1904,8 +1931,12 @@ export function findLatestRollout(sessionsDir: string, threadId: string): string
           const files = fs.readdirSync(dayDir).filter(f => f.includes('rollout') || f.endsWith('.jsonl') || f.endsWith('.jsonl.zst'));
           for (const file of files) {
             const fp = path.join(dayDir, file);
-            // Prefer files matching the thread ID
+            // A caller that knows its thread ID must never fall through to an
+            // unrelated recent rollout. That fallback copied one Codex task's
+            // prompts and token totals into a second task whose rollout did
+            // not exist yet, creating a duplicate dashboard session.
             if (threadId && file.includes(threadId)) return fp;
+            if (threadId) continue;
             const stat = fs.statSync(fp);
             if (stat.mtimeMs > bestMtime) {
               bestMtime = stat.mtimeMs;
@@ -1923,4 +1954,3 @@ export function findLatestRollout(sessionsDir: string, threadId: string): string
 }
 
 // ─── Hook Handlers ─────────────────────────────────────────────────────────
-

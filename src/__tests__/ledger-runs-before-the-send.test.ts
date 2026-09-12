@@ -20,7 +20,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { hooksSource } from './helpers/hooks-source.js';
+import { hooksSource, hookModuleSource } from './helpers/hooks-source.js';
 
 const HOOKS = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)), '..', 'commands', 'hooks.ts',
@@ -57,5 +57,44 @@ describe('ledger ordering in handleStop', () => {
     const start = src.indexOf('state.completedPromptMappings = promptMappings.map');
     const pick = src.slice(start, start + 1600);
     expect(pick, 'diffSource is dropped on the state round-trip').toContain('diffSource');
+  });
+});
+
+describe('commit-patch ordering in handleStop', () => {
+  const src = hooksSource();
+
+  it('replaces the mapping with the commit patch before the payload is built', () => {
+    // Stop re-sends every turn with a newer stamp. The commit patch has to
+    // be the thing on the wire, not a later reconstruction.
+    const replaced = src.indexOf('preferCommitPatchForCommittedTurns(');
+    const payload = src.indexOf('const stopUpdatePayload = {');
+    expect(replaced, 'preferCommitPatchForCommittedTurns call not found').toBeGreaterThan(-1);
+    expect(payload).toBeGreaterThan(-1);
+    expect(replaced).toBeLessThan(payload);
+  });
+
+  it('runs after the ledger, and is not bounded to the closing turn', () => {
+    // An earlier Stop skipped settled turns to save git calls. Session
+    // 761adbe8's last Stop (Cursor sessionEnd) then re-sent turn 5 as
+    // baseline..HEAD.
+    const ledger = src.indexOf('applyLedgerCaptures(state, promptMappings');
+    const start = src.indexOf('preferCommitPatchForCommittedTurns(');
+    expect(start).toBeGreaterThan(ledger);
+    const call = src.slice(start, start + 280);
+    expect(call).not.toContain('currentPromptIndex');
+    expect(call).not.toContain('lastStopAt');
+  });
+});
+
+describe('commit-patch at session end', () => {
+  it('runs after the ledger on the real session-end path too', () => {
+    // Cursor downgrades sessionEnd to Stop; Gemini and a killed agent do not.
+    const src = hookModuleSource('session-end');
+    const ledger = src.indexOf('applyLedgerCaptures(state, promptMappings');
+    const replaced = src.indexOf('preferCommitPatchForCommittedTurns(');
+    const payload = src.indexOf('promptChanges: promptMappings.length > 0');
+    expect(ledger).toBeGreaterThan(-1);
+    expect(replaced).toBeGreaterThan(ledger);
+    expect(payload).toBeGreaterThan(replaced);
   });
 });

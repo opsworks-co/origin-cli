@@ -572,24 +572,42 @@ describe('codexApplyPatchesToDiff — a whole turn at once', () => {
     expect(turn.linesAdded).toBe(solo.linesAdded);
   });
 
-  it('keeps the per-patch blocks when a patch could NOT be reconciled', () => {
-    // Second patch-s context is nowhere to be found, so the turn-level view is
-    // incomplete and must not be passed off as the whole story.
+  it('marks a repeated file unavailable when a patch could NOT be reconciled', () => {
+    // Second patch's context is nowhere to be found. It is safer to report a
+    // partial capture than to store two sections for one file, which cannot be
+    // applied or rendered as a single turn diff.
     const r = codexApplyPatchesToDiff(
       [append(37, [38, 39]), append(999, [1000])],
       undefined,
       () => rows(37),
     );
-    expect(r.diff.match(/^diff --git /gm)).toHaveLength(2);
-    expect(r.linesAdded).toBe(3);
+    expect(r.diff).toBe('');
+    expect(r.linesAdded).toBe(0);
+    expect(r.filesChanged).toEqual(['fikus']);
+    expect(r.contentUnavailableFiles).toEqual(['fikus']);
   });
 
-  it('degrades to the per-patch output with no baseline reader at all', () => {
+  it('does not emit duplicate file sections with no baseline reader', () => {
     const patches = [append(37, [38, 39]), append(39, [40, 41])];
-    const withRead = codexApplyPatchesToDiff(patches, undefined, undefined);
-    const manual = patches.map((p) => codexApplyPatchToDiff(p).diff).join('\n');
-    expect(withRead.diff).toBe(manual);
-    expect(withRead.linesAdded).toBe(4);
+    const r = codexApplyPatchesToDiff(patches, undefined, undefined);
+    expect(r.diff).toBe('');
+    expect(r.linesAdded).toBe(0);
+    expect(r.filesChanged).toEqual(['fikus']);
+    expect(r.contentUnavailableFiles).toEqual(['fikus']);
+  });
+
+  it('keeps a valid file while naming an unreconcilable repeated file', () => {
+    const other = ['*** Begin Patch', '*** Add File: other.txt', '+safe', '*** End Patch'].join('\n');
+    const r = codexApplyPatchesToDiff(
+      [append(37, [38]), append(999, [1000]), other],
+      undefined,
+      () => rows(37),
+    );
+    expect(r.diff.match(/^diff --git /gm)).toHaveLength(1);
+    expect(r.diff).toContain('other.txt');
+    expect(r.filesChanged.sort()).toEqual(['fikus', 'other.txt']);
+    expect(r.contentUnavailableFiles).toEqual(['fikus']);
+    expect(r.linesAdded).toBe(1);
   });
 
   it('still separates DIFFERENT files touched in the same turn', () => {

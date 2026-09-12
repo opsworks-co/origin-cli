@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { keepRicherTurnCapture } from '../commands/hooks.js';
+import { keepRicherTurnCapture, attestedCommitShas, headIsAttested } from '../commands/hooks.js';
 
 // Prod session 97c78829: ONE user prompt, four Stop fires. Claude Code ends a
 // response — and fires Stop — every time a background task reports back, so the
@@ -53,6 +53,21 @@ describe('keepRicherTurnCapture', () => {
     const current = [{ promptIndex: 0, filesChanged: ['a.ts'], diff: 'x' }];
     expect(keepRicherTurnCapture(current, [])).toBe(current);
   });
+
+  it('keeps a later commitSha when the prior ledger row still has null', () => {
+    const previous = [{
+      promptIndex: 0, filesChanged: ['a.ts'], diff: 'ledger',
+      diffSource: 'ledger' as const, commitSha: null as string | null,
+    }];
+    const current = [{
+      promptIndex: 0, filesChanged: ['a.ts', 'b.ts'], diff: 'guess that is longer than ledger xx',
+      commitSha: 'd30d8c9991eaf68635947dedff37744758897e1a',
+    }];
+    const [turn] = keepRicherTurnCapture(current, previous);
+    expect((turn as { commitSha?: string | null }).commitSha).toBe(
+      'd30d8c9991eaf68635947dedff37744758897e1a',
+    );
+  });
 });
 
 // A shared checkout means a later capture can legitimately DROP a file for
@@ -81,5 +96,23 @@ describe('keepRicherTurnCapture — excluded files', () => {
     const [turn] = keepRicherTurnCapture(current, previous, ['theirs.ts']);
     expect(turn.filesChanged).toEqual(['mine.ts']);
     expect(turn.chatOnly).toBeUndefined();
+  });
+});
+
+describe('attestedCommitShas', () => {
+  const SHA = 'd30d8c9991eaf68635947dedff37744758897e1a';
+  const OLD = '63eda90df9db1385d026e64b315a97a7186915cb';
+
+  it('includes rewrite survivors the range walk never saw', () => {
+    expect(attestedCommitShas({
+      sessionCommitShas: [OLD],
+      rewrittenCommits: [{ from: OLD, to: SHA }],
+    })).toEqual([OLD, SHA]);
+  });
+
+  it('treats HEAD as attested when it is the rewrite target', () => {
+    expect(headIsAttested(SHA, [SHA])).toBe(true);
+    expect(headIsAttested(SHA.slice(0, 12), [SHA])).toBe(true);
+    expect(headIsAttested('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', [SHA])).toBe(false);
   });
 });

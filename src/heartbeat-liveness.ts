@@ -18,6 +18,42 @@ export interface LivenessInputs {
   // isAgentActivelyWriting() — the agent's transcript/rollout was touched within
   // the idle window: positive proof it's alive right now.
   agentActivelyWriting: boolean;
+  // turnInProgress() — a prompt was submitted and no Stop has closed it yet.
+  // The agent is working on that prompt whether or not anything on disk
+  // moves, so it is proof of life in its own right. See turnInProgress.
+  turnInProgress?: boolean;
+}
+
+// A hook-driven turn that has been OPENED (user-prompt-submit) and not yet
+// CLOSED (Stop) is an agent at work, and that is true even when nothing on
+// disk moves for the whole turn.
+//
+// Cursor flushes its agent transcript at the END of a generation. A long
+// generation therefore looks, from the outside, exactly like a closed window:
+// no transcript write, no pid to watch, only Origin's own state file moving.
+// The 20-minute hookless-IDE window then reaped a live turn. Prod session
+// c1e361a4: the prompt landed 23:14:55, the agent read and thought until
+// 23:44 and edited seven files, Stop came at 23:45:30 — and the heartbeat
+// ended the session at 23:36:37, in the middle of it. The edits at 23:44
+// found no session to land on, and the next prompt minted a twin.
+//
+// The two timestamps are written by the hooks alone — the heartbeat never
+// touches them — so unlike the state file's mtime they cannot be kept warm by
+// Origin itself. Capped: a turn that dies without a Stop (API error, an
+// interrupt, the app quit mid-generation) stays "open" forever, so past
+// OPEN_TURN_MAX_MS the veto lapses and the ordinary signals decide.
+export const OPEN_TURN_MAX_MS = 90 * 60 * 1000;
+
+export function turnInProgress(
+  state: { currentTurnStartedAt?: number | null; lastTurnClosedAt?: number | null } | null | undefined,
+  nowMs: number = Date.now(),
+): boolean {
+  const opened = state?.currentTurnStartedAt;
+  if (typeof opened !== 'number' || !Number.isFinite(opened) || opened <= 0) return false;
+  const closed = state?.lastTurnClosedAt;
+  if (typeof closed === 'number' && Number.isFinite(closed) && closed >= opened) return false;
+  const age = nowMs - opened;
+  return age >= 0 && age <= OPEN_TURN_MAX_MS;
 }
 
 // True when the agent behind this session looks gone (the heartbeat then reaps
@@ -60,6 +96,27 @@ export function heartbeatSuperseded(i: HeartbeatOwnershipInputs): boolean {
   return i.pidFileOwner !== i.myPid;
 }
 
+// True when the state file this daemon was started on now belongs to ANOTHER
+// registered session, so nothing will ever write to ours again.
+//
+// The daemon is spawned with a session id and a state-file path, and every
+// tick it reads the file and pushes its contents under that id. The file is
+// keyed by conversation tag, not by session id — so when a second
+// registration lands on the same tag, the file's `sessionId` changes and the
+// daemon keeps going, feeding the other session's prompts and diffs to a row
+// that has no owner. Prod 2026-09-09: the daemon for 5431ff0f read a file that
+// had become e24477e2's, and the dashboard showed both rows live for eleven
+// minutes with the same turn on each.
+//
+// A provisional id in the file is not a takeover: a hook holding a stale
+// reservation can briefly write `local-…` back, and between two placeholders
+// the incumbent wins (preferRegisteredSessionId). Only a DIFFERENT registered
+// id means the row moved.
+export function stateFileTakenOver(i: { ownSessionId: string; fileSessionId: string | null | undefined }): boolean {
+  if (!i.fileSessionId || i.fileSessionId === i.ownSessionId) return false;
+  return !i.fileSessionId.startsWith('local-');
+}
+
 // The server's ping response can report a session in a state that is
 // DEFINITIVELY terminal for THIS machine — the user or an admin archived it, or
 // it no longer exists in the org (deleted → status 'NOT_FOUND'). These differ
@@ -84,6 +141,8 @@ export function isServerTerminalDefinitive(
 
 export function parentLooksDead(i: LivenessInputs): boolean {
   if (i.agentActivelyWriting) return false;
+  // An open turn is the agent working right now — see turnInProgress.
+  if (i.turnInProgress) return false;
   const processConfirmedAlive = i.recordedParentPid > 0 && i.recordedParentAlive;
   return (
     // A recorded pid we can prove is dead.

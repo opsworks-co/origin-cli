@@ -2,12 +2,14 @@
 //
 // Moved out of commands/hooks.ts mechanically: the text is unchanged, only its
 // home is. Shared helpers still live in hooks.ts and are imported from there.
+import { livePrompts } from '../../transcript.js';
 import { attributionPgrepChecks, resolveAgentDisplayName, sessionMatchesAgent } from '../../agents/registry.js';
 import { api } from '../../api.js';
 import { clearBudgetLockNotice } from '../../budget-breach.js';
 import { isConnectedMode, loadAgentConfig, loadConfig, loadRepoConfig, saveConfig } from '../../config.js';
 import { debugLog } from '../../debug-log.js';
 import { foldStagedNotes, pushAcceptanceNotes, pushMemoryNotes, shouldIncludePromptText, syncNotesFromRemoteThrottled } from '../../git-notes.js';
+import { notifyRepoMemoryChanged } from '../../memory-transport.js';
 import { reconcileSessionBranchWithRemote } from '../../local-entrypoint.js';
 import { decidePushBlock } from '../../push-block.js';
 import { isNonSecretAssignmentValue, isSkippedScanPath } from '../../secret-rules.js';
@@ -16,7 +18,8 @@ import type { SessionState } from '../../session-state.js';
 import { listSnapshots } from '../snapshot.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
-import { RECENCY_TIEBREAK_MARGIN_MS, inFlightEditedFiles, listSessionsForGitHook, safePgrep } from '../hooks.js';
+import { fenceJournal } from '../../write-journal-watch.js';
+import { RECENCY_TIEBREAK_MARGIN_MS, inFlightEditedFiles, listSessionsForGitHook, loneSessionMayOwnCommit, safePgrep, sameDir } from '../hooks.js';
 
 
 // ─── Git Hook: Pre-Commit (Secret Scan) ──────────────────────────────────
@@ -149,6 +152,10 @@ export async function handleGitPostCheckout(prevHead: string, newHead: string, f
       // Throttled so this and a SessionStart moments later don't both fetch.
       syncNotesFromRemoteThrottled(repoPath);
       return;
+    }
+
+    for (const state of listActiveSessions(repoPath)) {
+      if (state.writeJournalPath) fenceJournal(state.writeJournalPath);
     }
 
     const { handlePostCheckout } = await import('../../history-preservation.js');
@@ -770,6 +777,12 @@ export function sessionTouchedFiles(state: SessionState, repoPath: string): Set<
   // files" — the other session's uncommitted work — tied the overlap score,
   // which sent the decision to process detection and a Codex zombie.
   if ((state.prompts || []).length === 0) return files;
+  // The baseline diff is for a session with NO recorded turns — a hookless
+  // agent's first turn, nothing captured yet. A session whose turns are
+  // recorded and list no files did not write them; diffing the tree from
+  // session start would hand it every file anyone changed since (b3b45536:
+  // one closed read-only turn, and a stranger's README edit was "touched").
+  if ((state.completedPromptMappings || []).length > 0) return files;
   // Fallback (no recorded mappings): diff the working tree against the session's
   // baseline. Only meaningful when the baseline is the session's OWN start
   // shadow — a shared clean HEAD would sweep in other sessions' edits.
@@ -795,7 +808,15 @@ export function pickActiveSessionForCommit(hookCwd: string): SessionState | null
   const activeSessions = listSessionsForGitHook(hookCwd, { commitFiles: stagedFiles });
   activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
   if (activeSessions.length === 0) return null;
-  if (activeSessions.length === 1) return activeSessions[0];
+  if (activeSessions.length === 1) {
+    const only = activeSessions[0];
+    const verdict = loneSessionMayOwnCommit(only, stagedFiles);
+    if (verdict.ok) return only;
+    debugLog('prepare-commit-msg', 'skip: the only live session shows no evidence for the staged files', {
+      session: only.sessionId.slice(0, 12), staged: stagedFiles.length, why: verdict.why,
+    });
+    return null;
+  }
 
   // Strongest signal: attribute the commit to the session whose OWN changes
   // overlap the files being committed. This beats process-name guessing when
@@ -846,7 +867,7 @@ export function pickActiveSessionForCommit(hookCwd: string): SessionState | null
       if (scored.length > 1) {
         const top = scored[0].overlap;
         const tied = scored.filter((x) => x.overlap === top).map((x) => x.s);
-        const picked = breakTie(tied);
+        const picked = breakTie(tied, hookCwd);
         if (picked) {
           debugLog('prepare-commit-msg', 'attributed among tied overlap', {
             session: picked.sessionId.slice(0, 12), overlap: top, tied: tied.length,
@@ -863,15 +884,20 @@ export function pickActiveSessionForCommit(hookCwd: string): SessionState | null
 
   // Multiple sessions, no file evidence at all — disambiguate via process
   // detection.
-  return breakTie(activeSessions);
+  return breakTie(activeSessions, hookCwd);
 }
 
 /**
  * Among sessions that file evidence could not separate: the agent whose
- * process is running, then the one with a turn OPEN, then the clearly more
- * recent one. Null when none of that separates them — don't guess.
+ * process is running, then the one with a turn OPEN, then the one whose
+ * lastCwd is exactly where git ran the hook, then the clearly more recent
+ * one. Null when none of that separates them — don't guess.
+ *
+ * lastCwd sits this low on purpose. It used to decide BEFORE any of this, in
+ * the candidate narrowing, and a session that had `cd`-ed into a subdirectory
+ * lost both its commits to an idle sibling parked at the root (e1095412).
  */
-function breakTie(pool: SessionState[]): SessionState | null {
+function breakTie(pool: SessionState[], hookCwd?: string): SessionState | null {
   if (pool.length === 0) return null;
   if (pool.length === 1) return pool[0];
   for (const check of attributionPgrepChecks()) {
@@ -884,6 +910,10 @@ function breakTie(pool: SessionState[]): SessionState | null {
   }
   const open = pool.filter((s) => s.activeTurn && Number.isInteger(s.activeTurn.index));
   if (open.length === 1) return open[0];
+  if (hookCwd) {
+    const atCwd = pool.filter((s) => sameDir(s.lastCwd, hookCwd));
+    if (atCwd.length === 1) return atCwd[0];
+  }
   const recency = (s: SessionState): number => Math.max(
     s.lastStopAt ? Date.parse(s.lastStopAt) || 0 : 0,
     s.startedAt ? Date.parse(s.startedAt) || 0 : 0,
@@ -965,10 +995,14 @@ export async function handlePrepareCommitMsg(
       } catch { /* no snapshots is fine */ }
     }
 
+    // The trailer's count IS the commit's turn ordinal — the server anchors on
+    // it — so it must be the live one, not whatever the last surviving hook
+    // wrote. See livePrompts: a killed user-prompt-submit leaves state.prompts
+    // one short for the whole turn that is committing.
     const trailers = buildOriginTrailers(
       state.sessionId,
       state.model,
-      state.prompts?.length || 0,
+      livePrompts(state).length,
       latestSnapshotId,
       state.agentSlug,
       state.subagentSpawns?.length || 0,
@@ -1173,6 +1207,13 @@ export async function handlePrePush(): Promise<void> {
   try {
     pushMemoryNotes(repoPath, 'origin');
     debugLog('pre-push', 'pushed memory notes');
+    // The branch push that follows fires a webhook only where the GitHub App
+    // (or a GitLab hook) is installed, and never for the notes ref itself.
+    // Tell the server directly so the Memory tab reflects this push, not the
+    // next one. Bounded — a slow API must not stall the developer's push.
+    if (shouldIncludePromptText(repoPath)) {
+      await notifyRepoMemoryChanged(repoPath, 'pre-push', { remote: 'origin' });
+    }
   } catch (err: any) {
     debugLog('pre-push', 'memory notes push skipped', { message: err?.message });
   }

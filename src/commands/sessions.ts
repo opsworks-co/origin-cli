@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 import { isConnectedMode, loadAgentConfig } from '../config.js';
 import { api } from '../api.js';
-import { getGitRoot, listActiveSessions, listAllActiveSessions, clearSessionState, stopHeartbeat, isHeartbeatAlive } from '../session-state.js';
+import { getGitRoot, listActiveSessions, listAllActiveSessions, clearSessionState, stopHeartbeat, isHeartbeatAlive, sessionLastSignMs, hasHealthyHeartbeat, isSessionAlive } from '../session-state.js';
 import { git, gitOrNull } from '../utils/exec.js';
 import { currentOwner, isForeignSession, listForeignQueuedSessions, reportForeignSessionCount } from '../session-owner.js';
 import { resolveAgentDisplayName } from '../agents/registry.js';
@@ -633,11 +633,172 @@ export async function sessionEndCommand(id: string) {
 }
 
 /**
- * `origin sessions clean` — End all stale RUNNING sessions.
- * Optionally filter by --repo or --all.
+ * How long a session must have been silent before `origin sessions clean`
+ * will end it.
+ *
+ * Deliberately far longer than the 3h SESSION_STALE_MS used for *labelling* a
+ * session stale on a listing. Mislabelling a row costs nothing; ending a live
+ * session costs that session the rest of its capture, so the destructive path
+ * gets the conservative number. Twelve hours clears an overnight-stuck row
+ * while never reaching a session someone stepped away from at lunch.
  */
-export async function sessionCleanCommand(opts: { all?: boolean }) {
+export const DEFAULT_CLEAN_AGE_MS = 12 * 60 * 60 * 1000;
+
+export interface CleanCandidate {
+  id: string;
+  /** Model/agent text for the console line. */
+  label: string;
+  /** Best-known moment of last activity. null = no evidence either way. */
+  lastActivityMs: number | null;
+  /** This session is still alive by ANY liveness signal — see isSessionAlive. */
+  alive: boolean;
+}
+
+export interface CleanDecision {
+  candidate: CleanCandidate;
+  action: 'end' | 'skip';
+  reason: string;
+}
+
+/**
+ * Decide which sessions `origin sessions clean` may end.
+ *
+ * Pure, and exported for tests: the command's three cleanup paths (platform
+ * rows, local state files, the origin-sessions branch) all route their
+ * candidates through this one function, so there is a single place where
+ * "may I end this?" is answered and a single place to test it.
+ *
+ * The rules, in order:
+ *  1. A LIVE SESSION IS ABSOLUTE. Never ended, not even under --force: ending
+ *     a working session's row and clearing its state file breaks capture for
+ *     the rest of that session, which is the bug this planner exists to fix.
+ *     `origin sessions end <id>` remains the way to end a specific live
+ *     session on purpose.
+ *
+ *     "Live" is isSessionAlive — ALL THREE signals, not just the heartbeat.
+ *     Gating this on the heartbeat alone looked right and protected nothing on
+ *     Windows: GUI agents fire no hooks, so their capture runs through the
+ *     transcript watcher and they have no heartbeat pid at all. Two sessions
+ *     working on this machine were unprotected until `--dry-run --force` was
+ *     run for real and reported it would clear both.
+ *
+ *     A session whose heartbeat has HUNG (process alive, ping loop wedged, pid
+ *     file going stale) is still reachable: isSessionAlive requires the pid
+ *     file to be fresh, so a wedged daemon does not pin a session alive
+ *     forever — which would defeat the whole command.
+ *  2. No activity signal at all → skipped unless --force. A hook-only agent
+ *     that never ran a heartbeat is indistinguishable from a crashed one, and
+ *     guessing wrong on the destructive side is the expensive direction.
+ *  3. Otherwise end it only once it has been silent for `olderThanMs`.
+ *
+ * --force drops the AGE requirement (rules 2 and 3), never rule 1.
+ */
+export function planSessionClean(
+  candidates: CleanCandidate[],
+  opts: { olderThanMs?: number; force?: boolean; now?: number } = {}
+): CleanDecision[] {
+  const olderThanMs = opts.olderThanMs ?? DEFAULT_CLEAN_AGE_MS;
+  const force = !!opts.force;
+  const now = opts.now ?? Date.now();
+
+  return candidates.map((candidate): CleanDecision => {
+    if (candidate.alive) {
+      return { candidate, action: 'skip', reason: 'still running' };
+    }
+    if (candidate.lastActivityMs === null) {
+      return force
+        ? { candidate, action: 'end', reason: 'no activity signal (--force)' }
+        : { candidate, action: 'skip', reason: 'no activity signal — use --force to end anyway' };
+    }
+    const idleMs = now - candidate.lastActivityMs;
+    if (force) {
+      return { candidate, action: 'end', reason: `idle ${formatIdle(idleMs)} (--force)` };
+    }
+    if (idleMs >= olderThanMs) {
+      return { candidate, action: 'end', reason: `idle ${formatIdle(idleMs)}` };
+    }
+    return {
+      candidate,
+      action: 'skip',
+      reason: `active ${formatIdle(idleMs)} ago — needs ${formatIdle(olderThanMs)}`,
+    };
+  });
+}
+
+/** Compact "3h"/"25m"/"4d" for the reason strings above. */
+function formatIdle(ms: number): string {
+  if (ms < 0) ms = 0;
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+/**
+ * `origin sessions clean` — End stale RUNNING sessions.
+ *
+ * "Stale" is now enforced rather than merely promised: this used to end EVERY
+ * RUNNING session it could see and stop every local heartbeat, with no age
+ * comparison anywhere in the function. On a machine running several agents at
+ * once — which is the normal case here — clearing one overnight-stuck row also
+ * killed capture for every session currently working.
+ */
+export async function sessionCleanCommand(opts: {
+  all?: boolean;
+  dryRun?: boolean;
+  olderThan?: string;
+  force?: boolean;
+}) {
   const repoPath = getGitRoot();
+
+  const olderThanHours = opts.olderThan !== undefined ? Number(opts.olderThan) : undefined;
+  if (olderThanHours !== undefined && (!Number.isFinite(olderThanHours) || olderThanHours < 0)) {
+    console.error(chalk.red(`  --older-than expects a number of hours, got "${opts.olderThan}"`));
+    process.exitCode = 1;
+    return;
+  }
+  const olderThanMs = olderThanHours !== undefined ? olderThanHours * 60 * 60 * 1000 : DEFAULT_CLEAN_AGE_MS;
+  const planOpts = { olderThanMs, force: !!opts.force };
+  const dry = !!opts.dryRun;
+
+  // NOTE: --dry-run guarantees this command ends nothing and clears no state
+  // file. It is not a guarantee of zero writes: listAllActiveSessions below
+  // self-heals a state file whose status says RUNNING but which fails every
+  // liveness check, persisting status: ENDED as it reads. That is long-standing
+  // behaviour of the listing itself (the old command called it too), not
+  // something the dry run triggers, but it does mean a dry run can leave a
+  // corrected status behind.
+  if (dry) console.log(chalk.bold('\n  Dry run — nothing will be ended.\n'));
+
+  // Every session still alive on THIS machine, by every id a server row might
+  // carry it under. `sessionId` is the Origin API id for a normally registered
+  // session; a queued `local-*` one carries the real server id in
+  // `syncedSessionId` once sync has replayed session/start.
+  //
+  // isSessionAlive, NOT hasHealthyHeartbeat: the heartbeat is only one of three
+  // liveness signals, and on Windows it is routinely the missing one — GUI
+  // agents fire no hooks, so capture runs through the transcript watcher and
+  // those sessions have no heartbeat pid at all. Gating on the heartbeat alone
+  // left two live sessions on this machine completely unprotected, which
+  // `--force` then swept (caught by running --dry-run --force for real).
+  const liveIds = new Set<string>();
+  try {
+    for (const s of listAllActiveSessions()) {
+      if (!s.sessionId || !isSessionAlive(s)) continue;
+      liveIds.add(s.sessionId);
+      if (s.syncedSessionId) liveIds.add(s.syncedSessionId);
+    }
+  } catch { /* best effort — an unreadable state dir must not unblock ending */ }
+
+  const report = (d: CleanDecision, done: boolean) => {
+    if (d.action === 'skip') {
+      console.log(chalk.gray('  – ') + chalk.gray(d.candidate.id.slice(0, 8)) + ' ' + d.candidate.label + chalk.gray(` — kept: ${d.reason}`));
+      return;
+    }
+    const mark = done ? chalk.green('  ✓ ') : chalk.yellow('  → ');
+    console.log(mark + chalk.gray(d.candidate.id.slice(0, 8)) + ' ' + d.candidate.label + chalk.gray(` — ${d.reason}`));
+  };
 
   // ── Platform sessions ──
   if (isConnectedMode()) {
@@ -645,27 +806,48 @@ export async function sessionCleanCommand(opts: { all?: boolean }) {
       const result = await api.getSessions({ status: 'RUNNING' });
       const sessions = result?.sessions || [];
 
-      let toEnd = sessions;
+      let rows = sessions;
       if (!opts.all && repoPath) {
         const repoUrl = gitOrNull(['remote', 'get-url', 'origin'], { cwd: repoPath }) || '';
         if (repoUrl) {
-          toEnd = sessions.filter((s: any) => s.repoUrl === repoUrl);
+          rows = sessions.filter((s: any) => s.repoUrl === repoUrl);
         }
       }
 
-      if (toEnd.length > 0) {
-        console.log(chalk.bold(`\nEnding ${toEnd.length} running session(s) on platform...\n`));
+      // The server already exposes the anchors its own RUNNING/IDLE/ABANDONED
+      // rule reads. Prefer real activity over the heartbeat's updatedAt, and
+      // fall back to startedAt so a row that never reported anything still has
+      // an age rather than reading as "no signal".
+      const candidates: CleanCandidate[] = rows.map((s: any) => {
+        const anchor = s.lastActivityAt || s.updatedAt || s.startedAt || null;
+        return {
+          id: String(s.id),
+          label: s.model || 'unknown',
+          lastActivityMs: anchor ? new Date(anchor).getTime() : null,
+          alive: liveIds.has(String(s.id)),
+        };
+      });
+
+      const decisions = planSessionClean(candidates, planOpts);
+      const toEnd = decisions.filter((d) => d.action === 'end');
+      const kept = decisions.filter((d) => d.action === 'skip');
+
+      if (decisions.length > 0) {
+        console.log(chalk.bold(`\n${dry ? 'Would end' : 'Ending'} ${toEnd.length} of ${decisions.length} running session(s) on platform...\n`));
         let ended = 0;
-        for (const s of toEnd) {
+        for (const d of decisions) {
+          if (d.action === 'skip') { report(d, false); continue; }
+          if (dry) { report(d, false); continue; }
           try {
-            await api.endSessionById(s.id);
-            console.log(chalk.green('  ✓ ') + chalk.gray(s.id.slice(0, 8)) + ' ' + (s.model || 'unknown') + ' ' + chalk.gray(timeAgo(s.startedAt)));
+            await api.endSessionById(d.candidate.id);
+            report(d, true);
             ended++;
           } catch {
-            console.log(chalk.red('  ✗ ') + chalk.gray(s.id.slice(0, 8)) + ' failed to end');
+            console.log(chalk.red('  ✗ ') + chalk.gray(d.candidate.id.slice(0, 8)) + ' failed to end');
           }
         }
-        console.log(chalk.green(`\n  Ended ${ended} session(s) on platform.\n`));
+        if (!dry) console.log(chalk.green(`\n  Ended ${ended} session(s) on platform.`));
+        if (kept.length > 0) console.log(chalk.gray(`  Kept ${kept.length} still-active session(s).\n`));
       }
     } catch (err: any) {
       console.error(chalk.yellow('Platform:'), err.message);
@@ -674,9 +856,33 @@ export async function sessionCleanCommand(opts: { all?: boolean }) {
 
   // ── Local state files — clean up and kill orphaned heartbeats ──
   try {
-    const localSessions = opts.all ? listAllActiveSessions() : (repoPath ? listActiveSessions(repoPath) : []);
+    const localSessions = (opts.all ? listAllActiveSessions() : (repoPath ? listActiveSessions(repoPath) : []))
+      .filter((s: any) => String(s?.status || '').toUpperCase() !== 'ENDED');
+
+    const candidates: CleanCandidate[] = localSessions.map((s) => {
+      const lastSignMs = sessionLastSignMs(s);
+      return {
+        id: s.sessionId,
+        label: s.model || 'unknown',
+        lastActivityMs: lastSignMs,
+        alive: isSessionAlive(s),
+      };
+    });
+
+    const decisions = planSessionClean(candidates, planOpts);
+    const byId = new Map(localSessions.map((s) => [s.sessionId, s]));
     let localCleaned = 0;
-    for (const s of localSessions) {
+    let localKept = 0;
+
+    for (const d of decisions) {
+      // Name every session either way. A bare "Would clean 2 local state
+      // file(s)" tells you nothing about WHICH two, which is useless in the
+      // one mode whose entire job is letting you check before you act.
+      report(d, false);
+      if (d.action === 'skip') { localKept++; continue; }
+      if (dry) { localCleaned++; continue; }
+      const s = byId.get(d.candidate.id);
+      if (!s) continue;
       stopHeartbeat(s.sessionId);
       if (s.sessionTag) {
         clearSessionState(s.repoPath || repoPath || undefined, s.sessionTag);
@@ -684,7 +890,10 @@ export async function sessionCleanCommand(opts: { all?: boolean }) {
       localCleaned++;
     }
     if (localCleaned > 0) {
-      console.log(chalk.gray(`  Cleaned ${localCleaned} local state file(s).`));
+      console.log(chalk.gray(`  ${dry ? 'Would clean' : 'Cleaned'} ${localCleaned} local state file(s).`));
+    }
+    if (localKept > 0) {
+      console.log(chalk.gray(`  Kept ${localKept} live local session(s).`));
     }
   } catch { /* ignore */ }
 
@@ -697,6 +906,7 @@ export async function sessionCleanCommand(opts: { all?: boolean }) {
       if (sessionDirs.length === 0) return;
       const { writeSessionFiles } = await import('../local-entrypoint.js');
       let branchCleaned = 0;
+      let branchKept = 0;
 
       for (const dir of sessionDirs) {
         try {
@@ -704,6 +914,28 @@ export async function sessionCleanCommand(opts: { all?: boolean }) {
           const metaRaw = (readSessionFile(repoPath, dir.replace('sessions/', ''), 'metadata.json') ?? '').trim();
           const metadata = JSON.parse(metaRaw);
           if (metadata.status === 'running') {
+            // Same gate as the other two paths. A branch row for a session that
+            // is still running gets flipped to ended here otherwise, which is
+            // the surface that made `clean` look harmless — the row goes quiet
+            // while the agent it describes is still writing.
+            const anchor = metadata.lastActivityAt || metadata.updatedAt || metadata.startedAt || null;
+            const [decision] = planSessionClean([{
+              id: String(metadata.sessionId || dir.replace('sessions/', '')),
+              label: metadata.model || 'unknown',
+              lastActivityMs: anchor ? new Date(anchor).getTime() : null,
+              alive: metadata.sessionId ? (liveIds.has(String(metadata.sessionId)) || hasHealthyHeartbeat(String(metadata.sessionId))) : false,
+            }], planOpts);
+
+            if (decision.action === 'skip') {
+              report(decision, false);
+              branchKept++;
+              continue;
+            }
+            if (dry) {
+              report(decision, false);
+              branchCleaned++;
+              continue;
+            }
             writeSessionFiles(repoPath, {
               sessionId: metadata.sessionId,
               model: metadata.model,
@@ -732,8 +964,11 @@ export async function sessionCleanCommand(opts: { all?: boolean }) {
         } catch { /* skip invalid */ }
       }
 
+      if (branchKept > 0) {
+        console.log(chalk.gray(`  Kept ${branchKept} still-active session(s) on origin-sessions branch.`));
+      }
       if (branchCleaned > 0) {
-        console.log(chalk.green(`\n  Ended ${branchCleaned} session(s) on origin-sessions branch.\n`));
+        console.log(chalk.green(`\n  ${dry ? 'Would end' : 'Ended'} ${branchCleaned} session(s) on origin-sessions branch.\n`));
       } else {
         console.log(chalk.gray('  No stale sessions found on origin-sessions branch.'));
       }

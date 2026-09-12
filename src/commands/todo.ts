@@ -1,13 +1,14 @@
 import chalk from 'chalk';
 import { getGitRoot } from '../session-state.js';
+import { sweepTodoClosures } from '../todo-sweep.js';
 import {
-  loadTodos,
   getOpenTodos,
   getAllTodos,
   markTodoDone,
   getTodoById,
   addManualTodo,
   removeTodo,
+  type TodoItem,
 } from '../todo.js';
 
 function timeAgo(dateStr: string): string {
@@ -19,11 +20,45 @@ function timeAgo(dateStr: string): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+// The repo the command runs in — the worktree's own root, so a TODO closed
+// from a worktree is closed for the repo (ids are text + session, not path).
+function currentRepo(): string | undefined {
+  return getGitRoot(process.cwd()) || undefined;
+}
+
+function printItem(item: TodoItem): void {
+  const icon = item.status === 'done' ? chalk.green('✓') : chalk.yellow('○');
+  const id = chalk.gray(item.id);
+  const age = chalk.gray(timeAgo(item.createdAt));
+  const session = chalk.gray(`session:${item.sessionId.slice(0, 8)}`);
+  const repoName = item.repoPath.split('/').pop() || item.repoPath;
+  const origin = item.source === 'memory' ? chalk.gray('repo memory') : chalk.gray(repoName);
+
+  console.log(`  ${icon} ${id}  ${item.text}`);
+  console.log(`    ${session}  ${origin}  ${age}`);
+  if (item.pending) {
+    // Still open, and says why it is about to stop being: a session has claimed
+    // it, and the claim is waiting on the default branch.
+    console.log(`    ${chalk.cyan(`claimed done by session:${(item.pending.sessionId || '?').slice(0, 8)} — confirms when it lands on the default branch`)}`);
+  }
+  if (item.branch) {
+    console.log(`    ${chalk.gray(`branch: ${item.branch}`)}`);
+  }
+  console.log('');
+}
+
 /**
  * origin todo list
+ *
+ * Open TODOs for this repo: what past sessions left unfinished, read from the
+ * repo's memory notes, plus anything added by hand.
  */
 export async function todoListCommand(opts?: { all?: boolean; done?: boolean; repo?: string }): Promise<void> {
-  const repoPath = opts?.repo ? opts.repo : (opts?.all ? undefined : getGitRoot(process.cwd()) || undefined);
+  const repoPath = opts?.repo ? opts.repo : (opts?.all ? undefined : currentRepo());
+
+  // Confirm any claim whose work has landed since the last read. Costs one note
+  // read when nothing is pending, which is the normal case.
+  if (repoPath) sweepTodoClosures(repoPath);
 
   const items = opts?.done
     ? getAllTodos(repoPath).filter(i => i.status === 'done')
@@ -32,34 +67,22 @@ export async function todoListCommand(opts?: { all?: boolean; done?: boolean; re
   if (items.length === 0) {
     console.log(opts?.done
       ? 'No completed TODOs.'
-      : 'No open TODOs. TODOs are extracted from AI session prompts automatically.');
+      : repoPath
+        ? 'No open TODOs. Sessions record what they leave unfinished in this repo\'s memory notes; none is open.'
+        : 'No open TODOs. Run inside a repo to read the TODOs its sessions recorded.');
     return;
   }
 
   const label = opts?.done ? 'Completed' : 'Open';
   console.log(`\n  ${label} TODOs (${items.length})\n`);
-
-  for (const item of items) {
-    const icon = item.status === 'done' ? chalk.green('✓') : chalk.yellow('○');
-    const id = chalk.gray(item.id);
-    const age = chalk.gray(timeAgo(item.createdAt));
-    const session = chalk.gray(`session:${item.sessionId.slice(0, 8)}`);
-    const repoName = item.repoPath.split('/').pop() || item.repoPath;
-
-    console.log(`  ${icon} ${id}  ${item.text}`);
-    console.log(`    ${session}  ${chalk.gray(repoName)}  ${age}`);
-    if (item.branch) {
-      console.log(`    ${chalk.gray(`branch: ${item.branch}`)}`);
-    }
-    console.log('');
-  }
+  for (const item of items) printItem(item);
 }
 
 /**
  * origin todo done <id>
  */
 export async function todoDoneCommand(id: string): Promise<void> {
-  const item = markTodoDone(id);
+  const item = markTodoDone(id, currentRepo());
   if (!item) {
     console.log(chalk.red(`No open TODO found matching "${id}".`));
     return;
@@ -71,7 +94,7 @@ export async function todoDoneCommand(id: string): Promise<void> {
  * origin todo show <id>
  */
 export async function todoShowCommand(id: string): Promise<void> {
-  const item = getTodoById(id);
+  const item = getTodoById(id, currentRepo());
   if (!item) {
     console.log(chalk.red(`No TODO found matching "${id}".`));
     return;
@@ -89,7 +112,12 @@ export async function todoShowCommand(id: string): Promise<void> {
   if (item.doneAt) {
     console.log(`  Done:      ${item.doneAt} (${timeAgo(item.doneAt)})`);
   }
-  console.log(`  Source:    ${item.source}`);
+  console.log(`  Source:    ${item.source === 'memory' ? 'repo memory (refs/notes/origin-memory)' : item.source}`);
+  if (item.pending) {
+    console.log(`  Claimed:   ${item.pending.at} by session ${(item.pending.sessionId || '?').slice(0, 8)}`);
+    console.log(`             ${item.pending.reason}`);
+    console.log(`             ${chalk.cyan('confirms when that work reaches the default branch')}`);
+  }
   console.log('');
 }
 
@@ -97,7 +125,7 @@ export async function todoShowCommand(id: string): Promise<void> {
  * origin todo add <text>
  */
 export async function todoAddCommand(text: string): Promise<void> {
-  const repoPath = getGitRoot(process.cwd()) || process.cwd();
+  const repoPath = currentRepo() || process.cwd();
   const item = addManualTodo(text, repoPath);
   console.log(chalk.green(`✓ Added TODO ${item.id}: ${item.text}`));
 }
@@ -106,10 +134,15 @@ export async function todoAddCommand(text: string): Promise<void> {
  * origin todo remove <id>
  */
 export async function todoRemoveCommand(id: string): Promise<void> {
-  const removed = removeTodo(id);
-  if (removed) {
-    console.log(chalk.green(`✓ Removed TODO ${id}`));
-  } else {
+  const removed = removeTodo(id, currentRepo());
+  if (!removed) {
     console.log(chalk.red(`No TODO found matching "${id}".`));
+    return;
   }
+  if (removed.mode === 'closed') {
+    // The notes are a history, not a checklist: nothing to remove there.
+    console.log(chalk.green(`✓ Closed TODO ${removed.item.id} (recorded in repo memory, so it is marked done rather than removed)`));
+    return;
+  }
+  console.log(chalk.green(`✓ Removed TODO ${id}`));
 }

@@ -28,10 +28,10 @@ beforeEach(() => {
   execFileSync('git', ['add', '.'], { cwd: repo });
   execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'base'], { cwd: repo });
   // A fresh lock says a watcher is live, so nothing is spawned here.
-  const jp = journalPathsForTag(TAG);
+  const jp = journalPathsForTag(TAG, repo);
   fs.mkdirSync(path.dirname(jp.lockPath), { recursive: true });
   fs.writeFileSync(jp.lockPath, String(process.pid));
-  // One journal per tag under the worker's home: start each test on an empty one.
+  // One journal per (tag, tree) under the worker's home: start each test empty.
   try { fs.unlinkSync(jp.journalPath); } catch { /* none yet */ }
   const state = {
     sessionId: 'sess-copilot-1',
@@ -63,7 +63,7 @@ describe('preMarkTurnForBackgroundSubmit', () => {
     expect(state.promptTurnIds).toHaveLength(2);
     expect(state.promptTurnIds![1]).toMatch(/^t_/);
     expect(state.prompts).toEqual(['first prompt']); // the prompt itself is the background handler's to record
-    const { journalPath } = journalPathsForTag(TAG);
+    const { journalPath } = journalPathsForTag(TAG, repo);
     expect(state.writeJournalPath).toBe(journalPath);
     expect(turnIdsInJournal(readJournalEntries(journalPath))).toEqual([state.promptTurnIds![1]]);
   });
@@ -79,7 +79,7 @@ describe('preMarkTurnForBackgroundSubmit', () => {
   });
 
   it('never marks an id the journal already holds', () => {
-    const { journalPath } = journalPathsForTag(TAG);
+    const { journalPath } = journalPathsForTag(TAG, repo);
     markTurn(journalPath, 't_already', 1000);
     const state = loadSessionState(repo, TAG)!;
     state.promptTurnIds = ['t_first0000000001', 't_already'];

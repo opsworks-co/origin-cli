@@ -21,7 +21,7 @@
  * handled.
  */
 import { describe, it, expect } from 'vitest';
-import { reconcilePromptHistory, homePromptIndexByText } from '../session-state.js';
+import { reconcilePromptHistory, homePromptIndexByText, clipMappingsToPromptHistory } from '../session-state.js';
 
 describe('reconcilePromptHistory — a late-starting stored list', () => {
   // Verbatim from prod session 3bfa24e6: the state file missed turn 1, and the
@@ -185,5 +185,72 @@ describe('reconcilePromptHistory — the two producers do not agree byte for byt
 
   it('a genuinely re-sent prompt still lands as a second row', () => {
     expect(reconcilePromptHistory(['try again'], ['try again', 'try again'])).toEqual(['try again', 'try again']);
+  });
+
+  it('Cursor collapseTrailingRepeat drops a transcript echo of the last prompt', () => {
+    expect(reconcilePromptHistory(
+      ['do 1 and 2', 'open PR'],
+      ['do 1 and 2', 'open PR', 'open PR'],
+      { collapseTrailingRepeat: true },
+    )).toEqual(['do 1 and 2', 'open PR']);
+    // Off by default — Claude/Codex may really send the same sentence twice.
+    expect(reconcilePromptHistory(
+      ['open PR'],
+      ['open PR', 'open PR'],
+    )).toEqual(['open PR', 'open PR']);
+  });
+
+  it('Cursor timestamp / image envelope is the same prompt as the inner text', () => {
+    // Session 562314d8: the hook stored Cursor's payload (timestamp + [Image]
+    // + image_files + user_query), Stop parsed the inner sentence. Before
+    // promptKey peeled those envelopes they were two turns.
+    const inner = "why the PR doesn't have this session linked";
+    const hook = [
+      '[Image]',
+      '<image_files>',
+      'The following images were provided by the user and saved to disk for future use:',
+      '1. /Users/me/.cursor/projects/origin/assets/shot.png',
+      '</image_files>',
+      '<timestamp>Monday, Sep 7, 2026, 7:57 PM (UTC-4)</timestamp>',
+      `<user_query>\n${inner}\n</user_query>`,
+    ].join('\n');
+    expect(reconcilePromptHistory([hook], [inner])).toEqual([hook]);
+    expect(reconcilePromptHistory([hook], [`${inner}\n[image]`])).toHaveLength(1);
+    const stamped = `<timestamp>Monday, Sep 7, 2026, 9:08 PM (UTC-4)</timestamp>\n\nDid you opened PR or what? I deploy from claude. Who's gonan bump the cli?`;
+    const plain = "Did you opened PR or what? I deploy from claude. Who's gonan bump the cli?";
+    expect(reconcilePromptHistory([stamped], [plain])).toEqual([stamped]);
+  });
+});
+
+describe('clipMappingsToPromptHistory', () => {
+  it('drops a transcript echo past the reconciled prompt list', () => {
+    // 17:25 Stop on c7cc460f: four stored prompts, five transcript mappings.
+    const mappings = [
+      { promptIndex: 3, promptText: 'open PR', filesChanged: [] as string[] },
+      { promptIndex: 4, promptText: 'open PR', filesChanged: [] as string[] },
+    ];
+    expect(clipMappingsToPromptHistory(mappings, ['a', 'b', 'c', 'open PR'])).toEqual([
+      { promptIndex: 3, promptText: 'open PR', filesChanged: [] },
+    ]);
+  });
+
+  it('does not rewrite a mapping whose text disagrees with the hook (numbering may have drifted)', () => {
+    const mappings = [
+      { promptIndex: 4, promptText: 'open PR', filesChanged: ['sessions.ts'] },
+    ];
+    expect(clipMappingsToPromptHistory(
+      mappings,
+      ['a', 'b', 'c', 'open PR', 'capture for this session has a lot of bugs'],
+    )).toEqual(mappings);
+  });
+
+  it('keeps the [image] placeholder when hook and transcript describe the same prompt', () => {
+    const hook = 'capture for this session has a lot of bugs';
+    const mapped = `${hook}\n[image]`;
+    const out = clipMappingsToPromptHistory(
+      [{ promptIndex: 0, promptText: mapped }],
+      [hook],
+    );
+    expect(out[0].promptText).toBe(mapped);
   });
 });

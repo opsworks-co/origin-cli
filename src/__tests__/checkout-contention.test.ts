@@ -10,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 import path from 'path';
 import os from 'os';
 import {
-  detectContention, contentionAdvice, PEER_ACTIVE_WINDOW_MS, type PeerSession,
+  detectContention, detectLiveContention, contentionAdvice, PEER_ACTIVE_WINDOW_MS, type PeerSession,
 } from '../checkout-contention.js';
 
 const SELF = { sessionId: 'self-1' };
@@ -76,6 +76,17 @@ describe('detectContention', () => {
     expect(detectContention(SELF, TREE, [], NOW).contested).toBe(false);
     expect(detectContention(SELF, '', [peer()], NOW).contested).toBe(false);
     expect(detectContention(SELF, TREE, [{ sessionId: '' } as PeerSession], NOW).contested).toBe(false);
+  });
+});
+
+describe('detectLiveContention', () => {
+  it('uses the active state store view at capture time', () => {
+    const r = detectLiveContention(SELF, TREE, [
+      { ...SELF, repoPath: TREE, claudeSessionId: 'self', transcriptPath: '', model: '', startedAt: '', prompts: [] },
+      { ...peer(), claudeSessionId: 'peer', transcriptPath: '', model: '', startedAt: '', prompts: [] },
+    ] as any, NOW);
+    expect(r.contested).toBe(true);
+    expect(r.peers.map((p) => p.sessionId)).toEqual(['peer-1']);
   });
 });
 

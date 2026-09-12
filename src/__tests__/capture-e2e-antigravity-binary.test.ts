@@ -17,12 +17,13 @@ import path from 'path';
 import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import { journalPathsForTag } from '../write-journal-watch.js';
 import { verifyTurn, parseUnifiedDiff } from '../capture-verify.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
 const haveDist = fs.existsSync(BIN);
-const posix = process.platform !== 'win32';
 
 type Hit = { method: string; url: string; body: any };
 const hits: Hit[] = [];
@@ -99,7 +100,8 @@ function toolWrote(file: string) {
 }
 
 function journalPath(): string {
-  return path.join(os.homedir(), '.origin', 'journals', `${TAG}.jsonl`);
+  // Keyed by tag AND tree — a tag alone no longer names one journal.
+  return journalPathsForTag(TAG, repo).journalPath;
 }
 function writesIn(): number {
   try { return fs.readFileSync(journalPath(), 'utf-8').split('\n').filter((l) => l.startsWith('{"f"')).length; } catch { return 0; }
@@ -109,7 +111,7 @@ function rowsSent(): any[] {
 }
 
 async function killJournalWatcher(): Promise<void> {
-  const lock = path.join(os.homedir(), '.origin', 'journals', `${TAG}.lock`);
+  const lock = journalPathsForTag(TAG, repo).lockPath;
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     try {
@@ -120,7 +122,7 @@ async function killJournalWatcher(): Promise<void> {
   }
 }
 
-describe.skipIf(!haveDist || !posix)('antigravity capture end to end through the built binary', () => {
+describe.skipIf(!haveDist)('antigravity capture end to end through the built binary', () => {
   let tmp = '';
 
   beforeAll(async () => {
@@ -152,7 +154,7 @@ describe.skipIf(!haveDist || !posix)('antigravity capture end to end through the
     fs.writeFileSync(path.join(repo, 'app.py'), 'def main():\n    print("old")\n\n\nmain()\n');
     git(['add', '.']);
     git(['commit', '-q', '-m', 'base']);
-  }, 60_000);
+  }, 60_000 * WINDOWS_SLOWDOWN);
 
   afterAll(async () => {
     if (process.env.E2E_DUMP) {
@@ -213,7 +215,7 @@ describe.skipIf(!haveDist || !posix)('antigravity capture end to end through the
     expect(t1.linesRemoved).toBe(1);
     expect(parseUnifiedDiff(t1.diff).files[0].isNew).toBe(false);
     expect(verifyTurn({ promptIndex: 0, filesChanged: t1.filesChanged, diff: t1.diff, linesAdded: t1.linesAdded, linesRemoved: t1.linesRemoved })).toEqual([]);
-  }, 120_000);
+  }, 120_000 * WINDOWS_SLOWDOWN);
 
   it('turn 2: its own mark, its own write, nothing of turn 1', async () => {
     const abs = path.join(repo, 'notes.md');
@@ -244,5 +246,5 @@ describe.skipIf(!haveDist || !posix)('antigravity capture end to end through the
     const t1 = rows.find((r: any) => r.promptIndex === 0);
     expect(t1.turnId).not.toBe(t2.turnId);
     expect(verifyTurn({ promptIndex: 1, filesChanged: t2.filesChanged, diff: t2.diff, linesAdded: t2.linesAdded, linesRemoved: t2.linesRemoved })).toEqual([]);
-  }, 120_000);
+  }, 120_000 * WINDOWS_SLOWDOWN);
 });

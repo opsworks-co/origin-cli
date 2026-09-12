@@ -14,25 +14,26 @@ import { debugLog } from '../../debug-log.js';
 import { readDevinDesktopSessions, selectDevinSessionForRepo } from '../../devin-desktop.js';
 import type { DevinDesktopSession } from '../../devin-desktop.js';
 import { capDiff, fitDiffToBudget } from '../../diff-budget.js';
-import { MAX_PROMPT_DIFF_LEN, capCommitMessage, captureGitState, commitDiffScopedToPrompt } from '../../git-capture.js';
+import { MAX_PROMPT_DIFF_LEN, capCommitMessage, captureGitState, commitDiffScopedToPrompt, commitLineCounts } from '../../git-capture.js';
 import { writeGitNotes } from '../../git-notes.js';
-import { BACKFILL_TIMEOUT_MS, COMMIT_INGEST_TIMEOUT_MS, RECENT_SHAS_LIMIT, acquireBackfillLock, backfillUnknownCommits, extractCommitDiff, listRecentShas, mergeOwnDiff, releaseBackfillLock, shouldAdvertiseHistory, writeSyncMarker } from '../../history-backfill.js';
+import { BACKFILL_TIMEOUT_MS, COMMIT_INGEST_TIMEOUT_MS, RECENT_SHAS_LIMIT, acquireBackfillLock, backfillUnknownCommits, commitAuthoredDelta, extractCommitDiff, listRecentShas, releaseBackfillLock, shouldAdvertiseHistory, writeSyncMarker } from '../../history-backfill.js';
 import { pushSessionBranch, writeSessionFiles } from '../../local-entrypoint.js';
 import { memoryUpdateTrigger, shouldWriteMemoryOnCommit, summarizeFromCommitSubjects, writeCommitMemory, writeSessionMemory } from '../../memory.js';
 import { parseMarkersFromTranscriptPath } from '../../origin-markers.js';
 import type { OriginMarkers } from '../../origin-markers.js';
-import { getBranch, getGitRoot, getHeadSha, getWorkingGitRoot, isSessionAlive, listActiveSessions, listMirroredSessionsForTree, markSessionEnded, saveSessionState } from '../../session-state.js';
+import { currentTurnIndex, getBranch, getGitRoot, getHeadSha, getWorkingGitRoot, isSessionAlive, listActiveSessions, listMirroredSessionsForTree, markSessionEnded, saveSessionState, stampCaptured } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
-import { estimateCost, extractPromptFileMappings, parseTranscript } from '../../transcript.js';
+import { estimateCost, extractPromptFileMappings, livePrompts, parseTranscript } from '../../transcript.js';
 import type { ParsedTranscript } from '../../transcript.js';
-import { drainUpdateQueue, durableUpdateSession, enqueueFailedUpdate, isRetriableApiError } from '../../update-queue.js';
+import { drainUpdateQueue, durableUpdateSession, enqueueFailedUpdate, isRetriableApiError, persistUpdateBeforeWork } from '../../update-queue.js';
 import { isProcessRunning, uniqueMatchingId } from '../../utils/process-detect.js';
 import { ensureSqlite } from '../../utils/sqlite.js';
 import { condenseSnapshot, listSnapshots } from '../snapshot.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { applyLedgerCaptures, buildMemoryEntry, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitTrailerBelongsToSession, durableUpdate, isInsideRepo, rewrittenCommitsPayload, sameDir, scheduleMemoryBriefRefresh, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, trailerNamesAKnownSession, turnIdFor, withDerivedLineCounts } from '../hooks.js';
+import { serverRowForLocalTurn, turnIdForServerRow } from '../../turn-index.js';
+import { applyLedgerCaptures, buildMemoryEntry, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitTrailerBelongsToSession, durableUpdate, isInsideRepo, ownedRangeCommitShas, rewrittenCommitsPayload, sameDir, scheduleMemoryBriefRefresh, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, trailerNamesAKnownSession, turnIdFor, withDerivedLineCounts } from '../hooks.js';
 
 
 /**
@@ -112,17 +113,136 @@ export function sessionToDateCommittedSnapshot(
   state: SessionState,
   fallback: { diff: string; linesAdded: number; linesRemoved: number },
 ): { diff: string; linesAdded: number; linesRemoved: number; scoped: boolean } {
-  let owned = '';
+  const snap = sessionAuthoredSnapshot(repoPath, state);
+  if (snap.source === 'none') return { ...fallback, scoped: false };
+  return { diff: snap.diff, linesAdded: snap.linesAdded, linesRemoved: snap.linesRemoved, scoped: true };
+}
+
+// ─── The one answer to "what did this session author" ─────────────────────
+//
+// Session 51995e1c (2026-09-08) put the same question to six producers and
+// got three answers. The turn row asked a merge commit what it RESOLVED (2
+// files, +3/-3); the session accumulator added what the merge ABSORBED (13
+// files, +326/-71); the read side then recovered those 13 files back into a
+// header that post-commit had just stored correctly. Every one of those paths
+// had its own arithmetic, and each was fixed on its own — #1385 the turn,
+// #1409 the header, #1473 checkouts — while the next path kept the old answer.
+//
+// So: two functions, and everything that describes a session's authorship
+// derives from them.
+//
+//   commitAuthoredDelta   — what ONE commit contributed. A merge contributes
+//                           its resolution; a plain commit contributes its
+//                           patch. Never the first-parent view of a merge,
+//                           which is the whole other branch.
+//   sessionAuthoredSnapshot — what the SESSION has authored so far: its own
+//                           commits, each rendered by commitAuthoredDelta and
+//                           stripped of pre-session dirt, plus whatever
+//                           uncommitted work the caller hands in. Counts are
+//                           taken from the resulting text, never summed from
+//                           parts, so a file touched twice counts once.
+//
+// The Commit ROW ingest, the session accumulator, the memory entry, the turn
+// row, Stop's and session-end's session-level snapshots, and the transcript
+// watcher's, all call these. `origin verify-capture` checks the header they
+// produce against the turn rows, so a seventh producer with its own
+// arithmetic fails locally before it ships.
+
+// commitAuthoredDelta / renderAuthoredCommits live in history-backfill.ts
+// (beside mergeOwnDiff, with no hook-side imports) and are re-exported here so
+// every hooks consumer reaches them from one place.
+export { commitAuthoredDelta, renderAuthoredCommits, type CommitAuthoredDelta } from '../../history-backfill.js';
+
+export interface SessionAuthoredSnapshot {
+  /** Committed + uncommitted, one text; the counts below are taken from it. */
+  diff: string;
+  committedDiff: string;
+  uncommittedDiff: string;
+  filesChanged: string[];
+  linesAdded: number;
+  linesRemoved: number;
+  /** The commits the committed side was rendered from. */
+  commitShas: string[];
+  /**
+   * `owned`   — rendered from the session's recorded commits.
+   * `trailer` — no commit was recorded (a hook was missed) but the range
+   *             since session start holds commits whose trailer names this
+   *             session; those were rendered instead.
+   * `none`    — nothing committed; only the uncommitted side, if any.
+   */
+  source: 'owned' | 'trailer' | 'none';
+}
+
+/**
+ * Everything the session has authored so far, from its own commits and the
+ * uncommitted work the caller passes in. The uncommitted side is the caller's
+ * because each caller already filters it differently (a turn's baseline, the
+ * session-start shadow, the dirt lists); what is shared is the committed side
+ * and the rule that the totals come from the one combined text.
+ */
+export function sessionAuthoredSnapshot(
+  repoPath: string,
+  state: SessionState,
+  opts: { uncommittedDiff?: string | null } = {},
+): SessionAuthoredSnapshot {
+  let committed = '';
+  let source: SessionAuthoredSnapshot['source'] = 'none';
+  let commitShas: string[] = [];
   try {
-    owned = sessionScopedCommittedDiff(repoPath, state);
-  } catch { /* range unreadable — the raw one is still better than nothing */ }
-  if (!owned) return { ...fallback, scoped: false };
+    committed = sessionScopedCommittedDiff(repoPath, state);
+  } catch { /* range unreadable — fall through to the trailer walk */ }
+  if (committed) {
+    source = 'owned';
+    commitShas = (state.sessionCommitShas || []).filter((s) => /^[a-fA-F0-9]{7,40}$/.test(s));
+  } else {
+    // Codex bypasses .git/hooks/post-commit on some installs, so the recorded
+    // list can be empty for a session that really did commit. The commits in
+    // range whose trailer names this session are still ours — render those,
+    // each by its OWN contribution, never `git show` on a merge.
+    let trailerOwned: string[] = [];
+    try { trailerOwned = ownedRangeCommitShas(repoPath, state); } catch { trailerOwned = []; }
+    const parts: string[] = [];
+    for (const sha of trailerOwned) {
+      try {
+        const own = commitAuthoredDelta(repoPath, sha);
+        if (own.diff) parts.push(own.diff);
+      } catch { /* a sha a rebase removed */ }
+    }
+    if (parts.length > 0) {
+      committed = parts.join('\n').trim();
+      source = 'trailer';
+      commitShas = trailerOwned;
+    }
+  }
+  const uncommitted = (opts.uncommittedDiff || '').trim();
+  const diff = (committed + (uncommitted ? '\n' + uncommitted : '')).trim();
   return {
-    diff: owned,
-    linesAdded: countDiffSignLines(owned, '+'),
-    linesRemoved: countDiffSignLines(owned, '-'),
-    scoped: true,
+    diff,
+    committedDiff: committed,
+    uncommittedDiff: uncommitted,
+    filesChanged: filesNamedInDiff(diff),
+    linesAdded: countDiffSignLines(diff, '+'),
+    linesRemoved: countDiffSignLines(diff, '-'),
+    commitShas,
+    source,
   };
+}
+
+/**
+ * Write a snapshot's totals onto the session state — the header numbers the
+ * CLI keeps and sends. SET, never accumulated: the snapshot is already the
+ * whole answer, and adding to it is how a merge's absorbed branch got in.
+ */
+export function applyAuthoredTotals(
+  state: SessionState,
+  snap: Pick<SessionAuthoredSnapshot, 'filesChanged' | 'linesAdded' | 'linesRemoved' | 'commitShas' | 'source'>,
+): void {
+  const s = state as SessionState & { filesChanged?: string[]; linesAdded?: number; linesRemoved?: number; commitCount?: number; authoredSource?: string };
+  s.filesChanged = [...snap.filesChanged];
+  s.linesAdded = snap.linesAdded;
+  s.linesRemoved = snap.linesRemoved;
+  s.commitCount = snap.commitShas.length;
+  s.authoredSource = snap.source;
 }
 
 /**
@@ -455,12 +575,35 @@ export function listSessionsForGitHookUnscoped(
     const unknownCwd = sessions.filter(s =>
       !s.lastCwd && !worksInAnotherTree(s, hookTree));
     if (exact.length > 0) {
+      // An exact lastCwd match used to be returned ALONE, and both commit
+      // hooks trust a lone candidate absolutely. But lastCwd is only where a
+      // session's last lifecycle hook fired: a session that ran `cd
+      // packages/cli` for its tests is at a subdirectory of this same tree,
+      // and it is the one mid-commit. Session e1095412 (2026-09-08) lost both
+      // of its commits this way to session 29b32c38 — the earlier chat in the
+      // same worktree, still open and idle, parked at the root — with
+      // `narrowed by lastCwd, matched: [29b32c38]` and `ofActive: 1` in the
+      // log. Its open turn had every staged file in its ledger; the picker
+      // never saw it.
+      //
+      // Keep every live session working in THIS tree. The exact match stays
+      // first and is the tie-break both pickers fall back to when the file
+      // evidence does not separate the candidates (`pickSessionForCommit`
+      // reason 'cwd', `breakTie` in git-hooks.ts), so a lone root-cwd session
+      // beside idle siblings still wins — it just no longer beats a sibling
+      // whose open turn staged the commit.
+      const sameTree = sessions.filter((s) =>
+        !exact.includes(s)
+        && !!s.lastCwd
+        && sessionTrees(s).some((t) => sameDir(t, hookTree))
+        && isInsideRepo(hookTree, s.lastCwd));
       debugLog('git-hook-sessions', 'narrowed by lastCwd', {
         hookCwd,
         matched: exact.map(s => s.sessionId.slice(0, 12)),
+        keptSameTree: sameTree.map(s => s.sessionId.slice(0, 12)),
         keptUnknownCwd: unknownCwd.map(s => s.sessionId.slice(0, 12)),
       });
-      return [...exact, ...unknownCwd];
+      return [...exact, ...sameTree, ...unknownCwd];
     }
     // Git runs its hooks from the WORKING TREE ROOT, but a session's lastCwd is
     // wherever its last lifecycle hook fired — routinely a SUBDIRECTORY, because
@@ -651,7 +794,11 @@ export function resolvePromptForCommit(
   repoPath: string,
   commitTimestampMs: number,
 ): { promptIndex: number; promptText: string; total: number } {
-  const fromState = state?.prompts || [];
+  // `livePrompts` prefers the transcript when it is further along than
+  // state.prompts — a submit hook killed at its timeout leaves the list short
+  // by the very turn that is committing, which filed three of this session's
+  // own commits one turn early. Longer only; see livePrompts.
+  const fromState = livePrompts(state || {});
   if (fromState.length > 0) {
     const idx = fromState.length - 1;
     return { promptIndex: idx, promptText: fromState[idx], total: fromState.length };
@@ -738,6 +885,65 @@ export function inFlightEditedFiles(session: FileEvidenceSession): string[] {
     if (w && typeof w.file === 'string' && w.file) out.add(w.file);
   }
   return [...out];
+}
+
+/**
+ * Did the prompt that is running — submitted, not yet closed by Stop — record
+ * a committed file through its own captures? Read from the edit hook's mapping
+ * for that index and the live ledger, never inferred from time.
+ */
+export function runningTurnTouchedCommit(
+  state: { completedPromptMappings?: Array<{ promptIndex: number; filesChanged?: string[] }>; liveEdits?: Array<{ promptIndex: number; edits?: Array<{ file: string }> }> },
+  running: number,
+  commitFiles: string[],
+): boolean {
+  if (!commitFiles || commitFiles.length === 0) return false;
+  const baseOf = (f: string): string => f.split('/').pop() || f;
+  const wanted = new Set(commitFiles.map(baseOf));
+  for (const m of state.completedPromptMappings || []) {
+    if (m.promptIndex !== running) continue;
+    for (const f of m.filesChanged || []) if (wanted.has(baseOf(f))) return true;
+  }
+  for (const b of state.liveEdits || []) {
+    if (b.promptIndex !== running) continue;
+    for (const e of b.edits || []) if (e?.file && wanted.has(baseOf(e.file))) return true;
+  }
+  return false;
+}
+
+/**
+ * May the ONLY live session be credited with this commit?
+ *
+ * Both commit hooks used to trust a lone candidate absolutely: one session in
+ * the repo meant the commit was its. Session b3b45536 (lumen-interiors,
+ * 2026-09-09): one prompt, "check what's in here", a read-only turn already
+ * closed with an empty file list — and a README commit made in the main
+ * checkout by someone else landed on it. prepare-commit-msg wrote its
+ * trailer, post-commit recorded the sha, the header read +41/-8 on README.md
+ * while its one turn carried +0/-0, and `origin verify-capture` flagged both.
+ *
+ * Evidence, in the order the multi-candidate picker already uses: a turn is
+ * OPEN (the agent is mid-turn; the commit is part of its work), or the open
+ * turn's ledger holds a committed file, or a recorded turn touched one. A
+ * session with no recorded turns at all (a hookless agent's first turn, or
+ * nothing captured yet) is left as before — there is nothing to contradict it
+ * with. An empty file list likewise: without files there is no evidence to
+ * weigh, and refusing on none would strip every merge and empty commit.
+ */
+export function loneSessionMayOwnCommit<T extends FileEvidenceSession & { prompts?: string[] }>(
+  session: T,
+  commitFiles: string[],
+): { ok: boolean; why: string } {
+  if (!commitFiles || commitFiles.length === 0) return { ok: true, why: 'no files to weigh' };
+  const open = session.activeTurn;
+  if (open && Number.isInteger(open.index)) return { ok: true, why: 'turn open' };
+  const baseOf = (f: string): string => f.split('/').pop() || f;
+  const wanted = new Set(commitFiles.map(baseOf));
+  if (inFlightEditedFiles(session).some((f) => wanted.has(baseOf(f)))) return { ok: true, why: 'in-flight edit' };
+  const mappings = session.completedPromptMappings || [];
+  if (mappings.length === 0) return { ok: true, why: 'no recorded turns to contradict' };
+  if (sessionTouchedAnyCommitFile(session, commitFiles)) return { ok: true, why: 'a recorded turn touched a committed file' };
+  return { ok: false, why: 'no open turn and no recorded turn touched any committed file' };
 }
 
 /**
@@ -873,8 +1079,14 @@ export function pickSessionForCommit<
      * `Origin-Session:` trailer decides — see the 'trailer' rung below.
      */
     commitMessage?: string | null;
+    /**
+     * Where git ran the hook — the working-tree root. A session whose lastCwd
+     * is exactly this is the tie-break AFTER the file evidence, never before
+     * it: it is where a session's last hook fired, not who made the commit.
+     */
+    hookCwd?: string | null;
   } = {},
-): { session: T | null; reason: 'trailer' | 'only' | 'process' | 'branch' | 'file-overlap' | 'recency' | 'ambiguous' | 'none' } {
+): { session: T | null; reason: 'trailer' | 'only' | 'process' | 'branch' | 'file-overlap' | 'cwd' | 'recency' | 'ambiguous' | 'none' } {
   if (activeSessions.length === 0) return { session: null, reason: 'none' };
 
   // Rung 0 — the commit's own trailer, which outranks every rung below it.
@@ -917,6 +1129,15 @@ export function pickSessionForCommit<
   if (candidates.length > 1 && commitFiles.length > 0) {
     const best = pickSessionByFileOverlap(candidates, commitFiles);
     if (best) return { session: best, reason: 'file-overlap' };
+  }
+
+  // Where git ran the hook. A session whose lastCwd is exactly the tree root
+  // is the tie-break only once the file evidence above has had its say —
+  // lastCwd is where a session's last hook fired, not who made the commit
+  // (e1095412: the committing session sat in packages/cli).
+  if (candidates.length > 1 && opts.hookCwd) {
+    const atCwd = candidates.filter((s) => sameDir((s as { lastCwd?: string }).lastCwd, opts.hookCwd as string));
+    if (atCwd.length === 1) return { session: atCwd[0], reason: 'cwd' };
   }
 
   // Last resort — recency. A fresh commit belongs to the session actively
@@ -979,8 +1200,8 @@ export async function pinCodexCommitToProducer(state: SessionState, hookCwd: str
     // Turn-scoped backfill always wins (same merge policy as handleStop).
     for (const bf of backfilled) {
       const i = state.completedPromptMappings.findIndex((m) => m.promptIndex === bf.promptIndex);
-      if (i >= 0) state.completedPromptMappings[i] = bf;
-      else state.completedPromptMappings.push(bf);
+      if (i >= 0) state.completedPromptMappings[i] = stampCaptured(bf);
+      else state.completedPromptMappings.push(stampCaptured(bf));
     }
     state.completedPromptMappings.sort((a, b) => a.promptIndex - b.promptIndex);
     try { if (state.sessionTag) saveSessionState(state, repoPath, state.sessionTag); } catch { /* non-fatal */ }
@@ -991,7 +1212,8 @@ export async function pinCodexCommitToProducer(state: SessionState, hookCwd: str
         ...pm,
         promptText: (pm.promptText || '').slice(0, 1000),
         diff: capDiff(pm.diff, MAX_PROMPT_DIFF_LEN),
-        ...(turnIdFor(state, pm.promptIndex) && { turnId: turnIdFor(state, pm.promptIndex) }),
+        // `completedPromptMappings` is numbered by SERVER row; ids are local.
+        ...(turnIdForServerRow(state, pm.promptIndex) && { turnId: turnIdForServerRow(state, pm.promptIndex) }),
         ...captureStamp(),
       })),
     });
@@ -1103,17 +1325,52 @@ export async function handlePostCommit(): Promise<void> {
   // Per-commit diff + files. Shared with the history backfill so the
   // fallback chain (empty stdout on fresh branches, root commits, merges)
   // is fixed in one place — see extractCommitDiff for the strategy notes.
-  const { diff, filesChanged } = extractCommitDiff(hookCwd, commitSha);
-  if (!diff) {
+  const firstParent = extractCommitDiff(hookCwd, commitSha);
+  // From here on `diff` / `filesChanged` are what this commit AUTHORED — for a
+  // merge, its resolution. The first-parent view of a merge is the whole other
+  // branch, and every consumer below (the Commit row, the session totals, the
+  // memory entry, the turn) describes this session's work, not what landed on
+  // the branch. See commitAuthoredDelta.
+  const authored = commitAuthoredDelta(hookCwd, commitSha, firstParent);
+  const { diff, filesChanged } = authored;
+  if (!diff && !authored.isMerge) {
     debugLog('post-commit', 'WARN: empty per-commit diff after all three strategies', { commitSha });
+  }
+  if (authored.isMerge) {
+    debugLog('post-commit', 'merge commit — crediting the session with its resolution only', {
+      commitSha: commitSha.slice(0, 8),
+      absorbedFiles: authored.absorbed?.files ?? 0,
+      absorbedLines: `+${authored.absorbed?.linesAdded ?? 0}/-${authored.absorbed?.linesRemoved ?? 0}`,
+      resolvedFiles: filesChanged.length,
+    });
   }
 
   // Count lines
+  // git's own totals. `diff` is capped at MAX_DIFF_SIZE, so counting its
+  // sign lines under-reports a large commit: 7f310b6b (683KB) was sent as
+  // +1561/-892 for git's +1959/-1249, and the session page compared that
+  // against a turn counted another way. Fall back to the text only when
+  // numstat itself fails.
+  //
+  // A MERGE is the exception. `git diff-tree --numstat` prints nothing for
+  // it (no single parent), so commitLineCounts returns {0,0} — a real-looking
+  // zero that would throw away the resolution commitAuthoredDelta just
+  // computed. And the first-parent numstat, if we asked for it, is the
+  // absorbed branch: session 51995e1c stored +1218/−178 against a true
+  // +891/−106 because that number was added into the session total. The
+  // authored counts ARE the merge's contribution.
   let linesAdded = 0, linesRemoved = 0;
-  if (diff) {
-    for (const line of diff.split('\n')) {
-      if (line.startsWith('+') && !line.startsWith('+++')) linesAdded++;
-      if (line.startsWith('-') && !line.startsWith('---')) linesRemoved++;
+  if (authored.isMerge) {
+    linesAdded = authored.linesAdded;
+    linesRemoved = authored.linesRemoved;
+  } else {
+    const counted = commitLineCounts(hookCwd, commitSha);
+    if (counted) {
+      linesAdded = counted.added;
+      linesRemoved = counted.removed;
+    } else if (diff) {
+      linesAdded = authored.linesAdded;
+      linesRemoved = authored.linesRemoved;
     }
   }
 
@@ -1172,7 +1429,14 @@ export async function handlePostCommit(): Promise<void> {
         // Per-commit unified diff so commit-detail can show what THIS
         // commit changed instead of the session aggregate. Capped at
         // 500KB to stay sane on accidental large commits.
+        //
+        // For a MERGE this is the resolution, and the row says what the
+        // merge brought in from the other branch. The Commit row is read by
+        // the session composers as this session's authored content (the
+        // header recovery, the git-fallback body), so a first-parent patch
+        // here is how another PR's files reached a session's header.
         diff: diff ? diff.slice(0, 500_000) : undefined,
+        ...(authored.isMerge ? { isMerge: true, absorbed: authored.absorbed } : {}),
       };
       // AWAITED (#1247). This was a floating promise: the hook fired the
       // request and handlePostCommit returned, so the process could exit — or
@@ -1277,7 +1541,7 @@ export async function handlePostCommit(): Promise<void> {
   // The commit's files go in so a session that merely went QUIET — no lifecycle
   // hook for hours, which is normal for Antigravity — can still be recognised as
   // the owner when this commit is literally its own uncommitted work.
-  const activeSessions = listSessionsForGitHook(hookCwd, { commitFiles: filesChanged });
+  let activeSessions = listSessionsForGitHook(hookCwd, { commitFiles: filesChanged });
   activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
 
   // Pick the correct session when multiple are active: process detection →
@@ -1294,7 +1558,19 @@ export async function handlePostCommit(): Promise<void> {
       sessionId: state.sessionId, ofActive: activeSessions.length,
     });
   } else if (activeSessions.length === 1) {
-    state = activeSessions[0];
+    const only = activeSessions[0];
+    const verdict = loneSessionMayOwnCommit(only, filesChanged);
+    if (verdict.ok) {
+      state = only;
+    } else {
+      // One live session is not evidence that the commit is its (b3b45536).
+      // Treat the repo as having no session for this commit: the row still
+      // ingests, nothing is stamped on a turn that did not make it.
+      debugLog('post-commit', 'SKIP: the only live session shows no evidence for this commit', {
+        sessionId: only.sessionId, commitSha: commitSha.slice(0, 8), files: filesChanged.length, why: verdict.why,
+      });
+      activeSessions = [];
+    }
   } else if (activeSessions.length > 1) {
     // Every matching agent, not the first — see uniquePgrepMatch. A hint that
     // silently means "whichever agent happens to sort first among the ones
@@ -1310,6 +1586,7 @@ export async function handlePostCommit(): Promise<void> {
       currentBranch,
       commitFiles: filesChanged,
       commitMessage,
+      hookCwd,
     });
     state = picked.session;
     if (state) {
@@ -1418,6 +1695,29 @@ export async function handlePostCommit(): Promise<void> {
       // active turn, and inventing one would be worse than the heuristics: it
       // would give the downstream reader false attestation. No activeTurn means
       // no entry, and the existing inference still applies to that commit.
+      // A commit made while a prompt is RUNNING but before any tool capture
+      // opened its turn attested nothing. Cursor session c1e361a4: prompt 10
+      // saved 00:31:32, after-file-edit mapped its edits by prompt index
+      // without opening the turn, the commit landed 00:37:59 with "(no
+      // active turn)", and the header then carried the commit's files that
+      // no turn claimed. The running turn is the one after the last closed
+      // one — the same rule every tool capture opens by.
+      //
+      // This does not invent a turn (see the caveat above): it opens one only
+      // when a prompt is running AND that prompt's own captures — the edit
+      // hook's mapping for its index, or its live ledger — already hold a
+      // committed file. That is the same observation the tool captures make;
+      // post-commit merely arrives before the next one would have.
+      if (!state.activeTurn && Array.isArray(state.prompts) && state.prompts.length > 0) {
+        const lastClosed = Number.isInteger(state.lastClosedTurnIndex as number) ? (state.lastClosedTurnIndex as number) : -1;
+        const running = state.prompts.length - 1;
+        if (running > lastClosed && runningTurnTouchedCommit(state, running, filesChanged)) {
+          const opened = currentTurnIndex(state);
+          debugLog('post-commit', 'opened the running turn to attest the commit', {
+            promptIndex: opened, lastClosed, commitSha: commitSha.slice(0, 8),
+          });
+        }
+      }
       const attestTurnId = state.activeTurn?.turnId;
       if (attestTurnId) {
         if (!state.commitTurns) state.commitTurns = [];
@@ -1466,6 +1766,11 @@ export async function handlePostCommit(): Promise<void> {
     });
   }
 
+  // The owner's whole-session snapshot, computed once here and reused by the
+  // session-level diff below. It is the header: what the dashboard shows above
+  // the turns, what the memory entry records, what verify-capture checks the
+  // turns against.
+  let ownerAuthored: SessionAuthoredSnapshot | null = null;
   for (const s of activeSessions) {
     let changed = false;
     // Branch, unlike the counters, really is shared: these sessions live in one
@@ -1477,15 +1782,31 @@ export async function handlePostCommit(): Promise<void> {
       s.branch = currentBranch;
       changed = true;
     }
-    // Accumulate files changed in session state so standalone sessions show
-    // file counts — for the session that MADE the commit.
+    // The session's header totals — for the session that MADE the commit.
+    //
+    // SET from the authored snapshot, not accumulated. The accumulator added
+    // each commit's first-parent delta, so a `git merge origin/main` added the
+    // whole other branch to a session that resolved two version lines
+    // (51995e1c: +1218 stored against +895 authored). The snapshot renders the
+    // session's own commits through commitAuthoredDelta and counts the one
+    // resulting text, so it cannot drift from the turn rows built the same
+    // way. The per-commit add remains only as the fallback for a session whose
+    // owned walk yields nothing (a hook was missed), and it adds what the
+    // commit AUTHORED.
     if (filesChanged.length > 0 && counterSessionIds.has(s.sessionId)) {
-      const existing = new Set((s as any).filesChanged || []);
-      for (const f of filesChanged) existing.add(f);
-      (s as any).filesChanged = Array.from(existing);
-      (s as any).linesAdded = ((s as any).linesAdded || 0) + linesAdded;
-      (s as any).linesRemoved = ((s as any).linesRemoved || 0) + linesRemoved;
-      (s as any).commitCount = ((s as any).commitCount || 0) + 1;
+      let snap: SessionAuthoredSnapshot | null = null;
+      try { snap = sessionAuthoredSnapshot(hookCwd, s); } catch { snap = null; }
+      if (snap && snap.source !== 'none') {
+        applyAuthoredTotals(s, snap);
+        if (state && s.sessionId === state.sessionId) ownerAuthored = snap;
+      } else {
+        const existing = new Set((s as any).filesChanged || []);
+        for (const f of filesChanged) existing.add(f);
+        (s as any).filesChanged = Array.from(existing);
+        (s as any).linesAdded = ((s as any).linesAdded || 0) + linesAdded;
+        (s as any).linesRemoved = ((s as any).linesRemoved || 0) + linesRemoved;
+        (s as any).commitCount = ((s as any).commitCount || 0) + 1;
+      }
       changed = true;
     }
     if (changed) {
@@ -1648,99 +1969,51 @@ export async function handlePostCommit(): Promise<void> {
   // the session-end stop hook already does (see line ~3808 / ~4167), just
   // refreshed every commit instead of only at session end.
   if (activeSessions.length > 0) {
-    let sessionToDateDiff = '';
-    let sessionLinesAdded = linesAdded;
-    let sessionLinesRemoved = linesRemoved;
-    if (state?.headShaAtStart && state.headShaAtStart !== commitSha) {
-      try {
-        // hookCwd, not repoPath: the session-to-date diff must read the
-        // committing working tree's HEAD (worktree-safe, see execOpts above).
-        //
-        // The owned walk runs FIRST and the raw capture is computed only when
-        // it comes back empty, because the raw capture is the expensive half:
-        // `captureGitState` re-reads metadata for EVERY commit in the session
-        // range — five git spawns each — and then renders the range at
-        // `--unified=2000`, up to three times as the byte ladder steps down.
-        // Measured on this repo: 1.6s over a 10-commit range, 4.0s over 30,
-        // 7.2s over 60 — paid on every `git commit`, growing for the length of
-        // the session, and in the common case thrown away unlooked-at because
-        // the owned walk answered. post-commit runs before git returns, so it
-        // is latency a person sits through.
-        //
-        // `--name-only` reproduces the old `if (snap.committedDiff)` gate for
-        // a few ms: an empty committed range still sends nothing, so a session
-        // whose commits are all somebody else's does not get a snapshot.
-        let rangeHasContent = false;
-        try {
-          rangeHasContent = !!execFileSync(
-            'git', ['diff', '--name-only', state.headShaAtStart, commitSha],
-            { ...execOpts, timeout: 10000 },
-          ).trim();
-        } catch { rangeHasContent = true; /* unreadable range — let the old path decide */ }
-        if (rangeHasContent) {
-          // Scope it to the commits this session OWNS before it becomes the
-          // session header. The raw range holds a merge's absorbed branch and
-          // a concurrent agent's commits — see
-          // sessionToDateCommittedSnapshot.
-          let owned = sessionToDateCommittedSnapshot(hookCwd, state, {
-            diff: '', linesAdded: 0, linesRemoved: 0,
-          });
-          if (!owned.scoped) {
-            const snap = captureGitState(hookCwd, state.headShaAtStart, { fullContext: true });
-            owned = {
-              diff: snap.committedDiff,
-              linesAdded: snap.linesAdded || linesAdded,
-              linesRemoved: snap.linesRemoved || linesRemoved,
-              scoped: false,
-            };
-          }
-          sessionToDateDiff = owned.diff;
-          sessionLinesAdded = owned.linesAdded;
-          sessionLinesRemoved = owned.linesRemoved;
-          if (owned.scoped) {
-            // No `raw:` counterpart any more — producing it meant running the
-            // capture this branch exists to avoid.
-            debugLog('post-commit', 'session-to-date diff scoped to owned commits', {
-              owned: `+${owned.linesAdded}/-${owned.linesRemoved}`,
-              ownedCommits: (state.sessionCommitShas || []).length,
-              rawCaptureSkipped: true,
-            });
-          }
-        }
-      } catch (err: any) {
-        debugLog('post-commit', 'fullContext snapshot failed (non-fatal)', { message: err?.message });
-      }
-    }
+    // The session PATCH builds the Commit row from this object. Ingest also
+    // sends the patch, but that call can stall and the durable retry is a
+    // later hop — if this payload is thin (filesChanged only), the row
+    // renders as a bare "N files" line with no +/- and no hunks
+    // (session 49b1c722). The per-commit patch is THIS commit's authored
+    // `diff`, already in hand — send it FIRST, before the session-to-date
+    // snapshot. That snapshot is the expensive half (1.6s–7.2s of
+    // captureGitState) and is what killed post-commit before the PATCH on
+    // session e24477e2: local commitTurns via post-commit, dashboard pill
+    // "5 files" with no hunks. Drop an oversize patch rather than slice
+    // it: a truncated unified diff mis-parses in blame.
+    const commitPatch = diff && diff.length <= 500_000 ? diff : undefined;
+    const commitDetail = {
+      sha: commitSha,
+      message: commitMessage,
+      author: commitAuthor,
+      filesChanged,
+      linesAdded,
+      linesRemoved,
+      ...(commitPatch && { patch: commitPatch }),
+    };
+    // A COMMIT CARRIER, not a session capture: no `diff`, no line totals.
+    // headBefore is the session baseline, and the server REPLACES the stored
+    // session-to-date diff on a same-baseline capture — so a `diff` here
+    // (this one commit's) would shrink the session header to one commit until
+    // the snapshot below lands, and the snapshot is the half that gets killed.
+    // A capture with no `diff` field leaves SessionDiff alone (mcp.ts); the
+    // Commit row is built from commitDetails, which carry this commit's own
+    // patch and numstat.
     const gitCapture: {
       headBefore: string; headAfter: string; commitShas: string[];
-      commitDetails: Array<{ sha: string; message: string; author: string; filesChanged: string[] }>;
-      diff: string; diffTruncated: boolean; linesAdded: number; linesRemoved: number;
+      commitDetails: Array<{
+        sha: string; message: string; author: string; filesChanged: string[];
+        linesAdded?: number; linesRemoved?: number; patch?: string;
+      }>;
+      diff?: string; diffTruncated?: boolean; linesAdded?: number; linesRemoved?: number;
       snapshot?: boolean;
       rewrittenCommits?: Array<{ from: string; to: string }>;
-    } = sessionToDateDiff
-      ? {
-          ...(state ? rewrittenCommitsPayload(state) : {}),
-          headBefore: state?.headShaAtStart || commitSha,
-          headAfter: commitSha,
-          commitShas: [commitSha],
-          commitDetails: [{ sha: commitSha, message: commitMessage, author: commitAuthor, filesChanged }],
-          diff: sessionToDateDiff.length > 500_000 ? sessionToDateDiff.slice(0, 500_000) : sessionToDateDiff,
-          diffTruncated: sessionToDateDiff.length > 500_000,
-          linesAdded: sessionLinesAdded,
-          linesRemoved: sessionLinesRemoved,
-          snapshot: true,
-        }
-      : {
-          ...(state ? rewrittenCommitsPayload(state) : {}),
-          headBefore: (state?.headShaAtStart) || commitSha,
-          headAfter: commitSha,
-          commitShas: [commitSha],
-          commitDetails: [{ sha: commitSha, message: commitMessage, author: commitAuthor, filesChanged }],
-          diff: diff.length > 500_000 ? diff.slice(0, 500_000) : diff,
-          diffTruncated: diff.length > 500_000,
-          linesAdded,
-          linesRemoved,
-        };
+    } = {
+      ...(state ? rewrittenCommitsPayload(state) : {}),
+      headBefore: (state?.headShaAtStart) || commitSha,
+      headAfter: commitSha,
+      commitShas: [commitSha],
+      commitDetails: [commitDetail],
+    };
 
     // Resolve the commit's timestamp once, outside the per-session loop.
     // resolvePromptForCommit() uses it to match the commit to the prompt
@@ -1788,15 +2061,14 @@ export async function handlePostCommit(): Promise<void> {
     // whose work is only the conflict resolution. Prod f7881a6e turn 3 was sent
     // `{filesChanged:0, a:84, r:20}`: no files, and 84 lines of another PR's
     // `final-state-blame.ts`/`transcript-watch.ts` that the session never wrote.
-    const mergeOwn = mergeOwnDiff(hookCwd, commitSha);
-    const turnFiles = mergeOwn ? mergeOwn.filesChanged : filesChanged;
-    const turnDiff = mergeOwn ? mergeOwn.diff : diff;
-    if (mergeOwn) {
-      debugLog('post-commit', 'merge commit — crediting the turn with its resolution only', {
-        commitSha: commitSha.slice(0, 8),
-        absorbedFiles: filesChanged.length, resolvedFiles: turnFiles.length,
-      });
-    }
+    //
+    // `diff` / `filesChanged` are already the authored view (commitAuthoredDelta,
+    // above); `mergeOwn` only tells the prompt-baseline re-diff below to stand
+    // down for a merge, since re-diffing from the baseline tree would put the
+    // absorbed branch straight back in.
+    const mergeOwn = authored.isMerge ? { diff: authored.diff, filesChanged: authored.filesChanged } : null;
+    const turnFiles = filesChanged;
+    const turnDiff = diff;
 
     if (connected) {
       for (const s of updateTargets) {
@@ -1865,8 +2137,14 @@ export async function handlePostCommit(): Promise<void> {
         const unit = commitTurnContentUnit(scoped, turnFiles, turnDiff);
         const pDiff = unit.diff;
         const budgetedCommitDiff = fitDiffToBudget(pDiff, MAX_PROMPT_DIFF_LEN);
+        // `latestPromptIdx` is LOCAL — it indexes `s.prompts`, the shadows and
+        // the turn ids. The row it is sent to is the SERVER one. This producer
+        // sent the local number: on prod 8a626742, resumed with base 21, the
+        // commit's diff went out under index 0 and was refused (row 0 held
+        // turn one), so the commit was never stamped on its own turn.
+        const latestPromptRow = serverRowForLocalTurn(latestPromptIdx, s.promptIndexBase);
         const perPromptUpdate = {
-          promptIndex: latestPromptIdx,
+          promptIndex: latestPromptRow,
           // Key the row on IDENTITY, like every other sender does. This one
           // was the last positional-only producer, and it is the one that
           // writes the commit-linked row — so a prompt list that renumbered
@@ -1910,6 +2188,7 @@ export async function handlePostCommit(): Promise<void> {
             sessionId: s.sessionId,
             filesChanged: filesChanged.length,
             attributedPromptIdx: latestPromptIdx,
+            attributedPromptRow: latestPromptRow,
             commitSha,
             payload: summarizePromptPayload([perPromptUpdate]),
           });
@@ -1933,6 +2212,14 @@ export async function handlePostCommit(): Promise<void> {
           // The module header already listed post-commit as a durable caller
           // and line 8598 drains the queue here; only the send itself was
           // never converted.
+          // Write-ahead copy: the fetch below can outlive this process (git
+          // returns to the user and Cursor moves on). Superseded by the send.
+          const prePersisted = persistUpdateBeforeWork(s.sessionId, {
+            filesChanged: turnFiles.length > 0 ? turnFiles : undefined,
+            branch: currentBranch || undefined,
+            gitCapture,
+            promptChanges: latestPromptText ? [perPromptUpdate] : undefined,
+          }, (e, m, d) => debugLog(e, m, d));
           await durableUpdateSession(s.sessionId, {
             // `turnFiles`, not the commit's raw list. This one is the SESSION's
             // file list, and the session's list is a union that only ever
@@ -1946,7 +2233,7 @@ export async function handlePostCommit(): Promise<void> {
             branch: currentBranch || undefined,
             gitCapture,
             promptChanges: latestPromptText ? [perPromptUpdate] : undefined,
-          }, (e, m, d) => debugLog(e, m, d));
+          }, (e, m, d) => debugLog(e, m, d), { supersedes: prePersisted });
           debugLog('post-commit', 'API update complete', { sessionId: s.sessionId });
         } catch (err: any) {
           // Retriable failures no longer reach here — durableUpdateSession
@@ -1954,6 +2241,86 @@ export async function handlePostCommit(): Promise<void> {
           // failures, which replaying could never fix.
           debugLog('post-commit', 'API update error (non-fatal)', { sessionId: s.sessionId, message: err.message });
         }
+      }
+    }
+
+    // Session-to-date snapshot AFTER the Commit row is on the wire. This is
+    // the expensive half: captureGitState of the whole session range at
+    // `--unified=2000`, 1.6s–7.2s and growing. It used to run first, so a
+    // killed hook left the pill files-only. Same commitDetail so
+    // gitCapture.diff (the header) cannot leak onto commitDetails[].patch.
+    if (connected && state?.headShaAtStart && state.headShaAtStart !== commitSha && updateTargets.length > 0) {
+      try {
+        // hookCwd, not repoPath: the session-to-date diff must read the
+        // committing working tree's HEAD (worktree-safe, see execOpts above).
+        //
+        // The owned walk runs FIRST and the raw capture is computed only when
+        // it comes back empty, because the raw capture is the expensive half:
+        // `captureGitState` re-reads metadata for EVERY commit in the session
+        // range — five git spawns each — and then renders the range at
+        // `--unified=2000`, up to three times as the byte ladder steps down.
+        // Measured on this repo: 1.6s over a 10-commit range, 4.0s over 30,
+        // 7.2s over 60 — paid on every `git commit`, growing for the length of
+        // the session, and in the common case thrown away unlooked-at because
+        // the owned walk answered. post-commit runs before git returns, so it
+        // is latency a person sits through.
+        //
+        // `--name-only` reproduces the old `if (snap.committedDiff)` gate for
+        // a few ms: an empty committed range still sends nothing, so a session
+        // whose commits are all somebody else's does not get a snapshot.
+        let rangeHasContent = false;
+        try {
+          rangeHasContent = !!execFileSync(
+            'git', ['diff', '--name-only', state.headShaAtStart, commitSha],
+            { ...execOpts, timeout: 10000 },
+          ).trim();
+        } catch { rangeHasContent = true; /* unreadable range — let the old path decide */ }
+        if (rangeHasContent) {
+          let owned: { diff: string; linesAdded: number; linesRemoved: number; scoped: boolean } | null =
+            ownerAuthored && ownerAuthored.source !== 'none'
+              ? { diff: ownerAuthored.diff, linesAdded: ownerAuthored.linesAdded, linesRemoved: ownerAuthored.linesRemoved, scoped: true }
+              : null;
+          if (!owned) owned = sessionToDateCommittedSnapshot(hookCwd, state, { diff: '', linesAdded: 0, linesRemoved: 0 });
+          if (!owned.scoped) {
+            const snap = captureGitState(hookCwd, state.headShaAtStart, { fullContext: true });
+            owned = {
+              diff: snap.committedDiff,
+              linesAdded: snap.linesAdded || linesAdded,
+              linesRemoved: snap.linesRemoved || linesRemoved,
+              scoped: false,
+            };
+          }
+          if (owned.scoped) {
+            debugLog('post-commit', 'session-to-date diff scoped to owned commits', {
+              owned: `+${owned.linesAdded}/-${owned.linesRemoved}`,
+              ownedCommits: (state.sessionCommitShas || []).length,
+              rawCaptureSkipped: true,
+            });
+          }
+          const sessionToDateDiff = owned.diff;
+          if (sessionToDateDiff) {
+            const snapshotCapture = {
+              ...gitCapture,
+              diff: sessionToDateDiff.length > 500_000 ? sessionToDateDiff.slice(0, 500_000) : sessionToDateDiff,
+              diffTruncated: sessionToDateDiff.length > 500_000,
+              linesAdded: owned.linesAdded,
+              linesRemoved: owned.linesRemoved,
+              snapshot: true as const,
+            };
+            for (const s of updateTargets) {
+              try {
+                debugLog('post-commit', 'sending session-to-date snapshot', { sessionId: s.sessionId });
+                await durableUpdateSession(s.sessionId, { gitCapture: snapshotCapture }, (e, m, d) => debugLog(e, m, d));
+              } catch (err: any) {
+                debugLog('post-commit', 'session-to-date snapshot error (non-fatal)', {
+                  sessionId: s.sessionId, message: err?.message,
+                });
+              }
+            }
+          }
+        }
+      } catch (err: any) {
+        debugLog('post-commit', 'fullContext snapshot failed (non-fatal)', { message: err?.message });
       }
     }
   } else {

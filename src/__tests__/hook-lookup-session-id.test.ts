@@ -29,9 +29,18 @@ describe('hookLookupSessionId', () => {
     expect(hookLookupSessionId('cc03c3a0-new-after-resume', 'gemini')).toBeUndefined();
   });
 
-  it('returns undefined for other unstable-id agents (codex, cursor)', () => {
+  it('returns undefined for Codex per-turn thread ids', () => {
     expect(hookLookupSessionId('thread-per-turn', 'codex')).toBeUndefined();
+  });
+
+  it('returns undefined for Cursor session_id alone — that id rotates per turn', () => {
     expect(hookLookupSessionId('whatever', 'cursor')).toBeUndefined();
+  });
+
+  it('returns Cursor conversation_id so sibling chats do not share one session', () => {
+    // session_id is ignored; conversation_id is the per-chat anchor.
+    expect(hookLookupSessionId('rotating-turn-id', 'cursor', 'stable-chat-id')).toBe('stable-chat-id');
+    expect(hookLookupSessionId('rotating-turn-id', 'cursor', '  ')).toBeUndefined();
   });
 
   it('returns undefined when the agent slug is missing', () => {

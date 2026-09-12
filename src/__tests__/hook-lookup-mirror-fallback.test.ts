@@ -141,4 +141,27 @@ describe('findStateForHook — durable mirror fallback', () => {
 
     expect(found!.state.sessionId).toBe('local-bycwd');
   });
+
+  it('still reads the mirror when .git already has someone else\'s session', () => {
+    // Session c1e361a4: this Cursor worktree chat lived in ~/.origin/sessions.
+    // The common git dir already held other origin-session files, so the
+    // "both scans empty" gate never opened the mirror. after-file-edit
+    // scanned the foreign tags, missed this conversation id, and the turns
+    // stored no diffs.
+    writeGitState('foreign-chat', {
+      sessionId: 'other-session',
+      agentSlug: 'claude-code',
+      model: 'claude-opus-5',
+    });
+    const conv = '7b2b1608-065e-43c6-982a-a5841d39fead';
+    writeMirror('c1e361a4-68d', {
+      repoPath: repo,
+      agentSessionId: conv,
+      sessionId: 'c1e361a4-68d9-4b71-af22-a0d4d7732215',
+    });
+
+    const found = findStateForHook(repo, conv, 'cursor');
+    expect(found).not.toBeNull();
+    expect(found!.state.sessionId).toBe('c1e361a4-68d9-4b71-af22-a0d4d7732215');
+  });
 });

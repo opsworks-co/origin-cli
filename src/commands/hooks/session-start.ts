@@ -16,6 +16,7 @@ import { debugLog } from '../../debug-log.js';
 import { retagDevinFromProcess } from '../../devin-cli.js';
 import { capDiff } from '../../diff-budget.js';
 import { MAX_PROMPT_DIFF_LEN, captureGitState, createShadowCommit, getDirtyFiles } from '../../git-capture.js';
+import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
 import { syncNotesForSessionStart } from '../../git-notes.js';
 import { buildHandoffContext } from '../../handoff.js';
 import { hasFreshFailedAttempt, listRecentShas, shouldSyncStandalone } from '../../history-backfill.js';
@@ -23,8 +24,10 @@ import { matchIgnoredRepo } from '../../ignore-repos.js';
 import { buildMemoryBriefContext, buildMemoryContext, buildMemoryPointerContext, buildStartupCheckContext, isSubstantiveMemory, readAllSessionMemory, readMemoryBrief, readRecentMemory } from '../../memory.js';
 import { buildRepoBriefContext, maybeSpawnBriefGeneration } from '../../repo-brief.js';
 import { carryForwardTurnState, findDuplicateStateForSession, findSameTagStateForResume } from '../../session-dedup.js';
+import { pickWorktreeBootstrap, restampWorktreeBootstrap, type SessionStartBaseline } from '../../worktree-bootstrap.js';
+import { mergeAdoptedReservation, reservationAdoptedMeanwhile } from '../../reservation-adoption.js';
 import { sendDesktopNotification } from '../../session-limits.js';
-import { clearSessionState, discoverAllGitRoots, discoverGitRoot, dropSessionMirror, findSessionByClaudeId, getBranch, getCanonicalRepoPath, getGitRoot, getHeadSha, getStatePath, getWorkingGitRoot, isSessionAlive, listActiveSessions, loadSessionState, markSessionEnded, preferRegisteredSessionId, saveSessionState, sessionTagFor, startHeartbeat, stopHeartbeat } from '../../session-state.js';
+import { clearSessionState, discoverAllGitRoots, discoverGitRoot, dropSessionMirror, findSessionByClaudeId, getBranch, getCanonicalRepoPath, getGitRoot, getHeadSha, getStatePath, getWorkingGitRoot, isProvisionalSessionId, isSessionAlive, listActiveSessions, loadSessionState, markSessionEnded, preferRegisteredSessionId, readStateAtTag, saveSessionState, sessionTagFor, stampCaptured, startHeartbeat, stopHeartbeat } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import { memorySummaryMode } from '../../session-summary.js';
 import { makeSyncBlock } from '../../sync-block.js';
@@ -347,6 +350,47 @@ export function resumeBaseFromTranscript(
   if (!resumeSeedApplies(startSource, currentPrompts)) return null;
   if (!Number.isFinite(transcriptPromptCount) || transcriptPromptCount <= 0) return null;
   return transcriptPromptCount;
+}
+
+/**
+ * What session-start records about the tree a session begins on.
+ *
+ * `headShaAtStart` anchors every session-level range; the session-start
+ * shadow (only when the tree is dirty) is what keeps pre-existing dirt out of
+ * prompt 1 and out of the session diff. ONE assembly, used when a session is
+ * created and again when a main-checkout handshake is adopted into a
+ * worktree — the adoption used to keep main's baseline, and a worktree
+ * fourteen commits ahead of main was credited all fourteen on its first Stop
+ * (e1095412; see restampWorktreeBootstrap).
+ */
+export function captureSessionStartBaseline(repoPath: string, shadowTag: string): SessionStartBaseline {
+  const headShaAtStart = getHeadSha(repoPath);
+  const sessionStartDirtyFiles = getDirtyFiles(repoPath);
+  let prePromptSha = headShaAtStart;
+  let prePromptDirtyFiles = sessionStartDirtyFiles;
+  // SHA of the dirty-tree snapshot taken at session start (full working
+  // tree, tracked + untracked). The heartbeat diffs against this to keep
+  // pre-existing dirt from being attributed to the session's prompts.
+  let sessionStartShadowSha: string | null = null;
+  if (sessionStartDirtyFiles.length > 0) {
+    try {
+      const startShadow = createShadowCommit(repoPath, `start-${shadowTag}`);
+      if (startShadow) {
+        prePromptSha = startShadow;
+        sessionStartShadowSha = startShadow;
+        prePromptDirtyFiles = [];
+        debugLog('session-start', 'created session-start shadow', {
+          shadow: startShadow.slice(0, 12),
+          dirtyCount: sessionStartDirtyFiles.length,
+        });
+      }
+    } catch (err: unknown) {
+      debugLog('session-start', 'shadow creation failed (non-fatal)', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return { headShaAtStart, sessionStartShadowSha, prePromptSha, prePromptDirtyFiles, sessionStartDirtyFiles };
 }
 
 export async function handleSessionStart(input: Record<string, any>, agentSlug?: string): Promise<void> {
@@ -692,6 +736,60 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
   // NEVER touch sessions from other agents. If agentSlug is unknown, skip cleanup.
   // For Cursor/Codex (per-prompt session-start), skip this — they reuse below.
   const agentsWithPerPromptSessionStart = ['cursor', 'codex'];
+
+  // Everything a reused (or adopted) session owes the agent before this hook
+  // returns: a live heartbeat, the budget/policy banners, the notes sync, the
+  // attribution block, the framework guidance, the rules file. Shared by the
+  // Cursor/Codex reuse path and the worktree-bootstrap adopt below — the adopt
+  // used to `return` bare, and an agent starting in a fresh worktree began
+  // with no context at all.
+  const finishReusedSession = (existing: SessionState): void => {
+    // Restart heartbeat to keep session alive between prompts
+    const stateFileReuse = getStatePath(repoPath, existing.sessionTag);
+    startHeartbeat(existing.sessionId, config?.apiUrl || 'https://getorigin.io', config?.apiKey || '', stateFileReuse, finalAgentSlug);
+
+    // Output system message
+    let systemMsg = '';
+    // Budget banner FIRST \u2014 a resumed session under a breached cap must
+    // open with the warning, same as a fresh one. The flag comes from
+    // the persisted state (stamped by session-start / heartbeat pings).
+    if (existing.budgetBlocked) {
+      systemMsg += buildBudgetBanner(existing.budgetBlockReason || 'Hard budget cap exceeded') + '\n\n';
+    }
+    if (existing.agentSystemPrompt) systemMsg += existing.agentSystemPrompt + '\n\n';
+    systemMsg += 'Origin: Session tracking active \u2014 prompts, files, and tokens will be captured.';
+    if (existing.activePolicies && Array.isArray(existing.activePolicies) && existing.activePolicies.length > 0) {
+      systemMsg += '\n\nActive policies for this session:\n' +
+        existing.activePolicies.map((p: string) => `- ${p}`).join('\n');
+    }
+    try {
+      syncNotesForSessionStart(repoPath);
+    } catch {}
+    try {
+      const attributionCtx = buildAttributionContext(repoPath);
+      if (attributionCtx) systemMsg += '\n\n' + attributionCtx;
+    } catch {}
+    // Framework guidance — same as the fresh-session path. Resumed
+    // sessions still benefit from the [Origin: …] marker convention,
+    // and re-emitting on resume is harmless (the model will see the
+    // same guidance whether or not it saw it earlier).
+    systemMsg += '\n\n' + buildOriginFrameworkGuidance();
+    const reusePayload = buildContextInjectionPayload(agentSlug, 'SessionStart', systemMsg);
+    if (reusePayload) {
+      process.stdout.write(reusePayload);
+    } else if (agentSlug === 'codex' && existing.budgetBlocked) {
+      // Codex shows hook stdout as warnings — surface the banner there.
+      process.stdout.write(buildBudgetBanner(existing.budgetBlockReason || 'Hard budget cap exceeded') + '\n');
+    }
+    // Visible preamble on resume too (parity with Gemini) — see emitVisiblePreamble.
+    emitVisiblePreamble(agentSlug, systemMsg);
+
+    // Write rules file for reused sessions too
+    try {
+      writeAgentRulesFile(finalAgentSlug || '', systemMsg, repoPath);
+    } catch {}
+  };
+
   const effectiveSlug = finalAgentSlug || agentSlug || '';
   if (!claudeSessionId && effectiveSlug && !agentsWithPerPromptSessionStart.includes(effectiveSlug)) {
     const sameAgentSessions = listActiveSessions(repoPath).filter(s => sessionMatchesAgent(s, effectiveSlug));
@@ -845,6 +943,45 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
         } catch { /* no archive dir */ }
       }
     }
+    if (!existing) {
+      // Cursor sessionStart fires on the main checkout, then the harness
+      // moves the agent into a linked worktree. The worktree start carries a
+      // new conversation id so pickReusable misses — without this the
+      // dashboard shows main + cursor/<id> for a few seconds.
+      const boot = pickWorktreeBootstrap(
+        listActiveSessions(repoPath).filter(s => sessionMatchesAgent(s, finalAgentSlug || agentSlug || '')),
+        repoPath,
+        canonicalRepoPath,
+        Date.now(),
+      );
+      if (boot) {
+        restampWorktreeBootstrap(boot, {
+          agentSessionId: agentSessionId || undefined,
+          claudeSessionId: claudeSessionId || undefined,
+          lastCwd: hookCwd,
+          repoPath,
+          canonicalRepoPath,
+          branch: getBranch(hookCwd) || getBranch(repoPath) || undefined,
+          // The handshake's baseline is main's tree; this session works here.
+          baseline: captureSessionStartBaseline(repoPath, boot.sessionTag || boot.sessionId.slice(0, 12)),
+        });
+        existing = boot;
+        debugLog('session-start', 'adopting empty worktree-bootstrap session', {
+          sessionId: boot.sessionId, tag: boot.sessionTag, branch: boot.branch, agent: finalAgentSlug,
+          headShaAtStart: boot.headShaAtStart?.slice(0, 12), shadow: boot.sessionStartShadowSha?.slice(0, 12) ?? null,
+        });
+        try { saveSessionState(boot, repoPath, boot.sessionTag); } catch { /* non-fatal */ }
+        // Branch AND the conversation id: the row was registered under the
+        // handshake's composer id, and the server's resume rungs key on
+        // agentSessionId (see the same push in user-prompt-submit).
+        if (connected && boot.sessionId && !boot.sessionId.startsWith('local-') && (boot.branch || agentSessionId)) {
+          durableUpdate(boot.sessionId, {
+            ...(boot.branch && { branch: boot.branch }),
+            ...(agentSessionId && { agentSessionId }),
+          }).catch(() => {});
+        }
+      }
+    }
     if (existing) {
       // Stamp the resolved thread id onto an adopted id-less session so it can
       // never be reused by a DIFFERENT conversation later — the next
@@ -929,8 +1066,11 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
               mappingCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { windowsHide: true, cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
             } catch { /* ignore */ }
             mappingTreeSha = getWorkingTreeSha(repoPath);
-            const reuseDiff = (reuseSessionCommitted +
-              (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim();
+            const reuseDiff = combineApplyableTurnDiff({
+              committedDiff: reuseSessionCommitted,
+              uncommittedDiff: filteredUncommitted,
+              workingTreeDiff: prevCapture.workingTreeDiff || '',
+            });
             const mapping = {
               promptIndex: prevPromptIdx,
               promptText: (existing.prompts[prevLocalIdx] || '').slice(0, 1000),
@@ -947,10 +1087,10 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
               const newHasDiff = !!(mapping.diff || mapping.uncommittedDiff);
               const existingHasDiff = !!(prevExisting.diff || (prevExisting as any).uncommittedDiff);
               if (newHasDiff || !existingHasDiff) {
-                existing.completedPromptMappings[existingIdx] = mapping;
+                existing.completedPromptMappings[existingIdx] = stampCaptured(mapping);
               }
             } else {
-              existing.completedPromptMappings.push(mapping);
+              existing.completedPromptMappings.push(stampCaptured(mapping));
             }
             debugLog('session-start', 'captured per-prompt diff for previous prompt (reuse)', {
               promptIndex: prevPromptIdx, filesChanged: prevFiles.length,
@@ -1020,51 +1160,45 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
       // condenses the latest stop-snapshot for each commit, which is the
       // right anchor for "what did this prompt change?"
 
-      // Restart heartbeat to keep session alive between prompts
-      const stateFileReuse = getStatePath(repoPath, existing.sessionTag);
-      startHeartbeat(existing.sessionId, config?.apiUrl || 'https://getorigin.io', config?.apiKey || '', stateFileReuse, finalAgentSlug);
+      finishReusedSession(existing);
+      return;
+    }
+  }
 
-      // Output system message
-      let systemMsg = '';
-      // Budget banner FIRST \u2014 a resumed session under a breached cap must
-      // open with the warning, same as a fresh one. The flag comes from
-      // the persisted state (stamped by session-start / heartbeat pings).
-      if (existing.budgetBlocked) {
-        systemMsg += buildBudgetBanner(existing.budgetBlockReason || 'Hard budget cap exceeded') + '\n\n';
+  // Claude Code (and any agent whose session-start is once-per-conversation)
+  // has the same main→worktree move: the first start registered on the
+  // primary checkout, the second fires in the worktree with a new id. Adopt
+  // the empty handshake rather than minting a twin.
+  if (!agentsWithPerPromptSessionStart.includes(agentSlug || '')) {
+    const boot = pickWorktreeBootstrap(
+      listActiveSessions(repoPath).filter(s => sessionMatchesAgent(s, finalAgentSlug || agentSlug || '')),
+      repoPath,
+      canonicalRepoPath,
+      Date.now(),
+    );
+    if (boot) {
+      restampWorktreeBootstrap(boot, {
+        agentSessionId: agentSessionId || undefined,
+        claudeSessionId: claudeSessionId || undefined,
+        lastCwd: hookCwd,
+        repoPath,
+        canonicalRepoPath,
+        branch: getBranch(hookCwd) || getBranch(repoPath) || undefined,
+        // The handshake's baseline is main's tree; this session works here.
+        baseline: captureSessionStartBaseline(repoPath, boot.sessionTag || boot.sessionId.slice(0, 12)),
+      });
+      debugLog('session-start', 'adopting empty worktree-bootstrap session', {
+        sessionId: boot.sessionId, tag: boot.sessionTag, branch: boot.branch, agent: finalAgentSlug,
+        headShaAtStart: boot.headShaAtStart?.slice(0, 12), shadow: boot.sessionStartShadowSha?.slice(0, 12) ?? null,
+      });
+      try { saveSessionState(boot, repoPath, boot.sessionTag); } catch { /* non-fatal */ }
+      if (connected && boot.sessionId && !boot.sessionId.startsWith('local-') && (boot.branch || agentSessionId)) {
+        durableUpdate(boot.sessionId, {
+          ...(boot.branch && { branch: boot.branch }),
+          ...(agentSessionId && { agentSessionId }),
+        }).catch(() => {});
       }
-      if (existing.agentSystemPrompt) systemMsg += existing.agentSystemPrompt + '\n\n';
-      systemMsg += 'Origin: Session tracking active \u2014 prompts, files, and tokens will be captured.';
-      if (existing.activePolicies && Array.isArray(existing.activePolicies) && existing.activePolicies.length > 0) {
-        systemMsg += '\n\nActive policies for this session:\n' +
-          existing.activePolicies.map((p: string) => `- ${p}`).join('\n');
-      }
-      try {
-        syncNotesForSessionStart(repoPath);
-      } catch {}
-      try {
-        const attributionCtx = buildAttributionContext(repoPath);
-        if (attributionCtx) systemMsg += '\n\n' + attributionCtx;
-      } catch {}
-      // Framework guidance — same as the fresh-session path. Resumed
-      // sessions still benefit from the [Origin: …] marker convention,
-      // and re-emitting on resume is harmless (the model will see the
-      // same guidance whether or not it saw it earlier).
-      systemMsg += '\n\n' + buildOriginFrameworkGuidance();
-      const reusePayload = buildContextInjectionPayload(agentSlug, 'SessionStart', systemMsg);
-      if (reusePayload) {
-        process.stdout.write(reusePayload);
-      } else if (agentSlug === 'codex' && existing.budgetBlocked) {
-        // Codex shows hook stdout as warnings — surface the banner there.
-        process.stdout.write(buildBudgetBanner(existing.budgetBlockReason || 'Hard budget cap exceeded') + '\n');
-      }
-      // Visible preamble on resume too (parity with Gemini) — see emitVisiblePreamble.
-      emitVisiblePreamble(agentSlug, systemMsg);
-
-      // Write rules file for reused sessions too
-      try {
-        writeAgentRulesFile(finalAgentSlug || '', systemMsg, repoPath);
-      } catch {}
-
+      finishReusedSession(boot);
       return;
     }
   }
@@ -1245,6 +1379,9 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
   // Deliberately after every early-return guard above (background agent, not a
   // git repo, ignored repo, dedup hit) so a skipped start never leaves a file.
   let reservedSessionId = `local-${crypto.randomUUID()}`;
+  // Only a row THIS hook reserved can have been adopted mid-registration. A
+  // re-fired start over an existing file takes the carry-forward paths below.
+  let reservedHere = false;
   try {
     const reservationCwd = allRepoPaths ? hookCwd : repoPath;
     // NEVER overwrite state that already exists at this tag. A re-fired
@@ -1255,7 +1392,10 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
     // we just wrote and restore nothing. There is also nothing to reserve in
     // that case: a discoverable session already exists, which is the entire
     // point of reserving.
-    const existingAtTag = loadSessionState(reservationCwd, sessionTag);
+    // readStateAtTag, not loadSessionState: the latter rejects a row whose
+    // claudeSessionId is empty, which every Cursor row is, so this guard
+    // never saw a Cursor file and reserved straight over it.
+    const existingAtTag = readStateAtTag(reservationCwd, sessionTag);
     if (existingAtTag?.sessionId) {
       // Adopt its id as our local fallback too, so a failed `session/start`
       // below keeps the conversation on the id it already has instead of
@@ -1288,6 +1428,7 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
       debugLog('session-start', 'reserved state before registering', {
         sessionId: reservedSessionId, sessionTag, repoPath, agentSlug: finalAgentSlug,
       });
+      reservedHere = true;
     }
   } catch (reserveErr: unknown) {
     // A reservation is an optimisation, never a precondition — a repo whose
@@ -1450,33 +1591,13 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
     // as added lines for prompt 1. Without this, the user-prompt-submit
     // retroactive capture for prompt 1 conflates pre-existing dirty edits
     // with the agent's actual prompt-1 work and attributes them all to P1.
-    const sessionStartHead = getHeadSha(repoPath);
-    const sessionStartDirty = getDirtyFiles(repoPath);
-    let initialPrePromptSha = sessionStartHead;
-    let initialPrePromptDirtyFiles = sessionStartDirty;
-    // SHA of the dirty-tree snapshot taken at session start (full working
-    // tree, tracked + untracked). The heartbeat diffs against this to keep
-    // pre-existing dirt from being attributed to the session's prompts.
-    let sessionStartShadowSha: string | null = null;
-    if (sessionStartDirty.length > 0) {
-      try {
-        const startShadowTag = sessionTag || sessionId.slice(0, 12);
-        const startShadow = createShadowCommit(repoPath, `start-${startShadowTag}`);
-        if (startShadow) {
-          initialPrePromptSha = startShadow;
-          sessionStartShadowSha = startShadow;
-          initialPrePromptDirtyFiles = [];
-          debugLog('session-start', 'created session-start shadow', {
-            shadow: startShadow.slice(0, 12),
-            dirtyCount: sessionStartDirty.length,
-          });
-        }
-      } catch (err: unknown) {
-        debugLog('session-start', 'shadow creation failed (non-fatal)', {
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+    const {
+      headShaAtStart: sessionStartHead,
+      sessionStartShadowSha,
+      prePromptSha: initialPrePromptSha,
+      prePromptDirtyFiles: initialPrePromptDirtyFiles,
+      sessionStartDirtyFiles: sessionStartDirty,
+    } = captureSessionStartBaseline(repoPath, sessionTag || sessionId.slice(0, 12));
 
     // Codex thread_id is normally resolved earlier, BEFORE the reuse check (see
     // resolveCodexThreadId above). Kept here as a fallback for any path that
@@ -1619,7 +1740,8 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
       // Deterministic: the tag fully determines the path, so this needs no
       // scan and no mtime heuristic — the two things the earlier guard
       // depends on and that let this slip through.
-      const onDisk = loadSessionState(saveCwd, sessionTag);
+      // readStateAtTag, not loadSessionState — see the reservation above.
+      const onDisk = readStateAtTag(saveCwd, sessionTag);
       const prior = findSameTagStateForResume(
         onDisk ? [onDisk as any] : [], sessionTag, claudeSessionId,
       );
@@ -1676,19 +1798,94 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
     // failed, `sessionId` is still the placeholder — saving it would demote a
     // registered session back to local and strand the prompt already filed
     // against the real row. A registered id always wins.
+    //
+    // The same hook may also have USED the reservation: filed its prompt,
+    // restamped the row onto the worktree it runs in under the chat's real
+    // conversation id, opened a turn. Saving our row over that keeps only the
+    // id and throws the rest away — main checkout, composer id, no prompts —
+    // so the worktree's next hook finds a row that no longer matches its chat
+    // and the chat becomes two sessions (prod 2026-09-09: 5431ff0f on main,
+    // e24477e2 on cursor/f9213cfd, one Cursor chat). Fold the adopter's row
+    // into ours instead, and tell the server the identity it registered under
+    // has moved.
+    //
+    // readStateAtTag, not loadSessionState — see the reservation above.
     try {
-      const adopted = loadSessionState(saveCwd, sessionTag) as SessionState | null;
-      const promoted = preferRegisteredSessionId(state.sessionId, adopted?.sessionId);
+      const onDisk = readStateAtTag(saveCwd, sessionTag);
+      const promoted = preferRegisteredSessionId(state.sessionId, onDisk?.sessionId);
       if (promoted !== state.sessionId) {
         debugLog('session-start', 'a concurrent hook registered this session first — keeping its id', {
           ours: state.sessionId, theirs: promoted, sessionTag,
         });
         state.sessionId = promoted;
       }
+      if (reservedHere && onDisk && reservationAdoptedMeanwhile(state, onDisk)) {
+        const registeredBranch = state.branch;
+        const registeredChatId = state.agentSessionId;
+        const merge = mergeAdoptedReservation(state, onDisk);
+        if (merge.needsBaseline && state.repoPath) {
+          // Moved to a tree we never captured; anchor it there, not on main.
+          const fresh = captureSessionStartBaseline(state.repoPath, sessionTag);
+          state.headShaAtStart = fresh.headShaAtStart;
+          state.sessionStartShadowSha = fresh.sessionStartShadowSha;
+          state.sessionStartDirtyFiles = fresh.sessionStartDirtyFiles;
+          if (!state.prePromptSha) {
+            state.prePromptSha = fresh.prePromptSha;
+            state.prePromptDirtyFiles = fresh.prePromptDirtyFiles;
+          }
+        }
+        debugLog('session-start', 'a concurrent hook adopted the reservation while session/start was in flight — keeping its turn and identity', {
+          sessionId: state.sessionId, sessionTag,
+          prompts: state.prompts?.length || 0,
+          repoPath: state.repoPath, movedTree: merge.movedTree, rebaselined: merge.needsBaseline,
+          agentSessionId: state.agentSessionId, branch: state.branch,
+        });
+        const identity = {
+          ...(state.branch && state.branch !== registeredBranch && { branch: state.branch }),
+          ...(state.agentSessionId && state.agentSessionId !== registeredChatId && { agentSessionId: state.agentSessionId }),
+        };
+        if (connected && !isProvisionalSessionId(state.sessionId) && Object.keys(identity).length > 0) {
+          durableUpdate(state.sessionId, identity).catch(() => {});
+        }
+      }
     } catch { /* best-effort — never block session start */ }
     // Registration is settled by here (real id, or local after a failed call),
     // so the row is no longer a placeholder.
     delete (state as unknown as { pendingRegistration?: boolean }).pendingRegistration;
+
+    // One last read immediately before the atomic save closes the other
+    // interleaving: session-start's first read can see its untouched
+    // reservation, then user-prompt-submit saves the first turn while this
+    // handler is preparing its final write. Without this retry the stale
+    // session-start row overwrites that prompt. This occurred intermittently
+    // on Windows, where process scheduling makes the interval wide enough to
+    // hit in the concurrent-start E2E.
+    try {
+      const justAdopted = readStateAtTag(saveCwd, sessionTag);
+      if (reservedHere && justAdopted && reservationAdoptedMeanwhile(state, justAdopted)) {
+        const merge = mergeAdoptedReservation(state, justAdopted);
+        if (merge.needsBaseline && state.repoPath) {
+          const fresh = captureSessionStartBaseline(state.repoPath, sessionTag);
+          state.headShaAtStart = fresh.headShaAtStart;
+          state.sessionStartShadowSha = fresh.sessionStartShadowSha;
+          state.sessionStartDirtyFiles = fresh.sessionStartDirtyFiles;
+          if (!state.prePromptSha) {
+            state.prePromptSha = fresh.prePromptSha;
+            state.prePromptDirtyFiles = fresh.prePromptDirtyFiles;
+          }
+        }
+        // `mergeAdoptedReservation` does `Object.assign(ours, onDisk, keep)`,
+        // and `pendingRegistration` is not one of REGISTRATION_FIELDS — so the
+        // adopter's still-provisional row copies the flag straight back over
+        // the `delete` a few lines above. Re-clear it: registration HAS
+        // happened, and a row that says otherwise is treated as a placeholder
+        // by every later reader.
+        delete (state as unknown as { pendingRegistration?: boolean }).pendingRegistration;
+        debugLog('session-start', 'a concurrent hook adopted the reservation just before its final save — keeping its turn', {
+          sessionId: state.sessionId, sessionTag, prompts: state.prompts?.length || 0,
+        });
+      }
+    } catch { /* best-effort — never block session start */ }
 
     saveSessionState(state, saveCwd, sessionTag);
     // The reservation's mirror is keyed by the provisional id, so the save
@@ -1715,8 +1912,11 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
       const stateFile = getStatePath(saveCwd, sessionTag);
       const hbApiUrl = (connected && config) ? (config.apiUrl || 'https://getorigin.io') : '';
       const hbApiKey = (connected && config) ? config.apiKey : '';
-      startHeartbeat(sessionId, hbApiUrl, hbApiKey, stateFile, finalAgentSlug);
-      debugLog('session-start', 'heartbeat started', { sessionId, stateFile, agentSlug: finalAgentSlug, standalone: !connected });
+      // state.sessionId, not the local `sessionId`: when a concurrent hook
+      // registered the reservation first, the file carries ITS id and a
+      // daemon started on ours would ping a session that does not exist.
+      startHeartbeat(state.sessionId, hbApiUrl, hbApiKey, stateFile, finalAgentSlug);
+      debugLog('session-start', 'heartbeat started', { sessionId: state.sessionId, stateFile, agentSlug: finalAgentSlug, standalone: !connected });
     }
 
     // Build system message: agent system prompt first, then tracking notice + policies + attribution
@@ -1786,7 +1986,7 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
         // Tell the user-prompt-submit path this conversation already has it, so
         // the first prompt doesn't deliver a second copy — see
         // fullContextAlreadyInjected.
-        recordFullContextInjection(repoPath, hookLookupSessionId(input.session_id, agentSlug) || input.session_id);
+        recordFullContextInjection(repoPath, hookLookupSessionId(input.session_id, agentSlug, input.conversation_id) || input.session_id);
         debugLog('session-start', 'repo context injected (consolidated)', { length: repoContext.length });
       }
     } catch {

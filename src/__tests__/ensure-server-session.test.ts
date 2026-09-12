@@ -156,3 +156,60 @@ describe('isSessionGoneError', () => {
     expect(isSessionGoneError(null)).toBe(false);
   });
 });
+
+// ── a session-start reservation is registered by session-start ──────────────
+// The reservation is adoptable so a concurrent prompt does not mint its own
+// session. The adopter then "migrated" it here — a second `session/start` for
+// the same chat (prod 2026-09-09: 5431ff0f + e24477e2). While the reservation
+// is pending, this refuses; if session-start has landed its id since the
+// caller read the row, that id is taken instead.
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { execFileSync } from 'child_process';
+
+describe('ensureServerSession on a pending session-start reservation', () => {
+  const ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+  const TAG = 'f9213cfd-349';
+  let repo = '';
+  const stateFile = () => path.join(repo, '.git', `origin-session-${TAG}.json`);
+  const pendingState = (over: Partial<SessionState> & Record<string, unknown> = {}) => localState({
+    sessionId: 'local-82aaa929', sessionTag: TAG, claudeSessionId: '', agentSlug: 'cursor',
+    repoPath: repo, startedAt: new Date().toISOString(), pendingRegistration: true, ...over,
+  } as Partial<SessionState>);
+
+  beforeEach(() => {
+    repo = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-ensure-reservation-'));
+    execFileSync('git', ['init', '-q'], { cwd: repo, env: ENV });
+    repo = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: repo, env: ENV, encoding: 'utf-8' }).trim();
+  });
+
+  it('refuses to mint while session-start is still registering', async () => {
+    const state = pendingState();
+    fs.writeFileSync(stateFile(), JSON.stringify(state));
+    const ok = await ensureServerSession(state, repo, 'cursor', 'test');
+    expect(ok).toBe(false);
+    expect(startSession, 'a second /session/start is the twin').not.toHaveBeenCalled();
+    expect(state.sessionId).toBe('local-82aaa929');
+  });
+
+  it('takes the id session-start registered meanwhile instead of minting', async () => {
+    const state = pendingState();
+    fs.writeFileSync(stateFile(), JSON.stringify({ ...state, sessionId: 'srv-5431ff0f', pendingRegistration: undefined }));
+    const ok = await ensureServerSession(state, repo, 'cursor', 'test');
+    expect(ok).toBe(true);
+    expect(startSession).not.toHaveBeenCalled();
+    expect(state.sessionId).toBe('srv-5431ff0f');
+    expect((state as unknown as { pendingRegistration?: boolean }).pendingRegistration).toBeUndefined();
+  });
+
+  it('a stale reservation is a retry point again (the start hook died)', async () => {
+    startSession.mockResolvedValue({ sessionId: 'srv-fresh' });
+    const state = pendingState({ startedAt: new Date(Date.now() - 5 * 60_000).toISOString() });
+    fs.writeFileSync(stateFile(), JSON.stringify(state));
+    const ok = await ensureServerSession(state, repo, 'cursor', 'test');
+    expect(ok).toBe(true);
+    expect(startSession).toHaveBeenCalledTimes(1);
+    expect(state.sessionId).toBe('srv-fresh');
+  });
+});

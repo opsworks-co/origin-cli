@@ -28,11 +28,11 @@ import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { verifyTurn, parseUnifiedDiff } from '../capture-verify.js';
+import { WINDOWS_SLOWDOWN, isWindows } from './helpers/windows-e2e.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
 const haveDist = fs.existsSync(BIN);
-const posix = process.platform !== 'win32';
 
 // ─── fake Origin API ─────────────────────────────────────────────────────────
 
@@ -167,8 +167,28 @@ function stopPayloads(): any[] {
 }
 
 function lastRows(): any[] {
-  const p = stopPayloads();
-  return p.length ? p[p.length - 1].promptChanges : [];
+  // The CLI sends Stop payloads in TWO shapes: a FULL one carrying every turn
+  // captured so far, and a SINGLE-TURN one carrying only the turn that just
+  // closed. Both are correct on the wire — the server folds them by index.
+  //
+  // Taking the last payload wholesale therefore returned ONE row whenever the
+  // single-turn send happened to land last, which is pure timing. That is the
+  // whole of #1561: `turn 5` read `turnsAdded` as 1 instead of 6 and failed
+  // `header.linesAdded <= turnsAdded` — ~40% of runs on macOS and every run on
+  // the much slower Windows runner, where the single-turn send wins more often.
+  // Observed sequence on a failing run, as [promptIndex, linesAdded]:
+  //
+  //   [[0,2]] [[0,2]] [[1,2]] [[0,2],[1,2]] … [[0,2],[1,2],[2,0],[3,1]] [[4,1]]
+  //                                                                      ^ last
+  //
+  // Fold by promptIndex, last write per index — the same reading the server
+  // does, and the only one that does not depend on which send happens to be
+  // last.
+  const byIndex = new Map<number, any>();
+  for (const p of stopPayloads()) {
+    for (const r of p.promptChanges || []) byIndex.set(r.promptIndex, r);
+  }
+  return [...byIndex.values()].sort((a, b) => a.promptIndex - b.promptIndex);
 }
 
 /** The journal the session is using, and the detached watcher's lock. */
@@ -201,7 +221,28 @@ async function killJournalWatcher(): Promise<void> {
 
 // ─── the session ─────────────────────────────────────────────────────────────
 
-describe.skipIf(!haveDist || !posix)('capture end to end through the built binary', () => {
+// HELD BACK from the Windows sweep — the second of two files that did not
+// earn their place, and the more painful one, because this IS the capture
+// gate. Windows record: fail / fail / pass / fail, on TWO unrelated
+// assertions, against 13 files that are 4 for 4.
+//
+//   runs 1-2  turn 5  — #1561, the test read the last Stop payload
+//                       instead of folding them. A real test bug, fixed in
+//                       #1564, and it passed in run 3.
+//   run 4     turn 4  — "turn 4's own write is missing from its evidence".
+//                       A SHELL WRITE absent from the turn, which is the
+//                       opposite shape to #1561 and may be a genuine capture
+//                       loss on slow Windows hosts. Tracked in #1570.
+//
+// One green run was taken as proof this file was clean after #1564. It was
+// not — run 4 found a different assertion. That is the same weak-evidence
+// mistake the sweep's own PR warns about, made about this very file.
+//
+// Skipping it means the native-Windows job does NOT exercise the capture
+// gate, which is the single file most worth running there. That is a real
+// loss, deliberately taken so the leg can be green on the 13 clean files
+// instead of red on a rotating cast. #1570 is the debt; do not let it idle.
+describe.skipIf(!haveDist || isWindows)('capture end to end through the built binary', () => {
   let tmp = '';
 
   beforeAll(async () => {
@@ -231,7 +272,16 @@ describe.skipIf(!haveDist || !posix)('capture end to end through the built binar
     fs.writeFileSync(path.join(repo, 'README.md'), '# demo\n');
     git(['add', '.']);
     git(['commit', '-q', '-m', 'base']);
-  }, 60_000);
+    // Another PR, on its own branch, that turn 5 will merge: a 40-line file
+    // this session never writes, and the other side of a README conflict.
+    git(['checkout', '-q', '-b', 'theirs']);
+    fs.writeFileSync(path.join(repo, 'their_feature.py'),
+      Array.from({ length: 40 }, (_, i) => `THEIRS_${i} = ${i}`).join('\n') + '\n');
+    fs.writeFileSync(path.join(repo, 'README.md'), '# demo\n\nTheir readme.\n');
+    git(['add', '-A']);
+    git(['commit', '-q', '-m', 'their PR']);
+    git(['checkout', '-q', 'main']);
+  }, 60_000 * WINDOWS_SLOWDOWN);
 
   afterAll(async () => {
     // The scratch home is removed by the global teardown; dump the trail
@@ -306,7 +356,7 @@ describe.skipIf(!haveDist || !posix)('capture end to end through the built binar
       promptIndex: 0, filesChanged: t1.filesChanged, diff: t1.diff,
       linesAdded: t1.linesAdded, linesRemoved: t1.linesRemoved,
     })).toEqual([]);
-  }, 120_000);
+  }, 120_000 * WINDOWS_SLOWDOWN);
 
   it('turn 2: commits, and carries only its own increment plus the commit', async () => {
     say('now tidy the readme and commit');
@@ -369,7 +419,7 @@ describe.skipIf(!haveDist || !posix)('capture end to end through the built binar
     expect(t1.linesAdded).toBe(2);
     expect(t1.linesRemoved).toBe(1);
     expect(t1.commitSha ?? null, 'the commit landed on the turn that did not make it').not.toBe(sha);
-  }, 120_000);
+  }, 120_000 * WINDOWS_SLOWDOWN);
 
   it('turn 3: a chat-only turn claims nothing', async () => {
     say('thanks, what did we do?');
@@ -389,7 +439,7 @@ describe.skipIf(!haveDist || !posix)('capture end to end through the built binar
     // And the earlier turns still say what they said.
     expect(rows.find((r: any) => r.promptIndex === 0).linesAdded).toBe(2);
     expect(rows.find((r: any) => r.promptIndex === 1).linesAdded).toBe(2);
-  }, 120_000);
+  }, 120_000 * WINDOWS_SLOWDOWN);
 
   it('turn 4: after a chat-only turn, a shell write and a commit land on THEIR turn', async () => {
     // Prod bc4a1438 (vodka). Turn 2 was a question; turn 3 wrote four files
@@ -450,9 +500,94 @@ describe.skipIf(!haveDist || !posix)('capture end to end through the built binar
       promptIndex: 3, filesChanged: t4.filesChanged, diff: t4.diff,
       linesAdded: t4.linesAdded, linesRemoved: t4.linesRemoved,
     })).toEqual([]);
-  }, 120_000);
+  }, 120_000 * WINDOWS_SLOWDOWN);
 
-  it('session-end re-sends the same four turns, unchanged', async () => {
+  it('turn 5: a merge is credited with its resolution — not zero, not the absorbed branch', async () => {
+    // Session 51995e1c ran `git merge origin/main` mid-turn. The header stored
+    // the merge's first-parent delta (another PR, +326/-71) on top of the
+    // session's own work; #1488 made every producer render a merge as its
+    // RESOLUTION. Then #1485's numstat counter asked `git diff-tree` for the
+    // merge's totals, which prints nothing for two parents, and the merge's
+    // Commit row stored +0/-0 under a diff that showed the resolution.
+    say('merge the theirs branch and resolve the readme');
+    const ups = await run('user-prompt-submit', { prompt: 'merge the theirs branch and resolve the readme' });
+    expect(ups.code, ups.stderr).toBe(0);
+
+    const cmd = 'git merge theirs; git add -A && git commit -q -m "merge theirs"';
+    await run('pre-tool-use', { tool_name: 'Bash', tool_input: { command: cmd }, tool_use_id: 'tu-8' });
+    try { git(['merge', '--no-edit', 'theirs']); } catch { /* README.md conflicts, as intended */ }
+    expect(fs.readFileSync(path.join(repo, 'README.md'), 'utf-8')).toContain('<<<<<<<');
+    // The resolution: a line that is in NEITHER parent.
+    fs.writeFileSync(path.join(repo, 'README.md'), '# demo\n\nA tidy readme, merged.\n');
+    git(['add', '-A']);
+    git(['commit', '-q', '-m', 'merge theirs']);
+    const sha = git(['rev-parse', 'HEAD']);
+    expect(git(['rev-list', '--parents', '-n', '1', sha]).split(' ')).toHaveLength(3);
+    const pc = await gitHook('git-post-commit');
+    expect(pc.code, pc.stderr).toBe(0);
+    toolUse('tu-8', 'Bash', { command: cmd });
+    await run('post-tool-use', { tool_name: 'Bash', tool_input: { command: cmd }, tool_use_id: 'tu-8', tool_response: { stdout: '', stderr: '' } });
+
+    // The Commit row: what THIS commit authored is the README resolution.
+    const ingested = hits
+      .filter((h) => h.method === 'POST' && Array.isArray(h.body?.commits))
+      .flatMap((h) => h.body.commits)
+      .find((c: any) => c.sha === sha);
+    expect(ingested, 'post-commit never sent the merge as a Commit row').toBeTruthy();
+    expect(ingested.isMerge).toBe(true);
+    expect(ingested.filesChanged).toEqual(['README.md']);
+    expect([ingested.additions, ingested.deletions]).toEqual([1, 1]);
+    expect(ingested.diff).toContain('+A tidy readme, merged.');
+    expect(ingested.diff).not.toContain('THEIRS_');
+
+    // The turn that ran the merge carries the same answer.
+    const attested = hits
+      .filter((h) => h.method === 'PATCH' && Array.isArray(h.body?.promptChanges))
+      .flatMap((h) => h.body.promptChanges)
+      .find((r: any) => r.commitSha === sha);
+    expect(attested, 'post-commit never stamped the merge on any turn').toBeTruthy();
+    expect(attested.promptIndex).toBe(4);
+    expect(attested.filesChanged).toEqual(['README.md']);
+    expect([attested.linesAdded, attested.linesRemoved]).toEqual([1, 1]);
+
+    // The session header post-commit sent beside it: the session's own work,
+    // with none of the 40 absorbed lines, and never MORE than its turns.
+    const header = hits
+      .filter((h) => h.method === 'PATCH' && h.body?.gitCapture?.commitShas?.includes(sha))
+      .map((h) => h.body.gitCapture)
+      .pop();
+    expect(header, 'post-commit sent no session-level capture for the merge').toBeTruthy();
+    expect(header.diff).not.toContain('THEIRS_');
+    expect(header.diff).toContain('+A tidy readme, merged.');
+    expect(header.linesAdded).toBeLessThan(40);
+
+    const stop = await run('stop', { stop_hook_active: false });
+    expect(stop.code, stop.stderr).toBe(0);
+    const rows = lastRows();
+    // Name WHICH row is wrong before asserting the aggregate. #1561 surfaced
+    // as "expected 6 to be less than or equal to 1", which cannot distinguish
+    // "lastRows saw one turn" from "it saw five turns and four read zero" —
+    // two very different bugs, and the ambiguity is what sent the first
+    // diagnosis at the wrong platform. From #1565.
+    expect(rows.map((r: any) => r.promptIndex).sort()).toEqual([0, 1, 2, 3, 4]);
+    expect(rows.find((r: any) => r.promptIndex === 0).linesAdded).toBe(2);
+    expect(rows.find((r: any) => r.promptIndex === 1).linesAdded).toBe(2);
+    expect(rows.find((r: any) => r.promptIndex === 2).linesAdded || 0).toBe(0);
+    expect(rows.find((r: any) => r.promptIndex === 3).linesAdded).toBe(1);
+    const t5 = rows.find((r: any) => r.promptIndex === 4);
+    expect(t5, 'no row for turn 5').toBeTruthy();
+    expect(t5.filesChanged).toEqual(['README.md']);
+    expect(t5.diff).not.toContain('THEIRS_');
+    expect([t5.linesAdded, t5.linesRemoved]).toEqual([1, 1]);
+    const turnsAdded = rows.reduce((n: number, r: any) => n + (r.linesAdded || 0), 0);
+    // Turn 2's `git add -A` also committed the CLAUDE.md block session-start
+    // wrote; that is Origin's bookkeeping, not the session's, and no turn
+    // counts it — so neither may the header.
+    expect(header.diff).not.toContain('origin-managed');
+    expect(header.linesAdded).toBeLessThanOrEqual(turnsAdded);
+  }, 120_000 * WINDOWS_SLOWDOWN);
+
+  it('session-end re-sends the same five turns, unchanged', async () => {
     // Claude Code's SessionEnd is not trusted as the end of the session (it
     // fires on compaction and resume too); the hook runs one more capture
     // pass and leaves the real end to the heartbeat. What matters here is
@@ -465,7 +600,7 @@ describe.skipIf(!haveDist || !posix)('capture end to end through the built binar
     const rows: any[] = ended.length
       ? ended[ended.length - 1].body.promptChanges
       : (stopPayloads().length > sentBefore ? lastRows() : before);
-    expect(rows.map((r) => r.promptIndex).sort()).toEqual([0, 1, 2, 3]);
+    expect(rows.map((r) => r.promptIndex).sort()).toEqual([0, 1, 2, 3, 4]);
     for (const prev of before) {
       const now = rows.find((r) => r.promptIndex === prev.promptIndex);
       expect(now, `turn ${prev.promptIndex} vanished at session end`).toBeTruthy();
@@ -473,7 +608,7 @@ describe.skipIf(!haveDist || !posix)('capture end to end through the built binar
       expect(now.linesAdded || 0).toBe(prev.linesAdded || 0);
       expect(now.linesRemoved || 0).toBe(prev.linesRemoved || 0);
     }
-  }, 120_000);
+  }, 120_000 * WINDOWS_SLOWDOWN);
 
   it('the session leaves one state mirror, under the registered id', () => {
     const dir = path.join(os.homedir(), '.origin', 'sessions');

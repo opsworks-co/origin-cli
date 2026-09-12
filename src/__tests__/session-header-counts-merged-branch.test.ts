@@ -62,12 +62,16 @@ beforeAll(() => {
 });
 afterAll(() => { try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ } });
 
+// Captured at import, before the fixture commits: the session was running
+// when they were made, which is what the no-recorded-shas case is about.
+const STARTED_AT = new Date().toISOString();
+
 const sessionState = (shas: string[]) => ({
   sessionId: 'sess-hdr',
   sessionTag: 'hdr',
   repoPath: repo,
   headShaAtStart: sessionStart,
-  startedAt: new Date().toISOString(),
+  startedAt: STARTED_AT,
   sessionCommitShas: [...shas],
 }) as any;
 
@@ -97,10 +101,17 @@ describe('the session header counts what the session wrote, not what it merged',
     expect(owned.linesRemoved).toBe(0);
   });
 
-  it('falls back to the raw range rather than blanking a session with no recorded shas', () => {
+  it('does not blank a session with no recorded shas — it renders the commits in range it can own', () => {
     // Codex bypasses .git/hooks/post-commit on some installs, so a session that
     // really did commit can carry an empty sha list. An empty snapshot would
     // REPLACE the stored sessionDiff with nothing — worse than inflating it.
+    //
+    // This used to fall back to the RAW range. It now renders the commits in
+    // range whose trailer or committer identity is this session's, each by its
+    // authored contribution (sessionAuthoredSnapshot's trailer walk). In this
+    // single-identity fixture the committer rule claims their PR too — that is
+    // the documented generosity of commitBelongsToSession, not a leak through
+    // the merge: the merge itself still contributes nothing.
     const snap = captureGitState(repo, sessionStart, { fullContext: true });
     const owned = sessionToDateCommittedSnapshot(repo, sessionState([]), {
       diff: snap.committedDiff,
@@ -108,8 +119,11 @@ describe('the session header counts what the session wrote, not what it merged',
       linesRemoved: snap.linesRemoved,
     });
 
-    expect(owned.scoped).toBe(false);
-    expect(owned.diff).toBe(snap.committedDiff);
-    expect(owned.linesAdded).toBe(snap.linesAdded);
+    expect(owned.scoped).toBe(true);
+    expect(owned.diff).toContain('export const OURS = 1;');
+    expect(owned.linesAdded).toBeGreaterThanOrEqual(1);
+    // Rendered per commit: their 40 lines appear ONCE, from their commit — not
+    // a second time through the merge's first-parent view.
+    expect(owned.diff.split('THEIRS_0 ').length - 1).toBe(1);
   });
 });

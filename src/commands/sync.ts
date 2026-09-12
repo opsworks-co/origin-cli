@@ -6,6 +6,8 @@ import { api } from '../api.js';
 import { git, gitOrNull } from '../utils/exec.js';
 import { getCanonicalRepoPath } from '../session-state.js';
 import { syncRepoHistory, BACKFILL_TIMEOUT_MS } from '../history-backfill.js';
+import { syncNotesFromRemote } from '../git-notes.js';
+import { publishMemoryNotes } from '../memory-transport.js';
 
 function getGitRoot(): string | null {
   return gitOrNull(['rev-parse', '--show-toplevel']);
@@ -79,6 +81,35 @@ export async function syncCommand() {
     }
   } catch (err: any) {
     console.log(chalk.yellow(`  ⚠ Commit history sync failed: ${err.message}`));
+  }
+
+  // Repo memory and attribution notes, both directions. `git clone`/`pull`
+  // never fetch refs/notes/* on their own: syncNotesFromRemote installs the
+  // glob fetch refspec (so plain pulls carry them from here on), fetches once,
+  // and folds the staged refs onto the live ones. Then push whatever memory
+  // this machine wrote and ask the server to re-read it — a PR carries commits
+  // and a diff, never the notes, so this is how memory reaches the dashboard.
+  try {
+    const folded = syncNotesFromRemote(gitRoot);
+    console.log(chalk.green(folded
+      ? '  ✓ Repo memory & notes: fetched from remote and folded'
+      : '  ✓ Repo memory & notes: up to date with remote'));
+  } catch (err: any) {
+    console.log(chalk.yellow(`  ⚠ Repo memory & notes fetch failed: ${err.message}`));
+  }
+  try {
+    const { pushed, memory: mem } = await publishMemoryNotes(gitRoot, 'sync', { timeoutMs: BACKFILL_TIMEOUT_MS });
+    if (pushed) {
+      if (mem) {
+        console.log(chalk.green(`  ✓ Repo memory on dashboard: ${mem.sessions} session${mem.sessions === 1 ? '' : 's'}, ${mem.commits} commit${mem.commits === 1 ? '' : 's'}${mem.brief ? ', brief' : ''}`));
+      } else {
+        console.log(chalk.gray('  – Repo memory on dashboard: not refreshed (repo not registered, or no memory on the remote yet)'));
+      }
+    } else {
+      console.log(chalk.gray('  – Repo memory: nothing to publish (no remote, or prompt text opted out)'));
+    }
+  } catch (err: any) {
+    console.log(chalk.yellow(`  ⚠ Repo memory publish failed: ${err.message}`));
   }
 
   // Check for .entire directory

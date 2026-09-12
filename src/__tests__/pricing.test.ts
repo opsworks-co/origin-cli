@@ -9,10 +9,14 @@
  * Reference: https://www.anthropic.com/pricing  (verified 2026-04-24)
  */
 
-import { describe, it, expect } from 'vitest';
-import { estimateCost, getDefaultPricing } from '../transcript.js';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { estimateCost, getDefaultPricing, __resetActivePricingForTests } from '../transcript.js';
 
 const ONE_MILLION = 1_000_000;
+
+beforeEach(() => {
+  __resetActivePricingForTests();
+});
 
 describe('Anthropic Opus pricing — per generation: 4.5+ is $5/$25, 4.1 and older $15/$75', () => {
   it('charges $5 per million input tokens for modern (4.5+) opus variants', () => {
@@ -204,5 +208,21 @@ describe('model name normalization', () => {
 
   it('empty model string defaults to sonnet pricing', () => {
     expect(estimateCost('', ONE_MILLION, 0)).toBeCloseTo(3, 4);
+  });
+});
+
+describe('Cursor NA first-party pricing', () => {
+  it('Grok 4.6 Fast is $4/$12, not the old Sonnet cursor fallback', () => {
+    expect(estimateCost('cursor-grok-4.6-high-fast', ONE_MILLION, ONE_MILLION)).toBeCloseTo(16, 4);
+  });
+
+  it('Composer 2.5 standard is $0.50/$2.50, Fast is $3/$15', () => {
+    expect(estimateCost('composer-2.5', ONE_MILLION, ONE_MILLION)).toBeCloseTo(3, 4);
+    expect(estimateCost('composer-2.5-fast', ONE_MILLION, ONE_MILLION)).toBeCloseTo(18, 4);
+  });
+
+  it('Claude/GPT/Gemini used inside Cursor stay on provider API rates', () => {
+    expect(estimateCost('cursor-claude-sonnet-4-5', ONE_MILLION, 0)).toBeCloseTo(3, 4);
+    expect(estimateCost('cursor-gpt-5', ONE_MILLION, 0)).toBeCloseTo(2, 4);
   });
 });

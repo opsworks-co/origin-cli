@@ -18,11 +18,11 @@ import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { verifyTurn, parseUnifiedDiff } from '../capture-verify.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
 const haveDist = fs.existsSync(BIN);
-const posix = process.platform !== 'win32';
 
 type Hit = { method: string; url: string; body: any };
 const hits: Hit[] = [];
@@ -139,7 +139,7 @@ async function killJournalWatcher(): Promise<void> {
   }
 }
 
-describe.skipIf(!haveDist || !posix)('cursor capture end to end through the built binary', () => {
+describe.skipIf(!haveDist)('cursor capture end to end through the built binary', () => {
   let tmp = '';
 
   beforeAll(async () => {
@@ -168,7 +168,7 @@ describe.skipIf(!haveDist || !posix)('cursor capture end to end through the buil
     fs.writeFileSync(path.join(repo, 'app.py'), 'def main():\n    print("old")\n\n\nmain()\n');
     git(['add', '.']);
     git(['commit', '-q', '-m', 'base']);
-  }, 60_000);
+  }, 60_000 * WINDOWS_SLOWDOWN);
 
   afterAll(async () => {
     if (process.env.E2E_DUMP) {
@@ -223,7 +223,7 @@ describe.skipIf(!haveDist || !posix)('cursor capture end to end through the buil
     expect(t1.linesRemoved).toBe(1);
     expect(parseUnifiedDiff(t1.diff).files[0].isNew).toBe(false);
     expect(verifyTurn({ promptIndex: 0, filesChanged: t1.filesChanged, diff: t1.diff, linesAdded: t1.linesAdded, linesRemoved: t1.linesRemoved })).toEqual([]);
-  }, 120_000);
+  }, 120_000 * WINDOWS_SLOWDOWN);
 
   it('turn 2: never announced — discovered by afterFileEdit, still marked, still its own', async () => {
     turnSessionId = 2;
@@ -251,5 +251,65 @@ describe.skipIf(!haveDist || !posix)('cursor capture end to end through the buil
     const t1 = rows.find((r: any) => r.promptIndex === 0);
     expect(t1.filesChanged).toEqual(['app.py']);
     expect(t1.diff).not.toContain('remember this');
-  }, 120_000);
+  }, 120_000 * WINDOWS_SLOWDOWN);
+
+  it('turn 3: an edit-hook path is stored repo-relative, and a commit before Stop is attested to the running turn', async () => {
+    // Cursor c1e361a4 (2026-09-09): after-file-edit stored the raw absolute
+    // path of a worktree file beside five repo-relative ones, and the commit
+    // the agent made before Stop landed with "(no active turn)" — its files
+    // then sat in the header claimed by no turn.
+    turnSessionId = 3;
+    say('add a helper and commit it');
+    const ups = await run('user-prompt-submit', { prompt: 'add a helper and commit it' });
+    expect(ups.code, ups.stderr).toBe(0);
+    const before = writesIn();
+    fs.mkdirSync(path.join(repo, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(repo, 'lib', 'helper.py'), 'def helper():\n    return 1\n');
+    wrote('lib/helper.py', 'def helper():\n    return 1\n');
+    await waitFor(() => writesIn() > before, 10_000, 'the journal to record the helper');
+    const afe = await run('after-file-edit', { file_path: path.join(repo, 'lib', 'helper.py'), edits: [] });
+    expect(afe.code, afe.stderr).toBe(0);
+
+    // The edit hook's own mapping names the file the way the diff does.
+    const stateDir = path.join(os.homedir(), '.origin', 'sessions');
+    const stateFile = fs.readdirSync(stateDir).map((f) => path.join(stateDir, f)).find((f) => f.endsWith('.json') && fs.readFileSync(f, 'utf-8').includes('e2e-cursor-session-0001'));
+    expect(stateFile, 'no state mirror for the session').toBeTruthy();
+    const mapping3 = JSON.parse(fs.readFileSync(stateFile!, 'utf-8')).completedPromptMappings.find((m: any) => m.promptIndex === 2);
+    expect(mapping3, 'after-file-edit wrote no mapping for turn 3').toBeTruthy();
+    expect(mapping3.filesChanged.filter((f: string) => path.isAbsolute(f))).toEqual([]);
+    expect(mapping3.filesChanged).toContain('lib/helper.py');
+
+    // The agent commits before Stop.
+    git(['add', '-A']);
+    git(['commit', '-q', '-m', 'add helper']);
+    const sha = git(['rev-parse', 'HEAD']);
+    const pc = await new Promise<{ code: number | null; stderr: string }>((resolve) => {
+      const child = spawn(process.execPath, [BIN, 'hooks', 'git-post-commit'], { cwd: repo, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (c) => { stderr += c; });
+      child.on('close', (code) => resolve({ code, stderr }));
+    });
+    expect(pc.code, pc.stderr).toBe(0);
+    const recorded = fs.readFileSync(path.join(os.homedir(), '.origin', 'hooks.log'), 'utf-8').split('\n')
+      .find((l) => l.includes('recorded commit on session') && l.includes(sha.slice(0, 8)));
+    expect(recorded, 'post-commit recorded the commit on no session').toBeTruthy();
+    expect(recorded).not.toContain('(no active turn)');
+
+    // post-commit attested the commit to turn 3, not to the session alone.
+    const attested = hits
+      .filter((h) => h.method === 'PATCH' && Array.isArray(h.body?.promptChanges))
+      .flatMap((h) => h.body.promptChanges)
+      .find((r: any) => r.commitSha === sha);
+    expect(attested, 'post-commit stamped the commit on no turn').toBeTruthy();
+    expect(attested.promptIndex).toBe(2);
+
+    const stop = await run('stop', { status: 'completed' });
+    expect(stop.code, stop.stderr).toBe(0);
+    const t3 = lastRows().find((r: any) => r.promptIndex === 2);
+    expect(t3, 'no row for turn 3').toBeTruthy();
+    expect(t3.filesChanged).toEqual(['lib/helper.py']);
+    // Stop may or may not repeat the sha (the server keeps the stamped one);
+    // it must never contradict it.
+    if (t3.commitSha) expect(t3.commitSha).toBe(sha);
+  }, 120_000 * WINDOWS_SLOWDOWN);
 });

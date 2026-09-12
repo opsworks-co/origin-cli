@@ -9,6 +9,9 @@ import { discoverGeminiTranscriptPath } from '../../agents/gemini.js';
 import { isSpecificModel } from '../../agents/registry.js';
 import { api } from '../../api.js';
 import { applyLedgerToMappings } from '../../capture-from-ledger.js';
+import { stateLedgerIsContended } from '../../ledger-producer.js';
+import { preferCommitPatchForCommittedTurns } from '../../commit-patch-for-committed-turn.js';
+import { preferShadowRangeForTurns } from '../../prefer-shadow-range.js';
 import { isConnectedMode, loadAgentConfig, loadConfig } from '../../config.js';
 import { debugLog } from '../../debug-log.js';
 import { queueDevinBackfill } from '../../devin-backfill.js';
@@ -16,7 +19,9 @@ import { discoverDevinCliSessionDataByPrompt, retagDevinFromProcess } from '../.
 import { readDevinLiveSession } from '../../devin-sessions-db.js';
 import { capDiff } from '../../diff-budget.js';
 import { MAX_PROMPT_DIFF_LEN, captureGitState, gitIgnoredFiles, readFileAtRev } from '../../git-capture.js';
+import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
 import { pushAcceptanceNotes, resolvePushRemote, writeGitNotes } from '../../git-notes.js';
+import { publishMemoryNotes } from '../../memory-transport.js';
 import type { PromptNoteEntry } from '../../git-notes.js';
 import { extractTodosFromPrompts, handoffRepresentsWork, writeHandoff } from '../../handoff.js';
 import { isRepoIgnored } from '../../ignore-repos.js';
@@ -33,11 +38,12 @@ import { editSourceForAgent } from '../../prompt-capture/types.js';
 import { attachOrphanCommitFiles } from '../../prompt-completeness.js';
 import { applyImageDescriptions } from '../../prompt-images.js';
 import { redactSecrets } from '../../redaction.js';
-import { clearSessionState, dropSessionMirror, getBranch, getGitCommonDir, getGitRoot, getHeadSha, getWorkingGitRoot, reconcilePromptHistory, resolveSessionBranch, saveSessionState, stopHeartbeat, turnBaseline } from '../../session-state.js';
+import { adoptRegisteredReservation, clearSessionState, clipMappingsToPromptHistory, dropSessionMirror, getBranch, getGitCommonDir, getGitRoot, getHeadSha, getWorkingGitRoot, isPendingReservation, isProvisionalSessionId, reconcilePromptHistory, resolveSessionBranch, saveSessionState, stampCaptured, stopHeartbeat, turnBaseline } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import { memorySummaryMode, synthesizeSessionSummary } from '../../session-summary.js';
 import { samePath, sessionWorkTree, shellWindowTarget } from '../../session-worktree.js';
-import { addTodosFromSession } from '../../todo.js';
+import { addTodosFromSession, readMemoryTodos } from '../../todo.js';
+import { recordPendingClosures } from '../../todo-sweep.js';
 import { estimateCost, extractPromptFileMappings, formatTranscriptForDisplay, parseTranscript } from '../../transcript.js';
 import type { ParsedTranscript, PromptFileMapping } from '../../transcript.js';
 import { durableEndSession } from '../../update-queue.js';
@@ -49,7 +55,8 @@ import { execFileSync, spawn } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { currentSessionWorkTree, filterUncommittedDiff, findStateForHook, hookLookupSessionId, liveCaptureEnabled, normalizeWorkspaceRoot, recordShellWindowEdits, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
+import { localTurnForServerRow, rebaseToServerRows, turnIdForServerRow } from '../../turn-index.js';
+import { applyAuthoredTotals, currentSessionWorkTree, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, filterUncommittedDiff, findStateForHook, hookLookupSessionId, liveCaptureEnabled, normalizeWorkspaceRoot, recordShellWindowEdits, sessionAuthoredSnapshot, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
 
 
 /**
@@ -238,7 +245,9 @@ export function buildSessionWriteData(opts: {
 
   // Reconciled, never shrinking — see reconcilePromptHistory. A rolled
   // transcript otherwise renumbers every turn under it.
-  const prompts = reconcilePromptHistory(state.prompts, parsed.prompts);
+  const prompts = reconcilePromptHistory(state.prompts, parsed.prompts, {
+    collapseTrailingRepeat: state.agentSlug === 'cursor',
+  });
   const model = parsed.model || state.model;
   const durationMs = Date.now() - new Date(state.startedAt).getTime();
   const branch = resolveSessionBranch(state) || state.branch || '';
@@ -372,7 +381,7 @@ export function buildSessionWriteData(opts: {
       uncommittedDiff: m.uncommittedDiff ?? null,
       editsJson: promptEditsByIndex?.get(m.promptIndex) ?? null,
       ...(outOfRepoFilesFromEditsJson(promptEditsByIndex?.get(m.promptIndex))),
-      ...((m as { contentUnavailableFiles?: string[] }).contentUnavailableFiles?.length
+      ...(Array.isArray((m as { contentUnavailableFiles?: string[] }).contentUnavailableFiles)
         ? { contentUnavailableFiles: (m as { contentUnavailableFiles?: string[] }).contentUnavailableFiles }
         : {}),
       // Provenance travels WITH the content it describes, so the read path can
@@ -563,16 +572,7 @@ export function scheduleMemoryBriefRefresh(
  * hands back a DIFFERENT turn's shadow — a baseline that silently rebases the
  * whole diff onto the wrong start-state.
  */
-export function localTurnForServerRow(
-  serverIndex: number,
-  promptIndexBase: number | undefined | null,
-): number | null {
-  if (!Number.isFinite(serverIndex) || serverIndex < 0) return null;
-  const base = Number.isFinite(promptIndexBase as number) ? (promptIndexBase as number) : 0;
-  if (base <= 0) return serverIndex;
-  const local = serverIndex - base;
-  return local >= 0 ? local : null;
-}
+export { localTurnForServerRow };
 
 /**
  * `turnBaseline` for an index that arrived in SERVER space.
@@ -652,6 +652,27 @@ export async function ensureServerSession(
   const needsMint = state.sessionId
     && (state.sessionId.startsWith('local-') || opts.remintGone === true);
   if (!needsMint) return false;
+  // A session-start reservation is registered by session-start. Registering
+  // it here as well is how one chat became two rows: the prompt hook adopted
+  // the reservation while `session/start` was in flight, then "migrated" it.
+  // The pre-mint re-check in user-prompt-submit already refused this; the
+  // adoption path that found the reservation on its FIRST lookup did not go
+  // through that re-check, and this was its next stop. Refuse at the source.
+  // If session-start has landed its id since the caller read the row, take
+  // that id instead — no call needed. Past the reservation's age bound the
+  // start hook is presumed dead and every prompt is a retry point again.
+  if (isProvisionalSessionId(state.sessionId) && !opts.remintGone && isPendingReservation(state)) {
+    const adoption = adoptRegisteredReservation(state, saveCwd, state.sessionTag);
+    if (adoption) {
+      debugLog(scope, 'reservation was registered by session-start — adopting its id instead of minting', adoption);
+      try { saveSessionState(state, saveCwd, state.sessionTag); } catch { /* non-fatal */ }
+      return true;
+    }
+    debugLog(scope, 'reservation still registering — leaving session/start to session-start', {
+      local: state.sessionId, startedAt: state.startedAt,
+    });
+    return false;
+  }
   // Never push an ignored repo's local session up to the org (a `local-` session
   // can exist if it was created before the repo was ignored, or via a path that
   // skipped session-start). Keep it local-only.
@@ -735,7 +756,7 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
       hookCwd = wsRoot;
     }
   }
-  const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug), agentSlug);
+  const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug, input.conversation_id), agentSlug);
   const state = found?.state || null;
   if (!state) {
     debugLog('session-end', 'ABORT: missing state', { hasConfig: !!config, hasState: !!state });
@@ -855,7 +876,9 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
       }
     }
 
-    const prompts = reconcilePromptHistory(state.prompts, parsed.prompts);
+    const prompts = reconcilePromptHistory(state.prompts, parsed.prompts, {
+    collapseTrailingRepeat: state.agentSlug === 'cursor',
+  });
     if (prompts.length > (state.prompts?.length || 0)) state.prompts = [...prompts];
 
     // For agents without transcripts (Codex, Gemini, etc.): synthesize
@@ -902,6 +925,33 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
     // working tree) so the stored sessionDiff reflects ONLY what this session
     // changed — line-level, against the session-start snapshot.
     scopeSessionDiffToStart(gitCapture, state.repoPath, state.sessionStartShadowSha);
+    // The committed side is the session's OWN commits, each by its authored
+    // contribution — not `session-start..HEAD`, which holds every commit that
+    // reached the branch meanwhile (another agent's, a merge's whole other
+    // side). Same function post-commit and Stop use, so the number session
+    // end stores is the number they stored. Sent as a snapshot so the server
+    // REPLACES whatever a weaker producer appended, rather than merging onto
+    // it. The uncommitted side stays what scopeSessionDiffToStart produced.
+    let endIsAuthoredSnapshot = false;
+    try {
+      const authoredEnd = sessionAuthoredSnapshot(state.repoPath, state, { uncommittedDiff: gitCapture.uncommittedDiff || '' });
+      if (authoredEnd.source !== 'none') {
+        gitCapture.diff = authoredEnd.diff;
+        gitCapture.linesAdded = authoredEnd.linesAdded;
+        gitCapture.linesRemoved = authoredEnd.linesRemoved;
+        gitCapture.commitShas = authoredEnd.commitShas;
+        applyAuthoredTotals(state, authoredEnd);
+        endIsAuthoredSnapshot = true;
+        debugLog('session-end', 'session diff is the authored snapshot', {
+          source: authoredEnd.source, commits: authoredEnd.commitShas.length,
+          linesAdded: authoredEnd.linesAdded, linesRemoved: authoredEnd.linesRemoved,
+        });
+      }
+    } catch (err: unknown) {
+      debugLog('session-end', 'authored snapshot failed (non-fatal) — keeping the range capture', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     // Extract prompt → file change mappings from transcript
     let promptMappings = extractPromptFileMappings(state.transcriptPath, { since: state.startedAt, repoRoots: sessionRepoRoots(state) });
@@ -991,16 +1041,20 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
           promptIndex: lastPromptIdx,
           promptText: (prompts[prompts.length - 1] || '').slice(0, 1000),
           filesChanged: Array.from(lastFilesSet),
-          diff: ((sessionCommitted + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim()).slice(0, 200_000),
+          diff: combineApplyableTurnDiff({
+            committedDiff: sessionCommitted,
+            uncommittedDiff: filteredUncommitted,
+            workingTreeDiff: lastPromptCapture.workingTreeDiff || '',
+          }).slice(0, 200_000),
           uncommittedDiff: filteredUncommitted.slice(0, 200_000),
           commitSha: lastCommitSha,
           treeSha: lastTreeSha,
         };
         const existingIdx = state.completedPromptMappings.findIndex(m => m.promptIndex === lastPromptIdx);
         if (existingIdx >= 0) {
-          state.completedPromptMappings[existingIdx] = lastMapping;
+          state.completedPromptMappings[existingIdx] = stampCaptured(lastMapping);
         } else {
-          state.completedPromptMappings.push(lastMapping);
+          state.completedPromptMappings.push(stampCaptured(lastMapping));
         }
         debugLog('session-end', 'captured last prompt diff', {
           promptIndex: lastPromptIdx, filesChanged: lastFilesSet.size,
@@ -1035,6 +1089,44 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
         debugLog('ledger', 'turns captured from the ledger at session end', { count: fromLedger, of: promptMappings.length });
       }
     } catch { /* the ledger never blocks the end of a session */ }
+
+    // Mappings are server rows, `prompts` is this launch's local list.
+    promptMappings = clipMappingsToPromptHistory(
+      promptMappings, prompts,
+      Math.max(parsed.promptIndexBase || 0, state.promptIndexBase || 0),
+    );
+
+    try {
+      const fromShadows = preferShadowRangeForTurns(
+        state, promptMappings as any, state.repoPath || '',
+        { log: (event, data) => debugLog('session-end', event, data) },
+      );
+      if (fromShadows > 0) {
+        debugLog('session-end', 'turns scoped to their shadow window', {
+          count: fromShadows, of: promptMappings.length,
+        });
+      }
+    } catch { /* never block the end of a session */ }
+
+    // Same pass Stop runs. Agents that actually terminate here (Gemini, a
+    // killed process) never get a later Stop to put the commit patch back;
+    // without this, session-end re-sends baseline..HEAD with the newest stamp.
+    try {
+      const fromCommits = preferCommitPatchForCommittedTurns(
+        state, promptMappings as any, state.repoPath || '',
+        {
+          inheritedBaseline: (shadowSha, localTurn) => inheritedBaselineForTurn(
+            state.repoPath || '', state, shadowSha, localTurn,
+          ),
+          log: (event, data) => debugLog('session-end', event, data),
+        },
+      );
+      if (fromCommits > 0) {
+        debugLog('session-end', 'committed turns carrying their commit patch', {
+          count: fromCommits, of: promptMappings.length,
+        });
+      }
+    } catch { /* same as the ledger: never block the end of a session */ }
 
     // Hoisted so writeSessionFiles below the `if (connected)` block can
     // pass editsJson into changes.json (mirrors the stop-hook hoist).
@@ -1199,7 +1291,7 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
         agentSessionName: resolveAgentSessionName(state) || undefined,
         durationMs: durationMs > 0 ? durationMs : undefined,
         costUsd: costUsd > 0 ? costUsd : undefined,
-        gitCapture: gitCapture.diff ? gitCapture : undefined,
+        gitCapture: gitCapture.diff ? { ...gitCapture, ...(endIsAuthoredSnapshot ? { snapshot: true } : {}) } : undefined,
         promptChanges: promptMappings.length > 0
           ? promptMappings.map(withDerivedLineCounts).map((pm, _i, all) => ({
               ...pm,
@@ -1215,7 +1307,8 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
                   ? nestedRepoWritesForOpenTurn(state)
                   : [],
               )),
-              ...(turnIdFor(state, pm.promptIndex) && { turnId: turnIdFor(state, pm.promptIndex) }),
+              // `pm.promptIndex` is a SERVER row; ids are numbered locally.
+              ...(turnIdForServerRow(state, pm.promptIndex) && { turnId: turnIdForServerRow(state, pm.promptIndex) }),
               ...captureStamp(),
               // Real Devin submission time (see handleStop) — fixes commit
               // attribution when a turn's prompt was recorded after its commit.
@@ -1423,6 +1516,18 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
       debugLog('session-end', 'session memory error (non-fatal)', { message: err.message });
     }
 
+    // Publish it NOW. writeGitNotes (above) already pushed the memory refs, but
+    // it runs before this session's entry exists, so what it shipped was the
+    // previous session's memory — this session's only left the machine on the
+    // next push, and the dashboard only heard about it on the next BRANCH push
+    // (hosts send no webhook for refs/notes/*). Same ordering fix the
+    // acceptance notes needed; see publishMemoryNotes for the two halves.
+    try {
+      await publishMemoryNotes(state.repoPath, 'session-end');
+    } catch (err: any) {
+      debugLog('session-end', 'memory publish error (non-fatal)', { message: err?.message });
+    }
+
     // Trailing decisions backfill. Agents that commit BEFORE writing their
     // response (Cursor, sometimes Codex) emit the [Origin: Decision] marker into
     // the transcript AFTER the commit-time capture already froze the rollup and
@@ -1452,6 +1557,33 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
       }
     } catch {
       // Non-fatal
+    }
+
+    // The other half: a session that DISCHARGED a prior leftover says so with
+    // [Origin: Closes], and that claim is recorded against the TODO it names.
+    //
+    // Runs after the memory write above so the claim is matched against a note
+    // that already contains this session's own leftovers — a session that
+    // opened and closed the same loop should not leave it open.
+    //
+    // Recorded as PENDING. At session end the work is in a working tree or on a
+    // branch; the promotion to closed happens once it is on the default branch
+    // (todo-sweep.ts). Nothing disappears from `origin todo list` here.
+    try {
+      const closes = sessionMarkers?.closes || [];
+      if (closes.length > 0) {
+        const recorded = recordPendingClosures({
+          repoPath: state.repoPath,
+          sessionId: state.sessionId,
+          markers: closes,
+          openTodos: readMemoryTodos(state.repoPath).map((t) => ({ id: t.id, text: t.text })),
+          shas: gitCapture.commitShas,
+        });
+        debugLog('session-end', 'todo closures claimed', { claimed: closes.length, recorded });
+      }
+    } catch {
+      // Non-fatal — a claim that fails to record leaves the TODO open, which is
+      // the safe direction.
     }
   } catch (err: any) {
     debugLog('session-end', 'ERROR', { message: err.message, stack: err.stack });
@@ -1914,7 +2046,12 @@ export function outOfRepoFilesFromEditsJson(raw: string | undefined | null): { o
  */
 export function applyLiveLedger(captures: PromptCapture[], state: SessionState, scope: string): PromptCapture[] {
   if (!liveCaptureEnabled() || !state.liveEdits || state.liveEdits.length === 0) return captures;
-  const ledger = buildCapturesFromLedger(state.liveEdits);
+  // The ledger is numbered by this launch's local counter; the transcript
+  // captures by the turn's native position. Lift the ledger onto server rows
+  // BEFORE the merge, or a resumed conversation's first turn (local 0) is
+  // welded onto the row of turn one (server 0) — the fallback index
+  // mergeLedgerWithTranscript keeps for an edit the transcript never saw.
+  const ledger = rebaseToServerRows(buildCapturesFromLedger(state.liveEdits), state.promptIndexBase);
   if (ledger.length === 0) return captures;
   const merged = mergeLedgerWithTranscript(ledger, captures);
   debugLog(scope, 'merged live ledger with transcript', {
@@ -1943,10 +2080,18 @@ export function applyLedgerCaptures(
   promptMappings: Array<Record<string, unknown> & { promptIndex: number }>,
 ): number {
   const repoPath = currentSessionWorkTree(state) || state.repoPath;
-  return applyLedgerToMappings(state as any, promptMappings as any, {
+  return applyLedgerToMappings({
+    ...state,
+    ledgerContended: stateLedgerIsContended(state, repoPath),
+  } as any, promptMappings as any, {
     readEntries: readJournalEntries,
     readAtRev: repoPath ? (sha, file) => readFileAtRev(repoPath, sha, file) : undefined,
     ignoredFiles: repoPath ? (files) => gitIgnoredFiles(repoPath, files) : undefined,
+    // A checkout, pull, rebase or merge inside the turn's window rewrote files
+    // on disk; the watcher saw writes and cannot tell whose they were.
+    inheritedBefore: repoPath
+      ? (baselineSha, localTurn) => inheritedBeforeStatesForTurn(repoPath, state, baselineSha, localTurn)
+      : undefined,
     log: (event, data) => debugLog('ledger', event, data),
   });
 }

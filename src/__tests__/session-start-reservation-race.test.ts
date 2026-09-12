@@ -170,3 +170,68 @@ describe('the three halves are wired', () => {
     expect(prefer).toBeLessThan(save);
   });
 });
+
+// The reservation was adoptable and then registered TWICE — once by
+// session-start and once by the prompt hook that had adopted it (prod
+// 2026-09-09, one Cursor chat: 5431ff0f on main and e24477e2 on the worktree).
+// The pre-mint re-check above only covers the auto-create branch; the adopter
+// that found the reservation on its first lookup went straight to
+// ensureServerSession. And session-start's own save wrote its bare row over
+// the adopter's prompt and worktree identity. Both halves get a guard.
+describe('an adopted reservation is registered exactly once', () => {
+  const src = hooksSource();
+
+  it('ensureServerSession refuses a pending reservation', () => {
+    const fn = src.indexOf('export async function ensureServerSession');
+    const refuse = src.indexOf("'reservation still registering — leaving session/start to session-start'", fn);
+    const mint = src.indexOf("'migrating local session to server'", fn);
+    expect(fn).toBeGreaterThan(-1);
+    expect(refuse).toBeGreaterThan(fn);
+    expect(refuse).toBeLessThan(mint);
+  });
+
+  it('session-start folds an adopted reservation into its row before saving', () => {
+    const call = src.indexOf("'calling api.startSession'");
+    const merge = src.indexOf("'a concurrent hook adopted the reservation while session/start was in flight — keeping its turn and identity'");
+    const save = src.indexOf('saveSessionState(state, saveCwd, sessionTag);');
+    expect(merge).toBeGreaterThan(call);
+    expect(merge).toBeLessThan(save);
+    // Only a row THIS hook reserved — a re-fired start keeps its carry-forward.
+    expect(src.slice(merge - 1500, merge)).toContain('reservedHere && onDisk && reservationAdoptedMeanwhile');
+  });
+
+  it('the reservation checks can see a Cursor row (empty claudeSessionId)', () => {
+    // loadSessionState rejects a row with no claudeSessionId — every Cursor row.
+    expect(src).not.toContain('loadSessionState(reservationCwd, sessionTag)');
+    expect(src).toContain('readStateAtTag(reservationCwd, sessionTag)');
+    expect(src).not.toContain('loadSessionState(saveCwd, sessionTag)');
+    expect(src).toContain('readStateAtTag(saveCwd, sessionTag)');
+  });
+
+  it('the heartbeat starts on the id the file settled on, not the local variable', () => {
+    const merge = src.indexOf("'a concurrent hook adopted the reservation");
+    const hb = src.indexOf('startHeartbeat(state.sessionId, hbApiUrl, hbApiKey, stateFile, finalAgentSlug)', merge);
+    expect(hb).toBeGreaterThan(merge);
+  });
+
+  it('the prompt hook pushes the identity it restamped once the id is registered', () => {
+    const idx = src.indexOf("'session-start registered the reservation meanwhile — continuing on its id'");
+    const ensure = src.indexOf("ensureServerSession(state, found!.saveCwd, agentSlug, 'user-prompt-submit')", idx);
+    expect(idx).toBeGreaterThan(-1);
+    expect(ensure).toBeGreaterThan(idx);
+    expect(src.slice(idx, ensure)).toContain('durableUpdate(state.sessionId');
+  });
+});
+
+describe('a pending reservation gets no server traffic on its placeholder id', () => {
+  const src = hooksSource();
+
+  it('user-prompt-submit skips the per-prompt update and the daemon while registration is in flight', () => {
+    const guard = src.indexOf("'reservation still registering — no server update or daemon on the placeholder id'");
+    const block = src.indexOf('if (config && isConnectedMode() && !registrationInFlight)', guard);
+    const dispatch = src.indexOf("'heartbeat dispatched (fire-and-forget)'", block);
+    expect(guard).toBeGreaterThan(-1);
+    expect(block).toBeGreaterThan(guard);
+    expect(dispatch).toBeGreaterThan(block);
+  });
+});

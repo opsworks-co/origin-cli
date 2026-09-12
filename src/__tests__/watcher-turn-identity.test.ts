@@ -75,6 +75,15 @@ describe('assignTurnIds', () => {
     expect(second[0].turnId).toBe(first[0].turnId);
   });
 
+  it('treats a Cursor [Image]-wrapped prompt as the same turn as the inner text', () => {
+    const inner = "why the PR doesn't have this session linked";
+    const wrapped = `[Image]\n${inner}\n[image]`;
+    const first = assignTurnIds(undefined, [wrapped], ids());
+    const second = assignTurnIds(first, [inner], ids());
+    expect(second).toHaveLength(1);
+    expect(second[0].turnId).toBe(first[0].turnId);
+  });
+
   it('handles an empty session without inventing turns', () => {
     expect(assignTurnIds(undefined, [], ids())).toEqual([]);
     expect(assignTurnIds([], [], ids())).toEqual([]);

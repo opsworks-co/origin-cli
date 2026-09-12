@@ -22,7 +22,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
-import { git, gitOrNull } from './utils/exec.js';
+import { git, gitDetailed, gitOrNull } from './utils/exec.js';
 
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
 
@@ -397,8 +397,22 @@ export function commitChangedFiles(cwd: string, sha: string): string[] {
  *      errors silently with empty stdout; --root covers the initial commit.
  *   3. `git show <sha> --format=` — last-resort, handles merge commits.
  */
-export function extractCommitDiff(cwd: string, sha: string): { diff: string; filesChanged: string[] } {
-  let filesChanged: string[] = commitChangedFiles(cwd, sha);
+export function extractCommitDiff(
+  cwd: string,
+  sha: string,
+  /**
+   * Names already fetched for this sha by `prefetchCommitPayloads`. Passing
+   * them skips the per-commit `diff-tree` spawn.
+   *
+   * `undefined` means "not prefetched" and keeps the original per-commit read.
+   * A MERGE is always undefined — `diff-tree` prints nothing for it, not even
+   * its sha header — so merges keep the full commitChangedFiles ladder and its
+   * first-parent fallback. An empty ARRAY is a real answer (an empty commit)
+   * and is trusted as one.
+   */
+  knownFiles?: string[],
+): { diff: string; filesChanged: string[] } {
+  let filesChanged: string[] = knownFiles ?? commitChangedFiles(cwd, sha);
 
   let diff = gitOrNull(['diff', `${sha}~1..${sha}`], { cwd })?.trim() || '';
   if (!diff) {
@@ -412,6 +426,75 @@ export function extractCommitDiff(cwd: string, sha: string): { diff: string; fil
     }
   }
   return { diff, filesChanged };
+}
+
+/**
+ * Per-commit metadata and file lists for a whole SHA list, in TWO git
+ * processes instead of two PER COMMIT.
+ *
+ * Measured on this repo: 200 commits cost 11.0s one-at-a-time and 67ms
+ * batched — 164x. The backfill window caps at RECENT_SHAS_LIMIT (500), and at
+ * ~34ms per spawn the old shape put ~27s of pure process startup on a hook
+ * that the agent kills at its timeout, losing the whole turn's prompt.
+ *
+ * `--ignore-missing` is load-bearing on the log: WITHOUT it a single rebased-away
+ * sha makes git exit 128 and the ENTIRE batch returns nothing (verified — exit
+ * 128 vs exit 0). Missing shas are simply absent from the map, and
+ * buildCommitPayload falls back to its per-commit read for those.
+ * `diff-tree --stdin` tolerates a dead sha natively.
+ *
+ * The diff itself is deliberately NOT batched. `git diff <sha>~1..<sha>` — the
+ * primary in extractCommitDiff — has no multi-commit form, and the nearest
+ * batchable command (`git show <shas…>`) resolves merges differently, so
+ * folding it in would silently change what a merge's Commit row contains.
+ */
+export interface CommitPrefetch {
+  meta: Map<string, { author: string; committedAt: string; message: string }>;
+  files: Map<string, string[]>;
+}
+
+export function prefetchCommitPayloads(cwd: string, shas: string[]): CommitPrefetch {
+  const meta = new Map<string, { author: string; committedAt: string; message: string }>();
+  const files = new Map<string, string[]>();
+  const valid = shas.filter((x) => SHA_RE.test(x));
+  if (valid.length === 0) return { meta, files };
+
+  // Records are NUL-separated (-z); fields inside one record by \x1f, with the
+  // raw body (%B) last because it is the only multi-line field.
+  const metaOut = gitOrNull(
+    ['log', '--ignore-missing', '--no-walk=unsorted', '-z', '--format=%H%x1f%an%x1f%cI%x1f%B', ...valid],
+    { cwd },
+  );
+  for (const rec of (metaOut || '').split('\0')) {
+    if (!rec) continue;
+    const parts = rec.split('\x1f');
+    if (parts.length < 3) continue;
+    const sha = parts[0].trim();
+    if (!SHA_RE.test(sha)) continue;
+    meta.set(sha, { author: parts[1], committedAt: parts[2], message: parts.slice(3).join('\x1f') });
+  }
+
+  // `diff-tree --stdin` prints each commit's sha on its own line, then that
+  // commit's paths. A MERGE is omitted entirely — no sha header at all — so it
+  // never lands in this map and extractCommitDiff falls back to the per-commit
+  // ladder that knows how to ask a merge for its first-parent names.
+  // gitDetailed, not gitOrNull — `input` is only honoured by the Detailed
+  // variants, and gitOrNull would have run `--stdin` against an empty pipe and
+  // returned nothing for every commit.
+  const namesRes = gitDetailed(
+    ['diff-tree', '--stdin', '--name-only', '-r', '--root'],
+    // The trailing newline is load-bearing: without it `diff-tree --stdin`
+    // silently drops the LAST sha in the list (verified).
+    { cwd, input: `${valid.join('\n')}\n` },
+  );
+  const namesOut = namesRes.status === 0 ? namesRes.stdout : '';
+  let current: string | null = null;
+  for (const line of (namesOut || '').split('\n')) {
+    if (!line) continue;
+    if (/^[0-9a-f]{40}$/.test(line)) { current = line; if (!files.has(current)) files.set(current, []); continue; }
+    if (current) files.get(current)!.push(line);
+  }
+  return { meta, files };
 }
 
 /** SHAs reachable from HEAD, newest first. Empty on any git failure. */
@@ -430,15 +513,32 @@ export function listRecentShas(cwd: string, limit: number = RECENT_SHAS_LIMIT): 
  * for backfilled commits the body's Co-Authored-By / agent trailers are
  * the only AI-attribution signal the server will ever get.
  */
-export function buildCommitPayload(cwd: string, sha: string): BackfillCommitPayload | null {
+export function buildCommitPayload(
+  cwd: string,
+  sha: string,
+  prefetch?: CommitPrefetch,
+): BackfillCommitPayload | null {
   if (!SHA_RE.test(sha)) return null;
-  const meta = gitOrNull(['log', '-1', '--format=%an%x1f%cI%x1f%B', sha], { cwd });
-  if (meta === null) return null;
-  const [author, committedAt, ...rest] = meta.split('\x1f');
-  if (rest.length === 0) return null;
-  const message = rest.join('\x1f').trim().slice(0, MAX_MESSAGE_LEN);
+  const pre = prefetch?.meta.get(sha);
+  let author: string;
+  let committedAt: string;
+  let message: string;
+  if (pre) {
+    ({ author, committedAt } = pre);
+    message = pre.message.trim().slice(0, MAX_MESSAGE_LEN);
+  } else {
+    // No prefetch, or a sha the batch could not resolve (rebased away — the
+    // batch drops it rather than failing, see prefetchCommitMeta).
+    const meta = gitOrNull(['log', '-1', '--format=%an%x1f%cI%x1f%B', sha], { cwd });
+    if (meta === null) return null;
+    const parts = meta.split('\x1f');
+    if (parts.length < 3) return null;
+    author = parts[0];
+    committedAt = parts[1];
+    message = parts.slice(2).join('\x1f').trim().slice(0, MAX_MESSAGE_LEN);
+  }
 
-  const { diff, filesChanged } = extractCommitDiff(cwd, sha);
+  const { diff, filesChanged } = extractCommitDiff(cwd, sha, prefetch?.files.get(sha));
 
   return {
     sha,
@@ -497,8 +597,11 @@ export async function backfillUnknownCommits(opts: {
     }
   };
 
+  // Two spawns for the whole window instead of two per commit.
+  const prefetch = prefetchCommitPayloads(opts.hookCwd, shas);
+
   for (const sha of shas) {
-    const payload = buildCommitPayload(opts.hookCwd, sha);
+    const payload = buildCommitPayload(opts.hookCwd, sha, prefetch);
     if (!payload) continue;
     batch.push(payload);
     // Budget the whole serialized commit, not just the diff — a giant
@@ -624,4 +727,116 @@ export async function syncRepoHistory(opts: {
   } finally {
     releaseBackfillLock(markerKey);
   }
+}
+
+// ─── What a commit AUTHORED ───────────────────────────────────────────────
+//
+// The one per-commit answer every session-attribution consumer derives from:
+// the Commit row ingest, the session totals, the memory entry, the turn row,
+// the Stop / session-end / watcher session snapshots. Lives here, beside
+// mergeOwnDiff, because this module has no hook-side imports and so every
+// producer can reach it without a cycle.
+
+export interface CommitAuthoredDelta {
+  /** The commit's own unified diff — a merge's resolution only. */
+  diff: string;
+  filesChanged: string[];
+  linesAdded: number;
+  linesRemoved: number;
+  isMerge: boolean;
+  /** For a merge: what the first-parent view carried that the commit did
+   *  NOT author — the other branch. Reported so a Commit row can say so. */
+  absorbed: { files: number; linesAdded: number; linesRemoved: number } | null;
+}
+
+function countSignLines(diff: string, sign: '+' | '-'): number {
+  let n = 0;
+  const header = sign + sign + sign;
+  for (const line of (diff || '').split('\n')) {
+    if (line[0] === sign && line.slice(0, 3) !== header) n++;
+  }
+  return n;
+}
+
+function filesInDiff(diff: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const m of (diff || '').matchAll(/^diff --git a\/(.*?) b\/(.*)$/gm)) {
+    const f = (m[2] || m[1] || '').replace(/^\//, '');
+    if (f && !seen.has(f)) { seen.add(f); out.push(f); }
+  }
+  return out;
+}
+
+/**
+ * What one commit contributed to the session that made it.
+ *
+ * A merge contributes its resolution (mergeOwnDiff); a plain commit its patch.
+ * Never the first-parent view of a merge, which is the whole other branch —
+ * session 51995e1c (2026-09-08) was credited +326/-71 of another PR that way,
+ * by a session accumulator that asked the first-parent question while the
+ * turn row beside it asked this one.
+ *
+ * `firstParent` is the `extractCommitDiff` view the caller usually already
+ * holds; passing it saves a `git show` for the common non-merge case. It is
+ * also what a merge is measured AGAINST to report what it absorbed.
+ */
+export function commitAuthoredDelta(
+  cwd: string,
+  sha: string,
+  firstParent?: { diff: string; filesChanged: string[] },
+): CommitAuthoredDelta {
+  const merge = mergeOwnDiff(cwd, sha);
+  if (merge) {
+    const fp = firstParent ?? extractCommitDiff(cwd, sha);
+    return {
+      diff: merge.diff,
+      filesChanged: merge.filesChanged,
+      linesAdded: countSignLines(merge.diff, '+'),
+      linesRemoved: countSignLines(merge.diff, '-'),
+      isMerge: true,
+      absorbed: {
+        files: fp.filesChanged.length,
+        linesAdded: countSignLines(fp.diff, '+'),
+        linesRemoved: countSignLines(fp.diff, '-'),
+      },
+    };
+  }
+  const fp = firstParent ?? extractCommitDiff(cwd, sha);
+  return {
+    diff: fp.diff,
+    filesChanged: fp.filesChanged,
+    linesAdded: countSignLines(fp.diff, '+'),
+    linesRemoved: countSignLines(fp.diff, '-'),
+    isMerge: false,
+    absorbed: null,
+  };
+}
+
+/**
+ * The authored content of a known list of commits, for a producer that has
+ * the sha list but no full session state (the transcript watcher). Each
+ * commit by commitAuthoredDelta; counts from the one joined text, so a file
+ * touched by two commits is counted as the text shows it, never twice by
+ * summing.
+ */
+export function renderAuthoredCommits(
+  cwd: string,
+  shas: string[],
+): { diff: string; filesChanged: string[]; linesAdded: number; linesRemoved: number } {
+  const parts: string[] = [];
+  for (const sha of shas) {
+    if (!/^[a-fA-F0-9]{7,40}$/.test(sha)) continue;
+    try {
+      const own = commitAuthoredDelta(cwd, sha);
+      if (own.diff) parts.push(own.diff);
+    } catch { /* a sha a rebase removed */ }
+  }
+  const diff = parts.join('\n').trim();
+  return {
+    diff,
+    filesChanged: filesInDiff(diff),
+    linesAdded: countSignLines(diff, '+'),
+    linesRemoved: countSignLines(diff, '-'),
+  };
 }

@@ -166,6 +166,65 @@ interface MemoryPayload {
   // expressed as a fact that merges like any other rather than as an absence,
   // which merges as nothing.
   tombstones?: CommitTombstone[];
+  // TODO closures. Same reasoning as `tombstones`, for the other append-only
+  // record in here: `openTodos` is written by session end and never edited, so
+  // a leftover that someone has since dealt with is re-read as open forever.
+  // A closure is the fact "this was discharged", which merges like any other
+  // fact; the absence of a TODO would merge as nothing.
+  //
+  // In the NOTE rather than `~/.origin/origin-todos.json` because the TODO
+  // itself travels with the repo and its closure has to travel the same way —
+  // a closure recorded only on one laptop leaves every clone, every other
+  // machine and CI reading the item as still open.
+  closedTodos?: TodoClosure[];
+}
+
+/**
+ * A TODO that has been discharged.
+ *
+ * KEYED BY TEXT, not by the TODO id. An id is `hash(text + sessionId)`, and
+ * session end re-records a long-running leftover under each new session that
+ * mentions it — so the same sentence has a different id every time it comes
+ * back, and an id-keyed closure suppresses exactly one of its incarnations.
+ *
+ * `state` is what makes a closure evidence rather than an assertion. An agent
+ * saying it fixed something is a claim about a working tree; the claim becomes
+ * a fact when the work reaches the default branch. `pending` is the claim,
+ * `closed` is the fact, and only `closed` hides the item — see todo-sweep.ts.
+ */
+export interface TodoClosure {
+  /** The TODO's text, lowercased and whitespace-collapsed. */
+  key: string;
+  /** The id it carried when closed. Display only — see the note above. */
+  id: string;
+  text: string;
+  /** Why it is closed. A bare key in a suppression list is unreviewable later. */
+  reason: string;
+  at: string;
+  state: 'pending' | 'closed';
+  /** The session that asserted the closure. */
+  sessionId?: string;
+  /** Commits carrying the closing work. The promotion check reads these. */
+  shas?: string[];
+  /** When `pending` became `closed`. */
+  confirmedAt?: string;
+}
+
+/**
+ * The id `origin todo` shows for a TODO.
+ *
+ * Lives here rather than in todo.ts so the INJECTED context can print it:
+ * an agent that cannot see a TODO's id cannot write `[Origin: Closes] <id>`,
+ * and prose matching is the fallback, not the intended path. todo.ts imports
+ * memory.ts, so the helper has to sit on this side of that edge.
+ */
+export function todoDisplayId(text: string, sessionId: string): string {
+  return crypto.createHash('sha256').update(text + sessionId).digest('hex').slice(0, 8);
+}
+
+/** The durable key for a TODO: its text, lowercased and collapsed. */
+export function todoClosureKey(text: string): string {
+  return (text || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 export interface CommitTombstone {
@@ -185,7 +244,7 @@ function memoryRootCommit(repoPath: string): string | null {
 function readMemoryPayload(repoPath: string): MemoryPayload {
   try {
     const root = memoryRootCommit(repoPath);
-    if (!root) return { version: 2, sessions: [], commits: [], tombstones: [] };
+    if (!root) return { version: 2, sessions: [], commits: [], tombstones: [], closedTodos: [] };
     const raw = git(['notes', '--ref=origin-memory', 'show', root], { cwd: repoPath, timeoutMs: 10_000 }).trim();
     const data = JSON.parse(raw);
     return {
@@ -193,9 +252,10 @@ function readMemoryPayload(repoPath: string): MemoryPayload {
       sessions: Array.isArray(data.sessions) ? data.sessions : [],
       commits: Array.isArray(data.commits) ? data.commits : [], // absent in v1 payloads
       tombstones: Array.isArray(data.tombstones) ? data.tombstones : [],
+      closedTodos: Array.isArray(data.closedTodos) ? data.closedTodos : [],
     };
   } catch {
-    return { version: 2, sessions: [], commits: [], tombstones: [] };
+    return { version: 2, sessions: [], commits: [], tombstones: [], closedTodos: [] };
   }
 }
 
@@ -207,14 +267,29 @@ function writeMemoryPayload(
   // whatever tombstones are already recorded. Dropping them on an ordinary write
   // would quietly resurrect everything they suppress.
   tombstones?: CommitTombstone[],
+  // Same contract as `tombstones`: omitting it PRESERVES what is recorded.
+  closedTodos?: TodoClosure[],
 ): void {
   const root = memoryRootCommit(repoPath);
   if (!root) return;
-  const keptTombstones = tombstones ?? readMemoryPayload(repoPath).tombstones ?? [];
+  const existing = (tombstones === undefined || closedTodos === undefined)
+    ? readMemoryPayload(repoPath)
+    : null;
+  const keptTombstones = tombstones ?? existing?.tombstones ?? [];
   const suppressed = new Set(keptTombstones.map((t) => t.commitSha));
   const visibleCommits = commits.filter((c) => !suppressed.has(c.commitSha));
+  // A closure exists to suppress a TODO. Once the session that recorded that
+  // TODO has aged out of the retained window the TODO is gone on its own, and
+  // the closure is dead weight in a payload that has to stay push-sized — the
+  // same rule that prunes commit records whose session dropped out.
+  //
+  // Only prune what is UNREACHABLE, never what is merely closed: dropping a
+  // closure whose TODO is still in the window resurrects the TODO.
+  const liveTodoKeys = new Set<string>();
+  for (const e of sessions) for (const t of e.openTodos || []) liveTodoKeys.add(todoClosureKey(t));
+  const keptClosures = (closedTodos ?? existing?.closedTodos ?? []).filter((c) => liveTodoKeys.has(c.key));
   const payload = JSON.stringify(
-    { version: 2, sessions, commits: visibleCommits, tombstones: keptTombstones },
+    { version: 2, sessions, commits: visibleCommits, tombstones: keptTombstones, closedTodos: keptClosures },
     null,
     2,
   );
@@ -272,6 +347,18 @@ export function mergeMemoryPayloads(local: MemoryPayload, remote: MemoryPayload)
     if (t?.commitSha && !tombstones.has(t.commitSha)) tombstones.set(t.commitSha, t);
   }
 
+  // Closures union by key, and a CONFIRMED closure beats a pending one from
+  // the other side however the timestamps fall — promotion is monotonic (a
+  // merge is evidence that arrived, never evidence that was withdrawn), so
+  // letting a stale `pending` win would un-close an item on the next sync,
+  // which is the 74d04c6 failure in a different record.
+  const closedTodos = new Map<string, TodoClosure>();
+  for (const c of [...(local?.closedTodos || []), ...(remote?.closedTodos || [])]) {
+    if (!c?.key) continue;
+    const mine = closedTodos.get(c.key);
+    if (!mine || (mine.state !== 'closed' && c.state === 'closed')) closedTodos.set(c.key, c);
+  }
+
   const commits = new Map<string, CommitMemoryEntry>();
   for (const c of local?.commits || []) if (c?.commitSha) commits.set(c.commitSha, c);
   for (const c of remote?.commits || []) {
@@ -298,7 +385,15 @@ export function mergeMemoryPayloads(local: MemoryPayload, remote: MemoryPayload)
       }),
   );
 
-  return { version: 2, sessions: mergedSessions, commits: mergedCommits, tombstones: [...tombstones.values()] };
+  const liveTodoKeys = new Set<string>();
+  for (const e of mergedSessions) for (const t of e.openTodos || []) liveTodoKeys.add(todoClosureKey(t));
+  return {
+    version: 2,
+    sessions: mergedSessions,
+    commits: mergedCommits,
+    tombstones: [...tombstones.values()],
+    closedTodos: [...closedTodos.values()].filter((c) => liveTodoKeys.has(c.key)),
+  };
 }
 
 /** Read the memory payload out of an arbitrary notes ref, or null if absent. */
@@ -314,6 +409,7 @@ export function readMemoryPayloadFromRef(repoPath: string, ref: string): MemoryP
       sessions: Array.isArray(data.sessions) ? data.sessions : [],
       commits: Array.isArray(data.commits) ? data.commits : [],
       tombstones: Array.isArray(data.tombstones) ? data.tombstones : [],
+      closedTodos: Array.isArray(data.closedTodos) ? data.closedTodos : [],
     };
   } catch {
     return null;
@@ -330,10 +426,18 @@ export function foldRemoteMemory(repoPath: string, stagingRef: string): boolean 
     if (!remote) return false;
     const local = readMemoryPayload(repoPath);
     const merged = mergeMemoryPayloads(local, remote);
-    const before = JSON.stringify({ s: local.sessions, c: local.commits });
-    const after = JSON.stringify({ s: merged.sessions, c: merged.commits });
-    if (before === after) return false;
-    writeMemoryPayload(repoPath, merged.sessions, merged.commits);
+    // Compare — and write — ALL FOUR records. Sessions and commits alone left
+    // the other two unable to arrive: `writeMemoryPayload` preserves what it is
+    // not given, so passing only two of the four re-wrote the LOCAL tombstones
+    // and closures over the merged ones, discarding everything the remote had
+    // just contributed. Narrowing the comparison the same way also made a sync
+    // whose only news was a retraction or a closure report "nothing changed"
+    // and write nothing at all.
+    const shape = (p: MemoryPayload) => JSON.stringify({
+      s: p.sessions, c: p.commits, t: p.tombstones || [], d: p.closedTodos || [],
+    });
+    if (shape(local) === shape(merged)) return false;
+    writeMemoryPayload(repoPath, merged.sessions, merged.commits, merged.tombstones, merged.closedTodos);
     return true;
   } catch {
     return false;
@@ -362,7 +466,10 @@ export function reconcileMemoryWithRemote(repoPath: string, stagingRef: string):
     const merged = mergeMemoryPayloads(readMemoryPayload(repoPath), remote);
     const opts = { cwd: repoPath, timeoutMs: 10_000 };
     git(['update-ref', MEMORY_REF, stagingRef], opts);
-    writeMemoryPayload(repoPath, merged.sessions, merged.commits);
+    // All four records, for the reason spelled out in foldRemoteMemory: the ref
+    // now points at the REMOTE tip, so anything not written here is whatever
+    // the remote had, and the local side's retractions and closures are gone.
+    writeMemoryPayload(repoPath, merged.sessions, merged.commits, merged.tombstones, merged.closedTodos);
     return true;
   } catch {
     return false;
@@ -471,6 +578,52 @@ export function forgetCommitMemory(repoPath: string, commitSha: string, reason: 
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Every TODO closure recorded in this repo's memory, pending and confirmed. */
+export function readTodoClosures(repoPath: string): TodoClosure[] {
+  try {
+    return readMemoryPayload(repoPath).closedTodos || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Record TODO closures in the repo's memory note.
+ *
+ * Upserts by key. A `pending` claim never overwrites a `closed` fact — a later
+ * session re-asserting something already confirmed must not demote it back to
+ * unproven — and re-recording the same pending claim keeps the FIRST one, so
+ * the `at` stamp stays the moment the work was actually done.
+ *
+ * Returns how many closures the note gained or promoted.
+ */
+export function recordTodoClosures(repoPath: string, closures: TodoClosure[]): number {
+  try {
+    if (!closures?.length) return 0;
+    if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return 0;
+    const { sessions, commits, tombstones, closedTodos } = readMemoryPayload(repoPath);
+    const byKey = new Map<string, TodoClosure>();
+    for (const c of closedTodos || []) if (c?.key) byKey.set(c.key, c);
+    let changed = 0;
+    for (const c of closures) {
+      if (!c?.key || !c.text) continue;
+      const mine = byKey.get(c.key);
+      if (mine && (mine.state === 'closed' || c.state !== 'closed')) continue;
+      byKey.set(c.key, mine && c.state === 'closed'
+        // Promotion keeps the original claim and stamps it, so the record still
+        // says when the work was done as well as when it landed.
+        ? { ...mine, state: 'closed', confirmedAt: c.confirmedAt || new Date().toISOString() }
+        : c);
+      changed++;
+    }
+    if (changed === 0) return 0;
+    writeMemoryPayload(repoPath, sessions, commits, tombstones, [...byKey.values()]);
+    return changed;
+  } catch {
+    return 0;
   }
 }
 
@@ -800,11 +953,26 @@ export function buildMemoryContext(repoPath: string): string | null {
   }
 
   // Open TODOs carried across substantive sessions.
-  const todos: string[] = [];
-  for (const e of substantive) for (const t of e.openTodos || []) if (!todos.includes(t)) todos.push(t);
+  // Ids are printed so a session that deals with one of these can name it in
+  // an [Origin: Closes] marker. Confirmed closures are dropped: re-injecting a
+  // leftover that has already been discharged and landed is how the same ground
+  // gets covered twice.
+  const closedKeys = new Set(
+    (readMemoryPayload(repoPath).closedTodos || [])
+      .filter((c) => c.state === 'closed')
+      .map((c) => c.key),
+  );
+  const todos: { id: string; text: string }[] = [];
+  for (const e of substantive) {
+    for (const t of e.openTodos || []) {
+      if (closedKeys.has(todoClosureKey(t))) continue;
+      if (todos.some((x) => x.text === t)) continue;
+      todos.push({ id: todoDisplayId(t, e.sessionId), text: t });
+    }
+  }
   if (todos.length) {
-    parts.push('Open TODOs from previous sessions:');
-    for (const t of todos.slice(0, 5)) parts.push(`  - ${t}`);
+    parts.push('Open TODOs from previous sessions (close one with `[Origin: Closes] <id>`):');
+    for (const t of todos.slice(0, 5)) parts.push(`  - ${t.id}  ${t.text}`);
   }
 
   // How to run/confirm the recent work. Bounded to the most recent sessions and

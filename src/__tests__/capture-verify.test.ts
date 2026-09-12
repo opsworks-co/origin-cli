@@ -232,6 +232,39 @@ describe('verifyTurn', () => {
       .toEqual([]);
   });
 
+  it('counts the diff carried in uncommittedDiff when `diff` is empty', () => {
+    // The transcript watcher — the producer for every agent that fires no
+    // hooks — sends its per-turn text as `uncommittedDiff` and counts
+    // linesAdded from that SAME text. Reading `diff` alone graded every one of
+    // those rows as contradicting itself, inflating the contradiction rate this
+    // command exists to measure.
+    expect(codes({
+      promptIndex: 0, filesChanged: ['src/a.ts'],
+      diff: '', uncommittedDiff: MODIFY, linesAdded: 2, linesRemoved: 1,
+    })).toEqual([]);
+  });
+
+  it('still catches a disagreement when the content is in uncommittedDiff', () => {
+    // The fix must not become a blanket exemption: the check has to keep
+    // working on the field it newly reads.
+    const v = verifyTurn({
+      promptIndex: 0, filesChanged: ['src/a.ts'],
+      diff: '', uncommittedDiff: MODIFY, linesAdded: 0, linesRemoved: 0,
+    });
+    const hit = v.find((x) => x.code === 'line_counts_disagree_with_diff');
+    expect(hit?.detail).toMatch(/\+0\/-0.*\+2\/-1/);
+  });
+
+  it('does not double-count a row whose uncommittedDiff repeats its diff', () => {
+    // The hook path stores the COMBINED committed+uncommitted text in `diff`
+    // and repeats the uncommitted half in `uncommittedDiff`. Summing the two
+    // would report +4/-2 against a row that honestly recorded +2/-1.
+    expect(codes({
+      promptIndex: 0, filesChanged: ['src/a.ts'],
+      diff: MODIFY, uncommittedDiff: MODIFY, linesAdded: 2, linesRemoved: 1,
+    })).toEqual([]);
+  });
+
   it('tolerates an absolute path against a repo-relative diff', () => {
     expect(codes({ promptIndex: 0, filesChanged: ['/repo/src/a.ts'], diff: MODIFY })).toEqual([]);
   });

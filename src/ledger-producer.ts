@@ -15,22 +15,29 @@
 // or left alone, never blended.
 import { applyLedgerToMappings, type LedgerApplicableMapping } from './capture-from-ledger.js';
 import {
-  readJournalEntries, journalPathsForTag, startWriteJournal, markTurn,
+  readJournalEntries, journalPathsForTag, journalRootSlug, startWriteJournal, markTurn,
   journalWatcherIsLive, type JournalWatcher,
 } from './write-journal-watch.js';
 import { turnIdsInJournal } from './write-journal.js';
 import fs from 'fs';
 import { readFileAtRev, gitIgnoredFiles } from './git-capture.js';
 import { debugLog } from './debug-log.js';
+import { listActiveSessions, type SessionState } from './session-state.js';
+import { detectLiveContention } from './checkout-contention.js';
 
 /**
- * Write-journal watchers this process is holding open, keyed by session tag.
+ * Write-journal watchers this process is holding open, keyed by tag AND the
+ * tree each one is recording — the same key the journal file itself uses.
  *
  * Held IN-PROCESS rather than spawned. A daemon already runs for the life of
  * the session, so an in-process watcher needs no lock file, no orphan reaping
  * and no second node process per session.
+ *
+ * The lock path travels WITH the watcher rather than being re-derived on stop:
+ * the derivation now needs the root, and a stop that re-derived it from the tag
+ * alone would unlink somebody else's lock.
  */
-const journalWatchers = new Map<string, JournalWatcher>();
+const journalWatchers = new Map<string, { watcher: JournalWatcher; lockPath: string }>();
 /** The lock refreshers that go with them — see ensureInProcessJournal. */
 const lockRefreshers = new Map<string, NodeJS.Timeout>();
 /** Same cadence as the detached watcher, so a reader's staleness rule fits both. */
@@ -40,19 +47,43 @@ const LOCK_REFRESH_MS = 15_000;
  *  of recursive watchers. Sessions past this simply keep the old behaviour. */
 export const MAX_JOURNAL_WATCHERS = 12;
 
-/** Test hook: release every in-process journal watcher this module holds. */
-export function __stopAllJournalWatchers(): void {
-  for (const tag of [...journalWatchers.keys()]) stopJournalWatcher(tag);
+/**
+ * Map key for one (tag, tree) pair.
+ *
+ * The slug is fixed-length hex, so the space separates the two halves
+ * unambiguously and `stopJournalWatcher`'s tag-prefix sweep cannot match a
+ * longer tag that merely starts with a shorter one.
+ */
+function watcherKey(tag: string, root: string): string {
+  return `${tag} ${journalRootSlug(root)}`;
 }
 
-export function stopJournalWatcher(tag: string): void {
-  const t = lockRefreshers.get(tag);
-  if (t) { clearInterval(t); lockRefreshers.delete(tag); }
-  const w = journalWatchers.get(tag);
-  if (!w) return;
-  try { w.stop(); } catch { /* already gone */ }
-  journalWatchers.delete(tag);
-  try { fs.unlinkSync(journalPathsForTag(tag).lockPath); } catch { /* not ours, or gone */ }
+/** Test hook: release every in-process journal watcher this module holds. */
+export function __stopAllJournalWatchers(): void {
+  for (const key of [...journalWatchers.keys()]) stopWatcherByKey(key);
+}
+
+function stopWatcherByKey(key: string): void {
+  const t = lockRefreshers.get(key);
+  if (t) { clearInterval(t); lockRefreshers.delete(key); }
+  const held = journalWatchers.get(key);
+  if (!held) return;
+  try { held.watcher.stop(); } catch { /* already gone */ }
+  journalWatchers.delete(key);
+  try { fs.unlinkSync(held.lockPath); } catch { /* not ours, or gone */ }
+}
+
+/**
+ * Release this session's in-process watcher(s).
+ *
+ * A tag is shared by every worktree opened from one conversation, so callers
+ * must supply the tree their session owns.  A tag-wide stop is unsafe: ending
+ * a stale rollout in tree A would silently stop the still-live recorder in
+ * tree B and leave its remaining turns without observed-write evidence.
+ */
+export function stopJournalWatcher(tag: string, root: string): void {
+  if (!tag || !root) return;
+  stopWatcherByKey(watcherKey(tag, root));
 }
 
 /** How many in-process watchers are open right now. Exposed for tests. */
@@ -84,18 +115,23 @@ export function ensureInProcessJournal(
 ): void {
   if (!tag || !workRoot) return;
   try {
-    const { journalPath, snapshotDir, lockPath } = journalPathsForTag(tag);
+    // Keyed by tree as well as tag — see journalPathsForTag. Deferring to a
+    // lock held for a DIFFERENT tree is what made a session's every write
+    // invisible; now that tree has its own journal and its own lock, so there
+    // is nothing to defer to and nothing to contend with.
+    const { journalPath, snapshotDir, lockPath } = journalPathsForTag(tag, workRoot);
+    const key = watcherKey(tag, workRoot);
     // The hook path may already have a DETACHED watcher on this journal. Two
     // watchers would both append, doubling every record, so defer to it and
     // only contribute the turn mark below.
-    if (!journalWatchers.has(tag)
+    if (!journalWatchers.has(key)
       && !journalWatcherIsLive(lockPath)
       && journalWatchers.size < MAX_JOURNAL_WATCHERS) {
       const w = startWriteJournal(workRoot, journalPath, { snapshotDir });
       // null = no recursive watch on this platform; leave the map empty so the
       // next poll can retry rather than caching the failure forever.
       if (w) {
-        journalWatchers.set(tag, w);
+        journalWatchers.set(key, { watcher: w, lockPath });
         // OWN THE LOCK. The lock is how every producer tells the others a
         // recorder is live; an in-process watcher that held none was invisible
         // to the hook path, which then spawned a detached watcher beside it,
@@ -106,7 +142,7 @@ export function ensureInProcessJournal(
         claim();
         const timer = setInterval(claim, LOCK_REFRESH_MS);
         timer.unref?.();
-        lockRefreshers.set(tag, timer);
+        lockRefreshers.set(key, timer);
       }
     }
     const latest = turnIds[turnIds.length - 1];
@@ -132,6 +168,59 @@ export interface ProducerLedgerInputs {
 }
 
 /**
+ * A producer has only a journal tag, while the state store has the stable
+ * session id needed by contention detection.  If its state has not appeared
+ * yet, keep the legacy capture rather than guessing that some arbitrary
+ * session is ours. Once contention is observed, taint this journal for its
+ * remaining lifetime: records already written during the collision cannot
+ * become attributable merely because the peer exits before Stop runs.
+ */
+export function producerLedgerIsContended(tag: string, workRoot: string): boolean {
+  if (!tag || !workRoot) return false;
+  try {
+    const { journalPath } = journalPathsForTag(tag, workRoot);
+    const taintPath = `${journalPath}.contended`;
+    if (fs.existsSync(taintPath)) return true;
+    const sessions = listActiveSessions(workRoot);
+    const self = sessions.find((s) => s.sessionTag === tag);
+    if ((self?.contendingSessionIds?.length || 0) > 0) return true;
+    const report = self ? detectLiveContention(self, workRoot, sessions) : null;
+    if (!report?.contested) return false;
+    // This is a correctness marker, not a lock: it deliberately survives the
+    // peer's exit so contested records cannot be reclaimed on a later poll.
+    try {
+      fs.writeFileSync(taintPath, JSON.stringify({ at: Date.now(), peers: report.peers.map((p) => p.sessionId) }));
+    } catch { /* current collision still declines this capture */ }
+    return true;
+  } catch {
+    // The ledger is optional. An unreadable state store must not disable a
+    // capture path that was already available before journals existed.
+    return false;
+  }
+}
+
+/** The hook and heartbeat already have their own state, so no tag lookup. */
+export function stateLedgerIsContended(
+  state: Pick<SessionState, 'sessionId' | 'sessionTag' | 'writeJournalPath' | 'contendingSessionIds'>,
+  workRoot: string,
+): boolean {
+  if (!state.sessionId || !workRoot) return false;
+  try {
+    if ((state.contendingSessionIds?.length || 0) > 0) return true;
+    const tag = state.sessionTag || state.sessionId.slice(0, 12);
+    const { journalPath: derivedJournalPath } = journalPathsForTag(tag, workRoot);
+    const journalPath = state.writeJournalPath || derivedJournalPath;
+    if (fs.existsSync(`${journalPath}.contended`)) return true;
+    const report = detectLiveContention(state, workRoot);
+    if (!report.contested) return false;
+    try {
+      fs.writeFileSync(`${journalPath}.contended`, JSON.stringify({ at: Date.now(), peers: report.peers.map((p) => p.sessionId) }));
+    } catch { /* current collision still declines this capture */ }
+    return true;
+  } catch { return false; }
+}
+
+/**
  * Replace each row's capture with the ledger's, where the ledger has one.
  *
  * A row the ledger owns is marked `authoritative`: a ledger capture IS the
@@ -147,7 +236,7 @@ export function applyLedgerToProducerRows(
   rows: Array<LedgerApplicableMapping & Record<string, unknown>>,
   via: string,
 ): number {
-  const paths = journalPathsForTag(inputs.tag);
+  const paths = journalPathsForTag(inputs.tag, inputs.workRoot);
   const state = {
     writeJournalPath: paths.journalPath,
     writeSnapshotDir: paths.snapshotDir,
@@ -155,6 +244,7 @@ export function applyLedgerToProducerRows(
     promptShadows: inputs.promptShadows ? [...inputs.promptShadows] : undefined,
     prePromptSha: inputs.prePromptSha ?? null,
     headShaAtStart: inputs.headShaAtStart ?? null,
+    ledgerContended: producerLedgerIsContended(inputs.tag, inputs.workRoot),
   };
   const replaced = applyLedgerToMappings(state, rows, {
     readEntries: readJournalEntries,

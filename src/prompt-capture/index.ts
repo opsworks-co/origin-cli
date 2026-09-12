@@ -12,7 +12,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as fzstd from 'fzstd';
-import { convertCopilotEventsToClaude, cleanPrompt, isAgentInjectedEntry } from '../transcript.js';
+import { convertCopilotEventsToClaude, cleanPrompt, isAgentInjectedEntry, isCursorTranscriptUserEntry, transcriptPromptIfNew } from '../transcript.js';
 import { isInsideRepo, outOfRepoWrites, MAX_OUT_OF_REPO_FILES } from '../paths.js';
 import type { PromptCapture, PromptEdit, PromptEditOp, CaptureAgent } from './types.js';
 
@@ -814,6 +814,8 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
   // Prompts waiting for a turn to start (queued-prompt mode only).
   const pending: string[] = [];
   let current: PromptCapture | null = null;
+  let lastKeptPrompt: string | undefined;
+  let cursorTranscript = false;
 
   for (const line of lines) {
     let entry: any;
@@ -841,8 +843,10 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
     }
 
     if (type === 'user') {
-      const prompt = extractUserPromptText(entry);
+      if (isCursorTranscriptUserEntry(entry)) cursorTranscript = true;
+      const prompt = transcriptPromptIfNew(entry, lastKeptPrompt, cursorTranscript);
       if (prompt) {
+        lastKeptPrompt = prompt;
         if (hasTurnMarkers) {
           // A prompt also ends the open turn — Cursor doesn't always write a
           // turn_ended before the next one.

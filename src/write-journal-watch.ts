@@ -7,8 +7,10 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import * as crypto from 'crypto';
+import { normalizePath } from './paths.js';
 import {
-  serializeRecord, serializeTurnMark, parseJournal, parseJournalEntries, trimJournal,
+  serializeRecord, serializeTurnMark, serializeFence, parseJournal, parseJournalEntries, trimJournal,
   type WriteRecord, type JournalEntry,
 } from './write-journal.js';
 import { shouldIgnoreFile, isOriginAutoManagedPath } from './ignore-patterns.js';
@@ -72,19 +74,56 @@ export interface JournalWatcher {
 }
 
 /**
- * Where a session's journal and snapshot store live, derived from its tag.
+ * A short, stable fingerprint of a working tree, for the journal filename.
+ *
+ * Normalised first, so a symlinked temp root (/tmp → /private/tmp) and an 8.3
+ * short path on Windows fingerprint the same as their real directory — the
+ * same equality `samePath` gives, which is what every other tree comparison in
+ * the capture path uses. Case-folded on the two case-insensitive platforms for
+ * the same reason `samePath` folds there.
+ */
+export function journalRootSlug(root: string): string {
+  const norm = normalizePath(root);
+  const keyed = (process.platform === 'win32' || process.platform === 'darwin')
+    ? norm.toLowerCase()
+    : norm;
+  return crypto.createHash('sha256').update(keyed).digest('hex').slice(0, 8);
+}
+
+/**
+ * Where a session's journal and snapshot store live — keyed by its tag AND the
+ * working tree it is recording.
  *
  * Shared so the hook path (which CREATES them) and every reader compute the
- * same two paths. Deriving them independently is how one writer ends up
- * journalling to a file nobody reads — the failure mode this codebase already
- * has a guard for in paths.ts.
+ * same paths. Deriving them independently is how one writer ends up journalling
+ * to a file nobody reads — the failure mode this codebase already has a guard
+ * for in paths.ts.
+ *
+ * The ROOT is in the key because a tag alone does not identify a journal. A tag
+ * is derived from the conversation, and one conversation can be claimed for two
+ * different working trees — a session registered under the main checkout before
+ * its worktree existed, a producer that derives the repo differently from the
+ * hook path. Both then resolved to ONE `<tag>.jsonl`, and the second claimant
+ * found the first's lock fresh and silently deferred to it. Its watcher was
+ * watching a tree the session never wrote in, so every write was invisible:
+ * the journal held one turn mark and zero records, the lock stayed fresh
+ * because the wrong-tree watcher kept refreshing it, and no hook ever logged a
+ * spawn. Reproduced exactly by claiming one tag for two trees.
+ *
+ * `root` is optional only so a caller that genuinely has no tree (a cleanup
+ * sweep) can still name the legacy path; every creating caller passes one.
+ *
+ * A session whose state file already holds a `writeJournalPath` keeps reading
+ * THAT path, so journals written before this keep resolving — they are
+ * ephemeral anyway, and nothing migrates.
  */
-export function journalPathsForTag(tag: string): { journalPath: string; snapshotDir: string; lockPath: string } {
+export function journalPathsForTag(tag: string, root?: string | null): { journalPath: string; snapshotDir: string; lockPath: string } {
   const dir = path.join(os.homedir(), '.origin', 'journals');
+  const key = root ? `${tag}-${journalRootSlug(root)}` : tag;
   return {
-    journalPath: path.join(dir, `${tag}.jsonl`),
-    snapshotDir: path.join(dir, `${tag}.snapshots`),
-    lockPath: path.join(dir, `${tag}.lock`),
+    journalPath: path.join(dir, `${key}.jsonl`),
+    snapshotDir: path.join(dir, `${key}.snapshots`),
+    lockPath: path.join(dir, `${key}.lock`),
   };
 }
 
@@ -146,6 +185,10 @@ export function markTurn(journalPath: string, turnId: string, at = Date.now(), r
     fs.mkdirSync(path.dirname(journalPath), { recursive: true });
     fs.appendFileSync(journalPath, serializeTurnMark(reclaim && reclaim.length > 0 ? { at, turnId, reclaim } : { at, turnId }));
   } catch { /* best-effort, exactly like the writes */ }
+}
+
+export function fenceJournal(journalPath: string): void {
+  try { if (journalPath) fs.appendFileSync(journalPath, serializeFence(Date.now())); } catch { /* best effort */ }
 }
 
 /**
@@ -364,6 +407,7 @@ export function compactJournal(journalPath: string, now = Date.now(), snapshotDi
     const out: string[] = [];
     for (const e of entries) {
       if (e.kind === 'turn') { out.push(serializeTurnMark(e)); continue; }
+      if (e.kind === 'fence') { out.push(serializeFence(e.at)); continue; }
       const { kind: _k, ...rec } = e;
       if (keep.has(`${rec.file}\u0000${rec.at}`)) out.push(serializeRecord(rec));
     }

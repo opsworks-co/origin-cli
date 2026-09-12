@@ -82,6 +82,17 @@ export function enqueueFailedUpdate(
   err: any,
   log: Log = noop,
 ): boolean {
+  return writeQueueEntry(kind, sessionId, payload, err, log) !== null;
+}
+
+/** The entry writer behind enqueueFailedUpdate; returns the entry's file name so a caller can remove it. */
+function writeQueueEntry(
+  kind: QueueKind,
+  sessionId: string,
+  payload: any,
+  err: any,
+  log: Log = noop,
+): string | null {
   try {
     const entry: QueueEntry = {
       v: 1,
@@ -95,7 +106,7 @@ export function enqueueFailedUpdate(
     const body = JSON.stringify(entry);
     if (body.length > MAX_ENTRY_BYTES) {
       log('queue', 'entry exceeds size cap — dropped', { sessionId, kind, bytes: body.length });
-      return false;
+      return null;
     }
     const dir = queueDir();
     fs.mkdirSync(dir, { recursive: true });
@@ -113,11 +124,17 @@ export function enqueueFailedUpdate(
     log('queue', 'enqueued failed upload for retry', {
       sessionId, kind, bytes: body.length, error: entry.lastError,
     });
-    return true;
+    return name;
   } catch (e: any) {
     log('queue', 'enqueue itself failed (giving up on this payload)', { message: e?.message });
-    return false;
+    return null;
   }
+}
+
+/** Drop one queue entry by the name persistUpdateBeforeWork returned. */
+export function removeQueuedUpdate(name: string | null | undefined): void {
+  if (!name) return;
+  try { fs.unlinkSync(path.join(queueDir(), name)); } catch { /* already drained or gone */ }
 }
 
 function listEntryFiles(dir: string): string[] {
@@ -240,6 +257,41 @@ export async function drainUpdateQueue(
 }
 
 /**
+ * Write-ahead copy of a session PATCH, taken BEFORE work that might kill this
+ * process (a slow `captureGitState`, a shadow commit waiting on index.lock).
+ * `durableUpdateSession` only enqueues after a failed fetch; a SIGKILL during
+ * git never reaches that catch, so the payload is gone.
+ *
+ * Cursor session e24477e2: Stop built 4–5 prompt mappings then died inside
+ * `captureGitState({ fullContext: true })`; the overlapping next prompt's
+ * submit matched the session and died the same way. Neither reached
+ * `api.updateSession`.
+ *
+ * Returns the entry's name. The caller hands it to `durableUpdateSession` as
+ * `supersedes` when it sends the real payload: the entry is removed before
+ * the send, so a hook that finishes normally never replays a stale copy of
+ * itself (a replayed prompt list overwrites the server's — last write wins —
+ * and post-commit's copy carried a gitCapture). Only a hook that dies leaves
+ * the entry for the next drain. `status` is stripped: a late replay of
+ * `RUNNING` would reopen a session that has since ended.
+ */
+export function persistUpdateBeforeWork(
+  sessionId: string,
+  data: any,
+  log: Log = noop,
+): string | null {
+  const payload = data && typeof data === 'object' ? { ...data } : data;
+  if (payload && typeof payload === 'object') delete payload.status;
+  return writeQueueEntry(
+    'updateSession',
+    sessionId,
+    payload,
+    { message: 'pre-persisted before work that may not finish' },
+    log,
+  );
+}
+
+/**
  * updateSession that never loses the payload: drains this session's queued
  * backlog first (ordering), then sends. On retriable failure the payload is
  * queued and null is returned — callers treat null as "accepted for later".
@@ -249,7 +301,13 @@ export async function durableUpdateSession(
   sessionId: string,
   data: any,
   log: Log = noop,
+  opts: { supersedes?: string | null } = {},
 ): Promise<any | null> {
+  // The write-ahead copy this payload replaces (persistUpdateBeforeWork).
+  // Removed BEFORE the drain so it is neither replayed ahead of this send
+  // nor left behind for a later one; a retriable failure below re-enqueues
+  // the full payload, so nothing is lost in between.
+  removeQueuedUpdate(opts.supersedes);
   try {
     await drainUpdateQueue(log, { forSessionId: sessionId });
   } catch { /* drain is best-effort */ }

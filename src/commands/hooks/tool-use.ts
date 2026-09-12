@@ -22,7 +22,7 @@ import { spawn } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, PENDING_WRITE_TTL_MS, baselineShaForTree, currentSessionWorkTree, editContentBytes, enforceBudgetLockout, findStateForHook, hookLookupSessionId, isInsideRepo, liveCaptureEnabled, liveLedgerBytes, recordProbedShellEdits } from '../hooks.js';
+import { LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, PENDING_WRITE_TTL_MS, STABLE_SESSION_ID_AGENTS, baselineShaForTree, currentSessionWorkTree, resumeEndedConversationState, editContentBytes, enforceBudgetLockout, findStateForHook, hookLookupSessionId, isInsideRepo, liveCaptureEnabled, liveLedgerBytes, recordProbedShellEdits } from '../hooks.js';
 
 
 /** Cap so a long session cannot grow the claim list without bound. */
@@ -188,7 +188,13 @@ export async function handlePreToolUse(rawInput: Record<string, any>, agentSlug?
   debugLog('pre-tool-use', 'begin', { tool_name: input.tool_name, cwd: input.cwd });
 
   const hookCwd = input.cwd || process.cwd();
-  const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug), agentSlug);
+  let found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug, input.conversation_id), agentSlug);
+  // An idle end mid-conversation leaves the state ENDED and every tool hook
+  // aborting until the next prompt — see resumeEndedConversationState. An
+  // agent whose id is stable per conversation names its own row; bring it back.
+  if (!found && STABLE_SESSION_ID_AGENTS.includes(agentSlug || '')) {
+    found = resumeEndedConversationState(hookCwd, typeof input.session_id === 'string' ? input.session_id : undefined, agentSlug, 'pre-tool-use');
+  }
   if (!found) {
     debugLog('pre-tool-use', 'ABORT: no session state');
     return;
@@ -608,7 +614,13 @@ export async function handlePostToolUse(rawInput: Record<string, any>, agentSlug
   debugLog('post-tool-use', 'begin', { tool_name: input.tool_name, cwd: input.cwd });
 
   const hookCwd = input.cwd || process.cwd();
-  const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug), agentSlug);
+  let found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug, input.conversation_id), agentSlug);
+  // An idle end mid-conversation leaves the state ENDED and every tool hook
+  // aborting until the next prompt — see resumeEndedConversationState. An
+  // agent whose id is stable per conversation names its own row; bring it back.
+  if (!found && STABLE_SESSION_ID_AGENTS.includes(agentSlug || '')) {
+    found = resumeEndedConversationState(hookCwd, typeof input.session_id === 'string' ? input.session_id : undefined, agentSlug, 'post-tool-use');
+  }
   if (!found) {
     debugLog('post-tool-use', 'ABORT: no session state');
     return;

@@ -32,19 +32,11 @@ function probe(file: string) {
 }
 
 describe('pricing regression — Cursor', () => {
-  // Cursor's char-based estimator (chars/3.5 × CONTEXT_MULTIPLIER)
-  // lives inside `discoverCursorTranscript` in hooks.ts, which is too
-  // coupled to file-system discovery (~/.cursor/projects/<ws>/...) to
-  // test in isolation. parseTranscript walks Cursor JSONL but skips
-  // tokens (Cursor exposes none in the transcript), so a direct
-  // regression here would assert "0 tokens" — not informative.
-  //
-  // Coverage proxy: the OpenAI-cache pricing test in pricing.test.ts
-  // already validates the math the cursor model falls through to,
-  // and the constants CHARS_PER_TOKEN / CONTEXT_MULTIPLIER are
-  // single-source. If we ever wire Cursor token extraction into a
-  // testable path (e.g. when Cursor's API starts exposing usage),
-  // add a real fixture-driven case here.
+  // Cursor's char-based estimator lives in agents/cursor.ts
+  // (estimateCursorTokens / measureCursorJsonlTokens). parseTranscript
+  // walks Cursor JSONL but skips tokens (Cursor exposes none in the
+  // transcript), so a direct regression here asserts "0 tokens".
+  // The real estimator is covered by cursor-token-estimate.test.ts.
   it('parseTranscript returns 0 tokens for Cursor JSONL (estimator is elsewhere)', () => {
     const p = probe('cursor-strreplace-3-prompts.jsonl');
     expect(p.inputTokens).toBe(0);

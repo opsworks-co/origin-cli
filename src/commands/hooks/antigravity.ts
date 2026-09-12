@@ -468,7 +468,7 @@ export function registerAgySessionState(opts: {
 }): void {
   try {
     const tag = agySessionTag(opts.conversationId);
-    const journal = journalPathsForTag(tag);
+    const journal = journalPathsForTag(tag, opts.workRoot || opts.repoPath);
     const existing = loadSessionState(opts.repoPath, tag);
     const now = new Date().toISOString();
     // Accumulate the set of files this session has touched across syncs, so
@@ -809,7 +809,7 @@ export async function handleAntigravity(event: string, input: Record<string, any
   // are derived from one text and cannot disagree.
   let ledgerOwned = false;
   try {
-    const jp = journalPathsForTag(agySessionTag(conversationId));
+    const jp = journalPathsForTag(agySessionTag(conversationId), workRoot);
     const row: Record<string, unknown> & { promptIndex: number } = { promptIndex: currentIdx, filesChanged, diff, linesAdded, linesRemoved };
     const owned = applyLedgerToMappings({
       writeJournalPath: jp.journalPath,

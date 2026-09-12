@@ -16,12 +16,13 @@ import path from 'path';
 import http from 'http';
 import { execFileSync, spawn, type ChildProcess } from 'child_process';
 import { fileURLToPath } from 'url';
+import { journalPathsForTag } from '../write-journal-watch.js';
 import { verifyTurn, parseUnifiedDiff } from '../capture-verify.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
 const haveDist = fs.existsSync(BIN);
-const posix = process.platform !== 'win32';
 
 type Hit = { method: string; url: string; body: any };
 const hits: Hit[] = [];
@@ -83,14 +84,45 @@ function shellRan(cmd: string) {
 function rowsSent(): any[][] {
   return hits.filter((h) => h.method === 'PATCH' && Array.isArray(h.body?.promptChanges)).map((h) => h.body.promptChanges);
 }
+
+/**
+ * The daemon can send a later partial PATCH after it has sent the row this
+ * assertion is waiting for.  Read the newest matching row, not the last
+ * payload wholesale: the server folds PATCHes by prompt index and the test
+ * must model that asynchronous wire shape too.
+ */
+function latestSentRow(
+  payloads: readonly any[][],
+  matches: (row: any) => boolean,
+): any | null {
+  for (let payloadIndex = payloads.length - 1; payloadIndex >= 0; payloadIndex--) {
+    const rows = payloads[payloadIndex];
+    for (let rowIndex = rows.length - 1; rowIndex >= 0; rowIndex--) {
+      if (matches(rows[rowIndex])) return rows[rowIndex];
+    }
+  }
+  return null;
+}
 function journalPath(): string {
-  return path.join(os.homedir(), '.origin', 'journals', `${THREAD.slice(0, 12)}.jsonl`);
+  // Keyed by tag AND tree — a tag alone no longer names one journal.
+  return journalPathsForTag(THREAD.slice(0, 12), repo).journalPath;
 }
 function writesIn(): number {
   try { return fs.readFileSync(journalPath(), 'utf-8').split('\n').filter((l) => l.startsWith('{"f"')).length; } catch { return 0; }
 }
 
-describe.skipIf(!haveDist || !posix)('codex capture end to end through the built daemon', () => {
+describe('Codex e2e payload selection', () => {
+  it('does not discard a settled ledger row for a later empty PATCH', () => {
+    const ledgerRow = { promptIndex: 0, diffSource: 'ledger', linesAdded: 1 };
+    const row = latestSentRow([
+      [ledgerRow],
+      [], // a poll can legitimately send no prompt changes after the ledger row
+    ], (candidate) => candidate.promptIndex === 0 && candidate.diffSource === 'ledger');
+    expect(row).toBe(ledgerRow);
+  });
+});
+
+describe.skipIf(!haveDist)('codex capture end to end through the built daemon', () => {
   let tmp = '';
 
   beforeAll(async () => {
@@ -135,7 +167,7 @@ describe.skipIf(!haveDist || !posix)('codex capture end to end through the built
     });
     daemon.stderr?.on('data', (c) => { daemonErr += c; });
     daemon.stdout?.on('data', (c) => { daemonErr += c; });
-  }, 60_000);
+  }, 60_000 * WINDOWS_SLOWDOWN);
 
   afterAll(async () => {
     if (process.env.E2E_DUMP) {
@@ -172,9 +204,13 @@ describe.skipIf(!haveDist || !posix)('codex capture end to end through the built
     // Touch the rollout so the next poll sees activity.
     shellRan('git status');
 
-    await waitFor(() => rowsSent().some((rows) => rows.some((r) => r.promptIndex === 0 && r.diffSource === 'ledger')), 30_000, 'a ledger-sourced row for turn 0');
-    const all = rowsSent();
-    const t1 = all[all.length - 1].find((r: any) => r.promptIndex === 0);
+    await waitFor(
+      () => latestSentRow(rowsSent(), (r) => r.promptIndex === 0 && r.diffSource === 'ledger') !== null,
+      30_000,
+      'a ledger-sourced row for turn 0',
+    );
+    const t1 = latestSentRow(rowsSent(), (r) => r.promptIndex === 0 && r.diffSource === 'ledger');
+    if (!t1) throw new Error('the ledger row disappeared after the wait');
     expect(t1.diffSource).toBe('ledger');
     expect(t1.turnId).toMatch(/^[tw]_/);
     expect(t1.authoritative).toBe(true);
@@ -186,5 +222,5 @@ describe.skipIf(!haveDist || !posix)('codex capture end to end through the built
     expect(t1.linesRemoved).toBe(1);
     expect(parseUnifiedDiff(t1.diff).files[0].isNew).toBe(false);
     expect(verifyTurn({ promptIndex: 0, filesChanged: t1.filesChanged, diff: t1.diff, linesAdded: t1.linesAdded, linesRemoved: t1.linesRemoved })).toEqual([]);
-  }, 120_000);
+  }, 120_000 * WINDOWS_SLOWDOWN);
 });

@@ -28,6 +28,11 @@ const DEFAULT_IGNORE_PATTERNS = [
   '*.map',
   // Directories
   '**/node_modules/**',
+  // pnpm's content-addressable store. A sandbox `pnpm install` in a worktree
+  // materialises `.pnpm-store/v10/**` as untracked files; session 562314d8
+  // billed that as 51 files / +5262 on a chat turn. Same class as
+  // node_modules — never authored, never the agent's work.
+  '**/.pnpm-store/**',
   '**/vendor/**',
   '**/__snapshots__/**',
   '**/dist/**',
@@ -36,9 +41,26 @@ const DEFAULT_IGNORE_PATTERNS = [
   // Snapshots
   '**/*.snap',
   '**/*.snap.new',
-  // Database migrations metadata
+  // Database migrations metadata.
+  //
+  // `drizzle/meta` is pure bookkeeping — a journal plus snapshot JSON the tool
+  // regenerates — so the whole directory goes.
+  //
+  // Prisma's is NOT. `**/prisma/migrations/**` used to match here too, and it
+  // took the migration BODIES with it: a hand-written `migration.sql` is the
+  // schema change, reviewed and argued over like any other source file. Losing
+  // it is not cosmetic — the file reaches no turn's file list, no per-prompt
+  // diff, and no AI Blame, while the session header still counts it (that comes
+  // from git, not the journal). The session then reads "11 of 12 files" with no
+  // way to find the twelfth. Observed on 824daa22, whose
+  // `20260907_repo_memory/migration.sql` was authored, committed and invisible.
+  //
+  // Only the lock file is genuinely generated bookkeeping, so only it is
+  // ignored. A migration body that Prisma DID generate is captured, and that is
+  // the right answer for the same reason `package-lock.json`'s sibling
+  // generated files are: the agent caused it and it ships in the commit.
   '**/drizzle/meta/**',
-  '**/prisma/migrations/**',
+  '**/prisma/migrations/migration_lock.toml',
   // Origin auto-managed agent-rules files. The CLI writes these as a
   // per-repo agent rules buffer (`<!-- origin-managed -->` blocks); the
   // churn they generate is bookkeeping, not the agent's actual work, and
@@ -64,6 +86,22 @@ const DEFAULT_IGNORE_PATTERNS = [
   '.codex/hooks.json',
   '.github/hooks/origin.json',
   '.agents/hooks.json',
+  // Claude Code's dev-server launch config. The harness WRITES THIS ITSELF,
+  // unprompted: opening the Browser pane creates `.claude/launch.json` when the
+  // project has none, so it appears in a turn nobody asked to configure
+  // anything in. Prod 4968c7df turn 1 was "honestly, I think the design of our
+  // website is shit… What do you think?" — a pure opinion question, whose
+  // ledger recorded `{file: ".claude/launch.json", op: "create"}` and +11
+  // authored lines. Turn 7 ("what is next?") then carried the matching -11 when
+  // the file was removed, which is why the session footer read
+  // `-161 authored · -172 across turns`.
+  //
+  // Sits with the hook-config files above rather than with
+  // `.claude/settings.json` below for one reason: a person writes settings.json,
+  // and tooling writes this. A user who does hand-maintain a launch config
+  // loses attribution for it, which is the right side to err on — a question
+  // turn claiming to have authored a file is the worse error.
+  '.claude/launch.json',
   // Claude Code's parallel-branch worktrees. They show up as submodule
   // (160000 mode) entries in git diff when Cursor / other agents run in
   // a repo that previously hosted Claude Code worktrees. They aren't the
@@ -327,5 +365,27 @@ export function stripIgnoredSectionsFromDiff(
     if (ORIGIN_AUTO_MANAGED_BASENAMES.has(basename)) continue;
     kept.push(part);
   }
-  return kept.join('').trim();
+  return trimDiffText(kept.join(''));
+}
+
+/**
+ * Trim diff text WITHOUT destroying a trailing empty context line.
+ *
+ * `.trim()` cannot be used on a unified diff. An unchanged blank line is
+ * emitted as a single space, so a file ending in a blank line produces a diff
+ * ending `…\n \n` — and `.trim()` eats that last `" "` along with the newline.
+ * The hunk body is then ONE LINE SHORT of the count in its `@@` header: `git
+ * apply` rejects it, and `verify-capture` reports `diff_unparseable`.
+ *
+ * Measured on session `593241fe` turn 9 (2026-09-11): a whole-file diff of
+ * `packages/cli/src/transcript.ts`, which ends `}\n\n`, stored with a header
+ * claiming `@@ -1,3186 +1,3228 @@` over a body of 3185/3227 lines.
+ *
+ * `\n+$` is the correct stripper and is what the commit-patch path at
+ * git-capture.ts already used: an empty context line is a SPACE, so it
+ * survives, while the trailing newline does not. Only `-`/`+` lines for blank
+ * lines were ever safe under `.trim()` — they are not whitespace-only.
+ */
+export function trimDiffText(diffText: string): string {
+  return String(diffText || '').replace(/^\n+/, '').replace(/\n+$/, '');
 }

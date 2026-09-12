@@ -28,6 +28,8 @@ import {
   durableEndSession,
   drainUpdateQueue,
   enqueueFailedUpdate,
+  persistUpdateBeforeWork,
+  removeQueuedUpdate,
   isRetriableApiError,
 } from '../update-queue.js';
 
@@ -178,5 +180,61 @@ describe('drainUpdateQueue', () => {
     expect(res.dropped).toBe(1);
     expect(res.replayed).toBe(1);
     expect(entryFiles()).toHaveLength(0);
+  });
+});
+
+describe('persistUpdateBeforeWork', () => {
+  it('writes the payload to the queue without waiting for a failed fetch, and names the entry', () => {
+    const name = persistUpdateBeforeWork('sess-kill', { prompt: 'where is prompt 3?' });
+    expect(typeof name).toBe('string');
+    expect(entryFiles()).toEqual([name]);
+    expect(updateSession).not.toHaveBeenCalled();
+  });
+
+  it('never carries status — a late replay of RUNNING would reopen an ended session', () => {
+    persistUpdateBeforeWork('sess-kill', { prompt: 'p', status: 'RUNNING' });
+    const entry = JSON.parse(fs.readFileSync(path.join(QUEUE_DIR, entryFiles()[0]), 'utf-8'));
+    expect(entry.payload).toEqual({ prompt: 'p' });
+  });
+
+  it('a later drain delivers the pre-persisted PATCH when the hook died', async () => {
+    persistUpdateBeforeWork('sess-kill', { prompt: 'prompt 3' });
+    updateSession.mockResolvedValueOnce({});
+    const res = await drainUpdateQueue();
+    expect(res.replayed).toBe(1);
+    expect(updateSession).toHaveBeenCalledWith('sess-kill', { prompt: 'prompt 3' });
+    expect(entryFiles()).toHaveLength(0);
+  });
+
+  it('the real send supersedes it: sent once, with the fresh payload, and the entry is gone', async () => {
+    // The hook finished normally. Without `supersedes` the in-process drain
+    // replayed the stale copy first (two PATCHes per prompt), and when the
+    // drain lock was held the copy outlived the send and replayed later over
+    // newer state — a shorter prompt list overwriting a longer one.
+    const name = persistUpdateBeforeWork('sess-ok', { prompt: 'p1' });
+    updateSession.mockResolvedValueOnce({ ok: true });
+    await durableUpdateSession('sess-ok', { prompt: 'p1\n\n---\n\np2', tokensUsed: 5 }, undefined, { supersedes: name });
+    expect(updateSession).toHaveBeenCalledTimes(1);
+    expect(updateSession).toHaveBeenCalledWith('sess-ok', { prompt: 'p1\n\n---\n\np2', tokensUsed: 5 });
+    expect(entryFiles()).toHaveLength(0);
+  });
+
+  it('a retriable failure of the superseding send still leaves the FULL payload queued', async () => {
+    const name = persistUpdateBeforeWork('sess-down', { prompt: 'p1' });
+    updateSession.mockRejectedValueOnce(netErr());
+    await durableUpdateSession('sess-down', { prompt: 'p1', tokensUsed: 5 }, undefined, { supersedes: name });
+    expect(entryFiles()).toHaveLength(1);
+    const entry = JSON.parse(fs.readFileSync(path.join(QUEUE_DIR, entryFiles()[0]), 'utf-8'));
+    expect(entry.payload).toEqual({ prompt: 'p1', tokensUsed: 5 });
+  });
+
+  it('removeQueuedUpdate drops exactly the named entry', () => {
+    const a = persistUpdateBeforeWork('s', { prompt: 'a' });
+    const b = persistUpdateBeforeWork('s', { prompt: 'b' });
+    removeQueuedUpdate(a);
+    expect(entryFiles()).toEqual([b]);
+    removeQueuedUpdate('does-not-exist.json');
+    removeQueuedUpdate(null);
+    expect(entryFiles()).toEqual([b]);
   });
 });

@@ -256,6 +256,12 @@ export const api = {
       `/api/mcp/push-check${agentSlug ? `?agentSlug=${encodeURIComponent(agentSlug)}` : ''}`,
       signal ? { signal } : {},
     ),
+  // Ask the server to re-read this repo's memory notes off the git host, right
+  // after the CLI pushed them. Hosts send no webhook for refs/notes/*, so this
+  // is the only prompt the dashboard gets between branch pushes. Bounded by
+  // `timeoutMs` because it runs from hooks.
+  refreshRepoMemory: (data: { repoPath: string; repoUrl?: string }, timeoutMs?: number) =>
+    request('/api/mcp/repos/memory/refresh', { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
   getMe: async () => {
     const res = await request('/api/auth/me');
     assertObj(res, 'getMe');

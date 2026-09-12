@@ -61,10 +61,14 @@ describe('stateMatchesIncomingChat', () => {
     expect(matches).toBe(true);
   });
 
-  it('falls back to session_id when Cursor sends no conversation_id', () => {
+  it('does not treat a rotating session_id as a new Cursor chat', () => {
+    // Cursor's session_id changes every turn. Using it as a fallback chat
+    // id made prompt 2 detach from the session-start row and mint a twin
+    // (prod: locked 6f636f7d, incoming c49a1512). Only conversation_id can
+    // prove a mismatch; a missing conversation_id is adopted.
     expect(
       stateMatchesIncomingChat(stateFor(), 'cursor', { session_id: 'b1bcba95-2fe1' }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       stateMatchesIncomingChat(stateFor(), 'cursor', {
         session_id: 'ceb22e9b-2218-474c-be65-ecf73edda086',

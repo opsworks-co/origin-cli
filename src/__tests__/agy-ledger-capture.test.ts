@@ -90,7 +90,7 @@ const waitFor = async (cond: () => boolean, timeoutMs = 10_000): Promise<void> =
     if (cond()) return;
     await new Promise((r) => setTimeout(r, 25));
   }
-  const jp = journalPathsForTag(TAG);
+  const jp = journalPathsForTag(TAG, repo);
   let journal = '';
   try {
     const st = fs.statSync(jp.journalPath);
@@ -133,7 +133,7 @@ beforeEach(() => {
   // Same for the journal: a fresh lock means "a watcher is live", so the hook
   // marks the turn and spawns nothing. The watcher itself runs IN-PROCESS here
   // on the exact paths the hook derives, which is what a detached one would do.
-  const jp = journalPathsForTag(TAG);
+  const jp = journalPathsForTag(TAG, repo);
   fs.mkdirSync(path.dirname(jp.lockPath), { recursive: true });
   fs.writeFileSync(jp.lockPath, String(process.pid));
   watcher = startWriteJournal(repo, jp.journalPath, { snapshotDir: jp.snapshotDir });
@@ -152,7 +152,7 @@ afterEach(() => {
 describe('antigravity hook path + ledger', () => {
   it('opens the turn at pre-tool-use and takes the Stop row from the write journal', async () => {
     if (!watcher) return; // no recursive watch on this platform
-    const jp = journalPathsForTag(TAG);
+    const jp = journalPathsForTag(TAG, repo);
     const writesIn = () => readJournalEntries(jp.journalPath).filter((e) => e.kind === 'write').length;
 
     // Prove the watcher is armed with a gitignored probe first (FSEvents can
@@ -226,7 +226,7 @@ describe('antigravity hook path + ledger', () => {
   // Windows box gets the directory listing rather than an empty string.
   it.skipIf(process.platform === 'win32')('a second turn gets its own mark, and its diff is only its own write', async () => {
     if (!watcher) return;
-    const jp = journalPathsForTag(TAG);
+    const jp = journalPathsForTag(TAG, repo);
     const writesIn = () => readJournalEntries(jp.journalPath).filter((e) => e.kind === 'write').length;
     const probe = path.join(repo, '.probe');
     for (let i = 0; i < 200 && writesIn() === 0; i++) {

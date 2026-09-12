@@ -8,15 +8,19 @@ import { discoverGeminiTranscriptPath } from '../../agents/gemini.js';
 import { isSpecificModel, sessionMatchesAgent } from '../../agents/registry.js';
 import { api } from '../../api.js';
 import { preferCommitPatchForCommittedTurns } from '../../commit-patch-for-committed-turn.js';
+import { preferShadowRangeForTurns } from '../../prefer-shadow-range.js';
+import { recoverCommittedTurnProofs, rehomeGitOnlyCommitStamp } from '../../rehome-git-only-commit-stamp.js';
 import { backfillCodexPromptMappings } from '../../codex-prompt-mapping.js';
 import { isConnectedMode, loadAgentConfig, loadConfig } from '../../config.js';
 import { debugLog } from '../../debug-log.js';
 import { queueDevinBackfill } from '../../devin-backfill.js';
 import { discoverDevinCliSessionDataByPrompt, retagDevinFromProcess } from '../../devin-cli.js';
 import { readDevinLiveSession } from '../../devin-sessions-db.js';
-import { capDiff } from '../../diff-budget.js';
+import { fitDiffToBudget } from '../../diff-budget.js';
 import { finalHunksForCaptures } from '../../final-state-blame.js';
-import { MAX_PROMPT_DIFF_LEN, captureGitState, createShadowCommit, getDirtyFiles, gitIgnoredFiles, readFileAtRev } from '../../git-capture.js';
+import { MAX_PROMPT_DIFF_LEN, captureGitState, createShadowCommit, fillMissingCommitPatches, getDirtyFiles, gitIgnoredFiles, readFileAtRev, sameSha } from '../../git-capture.js';
+import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
+import type { CommitDetailWire } from '../../git-capture.js';
 import { writeGitNotes } from '../../git-notes.js';
 import { extractTodosFromPrompts, handoffRepresentsWork, writeHandoff } from '../../handoff.js';
 import { isOriginAutoManagedPath, shouldIgnoreFile } from '../../ignore-patterns.js';
@@ -27,14 +31,14 @@ import type { PromptEdit } from '../../prompt-capture/index.js';
 import { editSourceForAgent } from '../../prompt-capture/types.js';
 import { uploadPromptImages } from '../../prompt-images.js';
 import { redactSecrets } from '../../redaction.js';
-import { closeTurn, discoverGitRoot, getBranch, getCanonicalRepoPath, getGitRoot, getHeadSha, getWorkingGitRoot, homePromptIndexByText, reconcilePromptHistory, saveSessionState } from '../../session-state.js';
+import { clipMappingsToPromptHistory, closeTurn, discoverGitRoot, getBranch, getCanonicalRepoPath, getGitRoot, getHeadSha, getWorkingGitRoot, homePromptIndexByText, reconcilePromptHistory, samePromptText, saveSessionState, stampCaptured } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import type { ParsedTranscript } from '../../transcript.js';
 import { samePath, shellWindowTarget } from '../../session-worktree.js';
 import { SUBAGENT_SPAWN_TOOLS, detectRenamedSpawner } from '../../subagent-tools.js';
 import { countDiffLines } from '../../transcript-adapters.js';
 import { estimateCost, extractPromptFileMappings, formatTranscriptForDisplay, parseTranscript, scopeCapturedPath } from '../../transcript.js';
-import { durableUpdateSession } from '../../update-queue.js';
+import { durableUpdateSession, persistUpdateBeforeWork } from '../../update-queue.js';
 import { querySqlite } from '../../utils/sqlite.js';
 import { readJournal } from '../../write-journal-watch.js';
 import { filesWrittenDuring } from '../../write-journal.js';
@@ -43,7 +47,9 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyLedgerCaptures, applyLiveLedger, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, currentSessionWorkTree, editContentBytes, ensureServerSession, filterUncommittedDiff, findStateForHook, getWorkingTreeSha, hookLookupSessionId, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
+import { serverRowForLocalTurn, turnIdForServerRow } from '../../turn-index.js';
+import { firstUnanchoredPrompt, markSkippedPromptBaselines, recordPromptShadow } from '../../session-state.js';
+import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, applyLiveLedger, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesNamedInDiff, filterUncommittedDiff, findStateForHook, getWorkingTreeSha, hookLookupSessionId, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
 
 
 // ─── Debug Logger ─────────────────────────────────────────────────────────
@@ -52,8 +58,8 @@ import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE
 // Durable upload wrappers (update-queue.ts) bound to this file's debugLog.
 // On a retriable API failure the payload is persisted to ~/.origin/queue/
 // and replayed by a later hook — capture data is never silently lost.
-export const durableUpdate = (sessionId: string, data: any) =>
-  durableUpdateSession(sessionId, data, (e, m, d) => debugLog(e, m, d));
+export const durableUpdate = (sessionId: string, data: any, opts: { supersedes?: string | null } = {}) =>
+  durableUpdateSession(sessionId, data, (e, m, d) => debugLog(e, m, d), opts);
 
 // FIX 3 — SESSION-LEVEL pre-existing-dirt exclusion.
 //
@@ -159,9 +165,108 @@ export function buildSubagentSummary(
 }
 
 /** The (orphan → rewrite) pairs to send with a gitCapture, or nothing. */
+/** One entry per commit: two shas that abbreviate each other collapse to the longer one. */
+export function uniqueShas(shas: string[]): string[] {
+  const out: string[] = [];
+  for (const sha of shas) {
+    if (!sha) continue;
+    const i = out.findIndex((o) => sameSha(o, sha));
+    if (i === -1) out.push(sha);
+    else if (sha.length > out[i].length) out[i] = sha;
+  }
+  return out;
+}
+
+/**
+ * Attested shas worth a `git show` this Stop: post-commit's and the
+ * transcript's, minus the orphans a rebase rewrote away (they stay in the
+ * object db, so `git show` would happily resurrect a superseded row — the
+ * #1446 double-count), minus shas already rescued this session (the server
+ * keeps the first patch it gets; re-sending is spawn cost with no effect),
+ * minus shas the range walk already carries.
+ */
+export function rescuableShas(state: SessionState, inHand: string[]): string[] {
+  const rewrittenFrom = (state.rewrittenCommits || []).map((r) => r.from);
+  const rescued = state.rescuedCommitShas || [];
+  const attested = [
+    ...(state.sessionCommitShas || []),
+    ...(state.commitTurns || []).map((c) => c.sha),
+    ...(state.rewrittenCommits || []).map((r) => r.to),
+  ];
+  const out: string[] = [];
+  for (const sha of attested) {
+    if (!sha) continue;
+    if (rewrittenFrom.some((f) => sameSha(f, sha))) continue;
+    if (rescued.some((r) => sameSha(r, sha))) continue;
+    if (inHand.some((h) => sameSha(h, sha))) continue;
+    if (out.some((o) => sameSha(o, sha))) continue;
+    out.push(sha);
+  }
+  return out;
+}
+
+/** Record the shas fillMissingCommitPatches added beyond what the walk had. */
+function rememberRescued(state: SessionState, details: CommitDetailWire[], fromWalk: CommitDetailWire[]): void {
+  const added = details.filter((d) => !fromWalk.some((w) => sameSha(w.sha, d.sha))).map((d) => d.sha);
+  if (added.length === 0) return;
+  state.rescuedCommitShas = uniqueShas([...(state.rescuedCommitShas || []), ...added]);
+}
+
 export function rewrittenCommitsPayload(state: SessionState): { rewrittenCommits?: Array<{ from: string; to: string }> } {
   const r = state.rewrittenCommits;
   return Array.isArray(r) && r.length > 0 ? { rewrittenCommits: r } : {};
+}
+
+const HEX_SHA = /^[a-fA-F0-9]{7,40}$/;
+
+/**
+ * Shas this session has already claimed — post-commit, rewrite rescue, or
+ * both. Stop must `git show` these even when the session snapshot already
+ * exists: that snapshot used to skip the patch rescue, so a GitHub webhook
+ * row (message + file list, null patch) stayed files-only (d30d8c99).
+ *
+ * Superseded shas stay IN, unlike `rescuableShas`: the orphan's Commit row was
+ * created by a pre-rebase webhook and filling its patch is worth doing, and the
+ * server unlinks it from the session anyway (`applyCommitSupersession`), keeping
+ * the row as the record of what git once held.
+ *
+ * Already-rescued shas come OUT, for the reason `rescuableShas` gives: the
+ * server keeps the FIRST patch it gets, so re-offering buys nothing and costs
+ * two subprocesses per sha (`patchForCommitSha` + `commitMetaForSha`) on a hook
+ * Cursor fires once per generation.
+ */
+export function attestedCommitShas(state: {
+  sessionCommitShas?: string[];
+  commitTurns?: Array<{ sha?: string }>;
+  rewrittenCommits?: Array<{ from?: string; to?: string }>;
+  rescuedCommitShas?: string[];
+}): string[] {
+  const out: string[] = [];
+  const alreadyRescued = state.rescuedCommitShas || [];
+  const seen = (sha: string) => {
+    const key = sha.toLowerCase();
+    return out.some((h) => h.toLowerCase() === key || h.toLowerCase().startsWith(key) || key.startsWith(h.toLowerCase()));
+  };
+  const add = (s?: string) => {
+    const t = (s || '').trim();
+    if (!HEX_SHA.test(t) || seen(t)) return;
+    if (alreadyRescued.some((r) => sameSha(r, t))) return;
+    out.push(t);
+  };
+  for (const s of state.sessionCommitShas || []) add(s);
+  for (const c of state.commitTurns || []) add(c.sha);
+  for (const r of state.rewrittenCommits || []) add(r.to);
+  return out;
+}
+
+/** True when `head` is one of the shas this session already claimed. */
+export function headIsAttested(head: string | null | undefined, attested: string[]): boolean {
+  const h = (head || '').trim().toLowerCase();
+  if (!HEX_SHA.test(h)) return false;
+  return attested.some((s) => {
+    const k = s.toLowerCase();
+    return h === k || h.startsWith(k) || k.startsWith(h);
+  });
 }
 
 /**
@@ -483,7 +588,15 @@ export function keepRicherTurnCapture<
     // voted against a fresh guess by string length.
     if ((prior as { diffSource?: string }).diffSource === 'ledger'
       && (pm as { diffSource?: string }).diffSource !== 'ledger') {
-      return { ...pm, ...prior, promptIndex: pm.promptIndex } as T;
+      // Prior may carry `commitSha: null` from an earlier Stop that ran
+      // before the commit existed. Spreading it over a later synth that
+      // finally has the sha (d30d8c99: mapping logged the sha, payload `c:null`)
+      // would wipe the stamp and leave the Commit row unlinked to the turn.
+      const merged = { ...pm, ...prior, promptIndex: pm.promptIndex } as T;
+      const curSha = (pm as { commitSha?: string | null }).commitSha;
+      const priorSha = (prior as { commitSha?: string | null }).commitSha;
+      if (curSha && !priorSha) (merged as { commitSha?: string | null }).commitSha = curSha;
+      return merged;
     }
     const curFiles = Array.isArray(pm.filesChanged) ? pm.filesChanged : [];
     const claimedFiles = Array.isArray(prior.filesChanged) ? prior.filesChanged : [];
@@ -636,14 +749,7 @@ export function sessionFilesFromRangeCapture(
  * base — wrote 3. Both landed, and its `completedPromptMappings` ended up
  * holding the SAME prompt text at index 0 AND index 3.
  */
-export function serverRowForLocalTurn(
-  localIndex: number,
-  promptIndexBase: number | undefined | null,
-): number {
-  if (!Number.isFinite(localIndex) || localIndex < 0) return localIndex;
-  const base = Number.isFinite(promptIndexBase as number) ? (promptIndexBase as number) : 0;
-  return base > 0 ? base + localIndex : localIndex;
-}
+export { serverRowForLocalTurn };
 
 /** Persist the budget signal carried on a session PATCH response. */
 export function applyBudgetSignal(state: SessionState, apiResponse: unknown, saveCwd: string): void {
@@ -816,9 +922,9 @@ function backfillCodexRollout({ codexData, parsed, state, displayTranscript }: {
               m => m.promptIndex === bf.promptIndex,
             );
             if (existingIdx >= 0) {
-              state.completedPromptMappings[existingIdx] = bf;
+              state.completedPromptMappings[existingIdx] = stampCaptured(bf);
             } else {
-              state.completedPromptMappings.push(bf);
+              state.completedPromptMappings.push(stampCaptured(bf));
             }
           }
           state.completedPromptMappings.sort((a, b) => a.promptIndex - b.promptIndex);
@@ -1019,15 +1125,16 @@ function resolveModelFromCursorDb({ model, agentSlug, input }: { model: string; 
       model = cursorDbModel;
       debugLog('stop', 'model from Cursor DB', { model: cursorDbModel });
     } else {
-      // DB read failed or returned nothing — we'll bill at sonnet (cursor key) rates
-      // but the real model could be cheaper (gpt-4o-mini) or more expensive. Log it
-      // so we can spot systematic mispricing in aggregate.
+      // DB read failed or returned nothing — bill at Auto Cost (`cursor` key)
+      // rather than leaving model as "default" (which prices as Sonnet).
+      if (!model || model === 'default') model = 'cursor';
       debugLog('stop', 'cursor model fallback (DB lookup failed)', {
         conversationId: input.conversation_id,
-        finalModel: model || 'cursor',
+        finalModel: model,
       });
     }
   }
+  if (agentSlug === 'cursor' && (!model || model === 'default')) model = 'cursor';
   return { model };
 }
 function captureMultiRepoFiles({ state, filesChanged }: { state: SessionState; filesChanged: string[] }): { filesChanged: string[] } {
@@ -1059,11 +1166,106 @@ function captureMultiRepoFiles({ state, filesChanged }: { state: SessionState; f
   }
   return { filesChanged };
 }
+/**
+ * The files a SYNTHESIZED turn row may NAME: the ones its own stored diffs
+ * carry.
+ *
+ * Both synthesis branches below used to union the session-level `filesChanged`
+ * into the row they built. That list is `parsed.filesChanged` —
+ * `parseTranscript(..., { since: state.startedAt })`, i.e. the whole SESSION —
+ * so a turn was handed every file any EARLIER turn had edited while its diff
+ * carried only its own window. stop.ts already records that exact trap a few
+ * hundred lines below, for a different consumer: "'This turn' has to mean this
+ * turn. The exemption used to read `parsed.filesChanged` … so a file ANY
+ * earlier turn had touched was exempt forever after."
+ *
+ * Prod 4968c7df turn 6 (2026-09-09): the prompt was "what is next?", its
+ * region of the transcript holds no tool call at all, and the stored row read
+ * `filesChanged: ["src/components/layout/Section.tsx"]` — turn 4's file — over
+ * a diff whose only hunk DELETED `.claude/launch.json`. Two halves describing
+ * different files, and the file the row named had no content anywhere in it.
+ * `origin verify-capture` reports both ends: `claimed_file_absent_from_diff`
+ * and `diff_file_unclaimed`.
+ *
+ * A row may only name what it can show — the rule the ledger path already
+ * states ("filesChanged is read back OFF the emitted diff. Deriving it
+ * separately is how a row ends up naming files its own diff does not
+ * contain"). Reading the names off the stored text is also what keeps the two
+ * in step when the text is filtered: the dirt exclusions run on the diff, and
+ * a list built beside it does not learn what they removed.
+ *
+ * MULTI-REPO is the deliberate exception and the caller passes it in. Those
+ * files ARE this turn's — `captureMultiRepoFiles` measures each repo against
+ * its own per-prompt baseline — and their content lives in a diff this row
+ * does not store. Nothing here can re-derive them, so they are kept exactly as
+ * they were rather than dropped by a rule that cannot see them.
+ */
+function synthesizedTurnFiles(
+  storedDiffs: Array<string | null | undefined>,
+  otherRepoFiles: readonly string[],
+): Set<string> {
+  const out = new Set<string>();
+  for (const d of storedDiffs) for (const f of filesNamedInDiff(d)) out.add(f);
+  for (const f of otherRepoFiles) out.add(f);
+  return out;
+}
+
+/**
+ * A synthesized row's diffs cut to the storage budget, and the files it may
+ * name — decided together, so the two can never describe different things.
+ *
+ * Both branches used to store `diff.slice(0, 200_000)`. A byte offset cuts
+ * MID-HUNK, which yields a diff `git apply` refuses — a corrupt capture rather
+ * than a smaller one — and drops whole files off the end while the row went on
+ * naming them. capture-from-ledger.ts records the same lesson for the path it
+ * replaced: "The old path sliced the string at 200 KB, which cuts mid-hunk …
+ * Anything dropped is NAMED below, so the row still says the file changed."
+ * This is that old path; the rule had never been carried across.
+ *
+ * Seen live on session d5cc625b turn 2 — a stored diff of EXACTLY 200000
+ * bytes, nine files claimed and seven present, which `origin verify-capture`
+ * reports as `diff_unparseable` + `claimed_file_absent_from_diff`. The wire
+ * payload was already safe (it re-fits before sending); it is the row kept on
+ * disk, which every later re-capture and the verifier both read, that was
+ * corrupt.
+ *
+ * A file whose content did not fit is still a file this turn changed, so it
+ * stays in `filesChanged` AND is named in `contentUnavailableFiles` — the
+ * field's own rule: "A known change with no bytes is information; a silently
+ * missing file is not."
+ */
+function budgetedTurnCapture(
+  primaryDiff: string,
+  uncommittedDiff: string,
+  otherRepoFiles: readonly string[],
+): { diff: string; uncommittedDiff: string; filesChanged: string[]; contentUnavailableFiles?: string[] } {
+  const primary = fitDiffToBudget(primaryDiff || '', MAX_PROMPT_DIFF_LEN);
+  const uncommitted = fitDiffToBudget(uncommittedDiff || '', MAX_PROMPT_DIFF_LEN);
+  const cut = [...new Set([
+    ...primary.omittedFiles, ...primary.partialFiles,
+    ...uncommitted.omittedFiles, ...uncommitted.partialFiles,
+  ])];
+  const named = synthesizedTurnFiles([primary.diff, uncommitted.diff], otherRepoFiles);
+  for (const f of cut) named.add(f);
+  return {
+    diff: primary.diff,
+    uncommittedDiff: uncommitted.diff,
+    filesChanged: [...named],
+    ...(cut.length > 0 ? { contentUnavailableFiles: cut } : {}),
+  };
+}
+
 function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture, turnExcludeFiles, filesChanged, foreignCommitFiles }: { state: SessionState; parsed: ParsedTranscript; prompts: string[]; promptMappings: ReturnType<typeof extractPromptFileMappings>; gitCapture: ReturnType<typeof captureGitState>; turnExcludeFiles: string[]; filesChanged: string[]; foreignCommitFiles: string[] }): { promptMappings: ReturnType<typeof extractPromptFileMappings> } {
   // Build prompt→file mappings for the current prompt.
   // Always merge with previously saved mappings so the API's deleteMany+recreate
   // doesn't lose older prompts.
   {
+    // The one case where the session-level list is per-turn evidence rather
+    // than the whole session's — see synthesizedTurnFiles. Same condition
+    // captureMultiRepoFiles decides on, so the two cannot drift apart.
+    const otherRepoFiles = (state.repoPaths && state.repoPaths.length > 1 && state.perRepoState)
+      ? filesChanged
+      : [];
     const previousMappings = state.completedPromptMappings || [];
     // `prompts` is session-relative; mapping rows are numbered by their
     // NATIVE position in the transcript. On an adopted session those differ
@@ -1172,10 +1374,14 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
             if (m[1]) uncommittedFiles.push(m[1]);
           }
         }
-        const allFiles = new Set([...filesChanged, ...uncommittedFiles]);
         const synthDiff = useWorkingTreeDiff
           ? filteredWorkingTree
-          : (((gitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim());
+          : combineApplyableTurnDiff({
+              committedDiff: gitCapture.committedDiff || '',
+              uncommittedDiff: filteredUncommitted,
+              workingTreeDiff: gitCapture.workingTreeDiff || '',
+            });
+        const budgeted = budgetedTurnCapture(synthDiff, filteredUncommitted, otherRepoFiles);
         // Capture commit/tree SHAs so the commit-detail page can link
         // this prompt to the commit it produced.
         let synthCommitSha: string | null = null;
@@ -1187,9 +1393,7 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
         const currentMapping = {
           promptIndex: currentPromptIdx,
           promptText: currentPromptText.slice(0, 1000),
-          filesChanged: Array.from(allFiles),
-          diff: synthDiff.slice(0, 200_000),
-          uncommittedDiff: filteredUncommitted.slice(0, 200_000),
+          ...budgeted,
           commitSha: synthCommitSha,
           treeSha: synthTreeSha,
         };
@@ -1323,7 +1527,6 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
             if (m[1]) uncommittedFiles.push(m[1]);
           }
         }
-        const allFiles = new Set([...filesChanged, ...uncommittedFiles]);
         // The committed half is filtered on the FOREIGN files only, not the
         // full exclude union: session-start dirt that this turn went on to
         // commit is legitimately ours, and filtering it out here would drop
@@ -1333,7 +1536,12 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
           : (gitCapture.committedDiff || '');
         const safetyDiff = useWorkingTreeDiff
           ? filteredWorkingTree
-          : ((ownedCommittedDiff + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim());
+          : combineApplyableTurnDiff({
+              committedDiff: ownedCommittedDiff,
+              uncommittedDiff: filteredUncommitted,
+              workingTreeDiff: gitCapture.workingTreeDiff || '',
+            });
+        const budgeted = budgetedTurnCapture(safetyDiff, filteredUncommitted, otherRepoFiles);
         // Capture commitSha + treeSha so the dashboard can link this prompt
         // to its commit on the commit-detail page. Without these the
         // "Prompts in this commit" panel says "No linked prompts" even
@@ -1364,19 +1572,30 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
           if (ownedThisTurn.length > 0) {
             synthCommitSha = ownedThisTurn[ownedThisTurn.length - 1].sha || null;
           }
+          // Post-commit never ran, so commitDetails is empty after a rebase
+          // dropped the foreign range — but HEAD is the rewrite this session
+          // already claimed. Stamp it so the turn isn't `c:null` beside a
+          // files-only Commit pill (e24477e2 turn 7 / d30d8c99).
+          if (!synthCommitSha) {
+            const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+              windowsHide: true, cwd: state.repoPath, encoding: 'utf-8',
+              stdio: ['pipe', 'pipe', 'pipe'],
+            }).trim();
+            if (headIsAttested(head, attestedCommitShas(state))) synthCommitSha = head;
+          }
           synthTreeSha = getWorkingTreeSha(state.repoPath);
         } catch { /* ignore */ }
         promptMappings.push({
           promptIndex: currentPromptIdx,
           promptText: currentPromptText.slice(0, 1000),
-          filesChanged: Array.from(allFiles),
-          diff: safetyDiff.slice(0, 200_000),
-          uncommittedDiff: filteredUncommitted.slice(0, 200_000),
+          ...budgeted,
           commitSha: synthCommitSha,
           treeSha: synthTreeSha,
         } as any);
         debugLog('stop', 'synthesized current prompt mapping (safety net)', {
-          promptIndex: currentPromptIdx, files: allFiles.size, shadowBaseline: gitCapture.baselineIsShadow,
+          promptIndex: currentPromptIdx, files: budgeted.filesChanged.length,
+          unavailable: budgeted.contentUnavailableFiles?.length || 0,
+          shadowBaseline: gitCapture.baselineIsShadow,
           commitSha: synthCommitSha?.slice(0, 8) || null,
         });
       }
@@ -1395,6 +1614,12 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
       const haveIdx = new Set(promptMappings.map(pm => pm.promptIndex));
       for (let i = 0; i < prompts.length; i++) {
         if (haveIdx.has(i)) continue;
+        if (state.agentSlug === 'cursor' && i > 0 && samePromptText(prompts[i], prompts[i - 1])) {
+          debugLog('stop', 'SKIP chat-only gap (Cursor same text as previous prompt)', {
+            promptIndex: i,
+          });
+          continue;
+        }
         promptMappings.push({
           promptIndex: i,
           promptText: (prompts[i] || '').slice(0, 1000),
@@ -1422,6 +1647,41 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
             promptIndex: pm.promptIndex, files: `${before[i]}→${after}`,
           });
         }
+      });
+    }
+
+    if (rehomeGitOnlyCommitStamp(promptMappings as any, gitCapture.commitDetails || [])) {
+      debugLog('stop', 'rehomed git-only commit stamp onto the authoring turn', {
+        mappings: (promptMappings as any[]).map((pm) => ({
+          promptIndex: pm.promptIndex,
+          commitSha: pm.commitSha ? String(pm.commitSha).slice(0, 8) : null,
+        })),
+      });
+    }
+
+    // The post-commit hook can be missed when Codex commits from a sandboxed
+    // shell. Recover only mappings whose complete file boundary independently
+    // matches `git show <sha>`; this becomes an explicit turn attestation on
+    // the wire, not a normal Stop HEAD stamp. It also repairs a clean mapping
+    // polluted by a divergent branch baseline before it is sent again.
+    const mappedShas = promptMappings
+      .map((pm: any) => typeof pm.commitSha === 'string' ? pm.commitSha : '')
+      .filter((sha) => !!sha && !state.commitTurns?.some((ct) => sameSha(ct.sha, sha)));
+    const proofDetails = mappedShas.length > 0
+      ? fillMissingCommitPatches(state.repoPath, [], mappedShas)
+      : [];
+    const recoveredCommitProofs = recoverCommittedTurnProofs(promptMappings as any, proofDetails);
+    if (recoveredCommitProofs.length > 0) {
+      state.commitTurns ||= [];
+      for (const proof of recoveredCommitProofs) {
+        const turnId = turnIdForServerRow(state, proof.promptIndex);
+        if (!turnId || state.commitTurns.some((ct) => sameSha(ct.sha, proof.sha))) continue;
+        state.commitTurns.push({ sha: proof.sha, turnId, at: new Date().toISOString(), via: 'transcript' });
+      }
+      debugLog('stop', 'recovered exact commit-to-turn proof', {
+        proofs: recoveredCommitProofs.map((proof) => ({
+          promptIndex: proof.promptIndex, sha: proof.sha.slice(0, 8),
+        })),
       });
     }
 
@@ -1454,6 +1714,14 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
       filesChanged: filesChanged.length,
     });
   }
+  // `prompts` is this launch's list (local); the mappings are numbered by
+  // the transcript (server rows). Clip in ONE space — the larger of the two
+  // bases, since the base only ever grows and `state`'s copy is refreshed
+  // from `parsed` above.
+  promptMappings = clipMappingsToPromptHistory(
+    promptMappings as any, prompts,
+    Math.max(parsed.promptIndexBase || 0, state.promptIndexBase || 0),
+  ) as any;
   return { promptMappings };
 }
 function sessionFilesAcrossRepos({ state, sessionFilesChanged, promptBaseline, parsed }: { state: SessionState; sessionFilesChanged: string[]; promptBaseline: string | null | undefined; parsed: ParsedTranscript }): { sessionFilesChanged: string[] } {
@@ -1511,7 +1779,7 @@ function sessionFilesAcrossRepos({ state, sessionFilesChanged, promptBaseline, p
   }
   return { sessionFilesChanged };
 }
-async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, model, parsed, costUsd, promptMappings, filesChanged, turnExcludeFiles, promptBaseline, found, input, codexData, gitCapture, promptEditsByIndex, joinedPrompt, displayTranscript, sessionFilesChanged, tokensEstimated, durationMs, devinPromptTimes }: { connected: boolean; state: SessionState; hookCwd: string; agentSlug: string | undefined; prompts: string[]; model: string; parsed: ParsedTranscript; costUsd: number; promptMappings: ReturnType<typeof extractPromptFileMappings>; filesChanged: string[]; turnExcludeFiles: string[]; promptBaseline: string | null | undefined; found: ReturnType<typeof findStateForHook>; input: Record<string, any>; codexData: ReturnType<typeof discoverCodexSessionData> | null; gitCapture: ReturnType<typeof captureGitState>; promptEditsByIndex: Map<number, string> | null; joinedPrompt: string; displayTranscript: ReturnType<typeof formatTranscriptForDisplay>; sessionFilesChanged: string[]; tokensEstimated: boolean; durationMs: number; devinPromptTimes: (string | undefined)[] | undefined }): Promise<{ promptEditsByIndex: Map<number, string> | null; model: string }> {
+async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, model, parsed, costUsd, promptMappings, filesChanged, turnExcludeFiles, promptBaseline, found, input, codexData, gitCapture, promptEditsByIndex, joinedPrompt, displayTranscript, sessionFilesChanged, tokensEstimated, durationMs, devinPromptTimes, prePersisted }: { connected: boolean; state: SessionState; hookCwd: string; agentSlug: string | undefined; prompts: string[]; model: string; parsed: ParsedTranscript; costUsd: number; promptMappings: ReturnType<typeof extractPromptFileMappings>; filesChanged: string[]; turnExcludeFiles: string[]; promptBaseline: string | null | undefined; found: ReturnType<typeof findStateForHook>; input: Record<string, any>; codexData: ReturnType<typeof discoverCodexSessionData> | null; gitCapture: ReturnType<typeof captureGitState>; promptEditsByIndex: Map<number, string> | null; joinedPrompt: string; displayTranscript: ReturnType<typeof formatTranscriptForDisplay>; sessionFilesChanged: string[]; tokensEstimated: boolean; durationMs: number; devinPromptTimes: (string | undefined)[] | undefined; prePersisted: string | null }): Promise<{ promptEditsByIndex: Map<number, string> | null; model: string }> {
   if (connected) {
     // Recovery: if the session was created in local-only mode (key
     // was dead at the time → `local-` prefix) and the key has since
@@ -1545,9 +1813,11 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
     // existing sessionDiff.
     let sessionGitCapture: {
       headBefore: string; headAfter: string; commitShas: string[];
-      diff: string; linesAdded: number; linesRemoved: number;
-      commitDetails: Array<{ sha: string; message: string; author: string; filesChanged: string[] }>;
-      snapshot: true;
+      // Absent (not '') on a commit carrier: the server only touches
+      // SessionDiff when the capture carries a diff field.
+      diff?: string; linesAdded?: number; linesRemoved?: number;
+      commitDetails: CommitDetailWire[];
+      snapshot?: true;
     } | undefined;
     // Cursor's git commits don't reliably fire .git/hooks/post-commit
     // (sandbox / worktree isolation — same comment as in enable.ts). On
@@ -1560,8 +1830,18 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
     // and ship a session-level gitCapture snapshot at session-end —
     // walking git log from session start lifts every reachable commit
     // (including post-amend SHAs) into the MCP ingest path.
-    const codexLikeAgents = new Set(['codex', 'gemini', 'cursor']);
-    if (codexLikeAgents.has((agentSlug || state.agentSlug || '').toLowerCase()) && state.headShaAtStart) {
+    //
+    // EVERY agent, as of the authored-snapshot rewrite. This block used to run
+    // for codex/gemini/cursor only, on the theory that a hook-firing agent's
+    // post-commit kept the server's SessionDiff right on its own. It did — and
+    // then the read side, the session-end capture and the transcript watcher
+    // each had their own arithmetic for the same number, and a merge put
+    // another branch's 13 files on a Claude Code session's header while its
+    // post-commit snapshot sat correct underneath (51995e1c). A Stop that
+    // re-asserts the authored snapshot for every agent is what makes the
+    // header self-correcting: whatever a weaker producer appended, the next
+    // Stop REPLACES with the one answer.
+    if (state.headShaAtStart) {
       try {
         // fullContext: AI Blame renders the entire file from this diff —
         // unlimited unified context means every line ships as context or
@@ -1615,57 +1895,130 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
           // committed prompt from sessionDiff (and the AI Blame view). Fall
           // back to snap.committedDiff (= git diff session-start..HEAD)
           // when the session-scoped walk produces nothing.
-          let sessionCommitted = sessionScopedCommittedDiff(state.repoPath, state);
-          // Owned commit shas: recorded ones, or — when the post-commit hook
-          // was missed — the trailer-owned commits in range. NEVER the raw
-          // session-start..HEAD set, which sweeps in commits authored by OTHER
-          // agents running concurrently in the same repo (a Codex session
-          // showing a Devin commit + inflated lines — the reported bug).
-          let ownedShas = (state.sessionCommitShas || []).filter(s => /^[a-fA-F0-9]{7,40}$/.test(s));
-          if (!sessionCommitted) {
-            ownedShas = ownedRangeCommitShas(state.repoPath, state);
-            const parts: string[] = [];
-            for (const sha of ownedShas) {
-              try {
-                const out = execFileSync('git', ['show', sha, '--format=', '--no-color'], { windowsHide: true, cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 }).toString().trim();
-                if (out) parts.push(out);
-              } catch { /* skip */ }
-            }
-            sessionCommitted = parts.join('\n');
-          }
-          const fullDiff = (sessionCommitted +
-            (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim();
-          const countDiffLines = (d: string, sign: '+' | '-'): number =>
-            d.split('\n').filter(l => l[0] === sign && l.slice(0, 3) !== sign + sign + sign).length;
+          // The one answer: owned commits rendered by their authored
+          // contribution (a merge's resolution, never the branch it absorbed),
+          // falling back to trailer-owned commits in range when the post-commit
+          // hook was missed, plus this session's filtered uncommitted work.
+          // NEVER the raw session-start..HEAD set, which sweeps in commits
+          // authored by OTHER agents running concurrently in the same repo.
+          const authored = sessionAuthoredSnapshot(state.repoPath, state, { uncommittedDiff: filteredUncommitted });
+          const ownedShas = authored.commitShas;
           // Keep only the commit details we actually own — so commitShas /
           // commitDetails / lines all agree and don't include a foreign commit.
-          const ownedSet = new Set(ownedShas.map(s => s.toLowerCase()));
-          const ownedDetails = (snap.commitDetails || []).filter(c =>
-            [...ownedSet].some(o => o.startsWith(c.sha.toLowerCase()) || c.sha.toLowerCase().startsWith(o)),
+          const ownedFromWalk = (snap.commitDetails || []).filter(c => ownedShas.some((o) => sameSha(o, c.sha)));
+          // Post-commit's PATCH can die before the network call (killed
+          // mid-snapshot, sandbox): the sha is attested locally but the row
+          // landed files-only. Fill those from `git show` — once per sha per
+          // session, never a sha a rebase rewrote away, never one the walk
+          // already carries.
+          const ownedDetails = fillMissingCommitPatches(
+            state.repoPath,
+            ownedFromWalk,
+            rescuableShas(state, ownedFromWalk.map((d) => d.sha)),
           );
-          sessionGitCapture = {
-            ...rewrittenCommitsPayload(state),
-            headBefore: state.headShaAtStart,
-            headAfter: snap.headAfter || state.headShaAtStart,
-            commitShas: ownedShas,
-            diff: fullDiff.slice(0, 500_000),
-            linesAdded: countDiffLines(fullDiff, '+'),
-            linesRemoved: countDiffLines(fullDiff, '-'),
-            commitDetails: ownedDetails,
-            snapshot: true,
-          };
-          debugLog('stop', 'session-level gitCapture snapshot built', {
-            diffLen: sessionGitCapture.diff.length,
-            commitCount: sessionGitCapture.commitShas.length,
-            linesAdded: sessionGitCapture.linesAdded,
-            linesRemoved: sessionGitCapture.linesRemoved,
-            filteredOutFiles: (state.sessionStartDirtyFiles || []).length,
-          });
+          rememberRescued(state, ownedDetails, ownedFromWalk);
+          if (authored.diff) {
+            // The header the CLI keeps is the same computation the server is
+            // about to store.
+            applyAuthoredTotals(state, authored);
+            sessionGitCapture = {
+              ...rewrittenCommitsPayload(state),
+              headBefore: state.headShaAtStart,
+              headAfter: snap.headAfter || state.headShaAtStart,
+              commitShas: uniqueShas([...ownedShas, ...ownedDetails.map((d) => d.sha)]),
+              diff: authored.diff.slice(0, 500_000),
+              linesAdded: authored.linesAdded,
+              linesRemoved: authored.linesRemoved,
+              commitDetails: ownedDetails,
+              snapshot: true,
+            };
+            debugLog('stop', 'session-level gitCapture snapshot built', {
+              diffLen: sessionGitCapture.diff?.length ?? 0,
+              commitCount: sessionGitCapture.commitShas.length,
+              linesAdded: sessionGitCapture.linesAdded,
+              linesRemoved: sessionGitCapture.linesRemoved,
+              source: authored.source,
+              filteredOutFiles: (state.sessionStartDirtyFiles || []).length,
+            });
+          }
         }
       } catch (snapErr: unknown) {
         debugLog('stop', 'session-level gitCapture failed (non-fatal)', {
           message: snapErr instanceof Error ? snapErr.message : String(snapErr),
         });
+      }
+    }
+    // Post-commit recorded the sha locally but its PATCH never reached the
+    // API (sandbox, overlap, killed mid-snapshot). Stop still has
+    // sessionCommitShas / commitTurns / rewrite survivors — `git show` those
+    // even when the session-level walk already produced a snapshot.
+    // Session e24477e2: authored.diff existed so the old `if (!sessionGitCapture)`
+    // rescue never ran, and d30d8c99 stayed a files-only pill. A capture that
+    // carries a diff (even '') at the session baseline makes the server REPLACE
+    // the stored session diff (mcp.ts same-baseline rule); omit the field.
+    if (state.repoPath) {
+      if (!sessionGitCapture) {
+        const extra = rescuableShas(state, []);
+        if (extra.length > 0) {
+          const details = fillMissingCommitPatches(state.repoPath, [], extra);
+          if (details.length > 0) {
+            rememberRescued(state, details, []);
+            sessionGitCapture = {
+              ...rewrittenCommitsPayload(state),
+              headBefore: state.headShaAtStart || gitCapture.headBefore || '',
+              headAfter: gitCapture.headAfter || state.headShaAtStart || '',
+              commitShas: details.map((d) => d.sha),
+              commitDetails: details,
+            };
+            debugLog('stop', 'commitDetails patches rescued without session snapshot', {
+              commitCount: details.length,
+            });
+          }
+        }
+      } else {
+        const attested = attestedCommitShas(state);
+        const fromWalk = sessionGitCapture.commitDetails || [];
+        const details = fillMissingCommitPatches(
+          state.repoPath,
+          fromWalk,
+          attested,
+        );
+        // Record what this rescue ADDED beyond the walk, exactly as the
+        // no-snapshot branch does. Without it `rescuedCommitShas` never grows,
+        // so `attestedCommitShas` re-offers the same shas and every later Stop
+        // pays `git show` + `git log` again for a patch the server already has
+        // and keeps.
+        rememberRescued(state, details, fromWalk);
+        sessionGitCapture.commitDetails = details;
+        sessionGitCapture.commitShas = uniqueShas([
+          ...sessionGitCapture.commitShas,
+          ...details.map((d) => d.sha),
+        ]);
+      }
+      // Same lesson as post-commit: land the per-commit patch BEFORE the
+      // fat session snapshot. That snapshot is what Cursor kills; GitHub's
+      // webhook already created a files-only row by then. No `diff` field:
+      // an empty string would replace SessionDiff.
+      const withPatch = (sessionGitCapture?.commitDetails || []).filter((d) => !!(d.patch || '').trim());
+      if (withPatch.length > 0 && connected && state.sessionId && !String(state.sessionId).startsWith('local-')) {
+        try {
+          await durableUpdate(state.sessionId, {
+            gitCapture: {
+              ...rewrittenCommitsPayload(state),
+              headBefore: sessionGitCapture?.headBefore || state.headShaAtStart || '',
+              headAfter: sessionGitCapture?.headAfter || gitCapture.headAfter || '',
+              commitShas: withPatch.map((d) => d.sha),
+              commitDetails: withPatch,
+            },
+          });
+          debugLog('stop', 'commitDetails patches sent before session snapshot', {
+            commitCount: withPatch.length,
+          });
+        } catch (patchErr: unknown) {
+          debugLog('stop', 'commitDetails patch send failed (non-fatal)', {
+            message: patchErr instanceof Error ? patchErr.message : String(patchErr),
+          });
+        }
       }
     }
 
@@ -1875,21 +2228,32 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
         count: fromLedger, of: promptMappings.length,
       });
     }
+    // Shadow window before the commit patch: an empty window blanks leftover
+    // HEAD..worktree dumps, a changed window replaces unanchored journal hunks
+    // with git's. Committed-clean turns still get the commit-scoped patch below.
+    const fromShadows = preferShadowRangeForTurns(
+      state, promptMappings as any, state.repoPath || hookCwd,
+      { log: (event, data) => debugLog('stop', event, data) },
+    );
+    if (fromShadows > 0) {
+      debugLog('stop', 'turns scoped to their shadow window', {
+        count: fromShadows, of: promptMappings.length,
+      });
+    }
     // A turn whose work is entirely in its commits sends the commit's patch —
-    // the diff the badge, the commit detail and blame already read — rather
-    // than the ledger's own rendering of the same change. Post-commit sent
-    // exactly this; Stop's newer stamp used to overwrite it with a diff that
-    // could differ from the badge by a couple of alignment lines.
+    // the diff the badge, the commit detail and blame already read. Post-commit
+    // already sent that; every later Stop (including Cursor's fake sessionEnd)
+    // rebuilds every turn from baseline..HEAD with a newer stamp, so this pass
+    // must run on the whole list, not only the closing turn. Pathspec is the
+    // commit's files — a mid-turn fast-forward puts the range on the mapping
+    // (session 761adbe8: 41 files / +2615 under a badge of 4 / +589).
     const fromCommits = preferCommitPatchForCommittedTurns(
       state, promptMappings as any, state.repoPath || hookCwd,
       {
+        inheritedBaseline: (shadowSha, localTurn) => inheritedBaselineForTurn(
+          state.repoPath || hookCwd, state, shadowSha, localTurn,
+        ),
         log: (event, data) => debugLog('stop', event, data),
-        // Only the turn this Stop closes, and any turn that committed since
-        // the previous Stop — every other row is a re-send of a settled turn.
-        currentPromptIndex: promptMappings.length > 0
-          ? Math.max(...promptMappings.map((pm) => pm.promptIndex))
-          : undefined,
-        since: state.lastStopAt || null,
       },
     );
     if (fromCommits > 0) {
@@ -1975,7 +2339,18 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
             // Internal marker — `diffSource` is what travels.
             ledgerOwned: undefined,
             promptText: (pm.promptText || '').slice(0, 1000),
-            diff: capDiff(pm.diff, MAX_PROMPT_DIFF_LEN),
+            // The wire cap drops whole files; each one is named so the row
+            // can say "diff covers N of M" instead of shrinking to N.
+            ...(() => {
+              const fit = fitDiffToBudget(pm.diff, MAX_PROMPT_DIFF_LEN);
+              const prior = (pm as { contentUnavailableFiles?: string[] }).contentUnavailableFiles;
+              const cut = [...fit.omittedFiles, ...fit.partialFiles];
+              const merged = [...new Set([...(prior || []), ...cut])];
+              return {
+                diff: fit.diff,
+                ...(Array.isArray(prior) || cut.length > 0 ? { contentUnavailableFiles: merged } : {}),
+              };
+            })(),
             editsJson: promptEditsByIndex?.get(pm.promptIndex) || undefined,
             // Nested-repo writes belong to the turn that just ended — the
             // highest index present — because the window they were measured
@@ -1986,7 +2361,8 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
                 ? nestedRepoWritesForOpenTurn(state)
                 : [],
             )),
-            ...(turnIdFor(state, pm.promptIndex) && { turnId: turnIdFor(state, pm.promptIndex) }),
+            // `pm.promptIndex` is a SERVER row; ids are numbered locally.
+            ...(turnIdForServerRow(state, pm.promptIndex) && { turnId: turnIdForServerRow(state, pm.promptIndex) }),
             ...captureStamp(),
             // Devin records the prompt at Stop (after the turn's work), so the
             // server's timestamp-based commit attribution sees a commit as
@@ -2008,7 +2384,7 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
       payload: summarizePromptPayload(stopUpdatePayload.promptChanges as any),
     });
 
-    const sendStopUpdate = (id: string) => durableUpdate(id, stopUpdatePayload);
+    const sendStopUpdate = (id: string) => durableUpdate(id, stopUpdatePayload, { supersedes: prePersisted });
     let updateRes: any;
     try {
       updateRes = await sendStopUpdate(state.sessionId);
@@ -2192,36 +2568,53 @@ function advanceTurnBaselines({ state, gitCapture }: { state: SessionState; gitC
     }
   }
 }
-function persistCompletedMappings({ promptMappings, state }: { promptMappings: ReturnType<typeof extractPromptFileMappings>; state: SessionState }): void {
+export function persistCompletedMappings({ promptMappings, state }: { promptMappings: ReturnType<typeof extractPromptFileMappings>; state: SessionState }): void {
   // Save accumulated prompt mappings so next stop can include previous prompts' data
   if (promptMappings.length > 0) {
-    state.completedPromptMappings = promptMappings.map(pm => ({
-      promptIndex: pm.promptIndex,
-      promptText: pm.promptText,
-      filesChanged: pm.filesChanged,
+    // This is also the heartbeat's source of truth. Keeping only the diff
+    // used to turn every re-sent row into a partial capture: its line counts,
+    // release-gate timestamp, and commit identity vanished on disk. A watcher
+    // that won the next API race could therefore replace four real +N turns
+    // with zero-count rows while the session header remained correct.
+    const capturedNow = new Date();
+    state.completedPromptMappings = promptMappings.map((rawPm) => {
+      const pm = withDerivedLineCounts(rawPm as any);
+      return stampCaptured({
+        promptIndex: pm.promptIndex,
+        promptText: pm.promptText,
+        filesChanged: pm.filesChanged,
       // Explicit pick, so anything not listed here is silently dropped on
       // the state round-trip — which is where the heartbeat reads from.
-      ...((pm as { outOfRepoFiles?: string[] }).outOfRepoFiles?.length
-        ? { outOfRepoFiles: (pm as { outOfRepoFiles?: string[] }).outOfRepoFiles }
-        : {}),
-      ...((pm as { contentUnavailableFiles?: string[] }).contentUnavailableFiles?.length
-        ? { contentUnavailableFiles: (pm as { contentUnavailableFiles?: string[] }).contentUnavailableFiles }
-        : {}),
+        ...((pm as { outOfRepoFiles?: string[] }).outOfRepoFiles?.length
+          ? { outOfRepoFiles: (pm as { outOfRepoFiles?: string[] }).outOfRepoFiles }
+          : {}),
+      // An explicit [] travels too: it is how a commit patch that carries every
+      // file's content clears the ledger's earlier "could not read" list.
+        ...(Array.isArray((pm as { contentUnavailableFiles?: string[] }).contentUnavailableFiles)
+          ? { contentUnavailableFiles: (pm as { contentUnavailableFiles?: string[] }).contentUnavailableFiles }
+          : {}),
       // Provenance must survive the round-trip. This pick is explicit, so a
       // field not listed here is silently dropped — and the heartbeat re-sends
       // from this state, so losing it lets the server's editsJson synthesis
       // win back a row the ledger had already answered for.
-      ...((pm as { diffSource?: 'ledger' }).diffSource
-        ? { diffSource: (pm as { diffSource?: 'ledger' }).diffSource }
-        : {}),
+        ...((pm as { diffSource?: 'ledger' }).diffSource
+          ? { diffSource: (pm as { diffSource?: 'ledger' }).diffSource }
+          : {}),
       // The "never rebuild this from a commit" guard travels with the
       // provenance. Picking `diffSource` alone kept the label and lost the
       // guard, so the next Stop's `previousMappings` and every heartbeat
       // re-send were free to replace an observed diff with `git show`.
-      ...((pm as { ledgerOwned?: boolean }).ledgerOwned ? { ledgerOwned: true } : {}),
-      diff: pm.diff,
-      uncommittedDiff: pm.uncommittedDiff,
-    }));
+        ...((pm as { ledgerOwned?: boolean }).ledgerOwned ? { ledgerOwned: true } : {}),
+        diff: pm.diff,
+        uncommittedDiff: pm.uncommittedDiff,
+        ...(typeof pm.linesAdded === 'number' ? { linesAdded: pm.linesAdded } : {}),
+        ...(typeof pm.linesRemoved === 'number' ? { linesRemoved: pm.linesRemoved } : {}),
+        ...('commitSha' in pm ? { commitSha: pm.commitSha ?? null } : {}),
+        ...('treeSha' in pm ? { treeSha: pm.treeSha ?? null } : {}),
+        ...(pm.chatOnly ? { chatOnly: true } : {}),
+        ...((pm as { fileSetOnly?: boolean }).fileSetOnly ? { fileSetOnly: true } : {}),
+      }, capturedNow);
+    });
   }
 }
 function autoSnapshotTurn({ prompts, promptMappings, state, model, parsed, costUsd, gitCapture }: { prompts: string[]; promptMappings: ReturnType<typeof extractPromptFileMappings>; state: SessionState; model: string; parsed: ParsedTranscript; costUsd: number; gitCapture: ReturnType<typeof captureGitState> }): void {
@@ -2372,12 +2765,19 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
       hookCwd = wsRoot;
     }
   }
-  let found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug), agentSlug);
+  let found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug, input.conversation_id), agentSlug);
   let state = found?.state || null;
   // Recover from archive if .git state file is missing (Cursor/Codex sessions)
   if (!state) {
     try {
-      const recoveryRepoPath = discoverGitRoot(hookCwd) || hookCwd;
+      // The WORKING root, like the prompt hook's recovery: discoverGitRoot on
+      // a linked worktree is the primary checkout, and a session that ran in
+      // the worktree carries the worktree as repoPath — so this match never
+      // found it, and an exact-chat ENDED archive sat unrecovered while the
+      // Stop fell to the mirror (prod 2026-09-09, e24477e2). Archives written
+      // before the worktree fix carry the canonical path; match either.
+      const recoveryRepoPath = getWorkingGitRoot(hookCwd) || discoverGitRoot(hookCwd) || hookCwd;
+      const recoveryCanonical = getCanonicalRepoPath(recoveryRepoPath);
       const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
       const archiveEntries = fs.readdirSync(archiveDir).filter(f => f.endsWith('.json'));
       // The stop payload's conversation anchor (Cursor's conversation_id, else
@@ -2399,20 +2799,35 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
           if (!s?.sessionId || !s?.startedAt) continue;
           const age = Date.now() - new Date(s.startedAt).getTime();
           if (age > 24 * 60 * 60 * 1000) continue;
-          if (s.repoPath !== recoveryRepoPath) continue;
+          if (!samePath(s.repoPath || '', recoveryRepoPath) && !samePath(s.repoPath || '', recoveryCanonical)) continue;
           if (agentSlug && !sessionMatchesAgent(s, agentSlug)) continue;
+          // Archived or deleted on the web (stamped by the heartbeat when it
+          // drops the row) — never resumable, even for this chat.
+          if (s.serverTerminal === true) continue;
           const chatId = s.agentSessionId || s.claudeSessionId || '';
           if (incomingChatId && chatId === incomingChatId) {
             if (age < exactAge) { exactMatch = s; exactAge = age; }
             continue;
           }
           if (s.status === 'ENDED' && s.endedAt) continue;
+          // Not this chat by name; only adoptable when it names no chat at all.
+          if (!cursorSessionReusable(agentSlug, incomingChatId, chatId || undefined)) continue;
           if (age < bestAge) { bestCandidate = s; bestAge = age; }
         } catch { /* skip */ }
       }
       bestCandidate = exactMatch || bestCandidate;
       if (bestCandidate) {
-        debugLog('stop', 'recovered session from archive', { sessionId: bestCandidate.sessionId, tag: bestCandidate.sessionTag });
+        const wasEnded = bestCandidate.status === 'ENDED' || !!(bestCandidate as { endedAt?: string }).endedAt;
+        debugLog('stop', wasEnded ? 'resuming ended session from archive (same chat)' : 'recovered session from archive', {
+          sessionId: bestCandidate.sessionId, tag: bestCandidate.sessionTag, repoPath: recoveryRepoPath,
+        });
+        // Same reopen the prompt hook does: an ENDED row is dead to every
+        // liveness check while `endedAt` stands, and this Stop's PATCH is the
+        // new turn the server accepts as a genuine resume.
+        if (wasEnded) {
+          bestCandidate.status = 'RUNNING';
+          delete (bestCandidate as { endedAt?: string }).endedAt;
+        }
         saveSessionState(bestCandidate, recoveryRepoPath, bestCandidate.sessionTag);
         state = bestCandidate;
         found = { state, saveCwd: recoveryRepoPath };
@@ -2698,8 +3113,37 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     // Prompt history, reconciled so the index space only ever grows. Taking
     // the transcript's list outright renumbered every turn once Claude Code
     // rolled the transcript out from under a long session (0a8e2164).
-    const prompts = reconcilePromptHistory(state.prompts, parsed.prompts);
+    const prompts = reconcilePromptHistory(state.prompts, parsed.prompts, {
+      collapseTrailingRepeat: agentSlug === 'cursor',
+    });
     if (prompts.length > (state.prompts?.length || 0)) state.prompts = [...prompts];
+    // A prompt whose own hook never finished reaches state ONLY here, pulled
+    // out of the transcript by the reconcile above — and with no start-state,
+    // because `recordPromptShadow` is called from user-prompt-submit and that
+    // is the hook that died. after-file-edit already anchors what it recovers;
+    // this path and session-end did not, so the turn fell back to the session's
+    // start, spanned every turn since, and the API's echo detector correctly
+    // refused it. Session d5cc625b turns 2 and 8 rendered empty exactly so.
+    //
+    // Runs BEFORE advanceTurnBaselines, deliberately: until that fires,
+    // `prePromptSha` is still the shadow cut at the end of the previous turn,
+    // which IS this one's start-state. Recovering it here is the difference
+    // between a turn that shows its work and one that shows nothing.
+    {
+      const owner = firstUnanchoredPrompt(state, state.prompts.length);
+      if (owner !== null && state.prePromptSha) {
+        recordPromptShadow(state, owner, state.prePromptSha);
+        debugLog('stop', 'anchored a prompt whose own hook never ran', {
+          promptIndex: owner, baseline: state.prePromptSha.slice(0, 12),
+        });
+      }
+      // Anything still unanchored arrived in a batch this Stop cannot speak
+      // for. Its start-state is gone; say so rather than let it borrow.
+      const lost = markSkippedPromptBaselines(state, state.prompts.length);
+      if (lost.length > 0) {
+        debugLog('stop', 'prompts with no recoverable baseline', { promptIndexes: lost });
+      }
+    }
 
     // F9: Redact secrets before sending to API
     const config_ = loadConfig();
@@ -2708,6 +3152,25 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
       ? prompts.map(p => redactSecrets(p).redacted)
       : prompts;
     const joinedPrompt = redactedPrompts.join('\n\n---\n\n');
+
+    // Persist the prompt list BEFORE captureGitState. Cursor kills this hook
+    // when the next prompt overlaps a slow fullContext walk — session
+    // e24477e2: Stop logged "prompt mappings" at 02:42 / 02:45 and never
+    // reached `calling api.updateSession`. The overlapping submit matched
+    // the session and never logged "prompt saved". A later drain (the next
+    // submit that finishes, or a durableUpdate) replays this entry so
+    // chat-only turns still appear.
+    // Write-ahead only: no state save here (the turn's state is written once,
+    // complete, further down) and no `status` (a late replay of RUNNING would
+    // reopen an ended session). The real send in sendStopCapture supersedes it.
+    let prePersisted: string | null = null;
+    if (connected && state.sessionId && !String(state.sessionId).startsWith('local-')) {
+      try {
+        const earlyPayload = { prompt: joinedPrompt || undefined };
+        prePersisted = persistUpdateBeforeWork(state.sessionId, earlyPayload, (e, m, d) => debugLog(e, m, d));
+        debugLog('stop', 'prompts persisted before git capture', { promptCount: prompts.length });
+      } catch { /* never block Stop on a queue write */ }
+    }
 
     const durationMs = Date.now() - new Date(state.startedAt).getTime();
     // Prefer: stdin model → Cursor DB → transcript → state
@@ -2721,9 +3184,20 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     let promptMappings = extractPromptFileMappings(state.transcriptPath, { since: state.startedAt, repoRoots: sessionRepoRoots(state) });
     debugLog('stop', 'prompt mappings', { count: promptMappings.length });
 
-    // Fall back to git-captured files if transcript parsing didn't find any
-    // Use per-prompt baseline: prePromptSha (set at prompt start) > headShaAtLastStop > headShaAtStart
-    const promptBaseline = state.prePromptSha || state.headShaAtLastStop || state.headShaAtStart;
+    // Fall back to git-captured files if transcript parsing didn't find any.
+    // This turn's OWN start-state first: `promptShadows[closingLocal]` means
+    // "the tree as this prompt found it", where the rolling values only ever
+    // describe the most recent turn.
+    //
+    // The rolling values stay behind it, ahead of anything session-wide. When
+    // the submit hook was killed this turn has no shadow AND is not yet in
+    // `promptsWithoutBaseline` (that marking happens on the NEXT submit), so
+    // `turnBaseline` hands back the session-start shadow — which spans every
+    // turn since the session began, the exact over-claim #1532 set out to
+    // stop. `prePromptSha` / `headShaAtLastStop` span one turn, not N.
+    const closingLocal = Math.max((state.prompts?.length || 0) - 1, 0);
+    const closingShadow = (state.promptShadows || []).find((s) => s.promptIndex === closingLocal)?.shadowSha || null;
+    const promptBaseline = closingShadow || state.prePromptSha || state.headShaAtLastStop || state.headShaAtStart;
     // fullContext: per-prompt diff feeds AI Blame's replay. Full-file
     // context lets every editsJson edit anchor at an exact position.
     const gitCapture = captureGitState(state.repoPath, promptBaseline, { fullContext: true });
@@ -2803,7 +3277,7 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     // stays null when offline or when capture fails.
     let promptEditsByIndex: Map<number, string> | null = null;
     // Phase: sendStopCapture.
-    ({ promptEditsByIndex, model } = await sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, model, parsed, costUsd, promptMappings, filesChanged, turnExcludeFiles, promptBaseline, found, input, codexData, gitCapture, promptEditsByIndex, joinedPrompt, displayTranscript, sessionFilesChanged, tokensEstimated, durationMs, devinPromptTimes }));
+    ({ promptEditsByIndex, model } = await sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, model, parsed, costUsd, promptMappings, filesChanged, turnExcludeFiles, promptBaseline, found, input, codexData, gitCapture, promptEditsByIndex, joinedPrompt, displayTranscript, sessionFilesChanged, tokensEstimated, durationMs, devinPromptTimes, prePersisted }));
     // Phase: writeCommitNotes.
     writeCommitNotes({ gitCapture, state, model, agentSlug, prompts, promptEditsByIndex, parsed, costUsd, durationMs, config });
     // Phase: advanceTurnBaselines.
@@ -2824,6 +3298,10 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     // and committed; the probe and the commit trailer both said turn 2, and
     // the state ended the four-turn session at lastClosedTurnIndex 1.
     closeTurn(state, state.activeTurn?.index ?? Math.max(state.prompts.length - 1, 0));
+    // The turn is over as far as the heartbeat's liveness is concerned: from
+    // here until the next user-prompt-submit, a quiet transcript means idle,
+    // not "still generating". See turnInProgress in heartbeat-liveness.ts.
+    state.lastTurnClosedAt = Date.now();
     // Phase: persistCompletedMappings.
     persistCompletedMappings({ promptMappings, state });
     // Phase: autoSnapshotTurn.

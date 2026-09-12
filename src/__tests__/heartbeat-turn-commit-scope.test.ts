@@ -89,4 +89,14 @@ describe('the heartbeat honours both', () => {
     expect(body).toContain('if (!commitLandedInTurn(promptBaseline, sha, isAncestor)) continue;');
     expect(body).not.toContain('!isAncestor(promptBaseline, sha)) continue;');
   });
+
+  it('replaces a committed turn\'s inflight diff with the commit patch', () => {
+    // A 30s tick after post-commit used to PATCH baseline..HEAD over the
+    // badge-matching row (session 761adbe8: 41 files flapping against 4).
+    const body = src.slice(src.indexOf('async function pushInflightDiff'));
+    const ledger = body.indexOf('applyLedgerToMappings');
+    const commitPatch = body.indexOf('preferCommitPatchForCommittedTurns');
+    expect(ledger).toBeGreaterThan(0);
+    expect(commitPatch).toBeGreaterThan(ledger);
+  });
 });

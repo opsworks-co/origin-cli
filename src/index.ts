@@ -253,7 +253,10 @@ program.command('verify-capture')
   .option('-s, --session <id>', 'Only this session (id prefix)')
   .option('-a, --agent <slug>', 'Only sessions from this agent')
   .option('--all', 'Include sessions with no violations')
+  .option('--since <when>', 'Only sessions started since an ISO date or <N>d (e.g. 7d)')
   .option('--fail-on-contradiction', 'Exit 1 when any contradiction is found')
+  .option('--fail-on-incomplete-evidence', 'Exit 2 when selected capture evidence is still mutable or unavailable')
+  .option('--waiver', 'Print the record a release shipping these unread should carry')
   .action(verifyCaptureCommand);
 program.command('reset')
   .description('Clear local session state for this repo')
@@ -772,6 +775,13 @@ hooks.command('git-post-rewrite').description('Handle git post-rewrite hook (reb
   if (input) {
     const mappings = parseRewriteInput(input);
     preserveAttributionBatch(repoPath, mappings);
+    // The session's own record of the rewrite — exact, where the rescue's
+    // content rungs can only guess. Keyed on the hook's cwd (a linked
+    // worktree), not the main repo root.
+    try {
+      const { recordGitRewrites } = await import('./commands/hooks/post-rewrite.js');
+      recordGitRewrites(process.cwd(), mappings);
+    } catch { /* attribution notes are already preserved above */ }
   }
   // Also check for cherry-pick context
   handleCherryPick(repoPath);
@@ -803,8 +813,11 @@ program.command('session <id>').description('View session detail').action(sessio
 
 sessions.command('end <sessionId>').description('End a running session').action(sessionEndCommand);
 sessions.command('clean')
-  .description('End all stale RUNNING sessions')
-  .option('--all', 'End all running sessions across all repos')
+  .description('End RUNNING sessions that have been silent for 12h+ (see --older-than)')
+  .option('--all', 'Clean sessions across all repos, not just this one')
+  .option('-n, --dry-run', 'Show what would be ended without ending anything')
+  .option('--older-than <hours>', 'Only end sessions silent for at least this many hours (default 12)')
+  .option('--force', 'Ignore the age requirement; a session that is still live is never ended')
   .action(sessionCleanCommand);
 
 sessions.command('sync')
@@ -1210,13 +1223,25 @@ program.hook('postAction', async (thisCommand, actionCommand) => {
     const result = await checkForUpdate();
     if (result?.updateAvailable) {
       const chalk = (await import('chalk')).default;
-      console.log(chalk.yellow(`\n  Update available: ${result.current} → ${result.latest}`));
-      console.log(chalk.gray(`  Run: origin upgrade\n`));
+      // STDERR, not stdout. A notice is a diagnostic, and stdout belongs to
+      // whatever the command was asked to produce. On stdout this corrupted
+      // every machine reader that got past the exemption below — for a year it
+      // was only agy's hook protocol, then `verify-capture --json` started
+      // failing the release-gate test on CI with "Unexpected non-whitespace
+      // character after JSON at position 1508", and `--waiver` (captured by
+      // release-cli.sh into the annotated tag message with `$(…)`) would have
+      // baked "Run: origin upgrade" into a release tag forever.
+      //
+      // Keeping it off stdout is the structural half of the fix: the exemption
+      // has to predict which invocations are machine-read, and it has now been
+      // wrong twice. This can't be.
+      console.error(chalk.yellow(`\n  Update available: ${result.current} → ${result.latest}`));
+      console.error(chalk.gray(`  Run: origin upgrade\n`));
     }
   } catch { /* never fail */ }
 });
 
-// True when this invocation's stdout is consumed by a machine rather than read
+// True when this invocation's output is consumed by a machine rather than read
 // by a person, so nothing may be appended to it.
 export function isMachineReadableInvocation(actionCommand?: { name(): string; parent?: unknown } | null): boolean {
   // Walk to the root command name (`origin hooks antigravity pre-tool-use`
@@ -1226,9 +1251,21 @@ export function isMachineReadableInvocation(actionCommand?: { name(): string; pa
     if (typeof cmd.name === 'function' && cmd.name() === 'hooks') return true;
     cmd = cmd.parent;
   }
+  const argv = process.argv.slice(2);
   // Fall back to argv: a subcommand registered outside the walked chain, or a
   // dispatch path that never populated `parent`, still must not print.
-  return process.argv.slice(2).includes('hooks');
+  if (argv.includes('hooks')) return true;
+  // `--json` and `--waiver` say outright that the caller is parsing this run's
+  // output, so skip the check entirely rather than merely moving the notice:
+  // it also costs a network round-trip (up to FETCH_TIMEOUT_MS) on a scripted
+  // path, and a notice whose appearance depends on what getorigin.io is
+  // currently advertising makes every such run nondeterministic. That is what
+  // made the release-gate test fail on an API-only PR: its branch carried the
+  // previous version while a release had just published a newer one, so the
+  // banner appeared for the minutes in between — and the Windows job, which
+  // reaches that file ~13 minutes in, lost the race far more often than the
+  // faster Ubuntu one.
+  return argv.includes('--json') || argv.includes('--waiver');
 }
 
 // ─── Output: write help/errors synchronously ───────────────────────────────

@@ -29,6 +29,7 @@ import {
   type JournalEntry,
 } from './write-journal.js';
 import { getSnapshot } from './write-journal-store.js';
+import { localTurnForServerRow } from './turn-index.js';
 import { renderFileDiff, type FileDiffInput } from './write-journal-diff.js';
 import { fitDiffToBudget } from './diff-budget.js';
 import { MAX_PROMPT_DIFF_LEN } from './git-capture.js';
@@ -119,6 +120,23 @@ export interface LedgerCaptureDeps {
    * with no repo to ask.
    */
   ignoredFiles?: (files: string[]) => Set<string>;
+  /**
+   * Before-states for files the turn INHERITED rather than wrote — see
+   * inherited-window-baseline.ts.
+   *
+   * A `gh pr checkout`, `git pull`, `git rebase` or `git merge` rewrites files
+   * on disk, and the watcher records each rewrite as a write of whichever turn
+   * happened to be open. The bytes it saw arrive are real; WHOSE work they are
+   * is the question, and against the turn's own baseline the answer comes back
+   * "the turn's" for an entire pull request. Measured against what the
+   * inherited commit left, a file the turn merely received cancels to netZero
+   * and one it edited on top reports that edit alone.
+   *
+   * Consulted BEFORE the journal's own previous snapshot: that snapshot holds
+   * the state before the turn's first write of the file, which for a checkout
+   * is the pre-checkout content — the same stale answer in a closer voice.
+   */
+  beforeOverrides?: Map<string, string | null>;
 }
 
 /**
@@ -202,7 +220,14 @@ export function captureTurnFromLedger(deps: LedgerCaptureDeps): LedgerCapture | 
     // work. Only a file this turn saw FIRST needs git at all.
     let before: string | null = null;
     let beforeSource: BeforeSource = 'absent';
-    if (c.beforeHash) {
+    const inherited = deps.beforeOverrides;
+    if (inherited && inherited.has(c.file)) {
+      // The turn found this file already holding the inherited commit's bytes.
+      // Whatever the journal or the baseline says about an earlier state
+      // describes work that is not this turn's to claim.
+      before = inherited.get(c.file) ?? null;
+      if (before !== null) beforeSource = 'baseline';
+    } else if (c.beforeHash) {
       before = getSnapshot(snapshotDir, c.beforeHash);
       if (before === null) {
         contentUnavailable.push(c.file);
@@ -290,10 +315,20 @@ export function ledgerCaptureIsUsable(cap: LedgerCapture | null): cap is LedgerC
 export interface LedgerSessionState {
   writeJournalPath?: string;
   writeSnapshotDir?: string;
+  /** LOCAL-numbered: index L is this launch's turn L. */
   promptTurnIds?: string[];
+  /** LOCAL-numbered, like the ids. */
   promptShadows?: Array<{ promptIndex: number; shadowSha: string }>;
   prePromptSha?: string | null;
   headShaAtStart?: string | null;
+  /** Server row of this launch's turn 0 — see turn-index.ts. */
+  promptIndexBase?: number | null;
+  /**
+   * True once this journal has observed another session in its working tree.
+   * A journal observes bytes, not processes, so contested records must never
+   * become admissible merely because that peer later exits.
+   */
+  ledgerContended?: boolean;
 }
 
 /** A per-turn mapping, as each producer builds it before sending. */
@@ -319,6 +354,12 @@ export interface ApplyLedgerDeps {
   readAtRev?: (sha: string, file: string) => string | null;
   /** Batched "does git ignore this?" — see LedgerCaptureDeps.ignoredFiles. */
   ignoredFiles?: (files: string[]) => Set<string>;
+  /**
+   * Per-turn before-states for files the turn inherited from a checkout, pull,
+   * rebase or merge that landed inside its window. Injected because answering
+   * it needs the repo, and this module does no IO of its own.
+   */
+  inheritedBefore?: (baselineSha: string, localTurn: number) => Map<string, string | null>;
   /** Optional trace hook; never throws. */
   log?: (event: string, data: Record<string, unknown>) => void;
 }
@@ -351,13 +392,27 @@ export function applyLedgerToMappings(
     const journalPath = state.writeJournalPath;
     const snapshotDir = state.writeSnapshotDir;
     if (!journalPath || !snapshotDir || !Array.isArray(mappings)) return 0;
+    if (state.ledgerContended) {
+      deps.log?.('ledger declined: another live session shares this working tree', {});
+      return 0;
+    }
     const entries = deps.readEntries(journalPath);
     if (entries.length === 0) return 0;
 
     let replaced = 0;
     for (const pm of mappings) {
       if (!pm || !Number.isInteger(pm.promptIndex)) continue;
-      const turnId = state.promptTurnIds?.[pm.promptIndex];
+      // The mapping is a SERVER row; ids and shadows are numbered by this
+      // launch. Resolve once, or a resumed conversation's rows find no id
+      // (row 21 → `promptTurnIds[21]`) while the row of a turn from before
+      // the resume (row 0 → `promptTurnIds[0]`) borrows this launch's first
+      // turn — prod 8a626742.
+      const local = localTurnForServerRow(pm.promptIndex, state.promptIndexBase);
+      if (local === null) {
+        deps.log?.('ledger declined: row predates this launch', { promptIndex: pm.promptIndex });
+        continue;
+      }
+      const turnId = state.promptTurnIds?.[local];
       if (typeof turnId !== 'string' || !turnId) {
         deps.log?.('ledger declined: turn has no id', { promptIndex: pm.promptIndex });
         continue;
@@ -368,17 +423,24 @@ export function applyLedgerToMappings(
       // first to touch is diffed against what was really there rather than
       // against the last commit — which would credit the turn with someone
       // else's uncommitted edits.
-      const shadow = state.promptShadows?.find((ps) => ps.promptIndex === pm.promptIndex)?.shadowSha;
+      const shadow = state.promptShadows?.find((ps) => ps.promptIndex === local)?.shadowSha;
       const baselineSha = shadow || state.prePromptSha || state.headShaAtStart || null;
       // For a write reclaimed from ahead of this turn's mark: the tree as the
       // previous turn found it. Same fallbacks — a session with no shadows
       // still reads its first turn against the session start.
-      const priorShadow = state.promptShadows?.find((ps) => ps.promptIndex === pm.promptIndex - 1)?.shadowSha;
+      const priorShadow = state.promptShadows?.find((ps) => ps.promptIndex === local - 1)?.shadowSha;
       const priorBaselineSha = priorShadow || state.headShaAtStart || state.prePromptSha || null;
 
+      let beforeOverrides: Map<string, string | null> | undefined;
+      if (deps.inheritedBefore && baselineSha) {
+        try {
+          const m = deps.inheritedBefore(baselineSha, local);
+          if (m && m.size > 0) beforeOverrides = m;
+        } catch { /* unanswerable: the turn keeps the baseline it always had */ }
+      }
       const cap = captureTurnFromLedger({
         entries, turnId, snapshotDir, baselineSha, priorBaselineSha,
-        readAtRev: deps.readAtRev, ignoredFiles: deps.ignoredFiles,
+        readAtRev: deps.readAtRev, ignoredFiles: deps.ignoredFiles, beforeOverrides,
       });
       if (!ledgerCaptureIsUsable(cap)) {
         // A silent fallback is indistinguishable from a working ledger that
@@ -416,6 +478,7 @@ export function applyLedgerToMappings(
       deps.log?.('turn capture taken from the write journal', {
         promptIndex: pm.promptIndex,
         turnId,
+        inherited: beforeOverrides?.size ?? 0,
         files: cap.filesChanged.length,
         unavailable: cap.contentUnavailable.length,
         netZero: cap.netZero.length,

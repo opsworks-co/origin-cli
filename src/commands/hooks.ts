@@ -31,6 +31,7 @@ import {
   startHeartbeat,
   stopHeartbeat,
   isHeartbeatAlive,
+  isProvisionalSessionId,
   getStatePath,
   reconcilePromptHistory,
   homePromptIndexByText,
@@ -41,19 +42,21 @@ import {
   closeTurn,
   recordPromptShadow,
   turnBaseline,
+  applyRewritePairsToState,
 } from '../session-state.js';
-import { capCommitMessage, captureGitState, captureAgyDiff, getDirtyFiles, createShadowCommit, commitDiffScopedToPrompt, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
+import { capCommitMessage, captureGitState, captureAgyDiff, getDirtyFiles, createShadowCommit, commitDiffScopedToPrompt, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, sameSha, MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
 import { capDiff, fitDiffToBudget } from '../diff-budget.js';
 import { finalHunksForCaptures } from '../final-state-blame.js';
 import { parseAntigravityTranscript, estimateAntigravityUsage, agyArgs } from '../antigravity-transcript.js';
 import { claudeSessionName, cursorSessionName } from '../agent-session-name.js';
 import { outOfRepoWrites, samePath as samePathNormalized, isInsideRepo as isInsideRepoNormalized, toRepoRelativePath } from '../paths.js';
+import { WORKTREE_BOOTSTRAP_MAX_AGE_MS } from '../worktree-bootstrap.js';
 // Moved to ./hooks/git-hooks.ts — imported for the dispatcher, re-exported so
 // every existing `from './commands/hooks.js'` import keeps resolving.
 import { GENERIC_ASSIGNMENT_RULES, PRE_COMMIT_PATTERNS, buildOriginTrailers, handleGitPostCheckout, handleGitPostMerge, handlePreCommit, handlePrePush, handlePrepareCommitMsg, isNullRef, mapFindingSeverity, matchGlobPreCommit, parseStagedDiffLines, pickActiveSessionForCommit, policyAppliesToCommit, preCommitBudgetDecision, sessionTouchedFiles, stagedCommitFiles } from './hooks/git-hooks.js';
 // Moved to ./hooks/post-commit.ts — imported for the dispatcher, re-exported so
 // every existing `from './commands/hooks.js'` import keeps resolving.
-import { RECENCY_TIEBREAK_MARGIN_MS, commitTurnContentUnit, countDiffSignLines, excludeSessionsFromOtherTrees, filesNamedInDiff, gitCommitDate, handlePostCommit, inFlightEditedFiles, listSessionsForGitHook, listSessionsForGitHookUnscoped, pathNamesSession, pickCommitUpdateTargets, pickIdleOwnerByFileEvidence, pickRecentDevinSessionForRepo, pickSessionByFileOverlap, pickSessionForCommit, pinCodexCommitToProducer, resolvePromptForCommit, safePgrep, sessionDurationMs, sessionToDateCommittedSnapshot, sessionTouchedAnyCommitFile, sessionTrees, uniquePgrepMatch, worksInAnotherTree } from './hooks/post-commit.js';
+import { RECENCY_TIEBREAK_MARGIN_MS, applyAuthoredTotals, commitAuthoredDelta, commitTurnContentUnit, countDiffSignLines, excludeSessionsFromOtherTrees, filesNamedInDiff, gitCommitDate, handlePostCommit, inFlightEditedFiles, listSessionsForGitHook, listSessionsForGitHookUnscoped, loneSessionMayOwnCommit, pathNamesSession, pickCommitUpdateTargets, pickIdleOwnerByFileEvidence, pickRecentDevinSessionForRepo, pickSessionByFileOverlap, pickSessionForCommit, pinCodexCommitToProducer, renderAuthoredCommits, resolvePromptForCommit, safePgrep, sessionAuthoredSnapshot, sessionDurationMs, sessionToDateCommittedSnapshot, sessionTouchedAnyCommitFile, sessionTrees, uniquePgrepMatch, worksInAnotherTree } from './hooks/post-commit.js';
 // Moved to ./hooks/after-file-edit.ts — imported for the dispatcher, re-exported so
 // every existing `from './commands/hooks.js'` import keeps resolving.
 import { EDIT_HOOK_TOOL, adoptUnannouncedPrompts, buildLiveEditPromptChanges, cursorTranscriptPrompts, handleAfterFileEdit, resolveAfterFileEditCwd } from './hooks/after-file-edit.js';
@@ -65,18 +68,18 @@ import { LIVE_EDIT_MAX_ENTRIES, MAX_DISCOVERED_WORKTREES, PENDING_WRITE_MAX, SHE
 import { ADOPT_IDLESS_MAX_AGE_MS, ORIGIN_FRAMEWORK_MARKER, agentFileCarriesFramework, agentReadsContextFromHook, durableRulesFileMessage, emitVisiblePreamble, expireStaleSessionsOnServer, handleSessionStart, maybeSpawnHistorySync, maybeSpawnMemoryBriefBackfill, resolveCodexThreadId, resumeBaseFromTranscript, resumeSeedApplies, selectReusableSession } from './hooks/session-start.js';
 // Moved to ./hooks/user-prompt-submit.ts — imported for the dispatcher, re-exported so
 // every existing `from './commands/hooks.js'` import keeps resolving.
-import { SESSION_START_RECENT_SHAS, budgetLockoutDecision, buildContextInjectionPayload, contextInjectionStampPath, conversationAnchorId, cursorSessionReusable, enforceBudgetLockout, enforceSessionDurationLimit, fullContextAlreadyInjected, handleUserPromptSubmit, noteCheckoutContention, recordFullContextInjection, recordWorkTreeBaseline, retroactiveTurnFiles, selectRecoverableArchiveSession, stateMatchesIncomingChat } from './hooks/user-prompt-submit.js';
+import { SESSION_START_RECENT_SHAS, budgetLockoutDecision, buildContextInjectionPayload, contextInjectionStampPath, conversationAnchorId, cursorIncomingChatId, cursorSessionReusable, enforceBudgetLockout, enforceSessionDurationLimit, fullContextAlreadyInjected, handleUserPromptSubmit, noteCheckoutContention, recordFullContextInjection, recordWorkTreeBaseline, retroactiveTurnFiles, selectRecoverableArchiveSession, stateMatchesIncomingChat } from './hooks/user-prompt-submit.js';
 // Moved to ./hooks/stop.ts — imported for the dispatcher, re-exported so
 // every existing `from './commands/hooks.js'` import keeps resolving.
-import { SHELL_PROBE_TOOL, WRITE_JOURNAL_TOOL, applyBudgetSignal, baselineShaForTree, buildSubagentSummary, dropForeignCommitsFromCapture, durableUpdate, excludeUntouchedSessionStartDirt, fileNamedInCommand, filesOwnedByTurn, getCursorConversationSummary, handleStop, isInsideRepo, isSessionGoneError, journalFilesForTurn, keepRicherTurnCapture, normalizeTurnFiles, ownedRangeCommitShas, recordJournalEdits, recordProbedShellEdits, resolveAutoAgentSessionId, rewrittenCommitsPayload, serverRowForLocalTurn, sessionFilesFromRangeCapture, shouldAutoSnapshot, warnIfSpawnerRenamed } from './hooks/stop.js';
+import { SHELL_PROBE_TOOL, WRITE_JOURNAL_TOOL, applyBudgetSignal, attestedCommitShas, baselineShaForTree, buildSubagentSummary, dropForeignCommitsFromCapture, durableUpdate, excludeUntouchedSessionStartDirt, fileNamedInCommand, filesOwnedByTurn, getCursorConversationSummary, handleStop, headIsAttested, isInsideRepo, isSessionGoneError, journalFilesForTurn, keepRicherTurnCapture, normalizeTurnFiles, ownedRangeCommitShas, recordJournalEdits, recordProbedShellEdits, resolveAutoAgentSessionId, rewrittenCommitsPayload, serverRowForLocalTurn, sessionFilesFromRangeCapture, shouldAutoSnapshot, warnIfSpawnerRenamed } from './hooks/stop.js';
 // Moved to ./hooks/session-end.ts — imported for the dispatcher, re-exported so
 // every existing `from './commands/hooks.js'` import keeps resolving.
 import { CAPTURE_ID, applyLedgerCaptures, applyLiveLedger, buildMemoryEntry, buildPromptNoteEntries, buildSessionWriteData, captureStamp, describePromptImages, durableEnd, ensureServerSession, getWorkingTreeSha, handleSessionEnd, localTurnForServerRow, mergeFilesRead, mergePromptMappings, nestedRepoFilesWritten, nestedRepoWritesForOpenTurn, outOfRepoFilesFor, outOfRepoFilesFromEditsJson, promptMappingHasContent, recordDiscoveredWorkTreeEdits, repoRemoteUrl, resolveAgentSessionName, scheduleMemoryBriefRefresh, scopeSessionDiffToStart, sessionRepoRoots, spawnMemoryBriefChild, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, withDerivedLineCounts } from './hooks/session-end.js';
 export { CAPTURE_ID, applyLedgerCaptures, applyLiveLedger, buildMemoryEntry, buildPromptNoteEntries, buildSessionWriteData, captureStamp, describePromptImages, durableEnd, ensureServerSession, getWorkingTreeSha, handleSessionEnd, localTurnForServerRow, mergeFilesRead, mergePromptMappings, nestedRepoFilesWritten, nestedRepoWritesForOpenTurn, outOfRepoFilesFor, outOfRepoFilesFromEditsJson, promptMappingHasContent, recordDiscoveredWorkTreeEdits, repoRemoteUrl, resolveAgentSessionName, scheduleMemoryBriefRefresh, scopeSessionDiffToStart, sessionRepoRoots, spawnMemoryBriefChild, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, withDerivedLineCounts };
 
-export { SHELL_PROBE_TOOL, WRITE_JOURNAL_TOOL, applyBudgetSignal, baselineShaForTree, buildSubagentSummary, dropForeignCommitsFromCapture, durableUpdate, excludeUntouchedSessionStartDirt, fileNamedInCommand, filesOwnedByTurn, getCursorConversationSummary, handleStop, isInsideRepo, isSessionGoneError, journalFilesForTurn, keepRicherTurnCapture, normalizeTurnFiles, ownedRangeCommitShas, recordJournalEdits, recordProbedShellEdits, resolveAutoAgentSessionId, rewrittenCommitsPayload, serverRowForLocalTurn, sessionFilesFromRangeCapture, shouldAutoSnapshot, warnIfSpawnerRenamed };
+export { SHELL_PROBE_TOOL, WRITE_JOURNAL_TOOL, applyBudgetSignal, attestedCommitShas, baselineShaForTree, buildSubagentSummary, dropForeignCommitsFromCapture, durableUpdate, excludeUntouchedSessionStartDirt, fileNamedInCommand, filesOwnedByTurn, getCursorConversationSummary, handleStop, headIsAttested, isInsideRepo, isSessionGoneError, journalFilesForTurn, keepRicherTurnCapture, normalizeTurnFiles, ownedRangeCommitShas, recordJournalEdits, recordProbedShellEdits, resolveAutoAgentSessionId, rewrittenCommitsPayload, serverRowForLocalTurn, sessionFilesFromRangeCapture, shouldAutoSnapshot, warnIfSpawnerRenamed };
 
-export { SESSION_START_RECENT_SHAS, budgetLockoutDecision, buildContextInjectionPayload, contextInjectionStampPath, conversationAnchorId, cursorSessionReusable, enforceBudgetLockout, enforceSessionDurationLimit, fullContextAlreadyInjected, handleUserPromptSubmit, noteCheckoutContention, recordFullContextInjection, recordWorkTreeBaseline, retroactiveTurnFiles, selectRecoverableArchiveSession, stateMatchesIncomingChat };
+export { SESSION_START_RECENT_SHAS, budgetLockoutDecision, buildContextInjectionPayload, contextInjectionStampPath, conversationAnchorId, cursorIncomingChatId, cursorSessionReusable, enforceBudgetLockout, enforceSessionDurationLimit, fullContextAlreadyInjected, handleUserPromptSubmit, noteCheckoutContention, recordFullContextInjection, recordWorkTreeBaseline, retroactiveTurnFiles, selectRecoverableArchiveSession, stateMatchesIncomingChat };
 
 export { ADOPT_IDLESS_MAX_AGE_MS, ORIGIN_FRAMEWORK_MARKER, agentFileCarriesFramework, agentReadsContextFromHook, durableRulesFileMessage, emitVisiblePreamble, expireStaleSessionsOnServer, handleSessionStart, maybeSpawnHistorySync, maybeSpawnMemoryBriefBackfill, resolveCodexThreadId, resumeBaseFromTranscript, resumeSeedApplies, selectReusableSession };
 
@@ -84,7 +87,7 @@ export { LIVE_EDIT_MAX_ENTRIES, MAX_DISCOVERED_WORKTREES, PENDING_WRITE_MAX, SHE
 
 export { EDIT_HOOK_TOOL, adoptUnannouncedPrompts, buildLiveEditPromptChanges, cursorTranscriptPrompts, handleAfterFileEdit, resolveAfterFileEditCwd };
 
-export { RECENCY_TIEBREAK_MARGIN_MS, commitTurnContentUnit, countDiffSignLines, excludeSessionsFromOtherTrees, filesNamedInDiff, gitCommitDate, handlePostCommit, inFlightEditedFiles, listSessionsForGitHook, listSessionsForGitHookUnscoped, pathNamesSession, pickCommitUpdateTargets, pickIdleOwnerByFileEvidence, pickRecentDevinSessionForRepo, pickSessionByFileOverlap, pickSessionForCommit, pinCodexCommitToProducer, resolvePromptForCommit, safePgrep, sessionDurationMs, sessionToDateCommittedSnapshot, sessionTouchedAnyCommitFile, sessionTrees, uniquePgrepMatch, worksInAnotherTree };
+export { RECENCY_TIEBREAK_MARGIN_MS, applyAuthoredTotals, commitAuthoredDelta, commitTurnContentUnit, countDiffSignLines, excludeSessionsFromOtherTrees, filesNamedInDiff, gitCommitDate, handlePostCommit, inFlightEditedFiles, listSessionsForGitHook, listSessionsForGitHookUnscoped, loneSessionMayOwnCommit, pathNamesSession, pickCommitUpdateTargets, pickIdleOwnerByFileEvidence, pickRecentDevinSessionForRepo, pickSessionByFileOverlap, pickSessionForCommit, pinCodexCommitToProducer, renderAuthoredCommits, resolvePromptForCommit, safePgrep, sessionAuthoredSnapshot, sessionDurationMs, sessionToDateCommittedSnapshot, sessionTouchedAnyCommitFile, sessionTrees, uniquePgrepMatch, worksInAnotherTree };
 export type { FileEvidenceSession } from './hooks/post-commit.js';
 
 export { GENERIC_ASSIGNMENT_RULES, PRE_COMMIT_PATTERNS, buildOriginTrailers, handleGitPostCheckout, handleGitPostMerge, handlePreCommit, handlePrePush, handlePrepareCommitMsg, isNullRef, mapFindingSeverity, matchGlobPreCommit, parseStagedDiffLines, pickActiveSessionForCommit, policyAppliesToCommit, preCommitBudgetDecision, sessionTouchedFiles, stagedCommitFiles };
@@ -133,6 +136,7 @@ import { ensureSqlite, querySqlite } from '../utils/sqlite.js';
 import { attachOrphanCommitFiles } from '../prompt-completeness.js';
 import { writeSessionFiles, pushSessionBranch, reconcileSessionBranchWithRemote, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
 import { writeGitNotes, shouldIncludePromptText, syncNotesFromRemoteThrottled, syncNotesForSessionStart, pushMemoryNotes, pushAcceptanceNotes, foldStagedNotes, resolvePushRemote, type PromptNoteEntry } from '../git-notes.js';
+import { publishMemoryNotes } from '../memory-transport.js';
 import { parseMarkersFromTranscript, parseMarkersFromTranscriptPath, type OriginMarkers } from '../origin-markers.js';
 import { redactSecrets } from '../redaction.js';
 import { makeSyncBlock } from '../sync-block.js';
@@ -168,7 +172,7 @@ import {
   shellWindowEdits,
   SHELL_WINDOW_SOURCE,
 } from '../shell-write-capture.js';
-import { isOriginAutoManagedPath, shouldIgnoreFile } from '../ignore-patterns.js';
+import { isOriginAutoManagedPath, shouldIgnoreFile, stripIgnoredSectionsFromDiff } from '../ignore-patterns.js';
 import { normalizeToolHookPayload } from '../hook-payload.js';
 import {
   listMirroredSessionsForTree,
@@ -195,6 +199,7 @@ import {
 import { createSnapshot, condenseSnapshot, listSnapshots, condenseAndCleanupSession, cleanupSessionShadowBranch, type SnapshotMeta } from './snapshot.js';
 import { execFileSync, spawn } from 'child_process';
 import { toRepoRelative } from '../transcript-watch.js';
+import { inheritedBaseline, inheritedBeforeStates, type InheritedWindowDeps } from '../inherited-window-baseline.js';
 import { countDiffLines } from '../transcript-adapters.js';
 import fs from 'fs';
 import path from 'path';
@@ -594,6 +599,54 @@ function ownEditedFiles(state: SessionState, rel: (f: string) => string): Set<st
   return fallback;
 }
 
+/**
+ * Could this sibling session's claims describe a file in OUR working tree?
+ *
+ * The exclusion below compares sibling claims to ours as repo-relative STRINGS,
+ * because that is the only name a git-derived claim ever has. Across linked
+ * worktrees that string stops naming one file: `packages/cli/package.json` in
+ * `.claude/worktrees/a` and the same path in `.claude/worktrees/b` are two
+ * different files on disk, and a sibling writing its own copy says nothing
+ * about ours. Excluding on the strings alone deletes real authored work — and
+ * it does so hardest on the files a repo touches most, which is exactly the set
+ * every session has open.
+ *
+ * Measured on session 97846e3a (Cursor, its own worktree): the turn window saw
+ * its `packages/cli/package.json` +1/-1 version bump and skipped it as
+ * `foreign` because three siblings — two in `.claude/worktrees/memory-todo-
+ * review-9b9248`, one in `~/.cursor/worktrees/origin/05c3` — carried that path
+ * in their own claims. Two other files went the same way and survived only
+ * because Cursor's transcript had tool calls for them. The bump, written by
+ * `node packages/cli/scripts/version-bump.cjs`, had none. It reached the
+ * session header (post-commit reads git) and no turn's capture, which is the
+ * `header_file_unclaimed_by_turns` contradiction `verify-capture` reports —
+ * and, since a stored row is final, a permanent block on the release gate.
+ *
+ * Conservative in the direction that matters. Dropping a sibling here means we
+ * STOP excluding its files, i.e. we claim more, so we drop one only when its
+ * tree is KNOWN and is provably not ours:
+ *
+ *   • a sibling with no recorded tree is unknown, not elsewhere — kept, so the
+ *     shared-checkout leak this exclusion exists for stays closed;
+ *   • a sibling whose recorded tree is elsewhere but whose `lastCwd` is INSIDE
+ *     our tree has moved here (an agent that `cd`-ed in by hand — see
+ *     session-worktree.ts) and is kept;
+ *   • if we cannot resolve our OWN tree, nothing is dropped.
+ *
+ * Residual risk, stated plainly: a sibling that writes into our tree by
+ * absolute path while recording a different tree of its own is no longer
+ * excluded here. That is the same blind spot `candidateDirsFromCommand` covers
+ * from the other side, and it is rarer than the loss it replaces.
+ */
+export function siblingSharesOurTree(
+  sibling: { repoPath?: string | null; repoPaths?: string[] | null; lastCwd?: string | null },
+  ourTree: string | null | undefined,
+): boolean {
+  if (!ourTree) return true;
+  if (!worksInAnotherTree(sibling, ourTree)) return true;
+  return !!sibling.lastCwd && isInsideRepo(ourTree, sibling.lastCwd);
+}
+
 export function uncommittedExcludeUnion(state: SessionState): string[] {
   const set = new Set<string>();
   for (const f of state.prePromptDirtyFiles || []) set.add(f);
@@ -637,8 +690,10 @@ export function uncommittedExcludeUnion(state: SessionState): string[] {
         const p = (s as any).__statePath;
         if (!p) return false;
         try {
-          return now - fs.statSync(p).mtimeMs <= CONCURRENT_SESSION_WINDOW_MS;
+          if (now - fs.statSync(p).mtimeMs > CONCURRENT_SESSION_WINDOW_MS) return false;
         } catch { return false; }
+        // …and only one that is editing THIS tree. See siblingSharesOurTree.
+        return siblingSharesOurTree(s, workRoot);
       });
       if (others.length > 0) {
         // What counts as OURS is the live per-edit ledger — the post-tool-use
@@ -1069,21 +1124,23 @@ function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
     }
     return;
   }
-  // Remember the pairs, for the server. Dropping the orphan locally is only
+  // Remember the pairs, for the server — dropping the orphan locally is only
   // half the job: the server merges sha lists by union and keeps the orphan's
-  // Commit row on the session unless told which sha replaced it.
-  const rewritten = Array.isArray(state.rewrittenCommits) ? [...state.rewrittenCommits] : [];
-  const known = new Set(rewritten.map((r) => r.from));
-  for (const [from, to] of replacements) {
-    if (!known.has(from)) { rewritten.push({ from, to }); known.add(from); }
-  }
-  state.rewrittenCommits = rewritten;
-  // Dedupe AFTER mapping. An amend rescue could always collapse two entries
-  // onto one sha, and a rebase rescue always does — both the orphan and its
-  // rewrite were in the list, which is the duplication itself.
-  state.sessionCommitShas = dedupeShas(
-    state.sessionCommitShas.map((s) => replacements.get(s) ?? s),
-  );
+  // Commit row on the session unless told which sha replaced it — and move
+  // every local reading of an orphan onto its FINAL survivor: the sha list
+  // (deduped: both the orphan and its rewrite were in it, which is the
+  // duplication itself) and the turn attestation. `commitTurns` rides every
+  // Stop and session end, and the server badges each attested sha AFTER
+  // applying the supersession, so an attestation still naming an orphan
+  // re-badged the turn with a sha the same payload had just declared
+  // replaced (session 8a06aaf6: "3 commits total +517/-29" for one squash).
+  //
+  // Final, not one hop. The pairs already on the state matter as much as
+  // this rescue's: a chain rebase → amend → amend → rebase → squash is five
+  // pairs found across several Stops (and by the post-rewrite hook), and a
+  // reading mapped through only the newest pair stopped on an intermediate
+  // copy that itself had been rewritten — the same session kept two of them.
+  applyRewritePairsToState(state, [...replacements].map(([from, to]) => ({ from, to })));
   try {
     saveSessionState(state, state.repoPath || '', state.sessionTag);
   } catch { /* best-effort persistence */ }
@@ -1317,14 +1374,14 @@ export function sessionScopedCommittedDiff(
     // is the safe answer there.
     if (paths.length > 0 && paths.length <= 500) {
       try {
-        return execFileSync(
+        return dropBookkeepingSections(execFileSync(
           'git',
           ['diff', '--no-color', sinceSha, windowHead, '--', ...paths],
           {
             windowsHide: true, cwd: repoPath, encoding: 'utf-8',
             stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000, maxBuffer: 64 * 1024 * 1024,
           },
-        ).toString().trim();
+        ).toString().trim());
       } catch { /* fall through to the per-commit walk */ }
     }
   }
@@ -1366,7 +1423,7 @@ export function sessionScopedCommittedDiff(
     run.push(sha);
   }
   flushRun();
-  const walked = parts.join('\n').trim();
+  let walked = parts.join('\n').trim();
   // The SESSION-level render (no turn baseline) still answers "what is in
   // these commits" per commit, and a `git add -A` commits whatever was already
   // lying in the tree before the session began. Drop the files the session
@@ -1375,9 +1432,28 @@ export function sessionScopedCommittedDiff(
   // that already contains the dirt — and need nothing here.
   if (!sinceSha && walked) {
     const unchanged = preSessionDirtCommittedUnchanged(repoPath, state, filesNamedInDiff(walked));
-    if (unchanged.size > 0) return dropDiffSectionsForFiles(walked, unchanged);
+    if (unchanged.size > 0) walked = dropDiffSectionsForFiles(walked, unchanged);
   }
-  return walked;
+  return dropBookkeepingSections(walked);
+}
+
+/**
+ * What the turn rows never count, dropped from the committed walk too: the
+ * lockfiles and build output the default ignore patterns cover, and the
+ * context files Origin itself writes (CLAUDE.md, AGENTS.md, …). Every turn
+ * capture strips both; a `git add -A` commits both; and the header, rendered
+ * from the commits, then claimed them. The real-binary e2e caught it on a
+ * merge turn: the session's turns summed to +6 while the header read +22 —
+ * the 16 lines of Origin's own `<!-- origin-managed -->` block that
+ * session-start had written and turn 2 had swept into its commit. That is
+ * exactly the shape `origin verify-capture` flags (a header claiming more
+ * than its turns), on a session whose turns were right.
+ */
+function dropBookkeepingSections(diff: string): string {
+  if (!diff) return diff;
+  const stripped = stripIgnoredSectionsFromDiff(diff);
+  const managed = new Set(filesNamedInDiff(stripped).filter(isOriginAutoManagedPath));
+  return managed.size > 0 ? dropDiffSectionsForFiles(stripped, managed) : stripped;
 }
 
 /**
@@ -1527,6 +1603,12 @@ export function localCommitterEmail(repoPath: string): string {
  * authored it upstream. AUTHOR is not the signal — a squash-merge of your own
  * PR keeps you as author. With no local identity configured there is nothing
  * to compare against, so the generous default stands.
+ *
+ * Two bounds sit above all of that. A commit committed BEFORE `startedAt` is
+ * never ours — it entered the range because HEAD moved, not because we made
+ * it. And a trailer naming `previousSessionId` is ours only for a local
+ * commit made during this session while that session is not live here; the
+ * previous session's own merged PRs carry the same trailer and are not.
  */
 export function commitBelongsToSession(
   repoPath: string,
@@ -1536,14 +1618,50 @@ export function commitBelongsToSession(
 ): boolean {
   let body = '';
   let committerEmail = '';
+  let committedAtMs = NaN;
   try {
-    body = execFileSync('git', ['show', '-s', '--format=%B', sha], { ...GIT_READ_OPTS, cwd: repoPath }).toString();
-    committerEmail = execFileSync('git', ['show', '-s', '--format=%ce', sha], { ...GIT_READ_OPTS, cwd: repoPath })
-      .toString().trim().toLowerCase();
+    // One read for the three facts this predicate weighs. The body is last
+    // because it is the only multi-line field.
+    const raw = execFileSync('git', ['show', '-s', '--format=%ce%n%ct%n%B', sha], { ...GIT_READ_OPTS, cwd: repoPath }).toString();
+    const [emailLine = '', ctLine = '', ...bodyLines] = raw.split('\n');
+    committerEmail = emailLine.trim().toLowerCase();
+    committedAtMs = Number(ctLine.trim()) * 1000;
+    body = bodyLines.join('\n');
   } catch { return true; } // unreadable — keep it rather than guess work away
 
+  // A trailer naming THIS session is decisive — including a squash-merge of
+  // our own PR that GitHub committed and a pull brought back; supersession
+  // owns the rewrite.
+  if (commitTrailerBelongsToSession(body, { sessionId: state.sessionId }) === 'self') return true;
+
+  // Nothing this session did can be committed before the session started.
+  // A commit older than that is in the range because HEAD MOVED — a
+  // checkout, a pull, a rebase onto upstream — not because we made it.
+  // Session e1095412 (2026-09-08) ran `git checkout --detach origin/main`
+  // before its first commit; `headShaAtStart..HEAD` became every commit on
+  // main its branch lacked, and the header read +6634 across 9 commits that
+  // were not its work. Rewrites only move a committer date FORWARD, so our
+  // own amended or rebased commits keep passing. `startedAt` is written once
+  // at session creation and never bumped, so it is a safe lower bound —
+  // floored to the second, which is all the resolution a committer date has.
+  const startedAtMs = state.startedAt ? Math.floor(Date.parse(state.startedAt) / 1000) * 1000 : NaN;
+  if (Number.isFinite(startedAtMs) && Number.isFinite(committedAtMs) && committedAtMs < startedAtMs) return false;
+
   const ownership = commitTrailerBelongsToSession(body, state);
-  if (ownership === 'self') return true;
+  if (ownership === 'self') {
+    // Reached only through `previousSessionId` — the last session that wrote
+    // memory in this repo, ANY conversation, not one we resumed. It counted as
+    // "self" outright since #804, for the one shape that needs it: our own
+    // commit that prepare-commit-msg trailered with the id of a session we
+    // chained from. That shape is a LOCAL commit made during this session
+    // while the previous session is not itself running here. Everything else
+    // the rule let through was somebody else's: the previous session's PRs,
+    // squash-merged with their trailer intact and reached by the checkout
+    // above (GitHub committed those), or a sibling still live in this tree
+    // whose own commit we would take over the moment it landed.
+    if (localEmail && committerEmail && committerEmail !== localEmail) return false;
+    return !trailerNamesAKnownSession(repoPath, body, state);
+  }
 
   const recorded = (state.sessionCommitShas || []).map((c) => c.toLowerCase());
   const weRecordedIt = recorded.includes((sha || '').toLowerCase());
@@ -1785,7 +1903,7 @@ export function journalHasMark(journalPath: string, turnId: string | undefined):
 export function preMarkTurnForBackgroundSubmit(agentSlug: string, input: Record<string, any>): boolean {
   try {
     const hookCwd = normalizeWorkspaceRoot(input.cwd) || process.cwd();
-    const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug), agentSlug);
+    const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug, input.conversation_id), agentSlug);
     if (!found?.state) return false;
     const state = found.state;
     const idx = state.prompts?.length || 0;
@@ -2096,8 +2214,11 @@ export function buildOriginFrameworkGuidance(): string {
     '  [Origin: Decision] <choice you made> — <why>',
     '  [Origin: Open] <something you didn\'t finish, or aren\'t sure about>',
     '  [Origin: Verify] <something a human reviewer should check>',
+    '  [Origin: Closes] <id of an open TODO above that this change finishes>',
     '',
     'Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.',
+    '',
+    '[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it only for one you actually finished in this session, naming its id. It is recorded as a claim and confirmed when the change reaches the default branch, so a wrong one is visible rather than silent.',
     '',
     'Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn\'t do. These appear on the PR review surface alongside Origin\'s server-synthesized summary; agent-emitted markers take precedence.',
   ].join('\n');
@@ -2132,6 +2253,15 @@ export const PREAMBLE_VISIBLE_ANCHOR = 'Origin: Session tracking active';
 // via the agent-filtered fallback (the still-active same-agent session) instead
 // of aborting.
 //
+// Cursor is the exception among the "unstable session_id" agents: its
+// `session_id` rotates per turn, but `conversation_id` is stable per chat
+// (the `agent-transcripts/<id>/` directory). Passing the rotating id made
+// every lookup miss and fall through to "newest Cursor session in this
+// git dir" — sibling worktrees share `.git/origin-session-*.json`, so a
+// second Cursor chat's Stop wrote onto the first chat's row (prod: 8i6u
+// conversation e2efa52c landed on t09w session 562314d8). When the
+// conversation id is present, look up on THAT, not on session_id.
+//
 // Bug this fixes: a resumed Gemini session stopped capturing per-prompt diffs.
 // UserPromptSubmit already gated the id this way, but Stop / SessionEnd /
 // PreToolUse passed the raw id — so after resume (new Gemini id) Stop hit
@@ -2139,8 +2269,125 @@ export const PREAMBLE_VISIBLE_ANCHOR = 'Origin: Session tracking active';
 // ABORTed, never writing completedPromptMappings / advancing prePromptSha.
 // Prompts kept growing (UserPromptSubmit worked) while diffs froze.
 export const STABLE_SESSION_ID_AGENTS = ['claude-code', 'devin', 'copilot'];
-export function hookLookupSessionId(sessionId: string | undefined, agentSlug?: string): string | undefined {
+export function hookLookupSessionId(
+  sessionId: string | undefined,
+  agentSlug?: string,
+  conversationId?: string,
+): string | undefined {
+  if ((agentSlug || '').toLowerCase() === 'cursor') {
+    const conv = typeof conversationId === 'string' ? conversationId.trim() : '';
+    return conv || undefined;
+  }
   return STABLE_SESSION_ID_AGENTS.includes(agentSlug || '') ? sessionId : undefined;
+}
+
+function sessionMatchesLookupId(s: SessionState, id: string): boolean {
+  if (!id) return false;
+  if (s.claudeSessionId === id) return true;
+  const agentId = (s as { agentSessionId?: string }).agentSessionId;
+  return !!agentId && agentId === id;
+}
+
+/**
+ * Bring back this conversation's OWN ended state.
+ *
+ * The heartbeat retires a hook-driven session after 90 silent minutes, and a
+ * conversation can be silent that long while still open: this session
+ * (1b7b5ffe, 2026-09-09) asked the user a question at 03:50 and got its answer
+ * at 14:34. Claude Code fires no UserPromptSubmit for an answer, only tool
+ * hooks — and every tool hook found the state ENDED, said "new session
+ * needed", and aborted. The commit made at 14:41 then had no live session to
+ * attach to; the server injected it by time window, with no turn. The prompt
+ * hook at 14:51 auto-created a SECOND state file for the same session, so the
+ * turn history stayed behind in the first.
+ *
+ * A stable per-conversation id names the state positively — the same rule the
+ * Cursor archive resume uses. Reopen it in place: status back to RUNNING,
+ * endedAt cleared, the heartbeat restarted. Never a row the web archived or
+ * deleted (`serverTerminal`), never another agent's, never a Cursor row
+ * (claudeSessionId is empty there; Cursor has its own resume).
+ */
+export function resumeEndedConversationState(
+  hookCwd: string,
+  conversationId: string | undefined,
+  agentSlug: string | undefined,
+  scope: string,
+): { state: SessionState; saveCwd: string } | null {
+  if (!conversationId) return null;
+  const repoPath = discoverGitRoot(hookCwd) || hookCwd;
+  const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+  const candidates: SessionState[] = [];
+  const consider = (raw: unknown, tagFromName?: string) => {
+    const s = raw as (SessionState & { serverTerminal?: boolean; endedAt?: string }) | null;
+    if (!s || typeof s !== 'object' || !s.sessionId) return;
+    if (String(s.status || '').toUpperCase() !== 'ENDED') return;
+    if (s.serverTerminal === true) return;
+    if (s.claudeSessionId !== conversationId) return;
+    if (agentSlug && !sessionMatchesAgent(s, agentSlug)) return;
+    const started = s.startedAt ? Date.parse(s.startedAt) : NaN;
+    if (!Number.isFinite(started) || Date.now() - started > MAX_AGE_MS) return;
+    if (!s.sessionTag && tagFromName) s.sessionTag = tagFromName;
+    candidates.push(s);
+  };
+  try {
+    const gitDir = getGitCommonDir(repoPath) || getGitDir(repoPath);
+    if (gitDir) {
+      const dir = path.isAbsolute(gitDir) ? gitDir : path.resolve(repoPath, gitDir);
+      for (const entry of fs.readdirSync(dir)) {
+        const m = entry.match(/^origin-session-(.+)\.json$/);
+        if (!m) continue;
+        try { consider(JSON.parse(fs.readFileSync(path.join(dir, entry), 'utf-8')), m[1]); } catch { /* skip */ }
+      }
+    }
+  } catch { /* no git dir */ }
+  if (candidates.length === 0) {
+    try {
+      const mirrorDir = path.join(os.homedir(), '.origin', 'sessions');
+      for (const entry of fs.readdirSync(mirrorDir)) {
+        if (!entry.endsWith('.json')) continue;
+        try { consider(JSON.parse(fs.readFileSync(path.join(mirrorDir, entry), 'utf-8'))); } catch { /* skip */ }
+      }
+    } catch { /* no mirror dir */ }
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => Date.parse((b as { endedAt?: string }).endedAt || b.startedAt || '') - Date.parse((a as { endedAt?: string }).endedAt || a.startedAt || ''));
+  const state = candidates[0];
+  const endedAt = (state as { endedAt?: string }).endedAt;
+  state.status = 'RUNNING';
+  delete (state as { endedAt?: string }).endedAt;
+  const saveCwd = state.repoPath || repoPath;
+  try { saveSessionState(state, saveCwd, state.sessionTag); } catch { /* best effort */ }
+  debugLog(scope, 'resuming ended session (same conversation)', {
+    sessionId: state.sessionId, tag: state.sessionTag, conversationId, endedAt,
+    prompts: state.prompts?.length || 0, activeTurn: (state as { activeTurn?: { index?: number } | null }).activeTurn?.index ?? null,
+  });
+  try {
+    const config = loadConfig();
+    if (isConnectedMode() && config?.apiKey && !isProvisionalSessionId(state.sessionId) && !isHeartbeatAlive(state.sessionId)) {
+      startHeartbeat(state.sessionId, config.apiUrl || 'https://getorigin.io', config.apiKey, getStatePath(saveCwd, state.sessionTag), agentSlug);
+    }
+  } catch { /* the next hook restarts it */ }
+  return { state, saveCwd };
+}
+
+/**
+ * May a row recovered from the global mirror serve a Cursor hook for chat
+ * `incomingChatId`? Yes when it names that chat, names no chat at all, or is
+ * the empty, young main-checkout handshake that the worktree-bootstrap rule
+ * lets the chat's first prompt adopt. A row that names a DIFFERENT chat and
+ * has prompts is another conversation — never a fallback for this one.
+ */
+export function mirrorRowAdoptableForChat(
+  s: { claudeSessionId?: string; agentSessionId?: string; prompts?: unknown[]; startedAt?: string },
+  incomingChatId: string,
+  nowMs: number,
+): boolean {
+  if (!incomingChatId) return true;
+  if (s.claudeSessionId === incomingChatId || s.agentSessionId === incomingChatId) return true;
+  if (!s.agentSessionId && !s.claudeSessionId) return true;
+  if ((s.prompts?.length || 0) > 0) return false;
+  const started = s.startedAt ? Date.parse(s.startedAt) : NaN;
+  return Number.isFinite(started) && nowMs - started >= 0 && nowMs - started <= WORKTREE_BOOTSTRAP_MAX_AGE_MS;
 }
 
 // Every narrowing rule in listSessionsForGitHook routes through this, and it
@@ -2190,15 +2437,48 @@ export function findStateForHook(hookCwd: string, claudeSessionId?: string, agen
   // and the whole turn (src/index.js, src/parseArgs.test.js, README.md) was
   // dropped. The mirror had the session the entire time.
   //
-  // Only consulted when BOTH repo-scoped scans are empty, so a healthy `.git`
-  // still wins and this can never pull in a session the repo state disagrees
-  // with. listMirroredSessionsForTree is itself strict about ownership — it
+  // listMirroredSessionsForTree is itself strict about ownership — it
   // matches on repoPath/lastCwd/canonicalRepoPath for THIS tree only.
+  // The git-dir scan returns EVERY origin-session in the common git dir —
+  // other agents' chats in sibling worktrees — so it is almost never empty
+  // in this repo. The old gate (both scans empty) therefore never opened
+  // the mirror, and a Cursor worktree whose own state lived only in
+  // ~/.origin/sessions never matched. Session c1e361a4: after-file-edit
+  // scanned five foreign tags, skipped the mirror, and this chat's turns
+  // stored no diffs (header +0/−0, commit "not linked to a turn").
+  //
+  // Consult the mirror when git is empty (the baton case) OR when we have
+  // a conversation id that the git scan did not carry — never as a way
+  // to displace a live in-repo row for that same id.
   let sessionsInMirror: SessionState[] = [];
-  if (sessionsInHookCwd.length === 0 && sessionsInRepoPath.length === 0) {
+  const gitScanEmpty = sessionsInHookCwd.length === 0 && sessionsInRepoPath.length === 0;
+  const gitHasThisId = !!(claudeSessionId && (
+    sessionsInHookCwd.some((s) => sessionMatchesLookupId(s, claudeSessionId))
+    || sessionsInRepoPath.some((s) => sessionMatchesLookupId(s, claudeSessionId))
+  ));
+  if (gitScanEmpty || (claudeSessionId && !gitHasThisId)) {
     sessionsInMirror = listMirroredSessionsForTree(repoPath);
     if (sessionsInMirror.length === 0 && !samePathNormalized(hookCwd, repoPath)) {
       sessionsInMirror = listMirroredSessionsForTree(hookCwd);
+    }
+    // The mirror is global and the Cursor lookup falls through on an id
+    // mismatch, so a mirror row for ANOTHER chat is one agent-filtered match
+    // away from adopting this hook. Prod 2026-09-09: the real chat's row was
+    // idle-reaped (ENDED, invisible to the git scan); its next file edits and
+    // Stop fell to the mirror, where the archived twin's leftover RUNNING
+    // mirror (composer id, six copied prompts) won on recency, and the turn's
+    // capture re-opened the archived row on the server. Only a row that names
+    // this chat, names no chat yet, or is the empty main-checkout handshake
+    // the worktree-bootstrap rule adopts, is a candidate.
+    if (claudeSessionId && (agentSlug || '').toLowerCase() === 'cursor' && sessionsInMirror.length > 0) {
+      const foreign = sessionsInMirror.filter((s) => !mirrorRowAdoptableForChat(s, claudeSessionId, Date.now()));
+      if (foreign.length > 0) {
+        debugLog('findStateForHook', 'mirror rows for another chat are not candidates', {
+          incoming: claudeSessionId,
+          skipped: foreign.map((s) => ({ id: s.sessionId, chat: (s as { agentSessionId?: string }).agentSessionId, prompts: s.prompts?.length || 0 })),
+        });
+        sessionsInMirror = sessionsInMirror.filter((s) => !foreign.includes(s));
+      }
     }
   }
   debugLog('findStateForHook', 'scanning', {
@@ -2223,27 +2503,38 @@ export function findStateForHook(hookCwd: string, claudeSessionId?: string, agen
   // dropping the hook (which used to abort handleStop with "no exact match",
   // leaving the session's tool calls / diffs unattached on the dashboard).
   if (claudeSessionId) {
+    // Cursor session-start stores the conversation on `agentSessionId` and
+    // leaves `claudeSessionId` empty (Cursor is not a STABLE_SESSION_ID
+    // agent). findSessionByClaudeId only reads claudeSessionId, so a lookup
+    // keyed on conversation_id would miss the row and fall through to
+    // "newest same-agent session" — the sibling-worktree steal. Scan the
+    // already-loaded lists for either field first.
+    const inScan =
+      sessionsInHookCwd.find((s) => sessionMatchesLookupId(s, claudeSessionId))
+      || sessionsInRepoPath.find((s) => sessionMatchesLookupId(s, claudeSessionId))
+      || sessionsInMirror.find((s) => sessionMatchesLookupId(s, claudeSessionId))
+      || null;
     const inRepo = findSessionByClaudeId(claudeSessionId, hookCwd)
       || (repoPath !== hookCwd ? findSessionByClaudeId(claudeSessionId, repoPath) : null);
     // findSessionByClaudeId reads the same repo-scoped state listActiveSessions
     // does, so it is blind in exactly the same way. Match the mirror on the
     // unified agent id too — otherwise a stable-id agent whose `.git` state is
     // missing returns null below ("new session needed") and starts a duplicate.
-    const found = inRepo
-      || sessionsInMirror.find(
-        (s) => s.claudeSessionId === claudeSessionId
-          || (s as { agentSessionId?: string }).agentSessionId === claudeSessionId,
-      )
-      || null;
+    const found = inScan || inRepo || null;
     if (found) {
       debugLog('findStateForHook', 'exact match', { claudeSessionId, sessionId: found.sessionId, tag: found.sessionTag });
       return { state: found, saveCwd: found.repoPath || repoPath };
     }
-    if (agentSlug === 'codex') {
-      debugLog('findStateForHook', 'codex per-turn id mismatch — falling through to agent-filtered match', {
-        claudeSessionId,
+    if (agentSlug === 'codex' || (agentSlug || '').toLowerCase() === 'cursor') {
+      // Codex: stdin session_id is per-turn. Cursor: conversation_id is stable
+      // per chat, but older auto-create rows stored the rotating session_id
+      // (or nothing) on claudeSessionId / agentSessionId, so a lookup keyed
+      // on conversation_id misses and must not ABORT the Stop. Fall through
+      // to the agent-filtered match, which now disambiguates sibling
+      // worktrees by repoPath — not "newest Cursor row in this git dir".
+      debugLog('findStateForHook', 'id mismatch — falling through to agent-filtered match', {
+        claudeSessionId, agentSlug,
       });
-      // intentionally NOT returning here; let the agent-filtered branch below run
     } else {
       debugLog('findStateForHook', 'no exact match for stable claudeSessionId — new session needed', { claudeSessionId, agentSlug });
       return null;
@@ -2276,7 +2567,11 @@ export function findStateForHook(hookCwd: string, claudeSessionId?: string, agen
         // Same-agent tie (e.g. two Gemini windows): prefer the session whose
         // last-seen lifecycle cwd matches this hook's cwd — disambiguates
         // parallel worktrees, where each session works in its own directory.
-        const cwdMatched = matching.filter(s => sameDir(s.lastCwd, hookCwd));
+        // Cursor auto-create often never stamps lastCwd (the git-hook tests
+        // call that out). It DOES stamp repoPath to the worktree it started
+        // in. Matching only lastCwd left two Cursor chats in sibling
+        // worktrees indistinguishable, so the newest one ate the other's Stop.
+        const cwdMatched = matching.filter(s => sameDir(s.lastCwd, hookCwd) || sameDir(s.repoPath, hookCwd));
         if (cwdMatched.length > 0) matching = cwdMatched;
         // Two files for ONE session survived the merge guards (they race) —
         // take the one holding the turns, not whichever sorted first.
@@ -2428,6 +2723,9 @@ async function maybeRefreshMemoryBrief(repoPath: string, connected: boolean, sou
     if (brief) {
       writeMemoryBrief(repoPath, { version: 1, brief, signature: sig, generatedAt: new Date().toISOString() });
       debugLog(source, 'memory continuation brief refreshed', { len: brief.length });
+      // The brief lives in its own notes ref; a fresh one is worthless on this
+      // machine alone. Push it and let the dashboard re-read it.
+      await publishMemoryNotes(repoPath, source);
     }
   } catch (err: any) {
     debugLog(source, 'memory brief refresh error (non-fatal)', { message: err?.message });
@@ -2592,7 +2890,7 @@ export function ensureDetachedJournalWatcher(
 
     const dir = path.join(os.homedir(), '.origin', 'journals');
     // Derived in ONE place so every reader resolves the same two paths.
-    const { journalPath, snapshotDir, lockPath } = journalPathsForTag(tag);
+    const { journalPath, snapshotDir, lockPath } = journalPathsForTag(tag, repoPath);
     fs.mkdirSync(dir, { recursive: true });
     const paths = { journalPath, snapshotDir };
 
@@ -2652,6 +2950,33 @@ export async function runJournalWatcher(): Promise<void> {
   const snapshotDir = process.env.ORIGIN_JOURNAL_SNAPSHOTS || '';
   if (!repoPath || !journalPath) return;
 
+  // A watcher must never RESURRECT the home it was spawned for.
+  //
+  // The spawn is detached and the hook returns immediately, so there is a
+  // window between "watcher spawned" and "watcher runs". Anything that tears
+  // the home down inside that window — a test's `finally`, a cleanup sweep, a
+  // session-end — loses the race: startWriteJournal opens with
+  // `mkdirSync(recursive)`, which silently rebuilds `<home>/.origin/journals`
+  // and starts appending to a home nobody is going to read again.
+  //
+  // Measured on one developer machine: 87 leaked `origin-hook-home-*` trees,
+  // 79 still holding a live journal, and 24 live watcher processes — the
+  // oldest 57 minutes, against a 30-minute idle window it could never reach.
+  // A watcher pointed at a busy repo refreshes `idleSince` every time its
+  // journal grows, so once resurrected it is effectively immortal, holding a
+  // recursive watch over the whole tree and appending forever.
+  //
+  // `<home>/.origin` is the test: it is created by `origin enable` long before
+  // any hook runs and by the test harness's own isolate-home, so its absence
+  // never means "first run" — it means the home is gone.
+  const originDir = path.dirname(path.dirname(journalPath));
+  if (!fs.existsSync(originDir)) {
+    debugLog('journal-watch', 'home went away before the watcher started, exiting', {
+      repoPath, journalPath, originDir,
+    });
+    return;
+  }
+
   const watcher = startWriteJournal(repoPath, journalPath, snapshotDir ? { snapshotDir } : {});
   if (!watcher) {
     // No recursive watch on this platform — say so once and leave, rather than
@@ -2665,6 +2990,15 @@ export async function runJournalWatcher(): Promise<void> {
   // Own the lock from the first instant, not from the first tick.
   try { if (lockPath) fs.writeFileSync(lockPath, String(process.pid)); } catch { /* ignore */ }
   const timer = setInterval(() => {
+    // Same rule as the startup guard, for a teardown that lands AFTER we are
+    // up. Checked before the lock is rewritten, because writing the lock is
+    // itself a way to recreate the directory we are testing for.
+    if (!fs.existsSync(originDir)) {
+      clearInterval(timer);
+      watcher.stop();
+      debugLog('journal-watch', 'home removed under a running watcher, exiting', { originDir });
+      process.exit(0);
+    }
     try { if (lockPath) fs.writeFileSync(lockPath, String(process.pid)); } catch { /* ignore */ }
     try {
       const size = fs.statSync(journalPath).size;
@@ -2766,6 +3100,149 @@ export function filesLeftByForeignCommits(
   return pulled;
 }
 
+/**
+ * Files the window would re-claim from a commit THIS SESSION already made on an
+ * EARLIER turn.
+ *
+ * `filesLeftByForeignCommits` asks "is this commit someone else's?" and skips
+ * every commit that is ours. But ours is not one bucket: a commit made on turn
+ * 3 is already attributed to turn 3, and a later turn diffing from a baseline
+ * that predates it sees its content as work done now. The line count is then
+ * recorded twice under one session.
+ *
+ * Session 04bfe29c is the shape. Turn 8 merged a PR, pulled, deployed — it ran
+ * no edit tool at all — and stored 10 files / +235/-19, exactly
+ * `git show --numstat e8c57189a` over those files: turn 3's own commit, which
+ * turn 3 had already captured in full (14 files, +894/-34). The baseline shadow
+ * the window diffed against (`ed932bbbfe17`) had turn 3's parent as ITS parent,
+ * so every file that commit touched read as changed-since-baseline.
+ *
+ * The fix is deliberately at the ATTRIBUTION layer rather than the baseline
+ * one. A baseline can go stale in more ways than anyone can enumerate — adopted
+ * from a sibling tree, cut before a re-attach, left behind by a killed prompt
+ * hook — and each of those produces this same double count. Asking "did an
+ * earlier turn already account for this?" is one question that covers all of
+ * them, and `state.commitTurns` already records the answer.
+ *
+ * Content equality is the test, exactly as in the foreign case: the file is
+ * absorbed only if it still holds what that commit left. A file the current
+ * turn genuinely edited on top of an earlier commit differs, and stays.
+ */
+export function filesLeftByOwnEarlierCommits(
+  repoPath: string,
+  state: SessionState & { commitTurns?: Array<{ sha?: string; turnId?: string }>; promptTurnIds?: string[] },
+  baselineSha: string | null | undefined,
+  promptIndex: number,
+): Set<string> {
+  const out = new Set<string>();
+  const mappings = state.commitTurns || [];
+  if (mappings.length === 0) return out;
+  const inWindow = shasInWindow(repoPath, baselineSha);
+  if (inWindow.length === 0) return out;
+  // The turn being closed. Its OWN commit must stay in the window — a turn that
+  // commits its work is still the turn that wrote it.
+  const thisTurnId = (state.promptTurnIds || [])[promptIndex];
+  let budget = FOREIGN_WINDOW_FILE_BUDGET;
+  for (const sha of inWindow) {
+    if (budget <= 0) break;
+    const owner = mappings.find((m) => m.sha && sameSha(m.sha, sha));
+    // No mapping means we do not know which turn made it; that is the foreign
+    // check's question, not this one. Silence here, not a guess.
+    if (!owner?.turnId) continue;
+    if (thisTurnId && owner.turnId === thisTurnId) continue;
+    for (const file of commitChangedFiles(repoPath, sha)) {
+      if (budget-- <= 0) break;
+      if (out.has(file)) continue;
+      const atCommit = readFileAtRev(repoPath, sha, file);
+      let working: string | null;
+      try {
+        const abs = path.join(repoPath, file);
+        working = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : null;
+      } catch { continue; }
+      if (atCommit === working) out.add(file);
+    }
+  }
+  return out;
+}
+
+/**
+ * Before-states for the files this turn INHERITED — see
+ * inherited-window-baseline.ts for the shape of the problem.
+ *
+ * The two exclusions above answer the FILE half: a file whose working content
+ * still equals what an incoming commit left is dropped. They cannot answer the
+ * LINE half, because a file the turn edited ON TOP of the incoming commit
+ * survives them by design, and is then still measured from a baseline cut
+ * before that commit landed. Session a073a85b turn 1 reported +195 for a +4/-3
+ * edit to `prefer-shadow-range.test.ts` for exactly that reason, and 10 files
+ * / +574 for a turn whose commit was five files and +20/-10.
+ *
+ * Naming the inherited commit once answers both halves with one fact: a file
+ * only received cancels to netZero and drops out, and a file edited on top
+ * reports the edit alone.
+ */
+export function inheritedBaselineForTurn(
+  repoPath: string,
+  state: SessionState & { commitTurns?: Array<{ sha?: string; turnId?: string }>; promptTurnIds?: string[] },
+  baselineSha: string | null | undefined,
+  promptIndex: number,
+): string | null {
+  try {
+    return inheritedBaseline(baselineSha, inheritedWindowDeps(repoPath, state, promptIndex));
+  } catch {
+    return null;
+  }
+}
+
+export function inheritedBeforeStatesForTurn(
+  repoPath: string,
+  state: SessionState & { commitTurns?: Array<{ sha?: string; turnId?: string }>; promptTurnIds?: string[] },
+  baselineSha: string | null | undefined,
+  promptIndex: number,
+): Map<string, string | null> {
+  try {
+    return inheritedBeforeStates(baselineSha, inheritedWindowDeps(repoPath, state, promptIndex));
+  } catch {
+    return new Map();
+  }
+}
+
+/** The reads both resolvers above share, bound to one repo and one turn. */
+function inheritedWindowDeps(
+  repoPath: string,
+  state: SessionState & { commitTurns?: Array<{ sha?: string; turnId?: string }>; promptTurnIds?: string[] },
+  promptIndex: number,
+): InheritedWindowDeps {
+  const mappings = state.commitTurns || [];
+  const thisTurnId = (state.promptTurnIds || [])[promptIndex];
+  let localEmail = '';
+  try { localEmail = localCommitterEmail(repoPath); } catch { localEmail = ''; }
+  return {
+    listWindow: (sha) => shasInWindow(repoPath, sha),
+    isOwnWork: (sha) => {
+      const owner = mappings.find((m) => m.sha && sameSha(m.sha, sha));
+      // Attributed: this turn's own commit stops the walk, another turn's does
+      // not — an earlier turn's work is inherited by this one exactly as a
+      // stranger's is.
+      if (owner?.turnId) return !!thisTurnId && owner.turnId === thisTurnId;
+      // Unattributed: `commitBelongsToSession` is the generous predicate the
+      // rest of this file shares, and generous is the right direction here.
+      // Re-baselining PAST work the turn authored would erase it from the
+      // record; declining to re-baseline only leaves today's behaviour.
+      return commitBelongsToSession(repoPath, sha, state, localEmail);
+    },
+    changedFiles: (sha) => commitChangedFiles(repoPath, sha),
+    readAtRev: (sha, file) => readFileAtRev(repoPath, sha, file),
+    isAncestor: (a, b) => {
+      try {
+        execFileSync('git', ['merge-base', '--is-ancestor', a, b], { ...GIT_READ_OPTS, cwd: repoPath });
+        return true;
+      } catch { return false; }
+    },
+    fileBudget: FOREIGN_WINDOW_FILE_BUDGET,
+  };
+}
+
 // Ceiling on the file reads the exclusion above will do in a Stop hook. A
 // rebase across a long-running branch can pull in hundreds of commits; past
 // this the turn keeps today's behaviour rather than stalling the hook.
@@ -2857,6 +3334,16 @@ export function recordShellWindowEdits(
     if (pulled.size > 0) {
       debugLog('stop', 'pulled foreign-commit files excluded from the shell window', {
         promptIndex, count: pulled.size, files: [...pulled].slice(0, 20),
+      });
+    }
+    // And the same question asked of OUR OWN commits: an earlier turn's commit
+    // is already attributed to that turn, so re-claiming it here counts the
+    // lines twice under one session.
+    const alreadyOurs = filesLeftByOwnEarlierCommits(repoPath, state, baselineSha, promptIndex);
+    for (const f of alreadyOurs) absorbed.add(f);
+    if (alreadyOurs.size > 0) {
+      debugLog('stop', 'files already attributed to an earlier turn excluded from the shell window', {
+        promptIndex, count: alreadyOurs.size, files: [...alreadyOurs].slice(0, 20),
       });
     }
 

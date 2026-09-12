@@ -1,6 +1,7 @@
 import { spawnSync } from 'child_process';
 import { git, gitDetailed, gitOrNull } from './utils/exec.js';
-import { stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
+import { shouldIgnoreFile, stripIgnoredSectionsFromDiff, trimDiffText } from './ignore-patterns.js';
+import { combineApplyableTurnDiff } from './applyable-turn-diff.js';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -112,9 +113,17 @@ export interface GitCaptureResult {
    */
   workingTreeDiff: string;
   /**
-   * True when headBefore is not an ancestor of HEAD — i.e. headBefore is
-   * a shadow commit, so callers should prefer `workingTreeDiff` over the
-   * `committedDiff + uncommittedDiff` pair.
+   * True when headBefore is an Origin SHADOW commit, so callers should prefer
+   * `workingTreeDiff` over the `committedDiff + uncommittedDiff` pair.
+   *
+   * This used to be computed as "headBefore is not an ancestor of HEAD", which
+   * is necessary but not sufficient: a `git checkout` onto a branch cut before
+   * the baseline leaves headBefore a perfectly real commit that is also not an
+   * ancestor. Treating that as a shadow put the capture on the tree-to-tree
+   * path and credited the turn with the whole branch delta — another agent's
+   * commit, on a turn that only read files (session a6ad8379). It is now
+   * decided by the shadow's own author identity; the divergence case
+   * re-baselines `workingTreeDiff` to HEAD instead.
    */
   baselineIsShadow: boolean;
 }
@@ -122,6 +131,15 @@ export interface GitCaptureResult {
 // ─── Constants ─────────────────────────────────────────────────────────────
 
 const MAX_DIFF_SIZE = 500_000; // 500KB max diff size
+
+/**
+ * Author identity stamped on every shadow commit `createShadowCommit` writes.
+ *
+ * Load-bearing beyond cosmetics: it is how a baseline that is not an ancestor
+ * of HEAD is told apart from a real commit left behind by a `git checkout`.
+ * Change it in one place only — `createShadowCommit` sets it from here.
+ */
+export const SHADOW_IDENTITY_EMAIL = 'shadow@origin.local';
 
 /**
  * Maximum byte length for a single per-prompt diff in payloads sent to the
@@ -172,16 +190,128 @@ const CONTEXT_LADDER = [2000, 25, 3] as const;
  * Run a git diff at the best context that fits the byte budget.
  * `pre`/`post` bracket where the --unified flag belongs in the argv.
  */
+export interface LineTotals { added: number; removed: number }
+
+/**
+ * Line totals from `git … --numstat`, summed over the files the diff layer
+ * would keep (stripIgnoredSectionsFromDiff drops lock files, dist, Origin's
+ * own bookkeeping — numstat skips the same paths so the two agree).
+ *
+ * The diff TEXT is capped (MAX_DIFF_SIZE, and 200KB again on the server), and
+ * counting `+`/`-` lines of a capped diff under-reports exactly on the
+ * sessions that matter: commit 7f310b6b (683KB) read +1561/-892 for git's
+ * +1959/-1249, and the session header read +1612/-927 for a 146-file range.
+ * numstat is one line per file whatever the change size, so it never has to
+ * be capped. Returns null when git fails, so a caller can fall back to the
+ * text count rather than report 0.
+ *
+ * `args` is the full argument list after `git`, already carrying `--numstat`.
+ */
+export function numstatTotals(
+  args: string[],
+  gitOpts: Parameters<typeof git>[1],
+  customPatterns?: string[],
+): LineTotals | null {
+  const rows = numstatByFile(args, gitOpts, customPatterns);
+  return rows ? sumLineTotals(rows) : null;
+}
+
+export interface FileLineTotals extends LineTotals { file: string }
+
+/** One numstat row per kept file (ignored paths dropped); null when git fails. */
+export function numstatByFile(
+  args: string[],
+  gitOpts: Parameters<typeof git>[1],
+  customPatterns?: string[],
+): FileLineTotals[] | null {
+  let out: string;
+  try {
+    out = git(args, gitOpts);
+  } catch {
+    return null;
+  }
+  const rows: FileLineTotals[] = [];
+  for (const ln of out.split('\n')) {
+    const parts = ln.split('\t');
+    if (parts.length < 3) continue;
+    // Renames print as "old => new" or "{a => b}/x"; the new path decides.
+    const file = parts.slice(2).join('\t').replace(/^.*=> /, '').replace(/[{}]/g, '');
+    if (shouldIgnoreFile(file, customPatterns)) continue;
+    const a = Number(parts[0]);
+    const r = Number(parts[1]);
+    rows.push({ file, added: Number.isFinite(a) ? a : 0, removed: Number.isFinite(r) ? r : 0 });
+  }
+  return rows;
+}
+
+/**
+ * A commit's own line totals, as git counts them (`git show --stat`).
+ *
+ * A MERGE needs its own path. Bare `diff-tree` prints nothing for a commit
+ * with two parents, and "nothing" parsed as zero rows — so the merge's Commit
+ * row stored +0/-0 under a diff that showed its resolution, and the session
+ * accumulator's per-commit fallback added zero. `--cc --numstat` is no
+ * better: its counts fall back to the first-parent view, which is the whole
+ * absorbed branch (the overshoot #1488 removed from the header). What a merge
+ * authored is its resolution — the files that differ from EVERY parent,
+ * counted against the first — the definition `mergeOwnDiff` uses for its
+ * content. `--cc --name-only` lists exactly those files; the count is then a
+ * plain numstat over them. Only a commit whose bare numstat is silent pays
+ * the two extra spawns.
+ */
+export function commitLineCounts(repoPath: string, sha: string): LineTotals | null {
+  const gitOpts = { cwd: repoPath, timeoutMs: 15_000, maxBuffer: 16 * 1024 * 1024 };
+  const rows = numstatByFile(['diff-tree', '--no-commit-id', '--numstat', '-r', '--root', sha], gitOpts);
+  if (!rows) return null;
+  if (rows.length > 0) return sumLineTotals(rows);
+  // Silent: a merge, or a commit that changed nothing. Ask which.
+  let resolved: string[];
+  try {
+    resolved = git(['diff-tree', '--no-commit-id', '-r', '--cc', '--name-only', sha], gitOpts)
+      .split('\n').map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
+  if (resolved.length === 0) return { added: 0, removed: 0 };
+  const resolution = numstatByFile(['diff', '--numstat', `${sha}^1`, sha, '--', ...resolved], gitOpts);
+  return resolution ? sumLineTotals(resolution) : null;
+}
+
+function sumLineTotals(rows: LineTotals[]): LineTotals {
+  const totals = { added: 0, removed: 0 };
+  for (const r of rows) {
+    totals.added += r.added;
+    totals.removed += r.removed;
+  }
+  return totals;
+}
+
+/** Every line of an untracked file is an addition; binary files count 0. */
+function untrackedLineTotals(repoPath: string, files: string[], customPatterns?: string[]): LineTotals {
+  const totals = { added: 0, removed: 0 };
+  for (const file of files) {
+    if (shouldIgnoreFile(file, customPatterns)) continue;
+    try {
+      const buf = fs.readFileSync(path.join(repoPath, file));
+      if (buf.includes(0)) continue;
+      const text = buf.toString('utf-8');
+      if (!text) continue;
+      totals.added += text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
+    } catch { /* unreadable — leave it out */ }
+  }
+  return totals;
+}
+
 function diffWithinBudget(
   pre: string[],
   post: string[],
   gitOpts: Parameters<typeof git>[1],
   fullContext: boolean,
 ): string {
-  if (!fullContext) return git([...pre, ...post], gitOpts).trim();
+  if (!fullContext) return trimDiffText(git([...pre, ...post], gitOpts));
   let out = '';
   for (const u of CONTEXT_LADDER) {
-    out = git([...pre, `--unified=${u}`, ...post], gitOpts).trim();
+    out = trimDiffText(git([...pre, `--unified=${u}`, ...post], gitOpts));
     if (out.length <= MAX_DIFF_SIZE) return out;
   }
   return out;
@@ -205,7 +335,144 @@ function truncateToWholeSections(diffText: string, max: number): string {
     kept.push(part);
     size += part.length;
   }
+  return trimDiffText(kept.join(''));
+}
+
+/** Tracked + untracked paths that differ from HEAD. */
+function filesDirtyVsHead(gitOpts: Parameters<typeof git>[1]): Set<string> {
+  const names = new Set<string>();
+  try {
+    const t = git(['diff', '--name-only', 'HEAD'], gitOpts).trim();
+    for (const f of t.split('\n').filter(Boolean)) names.add(f);
+  } catch { /* shallow / missing HEAD */ }
+  try {
+    const u = git(['ls-files', '--others', '--exclude-standard'], gitOpts).trim();
+    for (const f of u.split('\n').filter(Boolean)) names.add(f);
+  } catch { /* ls-files failed */ }
+  return names;
+}
+
+/** Keep `diff --git` sections whose path is in `allow`. */
+function keepDiffPaths(diff: string, allow: Set<string>): string {
+  if (!diff || allow.size === 0) return '';
+  const kept: string[] = [];
+  for (const part of diff.split(/(?=^diff --git )/m)) {
+    if (!part.trim()) continue;
+    const match = part.match(/^diff --git a\/(.*?) b\//);
+    if (match && match[1] && !allow.has(match[1])) continue;
+    kept.push(part);
+  }
   return kept.join('').trim();
+}
+
+/** What the server needs to build a Commit row for one sha, in the wire shape post-commit sends. */
+export interface CommitDetailWire {
+  sha: string;
+  message?: string;
+  author?: string;
+  filesChanged?: string[];
+  linesAdded?: number;
+  linesRemoved?: number;
+  patch?: string;
+  committedAt?: string | number;
+}
+
+const gitShowOpts = (repoPath: string) => ({ cwd: repoPath, timeoutMs: 15_000, maxBuffer: 10 * 1024 * 1024 });
+
+/**
+ * One commit's unified patch (`git show`), or undefined when empty, oversize,
+ * a merge, or the object is missing. Used to fill a Commit row that landed
+ * files-only because post-commit's PATCH died before the network call
+ * (session e24477e2: local `commitTurns` via post-commit, dashboard pill
+ * "5 files" with no hunks).
+ *
+ * Standard context, not `--unified=2000`: the Commit row needs git's own
+ * hunks, and the full-file walk is what made Stop miss the PATCH entirely.
+ * Merges are skipped: `git show <merge>` emits an unparseable `--cc` diff and
+ * the first-parent view is the whole absorbed branch; post-commit owns those
+ * through mergeOwnDiff. Trailing newlines only are stripped — a `.trim()`
+ * would eat a trailing blank context line and mis-anchor the last hunk.
+ */
+export function patchForCommitSha(repoPath: string, sha: string): string | undefined {
+  if (!sha || !HEX.test(sha)) return undefined;
+  try {
+    const parents = git(['rev-list', '--parents', '-n', '1', sha], gitShowOpts(repoPath)).trim().split(/\s+/);
+    if (parents.length > 2) return undefined;
+    const raw = git(['show', '--format=', sha], gitShowOpts(repoPath));
+    const patch = stripIgnoredSectionsFromDiff(raw).replace(/\n+$/, '');
+    if (!patch.trim() || patch.length > MAX_DIFF_SIZE) return undefined;
+    return patch;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Subject, author, date, files and numstat for one sha — so a rescued Commit
+ * row is a real row. The server keeps a finite line count as the truth and
+ * never re-counts a row that has a patch, so sending 0/0 here would freeze
+ * the pill at +0/−0; absent fields let it count from the patch instead.
+ */
+export function commitMetaForSha(repoPath: string, sha: string): Omit<CommitDetailWire, 'sha' | 'patch'> | null {
+  if (!sha || !HEX.test(sha)) return null;
+  try {
+    const head = git(['show', '--no-patch', '--format=%s%x1f%an%x1f%cI', sha], gitShowOpts(repoPath))
+      .replace(/\n+$/, '').split('\x1f');
+    const numstat = git(['show', '--numstat', '--format=', sha], gitShowOpts(repoPath));
+    const filesChanged: string[] = [];
+    let linesAdded = 0;
+    let linesRemoved = 0;
+    for (const line of numstat.split('\n')) {
+      const m = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
+      if (!m) continue;
+      filesChanged.push(m[3]);
+      if (m[1] !== '-') linesAdded += Number(m[1]);
+      if (m[2] !== '-') linesRemoved += Number(m[2]);
+    }
+    return {
+      message: head[0] || '',
+      author: head[1] || '',
+      committedAt: head[2] || undefined,
+      filesChanged,
+      linesAdded,
+      linesRemoved,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Two shas name the same commit when one abbreviates the other. */
+export function sameSha(a: string, b: string): boolean {
+  const x = (a || '').toLowerCase();
+  const y = (b || '').toLowerCase();
+  return !!x && !!y && (x.startsWith(y) || y.startsWith(x));
+}
+
+/**
+ * Ensure every commitDetails entry carries a patch, and add any attested
+ * shas the range walk missed as full rows (subject, author, date, numstat,
+ * patch). Mutates nothing; returns a new array. A sha that yields no patch
+ * (merge, missing object, oversize) is left out.
+ */
+export function fillMissingCommitPatches(
+  repoPath: string,
+  details: CommitDetailWire[],
+  extraShas: string[] = [],
+): CommitDetailWire[] {
+  const out: CommitDetailWire[] = details.map((d) => {
+    if ((d.patch || '').trim()) return d;
+    const patch = patchForCommitSha(repoPath, d.sha);
+    return patch ? { ...d, patch } : d;
+  });
+  for (const sha of extraShas) {
+    if (!sha || !HEX.test(sha) || out.some((d) => sameSha(d.sha, sha))) continue;
+    const patch = patchForCommitSha(repoPath, sha);
+    if (!patch) continue;
+    const meta = commitMetaForSha(repoPath, sha);
+    out.push({ sha, patch, ...(meta || {}) });
+  }
+  return out;
 }
 
 export function captureGitState(
@@ -404,7 +671,7 @@ export function captureGitState(
       let patch = '';
       try {
         const raw = diffWithinBudget(['show', '--format=', '-m', '--first-parent'], [sha], gitOpts, wantFullContext);
-        patch = stripIgnoredSectionsFromDiff(raw).trim();
+        patch = stripIgnoredSectionsFromDiff(raw);
         if (patch.length > MAX_DIFF_SIZE) patch = '';
       } catch { /* show failed — leave patch empty, API falls back */ }
       commitDetails.push({
@@ -420,21 +687,105 @@ export function captureGitState(
     }
   }
 
+  // 3b. Decide what the baseline IS before any diff is built from it.
+  let baselineIsShadow = false;
+  // The baseline is on a DIFFERENT line of history than HEAD — the agent ran
+  // `git checkout`/`reset` onto another branch mid-turn.
+  let baselineDiverged = false;
+  if (safeBefore && safeBefore !== headAfter) {
+    try {
+      // Is baseline an ancestor of HEAD?
+      const ancestorRes = gitDetailed(['merge-base', '--is-ancestor', safeBefore, headAfter], gitOpts);
+      if (ancestorRes.status !== 0) {
+        // NOT an ancestor. This was read as "therefore a shadow commit", and
+        // that is only one of the two ways it happens:
+        //
+        //   1. a real shadow — `createShadowCommit` builds a dangling
+        //      commit-tree over the working tree, which is on no branch and so
+        //      can never be an ancestor of HEAD. Diffing base tree → cur tree
+        //      is exactly right for it.
+        //   2. HEAD MOVED. `git checkout <other-branch>` leaves the baseline a
+        //      perfectly real commit that simply sits on another line. Any diff
+        //      taken from it then reports THE ENTIRE BRANCH DELTA as the turn's
+        //      authored work.
+        //
+        // Case 2 is what session a6ad8379 hit. Turn 6 read three files and
+        // merged a PR — it authored nothing — and was credited +229/-9 across
+        // 3 files, which is byte-for-byte another agent's commit that a
+        // `git checkout` had brought into the tree. Turn 5 showed -443 against
+        // commits totalling -22. `verify-capture` reported ZERO contradictions
+        // for the session, because the row's counts agree with its diff: the
+        // diff itself is what is wrong, which no self-consistency check can see.
+        //
+        // The discriminator is authorship, not reachability: every shadow this
+        // module writes is stamped with a fixed internal identity, and nothing
+        // else in a repo carries it. That is one cheap subprocess, where
+        // "is this commit on any ref" is O(refs) on a hook path.
+        const baseAuthor = gitOrNull(['log', '-1', '--format=%ae', safeBefore], gitOpts);
+        baselineIsShadow = baseAuthor === SHADOW_IDENTITY_EMAIL;
+        if (baselineIsShadow) {
+          // A shadow is only meaningful while the real commit it snapshots is
+          // still on HEAD's history. A branch switch after a dirty turn leaves
+          // a perfectly valid Origin shadow whose *parent* is on the abandoned
+          // branch. Comparing that shadow tree to the new branch turns every
+          // earlier PR difference into this prompt's diff.
+          const shadowParent = gitOrNull(['rev-parse', `${safeBefore}^`], gitOpts);
+          const parentStillOnHead = !!shadowParent
+            && gitDetailed(['merge-base', '--is-ancestor', shadowParent, headAfter], gitOpts).status === 0;
+          if (!parentStillOnHead) baselineIsShadow = false;
+        }
+        baselineDiverged = !baselineIsShadow;
+      }
+    } catch {
+      baselineIsShadow = false;
+      baselineDiverged = false;
+    }
+  }
+  // A divergent range cannot identify commits authored by this turn: git log
+  // A..B lists every commit on B's branch that A never contained. Commit hooks
+  // carry real authorship; returning this speculative range lets Stop attach a
+  // whole branch's files to the current prompt.
+  if (baselineDiverged) {
+    commitShas = [];
+    commitDetails.length = 0;
+  }
+  // A diverged baseline cannot answer "what did this turn write": the branch it
+  // names is not the branch in the tree, so ANY range or diff taken from it
+  // hands back the whole divergence. Compare against HEAD instead — genuinely
+  // uncommitted edits are kept, and the branch delta is not this turn's work.
+  // Commits the turn actually made are captured by the commit path, not here.
+  //
+  // This has to govern `committedDiff` as much as `workingTreeDiff`. The first
+  // cut of this fix re-based only the latter, and Stop does not read the
+  // latter unless the baseline is a shadow — it reads
+  // `committedDiff + uncommittedDiff`, and `committedDiff` was still
+  // `<baseline>..HEAD`, i.e. the other branch's commits. The unit test was
+  // green on the field the consumer never looked at.
+  const workingTreeBase = baselineDiverged ? headAfter : safeBefore;
+
   // 4. Build diffs: committedDiff (sha..sha), uncommittedDiff (working tree),
   //    diff (combined for backwards compat)
   let committedDiff = '';
   let uncommittedDiff = '';
   let diffTruncated = false;
+  // numstat beside each diff, so the counts survive the text cap.
+  let committedStat: LineTotals | null = null;
+  let uncommittedStat: LineTotals | null = null;
+  let workingTreeStat: LineTotals | null = null;
 
   try {
-    // Committed changes since session start
-    if (safeBefore !== headAfter) {
-      committedDiff = diffWithinBudget(['diff'], [`${safeBefore}..${headAfter}`], gitOpts, wantFullContext);
+    // Committed changes since session start. From `workingTreeBase`, not the
+    // raw baseline: on a diverged baseline that range is the OTHER branch's
+    // commits, and this is the field Stop reads for a non-shadow baseline.
+    if (workingTreeBase !== headAfter) {
+      committedDiff = diffWithinBudget(['diff'], [`${workingTreeBase}..${headAfter}`], gitOpts, wantFullContext);
+      committedStat = numstatTotals(['diff', '--numstat', `${workingTreeBase}..${headAfter}`], gitOpts);
     }
 
     // Capture uncommitted changes (staged + unstaged + untracked)
     if (!opts?.committedOnly) {
       uncommittedDiff = diffWithinBudget(['diff'], ['HEAD'], gitOpts, wantFullContext);
+      uncommittedStat = numstatTotals(['diff', '--numstat', 'HEAD'], gitOpts);
       // Also capture new untracked files as diff
       try {
         const untracked = git(
@@ -442,6 +793,10 @@ export function captureGitState(
           gitOpts,
         ).trim();
         if (untracked) {
+          if (uncommittedStat) {
+            const u = untrackedLineTotals(repoPath, untracked.split('\n').filter(Boolean));
+            uncommittedStat = { added: uncommittedStat.added + u.added, removed: uncommittedStat.removed + u.removed };
+          }
           for (const file of untracked.split('\n').filter(Boolean)) {
             // git diff --no-index exits 1 on diff; use gitDetailed to capture
             // stdout regardless of status. Pass the file path as a positional
@@ -471,26 +826,16 @@ export function captureGitState(
     // git diff can fail on shallow clones, detached HEAD issues, etc.
   }
 
-  // Combined diff for backwards compat
-  let diff = committedDiff;
-  if (uncommittedDiff) {
-    diff = diff ? diff + '\n' + uncommittedDiff : uncommittedDiff;
-  }
+  // Combined `diff` is filled AFTER ignore-stripping — concatenating here
+  // stored two sections for a file that was committed and then edited further
+  // (acd825ed). The working-tree view is the applyable patch.
 
   // Single "working tree vs baseline" diff — clean even when baseline is
   // a shadow commit not in HEAD's ancestry. Use this in callers that
   // store the diff per-prompt for AI blame.
   let workingTreeDiff = '';
-  let baselineIsShadow = false;
-  if (safeBefore && safeBefore !== headAfter) {
-    try {
-      // Is baseline an ancestor of HEAD? If not, it's a shadow commit.
-      const ancestorRes = gitDetailed(['merge-base', '--is-ancestor', safeBefore, headAfter], gitOpts);
-      baselineIsShadow = ancestorRes.status !== 0;
-    } catch {
-      baselineIsShadow = false;
-    }
-  }
+  // `baselineIsShadow`, `baselineDiverged` and `workingTreeBase` are decided
+  // above step 4, because `committedDiff` needs them too — see there.
   try {
     if (safeBefore && baselineIsShadow) {
       // SHADOW baseline (a session-start / per-prompt working-tree snapshot):
@@ -504,11 +849,14 @@ export function captureGitState(
       const curTree = writeWorkingTree(repoPath, gitOpts);
       if (baseTree && HEX.test(baseTree) && curTree && HEX.test(curTree)) {
         workingTreeDiff = diffWithinBudget(['diff'], [baseTree, curTree], gitOpts, wantFullContext);
+        workingTreeStat = numstatTotals(['diff', '--numstat', baseTree, curTree], gitOpts);
       }
-    } else if (safeBefore) {
+    } else if (workingTreeBase) {
       // Real-commit baseline (clean start): `git diff <commit>` compares working
       // tree to the commit's tree (staged + unstaged); untracked appended below.
-      workingTreeDiff = diffWithinBudget(['diff'], [safeBefore], gitOpts, wantFullContext);
+      // `workingTreeBase` is HEAD rather than the recorded baseline when the two
+      // are on different branches — see the divergence note above.
+      workingTreeDiff = diffWithinBudget(['diff'], [workingTreeBase], gitOpts, wantFullContext);
       if (!opts?.committedOnly) {
         try {
           const untracked = git(['ls-files', '--others', '--exclude-standard'], gitOpts).trim();
@@ -535,42 +883,97 @@ export function captureGitState(
   // contribute noise to the per-prompt blame view — AGENTS.md alone shows
   // up as 13+ "AI-attributed" lines on every Codex turn because Origin
   // rewrites it as bookkeeping, not agent output.
-  diff = stripIgnoredSectionsFromDiff(diff);
   committedDiff = stripIgnoredSectionsFromDiff(committedDiff);
   uncommittedDiff = stripIgnoredSectionsFromDiff(uncommittedDiff);
   workingTreeDiff = stripIgnoredSectionsFromDiff(workingTreeDiff);
 
-  // When the baseline is a session-start (or per-prompt) working-tree SHADOW
-  // and the session made no commits, the honest per-prompt diff is the change
-  // SINCE that shadow — not `git diff HEAD`, which re-surfaces PRE-EXISTING
-  // uncommitted files a PRIOR session left in the tree (Cursor session
-  // d0a25d8d: a read-only prompt captured +149 / 7 files it never touched).
-  // workingTreeDiff is `shadow..worktree`, so files already present in the
-  // shadow cancel out; only genuinely-new changes remain. Gated on
-  // `commitShas.length === 0` so we never fold committed work into the
-  // uncommitted field. Applies to EVERY agent that anchors on a session-start
-  // shadow (Cursor/Codex/Claude/Gemini via captureGitState); clean-start
-  // sessions have no shadow (baseline === HEAD) so this is a no-op for them,
-  // and Antigravity has its own tree-to-tree captureAgyDiff.
-  if (baselineIsShadow && commitShas.length === 0) {
-    uncommittedDiff = workingTreeDiff;
-    diff = workingTreeDiff;
+  // When the baseline is a session-start (or per-prompt) working-tree SHADOW,
+  // the honest UNCOMMITTED half is the change since that shadow among files
+  // that are still dirty vs HEAD — not `git diff HEAD`, which re-surfaces
+  // files a PRIOR turn left in the tree.
+  //
+  // Two producers hit the same lie:
+  //   • d0a25d8d — a read-only prompt captured +149 of pre-existing untracked
+  //     because they were dirty vs HEAD and the shadow never rewrote the field.
+  //   • 06a44883 prompt 3 — stash, `git checkout -b` from a newer main, restore.
+  //     `git log shadow..HEAD` listed the checked-out history, so the old
+  //     `commitShas.length === 0` gate refused to rewrite, and `git diff HEAD`
+  //     stored the previous turn's whole patch as this turn's uncommitted work.
+  //
+  // Diffing the dirty paths against the shadow cancels content that has not
+  // moved since the turn started (the restored stash) and keeps a real edit
+  // (a version bump, a line this turn actually typed). Gating on "no SHAs
+  // in shadow..HEAD" is wrong once HEAD has moved. Applies to every agent
+  // that anchors on a shadow via captureGitState; Antigravity has its own
+  // tree-to-tree captureAgyDiff.
+  if (baselineIsShadow && !opts?.committedOnly) {
+    // Intersect the shadow→worktree view with files that are still dirty vs
+    // HEAD. Tree-to-tree already cancels blobs that have not moved since the
+    // shadow (the restored stash). Files that match HEAD (the checked-out
+    // line's own commits) are not dirty and drop out. What remains is this
+    // turn's uncommitted work.
+    //
+    // Scope note: this narrows `uncommittedDiff` ONLY. #1556 made
+    // `workingTreeDiff` the single source of both the shadow-baseline `diff`
+    // and its line counts, so narrowing that here reaches far past this bug —
+    // it silently re-cut the worktree-bootstrap header (+5 against +1 of work)
+    // and dropped commits the post-commit hook had stamped. The field this
+    // defect is about is the uncommitted half, and that is the field it fixes.
+    const dirty = filesDirtyVsHead(gitOpts);
+    uncommittedDiff = keepDiffPaths(workingTreeDiff, dirty);
+    uncommittedStat = null;
   }
 
-  // Count lines added/removed
+  // Combined `diff` is one applyable patch. Concatenating committedDiff +
+  // uncommittedDiff stored two `diff --git` sections for a file that was
+  // committed and then edited further (acd825ed). workingTreeDiff is the
+  // net vs the baseline. `committedOnly` keeps the committed range alone —
+  // that flag exists so a caller asking for commits does not pick up dirt.
+  let diff = '';
+  if (opts?.committedOnly) {
+    diff = committedDiff;
+  } else if (baselineIsShadow) {
+    // committedDiff against a shadow is reverse-direction text (files the
+    // shadow staged that HEAD does not track show up as deletions). The
+    // tree-to-tree working view is the applyable patch — including empty,
+    // which is a read-only turn over pre-existing untracked files.
+    diff = workingTreeDiff;
+  } else if (workingTreeDiff.trim()) {
+    diff = combineApplyableTurnDiff({
+      committedDiff,
+      uncommittedDiff,
+      workingTreeDiff,
+    });
+  } else {
+    diff = combineApplyableTurnDiff({ committedDiff, uncommittedDiff });
+  }
+
+  // Count lines added/removed — from numstat where it ran, from the diff
+  // text only as a fallback: the text is capped, numstat is not.
+  const countText = (d: string): LineTotals => {
+    const t = { added: 0, removed: 0 };
+    for (const line of d.split('\n')) {
+      if (line.startsWith('+') && !line.startsWith('+++')) t.added++;
+      if (line.startsWith('-') && !line.startsWith('---')) t.removed++;
+    }
+    return t;
+  };
   let linesAdded = 0;
   let linesRemoved = 0;
-  // For shadow baseline, use workingTreeDiff (committedDiff would be reverse).
-  const countSrc = baselineIsShadow && workingTreeDiff
-    ? [workingTreeDiff]
-    : [committedDiff, uncommittedDiff];
-  for (const d of countSrc) {
-    if (d) {
-      for (const line of d.split('\n')) {
-        if (line.startsWith('+') && !line.startsWith('+++')) linesAdded++;
-        if (line.startsWith('-') && !line.startsWith('---')) linesRemoved++;
-      }
-    }
+  // Combined view counts: workingTreeDiff is the net, so summing committed +
+  // uncommitted double-counts a file present in both. Shadow committedDiff
+  // is reverse-direction text and must never be counted.
+  const countSrc: Array<[string, LineTotals | null]> =
+    opts?.committedOnly
+      ? [[committedDiff, committedStat]]
+      : (baselineIsShadow || workingTreeDiff)
+        ? [[workingTreeDiff, workingTreeStat]]
+        : [[committedDiff, committedStat], [uncommittedDiff, uncommittedStat]];
+  for (const [d, stat] of countSrc) {
+    if (!d && !stat) continue;
+    const t = stat ?? countText(d);
+    linesAdded += t.added;
+    linesRemoved += t.removed;
   }
 
   return {
@@ -646,8 +1049,8 @@ export function createShadowCommit(repoPath: string, tag: string): string | null
     // and sweep in every pre-existing dirty file (the "+91 should be +2" bug).
     // These are internal objects, never pushed, so a fixed identity is safe.
     const shadowIdentity = {
-      GIT_AUTHOR_NAME: 'Origin', GIT_AUTHOR_EMAIL: 'shadow@origin.local',
-      GIT_COMMITTER_NAME: 'Origin', GIT_COMMITTER_EMAIL: 'shadow@origin.local',
+      GIT_AUTHOR_NAME: 'Origin', GIT_AUTHOR_EMAIL: SHADOW_IDENTITY_EMAIL,
+      GIT_COMMITTER_NAME: 'Origin', GIT_COMMITTER_EMAIL: SHADOW_IDENTITY_EMAIL,
     };
     const indexOpts = { ...gitOpts, env: { ...process.env, ...shadowIdentity, GIT_INDEX_FILE: tmpIndex } };
 
@@ -754,11 +1157,12 @@ function diffTreeToTree(
   baseTree: string,
   targetTree: string,
   gitOpts: { cwd: string; timeoutMs: number; maxBuffer: number },
+  unified = 2000,
 ): AgyDiffResult {
   let diff = '';
   const files = new Set<string>();
   try {
-    diff = git(['diff', '--unified=2000', baseTree, targetTree], gitOpts).trim();
+    diff = trimDiffText(git(['diff', `--unified=${unified}`, baseTree, targetTree], gitOpts));
     const names = git(['diff', '--name-only', baseTree, targetTree], gitOpts).trim();
     if (names) for (const f of names.split('\n').filter(Boolean)) files.add(f);
   } catch { /* best-effort */ }
@@ -809,6 +1213,67 @@ export function captureShadowRangeDiff(
   if (fromTree === toTree) return empty;
 
   return diffTreeToTree(fromTree, toTree, gitOpts);
+}
+
+/**
+ * Why a per-turn shadow window produced a given answer.
+ *
+ * `captureShadowRangeDiff` collapses "same sha", "same tree", "git failed"
+ * and "not a shadow" into one empty result, and its callers treat empty as
+ * unknown — leave the stored capture alone. That is right for the watcher
+ * (several prompts stamped with one baseline). It is wrong for a question
+ * turn whose two shadows are different objects over the same tree: the
+ * window is EMPTY, leftover `HEAD..worktree` dirt is not this turn's work,
+ * and leaving the dump would republish it.
+ *
+ * Callers that must tell those apart use this. `toSha === null` means the
+ * current working tree (the turn still in flight).
+ *
+ * Default hunk context is git's 3, not `--unified=2000`. The 2000-line form
+ * is for blame replay; the turn card needs a real hunk header (`@@ -820,6`)
+ * so a mid-file insert is not rendered as `@@ -1,6` of a 6-line fragment.
+ */
+export type ShadowWindowStatus =
+  | 'unavailable'
+  | 'not-shadow'
+  | 'identical-sha'
+  | 'empty'
+  | 'changed';
+
+export interface ShadowWindowCapture extends AgyDiffResult {
+  status: ShadowWindowStatus;
+}
+
+const EMPTY_WINDOW: AgyDiffResult = { diff: '', filesChanged: [], linesAdded: 0, linesRemoved: 0 };
+
+export function captureShadowWindow(
+  repoPath: string,
+  fromSha: string | null,
+  toSha: string | null,
+  opts?: { unified?: number },
+): ShadowWindowCapture {
+  const none = (status: ShadowWindowStatus): ShadowWindowCapture => ({ status, ...EMPTY_WINDOW });
+  if (!fromSha || !HEX.test(fromSha)) return none('unavailable');
+  if (toSha && !HEX.test(toSha)) return none('unavailable');
+  if (toSha && fromSha === toSha) return none('identical-sha');
+
+  const gitOpts = { cwd: repoPath, timeoutMs: 15_000, maxBuffer: 10 * 1024 * 1024 };
+  const author = gitOrNull(['log', '-1', '--format=%ae', fromSha], gitOpts);
+  if (author !== SHADOW_IDENTITY_EMAIL) return none('not-shadow');
+
+  const fromTree = gitOrNull(['rev-parse', `${fromSha}^{tree}`], gitOpts);
+  if (!fromTree || !HEX.test(fromTree)) return none('unavailable');
+
+  const toTree = toSha
+    ? gitOrNull(['rev-parse', `${toSha}^{tree}`], gitOpts)
+    : writeWorkingTree(repoPath, gitOpts);
+  if (!toTree || !HEX.test(toTree)) return none('unavailable');
+  // Tree object ids, not paths — raw identity is the question. // path-compare-ok
+  if (fromTree === toTree) return none('empty'); // path-compare-ok
+
+  const unified = opts?.unified ?? 3;
+  const cap = diffTreeToTree(fromTree, toTree, gitOpts, unified);
+  return { status: 'changed', ...cap };
 }
 
 /**
@@ -911,7 +1376,7 @@ export function commitDiffScopedToPrompt(
   baselineSha: string | null | undefined,
   commitSha: string,
   files: string[],
-): { diff: string; linesAdded: number; linesRemoved: number } | null {
+): { diff: string; linesAdded: number; linesRemoved: number; files: string[]; diffTruncated: boolean } | null {
   if (!baselineSha || !HEX.test(baselineSha) || !HEX.test(commitSha)) return null;
   if (baselineSha === commitSha) return null;
   const gitOpts = { cwd: repoPath, timeoutMs: 15_000, maxBuffer: 10 * 1024 * 1024 };
@@ -928,23 +1393,52 @@ export function commitDiffScopedToPrompt(
   const baseTree = gitOrNull(['rev-parse', `${baselineSha}^{tree}`], gitOpts);
   const commitTree = gitOrNull(['rev-parse', `${commitSha}^{tree}`], gitOpts);
   if (!baseTree || !commitTree || !HEX.test(baseTree) || !HEX.test(commitTree)) return null;
-  if (baseTree === commitTree) return { diff: '', linesAdded: 0, linesRemoved: 0 };
+  // Tree object ids, not paths — raw identity is the question. // path-compare-ok
+  if (baseTree === commitTree) return { diff: '', linesAdded: 0, linesRemoved: 0, files: [], diffTruncated: false }; // path-compare-ok
   try {
-    const args = ['diff', '--unified=2000', baseTree, commitTree];
-    if (files.length) args.push('--', ...files);
-    let diff = git(args, gitOpts).trim();
-    diff = stripIgnoredSectionsFromDiff(diff);
-    if (diff.length > MAX_DIFF_SIZE) diff = diff.slice(0, MAX_DIFF_SIZE);
+    const pathspec = files.length ? ['--', ...files] : [];
+    // The file list and the line counts come from numstat, which is one row
+    // per file whatever the change size. The TEXT is what gets capped: a
+    // 120-file turn at full-file context is 3.3MB, and a byte-slice at
+    // MAX_DIFF_SIZE kept the first 22 files and counted only those — which
+    // is how session 29b32c38 turn 1 was sent as 22 files / +794 after the
+    // range itself was already right. Context steps down before anything is
+    // dropped, and what is dropped is whole sections, never half a hunk.
+    const rows = numstatByFile(['diff', '--numstat', baseTree, commitTree, ...pathspec], gitOpts);
+    let diff = '';
+    let diffTruncated = false;
+    for (const u of CONTEXT_LADDER) {
+      diff = stripIgnoredSectionsFromDiff(git(['diff', `--unified=${u}`, baseTree, commitTree, ...pathspec], gitOpts));
+      if (diff.length <= MAX_DIFF_SIZE) break;
+    }
+    if (diff.length > MAX_DIFF_SIZE) {
+      diff = truncateToWholeSections(diff, MAX_DIFF_SIZE);
+      diffTruncated = true;
+    }
     let linesAdded = 0;
     let linesRemoved = 0;
-    for (const line of diff.split('\n')) {
-      if (line.startsWith('+') && !line.startsWith('+++')) linesAdded++;
-      else if (line.startsWith('-') && !line.startsWith('---')) linesRemoved++;
+    if (rows) {
+      for (const r of rows) { linesAdded += r.added; linesRemoved += r.removed; }
+    } else {
+      for (const line of diff.split('\n')) {
+        if (line.startsWith('+') && !line.startsWith('+++')) linesAdded++;
+        else if (line.startsWith('-') && !line.startsWith('---')) linesRemoved++;
+      }
     }
-    return { diff, linesAdded, linesRemoved };
+    const named = rows ? rows.map((r) => r.file) : pathsInDiffText(diff);
+    return { diff, linesAdded, linesRemoved, files: named, diffTruncated };
   } catch {
     return null;
   }
+}
+
+/** The paths a unified diff names, in order, without duplicates. */
+function pathsInDiffText(diff: string): string[] {
+  const out: string[] = [];
+  for (const m of (diff || '').matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)) {
+    if (m[2] && !out.includes(m[2])) out.push(m[2]);
+  }
+  return out;
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────

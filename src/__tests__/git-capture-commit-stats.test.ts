@@ -107,4 +107,25 @@ describe('captureGitState — per-commit line stats', () => {
     const shaFirst = gitIn(dir, ['rev-list', '--max-parents=1', '--reverse', `${headBefore}..HEAD`]).trim().split('\n')[0];
     expect(res.commitShas[0]).toBe(shaFirst);
   }, 30_000);
+
+  it('a file committed then edited further is one applyable section, not two', () => {
+    // The acd825ed producer: concatenating committedDiff + uncommittedDiff
+    // stored two `diff --git` sections for package.json. The combined `diff`
+    // must be the net vs the baseline — one section, both the commit and the
+    // leftover edit.
+    const headBefore = gitIn(dir, ['rev-parse', 'HEAD']).trim();
+    fs.writeFileSync(path.join(dir, 'pkg.json'), 'v1\n');
+    gitIn(dir, ['add', '-A']);
+    gitIn(dir, ['commit', '-q', '-m', 'bump']);
+    fs.writeFileSync(path.join(dir, 'pkg.json'), 'v1\nv2\n');
+
+    const res = captureGitState(dir, headBefore);
+    const sections = [...(res.diff.matchAll(/^diff --git /gm) || [])];
+    expect(sections).toHaveLength(1);
+    expect(res.diff).toContain('+v1');
+    expect(res.diff).toContain('+v2');
+    expect(res.uncommittedDiff).toContain('+v2');
+    expect(res.committedDiff).toContain('+v1');
+    expect(res.committedDiff).not.toContain('+v2');
+  }, 30_000);
 });

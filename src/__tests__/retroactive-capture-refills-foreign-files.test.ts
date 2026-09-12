@@ -26,7 +26,7 @@
  * "counts on a diff that doesn't hold them" shape.
  */
 import { describe, it, expect } from 'vitest';
-import { retroactiveTurnFiles } from '../commands/hooks.js';
+import { attestedHeadForPrompt, retroactiveTurnFiles } from '../commands/hooks/user-prompt-submit.js';
 
 const hunk = (f: string) => `diff --git a/${f} b/${f}\n--- a/${f}\n+++ b/${f}\n@@ -1 +1 @@\n-x\n+y\n`;
 
@@ -82,5 +82,35 @@ describe('the retroactive per-prompt file list', () => {
     // not always agree on the prefix.
     expect(retroactiveTurnFiles('', hunk('apps/api/src/routes/sessions.ts'),
       ['src/routes/sessions.ts'])).toEqual([]);
+  });
+});
+
+describe('the retroactive commit stamp', () => {
+  const SHA = '04ad8136fe90dd0c1dc976e411adb84e4d78d5f1';
+
+  it('does not claim the current checkout commit without a per-turn attestation', () => {
+    expect(attestedHeadForPrompt({
+      promptTurnIds: ['turn-0'],
+      commitTurns: [],
+    }, 0, SHA)).toBeNull();
+  });
+
+  it('keeps a commit only when post-commit attested it to this exact turn', () => {
+    expect(attestedHeadForPrompt({
+      promptTurnIds: ['turn-0', 'turn-1'],
+      commitTurns: [{ sha: SHA, turnId: 'turn-1', at: '2026-09-12T12:00:00Z', via: 'post-commit' }],
+    }, 1, SHA)).toBe(SHA);
+    expect(attestedHeadForPrompt({
+      promptTurnIds: ['turn-0', 'turn-1'],
+      commitTurns: [{ sha: SHA, turnId: 'turn-0', at: '2026-09-12T12:00:00Z', via: 'post-commit' }],
+    }, 1, SHA)).toBeNull();
+  });
+
+  it('uses the server-row turn identity after a resumed conversation', () => {
+    expect(attestedHeadForPrompt({
+      promptIndexBase: 8,
+      promptTurnIds: ['turn-8'],
+      commitTurns: [{ sha: SHA, turnId: 'turn-8', at: '2026-09-12T12:00:00Z', via: 'post-commit' }],
+    }, 8, SHA)).toBe(SHA);
   });
 });

@@ -7,6 +7,7 @@
 //   [Origin: Decision] <choice> — <rationale>
 //   [Origin: Open]     <unresolved thing>
 //   [Origin: Verify]   <reviewer-check item>
+//   [Origin: Closes]   <id or text of a PRIOR session's [Origin: Open] item>
 //
 // The server parses these from the stored transcript for the PR review
 // surface (apps/api/src/services/self-reported-brief.ts). This module is
@@ -32,7 +33,14 @@ import * as fs from 'fs';
 // decisions and written to git notes, where a later agent pulled them in as
 // prior context. Trading a little recall for precision is the right call: a
 // missed marker is invisible, a fabricated one actively misleads.
-const MARKER_RE = /^\[Origin:\s*(Intent|Decision|Open|Verify)\s*\]\s*(.+?)\s*$/i;
+//
+// `Closes` is the inverse of `Open` and the only marker that refers BACKWARDS,
+// to a leftover some earlier session recorded. It is deliberately not parsed by
+// the server's brief (self-reported-brief.ts): the PR surface reports what this
+// change did, and discharging a months-old leftover is a fact about the repo's
+// memory, not about the diff under review. The two parsers stay compatible in
+// the sense that matters — neither invents a bucket the other would mis-file.
+const MARKER_RE = /^\[Origin:\s*(Intent|Decision|Open|Verify|Closes)\s*\]\s*(.+?)\s*$/i;
 
 // Keep notes push-friendly: cap items per bucket and content length.
 const MAX_PER_BUCKET = 12;
@@ -43,11 +51,13 @@ export interface OriginMarkers {
   decision?: string[];
   open?: string[];
   verify?: string[];
+  /** Prior leftovers this session says it discharged. See MARKER_RE. */
+  closes?: string[];
 }
 
 // True when at least one bucket has an entry.
 export function hasMarkers(m: OriginMarkers | undefined): m is OriginMarkers {
-  return !!m && !!(m.intent?.length || m.decision?.length || m.open?.length || m.verify?.length);
+  return !!m && !!(m.intent?.length || m.decision?.length || m.open?.length || m.verify?.length || m.closes?.length);
 }
 
 // True when a marker's content is just the unfilled template — angle-bracket
@@ -91,8 +101,8 @@ function cleanContent(raw: string): string {
 // De-dupes by (kind, lowercased content) and caps each bucket.
 export function parseOriginMarkers(text: string | null | undefined): OriginMarkers | undefined {
   if (!text) return undefined;
-  const buckets: Record<'intent' | 'decision' | 'open' | 'verify', string[]> = {
-    intent: [], decision: [], open: [], verify: [],
+  const buckets: Record<'intent' | 'decision' | 'open' | 'verify' | 'closes', string[]> = {
+    intent: [], decision: [], open: [], verify: [], closes: [],
   };
   const seen = new Set<string>();
 
@@ -103,7 +113,7 @@ export function parseOriginMarkers(text: string | null | undefined): OriginMarke
     const cleaned = line.replace(/^[\s>*\-+•]+/, '');
     const m = cleaned.match(MARKER_RE);
     if (!m) continue;
-    const kind = m[1].toLowerCase() as 'intent' | 'decision' | 'open' | 'verify';
+    const kind = m[1].toLowerCase() as 'intent' | 'decision' | 'open' | 'verify' | 'closes';
     const content = cleanContent(m[2]);
     if (!content) continue;
     // Drop unfilled template placeholders — don't persist "<one sentence…>"
@@ -120,6 +130,7 @@ export function parseOriginMarkers(text: string | null | undefined): OriginMarke
   if (buckets.decision.length) out.decision = buckets.decision;
   if (buckets.open.length) out.open = buckets.open;
   if (buckets.verify.length) out.verify = buckets.verify;
+  if (buckets.closes.length) out.closes = buckets.closes;
   return hasMarkers(out) ? out : undefined;
 }
 

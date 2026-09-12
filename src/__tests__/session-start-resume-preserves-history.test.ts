@@ -19,9 +19,15 @@
  * nothing.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { execFileSync } from 'child_process';
 import { carryForwardTurnState, findSameTagStateForResume, findDuplicateStateForSession } from '../session-dedup.js';
 import { localTurnForServerRow, resumeBaseFromTranscript, resumeSeedApplies, serverRowForLocalTurn } from '../commands/hooks.js';
+import { loadSessionState, readStateAtTag } from '../session-state.js';
+import { hookModuleSource } from './helpers/hooks-source.js';
 
 const CONV = '66621eba-50dc-4cf3-b3e0-ceccfe5161e8';
 const TAG = '66621eba-50d';
@@ -95,6 +101,14 @@ describe('a re-fired SessionStart for a live conversation', () => {
   it('refuses to graft a DIFFERENT conversation that collided on the tag', () => {
     const other = { ...priorState(), claudeSessionId: 'someone-else' };
     expect(findSameTagStateForResume([other], TAG, CONV)).toBeNull();
+  });
+
+  it('finds a Cursor row whose claudeSessionId is empty', () => {
+    // Cursor stores the conversation on agentSessionId; claudeSessionId is ''.
+    // The identity check is "both sides named and they disagree", so empty
+    // on both is a match — same tag is the conversation.
+    const cursor = { ...priorState(), claudeSessionId: '' };
+    expect(findSameTagStateForResume([cursor], TAG, '')?.prompts).toHaveLength(5);
   });
 
   it('never lets a shorter prior state shrink richer incoming state', () => {
@@ -245,5 +259,76 @@ describe('transcript base seed — the last line of defence when no prior state 
     expect(resumeSeedApplies('resume', [])).toBe(true);
     expect(resumeSeedApplies('resume', ['a'])).toBe(false);
     expect(resumeSeedApplies('startup', [])).toBe(false);
+  });
+});
+
+// Cursor's conversation lives on agentSessionId, so the state file's
+// claudeSessionId is always empty. loadSessionState rejects that shape, and
+// until the same-tag resume at session-start swapped onto readStateAtTag
+// (the reservation checks already had), a re-fired Cursor session-start
+// got `onDisk = null`, carryForwardTurnState never ran, prompts stayed [],
+// and the resumed turn wrote onto server row 0. Same shape as prod 0c65017f,
+// permanently on for Cursor.
+describe('a Cursor-shaped state file (empty claudeSessionId) carries forward', () => {
+  const ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+  const CURSOR_CONV = 'f9213cfd-3494-476f-9249-b18716835b7a';
+  const CURSOR_TAG = 'f9213cfd-349';
+  const CURSOR_SESSION = '0c65017f-cursor-43bc-a6b8-04f86a0185b4';
+  let repo: string;
+
+  beforeEach(() => {
+    repo = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-cursor-resume-'));
+    execFileSync('git', ['init', '-q'], { cwd: repo, env: ENV });
+    repo = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: repo, env: ENV, encoding: 'utf-8' }).trim();
+  });
+
+  afterEach(() => {
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('loadSessionState misses it; the resume path still restores turn numbering', () => {
+    const prior = {
+      sessionId: CURSOR_SESSION,
+      sessionTag: CURSOR_TAG,
+      claudeSessionId: '',
+      agentSessionId: CURSOR_CONV,
+      status: 'RUNNING',
+      prompts: ['pull latest', 'work on this', 'the resumed turn'],
+      promptTurnIds: ['t0', 't1', 't2'],
+    };
+    fs.writeFileSync(
+      path.join(repo, '.git', `origin-session-${CURSOR_TAG}.json`),
+      JSON.stringify(prior, null, 2),
+    );
+
+    expect(loadSessionState(repo, CURSOR_TAG)).toBeNull();
+
+    // Exactly the sequence session-start uses after the swap.
+    const onDisk = readStateAtTag(repo, CURSOR_TAG);
+    const found = findSameTagStateForResume(
+      onDisk ? [onDisk] : [], CURSOR_TAG, '',
+    );
+    expect(found?.prompts).toHaveLength(3);
+
+    const state = {
+      sessionId: CURSOR_SESSION,
+      sessionTag: CURSOR_TAG,
+      claudeSessionId: '',
+      agentSessionId: CURSOR_CONV,
+      status: 'RUNNING',
+      prompts: [] as string[],
+    };
+    carryForwardTurnState(state as any, found!);
+    expect(state.prompts).toHaveLength(3);
+    expect((state as any).promptTurnIds).toEqual(['t0', 't1', 't2']);
+  });
+
+  it('session-start\'s same-tag resume reads with readStateAtTag', () => {
+    const src = hookModuleSource('session-start');
+    const resume = src.indexOf("'carried turn history forward across a re-fired session-start'");
+    expect(resume).toBeGreaterThan(-1);
+    const window = src.slice(Math.max(0, resume - 800), resume);
+    expect(window).toContain('readStateAtTag(saveCwd, sessionTag)');
+    expect(window).not.toContain('loadSessionState(saveCwd, sessionTag)');
   });
 });

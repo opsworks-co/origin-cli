@@ -330,7 +330,69 @@ export type ViolationCode =
   | 'diff_file_unclaimed'
   | 'line_counts_disagree_with_diff'
   | 'duplicate_file_section'
-  | 'identical_change_in_two_turns';
+  | 'identical_change_in_two_turns'
+  // Session-level: the header the CLI keeps for the session disagrees with
+  // the turns it is supposed to summarise. Reported at SESSION_LEVEL_INDEX.
+  | 'header_file_unclaimed_by_turns'
+  | 'header_exceeds_turns';
+
+/** `promptIndex` of a finding about the session header rather than a turn. */
+export const SESSION_LEVEL_INDEX = -1;
+
+/**
+ * The session's own header: the file list and line totals the CLI stores for
+ * the whole session and sends as its summary. Every turn row is a capture of
+ * one turn; this is the capture of all of them together, and it is produced
+ * by different code — which is how it came to disagree with them.
+ */
+export interface VerifiableHeader {
+  filesChanged?: string[] | null;
+  linesAdded?: number | null;
+  linesRemoved?: number | null;
+  /**
+   * The index of a turn still OPEN when this state was read, null between
+   * turns. `closeTurn` nulls it at Stop, so its PRESENCE is a live assertion
+   * that one more turn row is still coming — not an absence to interpret.
+   */
+  openTurnIndex?: number | null;
+  /**
+   * Nothing more is coming: no further turn row will ever be written for this
+   * session, whatever `openTurnIndex` still says. True for a session that
+   * ENDED, and for one that died mid-turn — a killed agent leaves its state
+   * RUNNING with the turn open for good.
+   */
+  noMoreTurns?: boolean;
+}
+
+/**
+ * This header summarises turns that are not all captured yet.
+ *
+ * The header and the turn rows are written by different hooks at different
+ * moments. post-commit SETS the session totals the instant `git commit` runs
+ * (`applyAuthoredTotals`), while the row for the turn that ran it is appended
+ * by Stop, at the END of that turn. Between those two points the header
+ * legitimately carries work no turn carries yet — and both header rules read
+ * that as the session being credited with work no turn saw.
+ *
+ * Not a rare window: `scripts/release-cli.sh` runs `verify-capture
+ * --fail-on-contradiction` from inside an agent's own turn, so the releasing
+ * session was in exactly this state every time it released. The gate failed on
+ * itself, and the way past it — `--allow-contradictions` — switches the check
+ * off for every OTHER session in the range too.
+ *
+ * SKIPPED, not exempted, on the same terms as `isFileSetRecord`. The flag must
+ * be PRESENT: a session with no open turn is graded exactly as before, so a
+ * producer that stops recording `activeTurn` loses the privilege instead of
+ * gaining a silent pass. And a session with nothing more coming is graded
+ * whatever it says, because a turn that never Stopped — an API error, an
+ * interrupt, a killed agent, the dead turn — leaves `activeTurn` set for good.
+ * The exemption is for a session still writing; it must never become a
+ * permanent excuse from the only check the header has.
+ */
+export function isMidTurnHeader(header: VerifiableHeader | null | undefined): boolean {
+  if (!header || header.noMoreTurns) return false;
+  return Number.isInteger(header.openTurnIndex as number);
+}
 
 /**
  * `contradiction` — the row asserts two incompatible things. Always a defect,
@@ -385,6 +447,14 @@ export interface VerifiableTurn {
    * again instead of silently excused.
    */
   fileSetOnly?: boolean;
+  /**
+   * When this row was written. Set by every producer via `stampCaptured`.
+   *
+   * The release gate windows on THIS, not on the session's start — see the
+   * note on the state-file type. Absent on rows written before it existed,
+   * and absence keeps a row out of the window.
+   */
+  capturedAt?: string | null;
 }
 
 /**
@@ -470,8 +540,23 @@ export function verifyTurn(turn: VerifiableTurn): CaptureViolation[] {
 
   // The mosaic tell: counts taken from one capture, diff from another.
   if (badness.length === 0 && (typeof turn.linesAdded === 'number' || typeof turn.linesRemoved === 'number')) {
-    const t = diffTotals(committed);
-    const anyContentless = committed.files.some((f) => f.contentless);
+    // WHICH field holds the row's content, on the same precedence the turn card
+    // renders by: `diff` when it has any, else `uncommittedDiff`.
+    //
+    // Not a sum. The hook path stores the COMBINED committed+uncommitted text
+    // in `diff` and repeats the uncommitted half in `uncommittedDiff`
+    // (git-capture's `diff` is documented "Combined committed + uncommitted"),
+    // so adding the two double-counts every row that carries both. But reading
+    // `diff` ALONE was just as wrong in the other direction: the transcript
+    // watcher — the producer for every agent that fires no hooks, which on
+    // Windows is every GUI agent — sends its per-turn text as `uncommittedDiff`
+    // and never as `diff`, while counting `linesAdded` from that same text
+    // (transcript-watch.ts). Every one of those rows was graded as
+    // contradicting itself, which inflates the corpus contradiction rate this
+    // command exists to measure.
+    const content = committed.files.length > 0 ? committed : working;
+    const t = diffTotals(content);
+    const anyContentless = content.files.some((f) => f.contentless);
     const declaredA = turn.linesAdded ?? 0;
     const declaredR = turn.linesRemoved ?? 0;
     // A binary or mode-only file has no countable lines, so a mismatch there
@@ -494,9 +579,96 @@ export function verifyTurn(turn: VerifiableTurn): CaptureViolation[] {
  * each time, so this cannot fire on it — the distinction transcript-attribution
  * .ts makes for the same reason.
  */
-export function verifySession(turns: VerifiableTurn[]): CaptureViolation[] {
+/**
+ * Check the session header against the turns.
+ *
+ * The header is a SUMMARY of the turns, so two things must hold whatever
+ * produced either side:
+ *
+ *   - every file the header lists appears in some turn's capture (its file
+ *     list, its stored diffs, its out-of-repo or content-unavailable lists);
+ *   - the header's line totals do not EXCEED what the turns carry together.
+ *
+ * Both are checked only once the turns are ALL there — see `isMidTurnHeader`.
+ *
+ * The second is one-sided on purpose. Turns may legitimately sum to MORE than
+ * the header — a line one turn adds and a later turn removes is two actions
+ * and zero net, and a commit-and-go turn re-carries what an earlier turn
+ * wrote uncommitted. A header that claims more than every turn together is
+ * the other way round: work the session is credited with that no turn saw.
+ * That is exactly the shape of the merge leak on 51995e1c (+1218 stored above
+ * turns carrying +895) and of every foreign-commit leak before it.
+ *
+ * Turn totals come from the stored diff text when there is any (the same
+ * parser the per-turn checks trust), else from the row's own counters.
+ */
+export function verifyHeader(
+  header: VerifiableHeader | null | undefined,
+  turns: VerifiableTurn[],
+): CaptureViolation[] {
+  const out: CaptureViolation[] = [];
+  if (!header || !Array.isArray(turns)) return out;
+  // A turn is still open: the row for work the header already counts has not
+  // been written yet, so header-versus-turns is unknown, not a finding.
+  if (isMidTurnHeader(header)) return out;
+  const graded = turns.filter((t) => t && Number.isInteger(t.promptIndex) && !isFileSetRecord(t));
+  // A header with no turns beneath it cannot be checked against them; that
+  // is "unknown", not a finding.
+  if (graded.length === 0) return out;
+
+  const named: string[] = [];
+  let sumAdded = 0;
+  let sumRemoved = 0;
+  for (const t of graded) {
+    for (const f of t.filesChanged || []) if (typeof f === 'string') named.push(f);
+    for (const f of t.outOfRepoFiles || []) if (typeof f === 'string') named.push(f);
+    for (const f of t.contentUnavailableFiles || []) if (typeof f === 'string') named.push(f);
+    const committed = parseUnifiedDiff(t.diff);
+    const working = parseUnifiedDiff(t.uncommittedDiff);
+    for (const f of [...committed.files, ...working.files]) named.push(f.file);
+    const hasText = committed.files.length > 0 || working.files.length > 0;
+    if (hasText) {
+      const c = diffTotals(committed);
+      const w = diffTotals(working);
+      sumAdded += c.added + w.added;
+      sumRemoved += c.removed + w.removed;
+    } else {
+      sumAdded += Number.isFinite(t.linesAdded as number) ? (t.linesAdded as number) : 0;
+      sumRemoved += Number.isFinite(t.linesRemoved as number) ? (t.linesRemoved as number) : 0;
+    }
+  }
+
+  const headerFiles = (header.filesChanged || []).filter((f) => typeof f === 'string' && f.trim().length > 0);
+  const unclaimed = headerFiles.filter((f) => !named.some((n) => sameFile(n, f)));
+  if (unclaimed.length > 0) {
+    out.push({
+      code: 'header_file_unclaimed_by_turns',
+      severity: 'contradiction',
+      promptIndex: SESSION_LEVEL_INDEX,
+      detail: `${unclaimed.length} file(s) in the session header appear in no turn's capture`,
+      files: unclaimed.slice(0, MAX_LISTED),
+    });
+  }
+
+  const hAdded = header.linesAdded;
+  const hRemoved = header.linesRemoved;
+  if (Number.isFinite(hAdded as number) && Number.isFinite(hRemoved as number)) {
+    if ((hAdded as number) > sumAdded || (hRemoved as number) > sumRemoved) {
+      out.push({
+        code: 'header_exceeds_turns',
+        severity: 'contradiction',
+        promptIndex: SESSION_LEVEL_INDEX,
+        detail: `session header claims +${hAdded}/-${hRemoved} but its turns together carry +${sumAdded}/-${sumRemoved}`,
+      });
+    }
+  }
+  return out;
+}
+
+export function verifySession(turns: VerifiableTurn[], header?: VerifiableHeader | null): CaptureViolation[] {
   const out: CaptureViolation[] = [];
   if (!Array.isArray(turns)) return out;
+  if (header) out.push(...verifyHeader(header, turns));
 
   // File-set records are not turns and cannot contradict themselves; they are
   // also invisible to the cross-turn rule below, which would otherwise read one
@@ -561,8 +733,12 @@ export function summarize(turns: VerifiableTurn[], violations: CaptureViolation[
   const dirty = new Set<number>();
   for (const v of violations) {
     byCode[v.code] = (byCode[v.code] || 0) + 1;
-    if (v.severity === 'contradiction') { contradictions++; dirty.add(v.promptIndex); }
-    else suspects++;
+    if (v.severity === 'contradiction') {
+      contradictions++;
+      // A header finding is about the session, not a turn: it counts as a
+      // contradiction without making any turn read dirty.
+      if (v.promptIndex >= 0) dirty.add(v.promptIndex);
+    } else suspects++;
   }
   const all = Array.isArray(turns) ? turns : [];
   const graded = all.filter((t) => !isFileSetRecord(t)).length;

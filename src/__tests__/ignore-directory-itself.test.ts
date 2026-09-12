@@ -29,12 +29,15 @@ describe('shouldIgnoreFile — a directory pattern covers the directory itself',
   it('ignores the bare directory name at the repo root', () => {
     expect(shouldIgnoreFile('node_modules')).toBe(true);
     expect(shouldIgnoreFile('dist')).toBe(true);
+    expect(shouldIgnoreFile('.pnpm-store')).toBe(true);
   });
 
   it('still ignores everything inside — the half that always worked', () => {
     expect(shouldIgnoreFile('packages/cli/node_modules/foo.js')).toBe(true);
     expect(shouldIgnoreFile('apps/web/dist/index.js')).toBe(true);
     expect(shouldIgnoreFile('a/b/__snapshots__/x.snap')).toBe(true);
+    expect(shouldIgnoreFile('.pnpm-store/v10/hash/foo')).toBe(true);
+    expect(shouldIgnoreFile('packages/cli/.pnpm-store/v10/foo')).toBe(true);
   });
 
   it('does not start swallowing real files that merely share a prefix', () => {

@@ -414,7 +414,7 @@ export async function reconcileThread(
       if (!endOk) return prior;
       const ended: ThreadWatchState = { ...prior, status: 'ENDED', endedAt: new Date(now).toISOString() };
       deps.saveState(ended);
-      stopJournalWatcher(codexJournalTag(scanned.threadId));
+      stopJournalWatcher(codexJournalTag(scanned.threadId), prior.workRoot || prior.repoPath);
       return ended;
     }
     return prior; // already ended or never started — nothing to do
@@ -578,7 +578,7 @@ export async function reconcileThread(
       // so its deletion counted -0 and dropped off the turn entirely (session
       // 5dfd1596 turn 3: `.tags-smoke.json`, -35 lines Codex itself reported).
       const readDeleted = codexDeletedContentReader(parsed.promptDeletedFiles?.[i]);
-      const { diff, linesAdded, linesRemoved, filesChanged } =
+      const { diff, linesAdded, linesRemoved, filesChanged, contentUnavailableFiles } =
         codexApplyPatchesToDiff(patches, repo.workRoot, readBaseline, readDeleted);
       const files = new Set<string>(filesChanged);
       // ADDITIVE ONLY — never a downgrade. Codex frequently BUILDS the patch
@@ -602,6 +602,7 @@ export async function reconcileThread(
           diff: capDiff(diff, MAX_PROMPT_DIFF_LEN),
           linesAdded,
           linesRemoved,
+          ...(contentUnavailableFiles.length > 0 ? { contentUnavailableFiles } : {}),
           checkpointType: 'auto',
         });
         continue;

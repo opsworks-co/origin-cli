@@ -16,6 +16,7 @@ import { debugLog } from '../../debug-log.js';
 import { retagDevinFromProcess } from '../../devin-cli.js';
 import { capDiff } from '../../diff-budget.js';
 import { MAX_PROMPT_DIFF_LEN, captureGitState, createShadowCommit, getDirtyFiles } from '../../git-capture.js';
+import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
 import { syncNotesForSessionStart } from '../../git-notes.js';
 import { buildHandoffContext } from '../../handoff.js';
 import { listRecentShas } from '../../history-backfill.js';
@@ -25,21 +26,24 @@ import { samePath as samePathNormalized } from '../../paths.js';
 import { redactSecrets } from '../../redaction.js';
 import { buildRepoBriefContext } from '../../repo-brief.js';
 import { carryForwardTurnState, findDuplicateStateForSession } from '../../session-dedup.js';
+import { isEmptyWorktreeBootstrap, restampWorktreeBootstrap } from '../../worktree-bootstrap.js';
 import { buildDurationBlockMessage, parseSessionLimits } from '../../session-limits.js';
-import { closeTurn, clearSessionState, discoverGitRoot, getBranch, getCanonicalRepoPath, getGitCommonDir, getGitRoot, getHeadSha, getStatePath, getWorkingGitRoot, isHeartbeatAlive, isPendingReservation, listActiveSessions, loadSessionState, promptHistoryFromPriorState, recordPromptShadow, resolveSessionBranch, saveSessionState, sessionTagFor, startHeartbeat } from '../../session-state.js';
+import { clearSessionState, closeTurn, discoverGitRoot, findPriorStateForConversation, getBranch, getCanonicalRepoPath, getGitCommonDir, getGitRoot, getHeadSha, getStatePath, getWorkingGitRoot, isHeartbeatAlive, isPendingReservation, isProvisionalSessionId, listActiveSessions, loadSessionState, markSkippedPromptBaselines, promptHistoryFromPriorState, recordPromptShadow, resolveSessionBranch, samePromptText, saveSessionState, sessionTagFor, stampCaptured, startHeartbeat } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import { openTurnLiveness } from '../../turn-liveness.js';
 import { samePath, sessionWorkTree } from '../../session-worktree.js';
 import { detectTools } from '../../tools-detector.js';
-import { estimateCost, formatTranscriptForDisplay, parseTranscript, readCopilotModel } from '../../transcript.js';
-import type { ParsedTranscript } from '../../transcript.js';
+import { estimateCost, extractPromptFileMappings, formatTranscriptForDisplay, isKnownCursorInternalPrompt, parseTranscript, promptTextForEntry, readCopilotModel } from '../../transcript.js';
+import type { ParsedTranscript, PromptFileMapping } from '../../transcript.js';
+import { persistUpdateBeforeWork } from '../../update-queue.js';
 import { markTurn } from '../../write-journal-watch.js';
 import { execFileSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { STABLE_SESSION_ID_AGENTS, captureStamp, currentSessionWorkTree, dropForeignCommitsFromCapture, durableUpdate, ensureServerSession, ensureWriteJournal, filterUncommittedDiff, findStateForHook, getWorkingTreeSha, hookLookupSessionId, journalHasMark, normalizeWorkspaceRoot, resolveAutoAgentSessionId, serverRowForLocalTurn, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, turnIdFor, uncommittedExcludeUnion } from '../hooks.js';
+import { turnIdForServerRow } from '../../turn-index.js';
+import { STABLE_SESSION_ID_AGENTS, captureStamp, currentSessionWorkTree, dropForeignCommitsFromCapture, durableUpdate, ensureServerSession, ensureWriteJournal, filterUncommittedDiff, findStateForHook, getWorkingTreeSha, hookLookupSessionId, journalHasMark, normalizeWorkspaceRoot, resolveAutoAgentSessionId, resumeEndedConversationState, serverRowForLocalTurn, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, turnIdFor, uncommittedExcludeUnion } from '../hooks.js';
 
 
 export function retroactiveTurnFiles(
@@ -59,6 +63,30 @@ export function retroactiveTurnFiles(
     if (m[1] && !isForeign(m[1])) out.add(m[1]);
   }
   return [...out];
+}
+
+/**
+ * A UserPromptSubmit hook runs after arbitrary shell activity, including a
+ * checkout. `HEAD` alone therefore says nothing about the turn we are
+ * closing: using it as a commit stamp made a branch's pre-existing tip appear
+ * as if the active prompt had authored it.
+ *
+ * A post-commit attestation is the one observation that binds a SHA to a
+ * stable turn id. Keep the convenient retroactive commit badge when that
+ * exact SHA is attested to this row; otherwise leave ownership to the
+ * post-commit/Stop paths instead of guessing from the checkout's HEAD.
+ */
+export function attestedHeadForPrompt(
+  state: Pick<SessionState, 'commitTurns' | 'promptTurnIds' | 'promptIndexBase'>,
+  promptIndex: number,
+  headSha: string | null | undefined,
+): string | null {
+  const sha = headSha?.trim();
+  const turnId = turnIdForServerRow(state, promptIndex);
+  if (!sha || !turnId) return null;
+  return state.commitTurns?.some((commit) =>
+    commit.sha.toLowerCase() === sha.toLowerCase() && commit.turnId === turnId,
+  ) ? sha : null;
 }
 
 // ─── Per-agent context injection ──────────────────────────────────────────
@@ -149,17 +177,18 @@ export function fullContextAlreadyInjected(repoPath: string, conversationKey: st
 }
 
 /**
- * The stable per-chat `agentSessionId` to advertise when a hook AUTO-CREATES a
- * session (no prior session-start row to anchor on). Resolves EXACTLY as
- * handleSessionStart does so the server's dedup can match a resumed chat to its
- * existing session instead of minting a twin:
- *   • cursor  → conversation_id (stable per chat), falling back to session_id.
- *               Cursor's session_id ROTATES per turn, so it alone can't anchor a
- *               resume — omitting the id entirely (the old bug) forked a twin that
- *               re-copied the chat's prior prompts (prod 3a5328e9 vs e6f72dcc).
- *   • stable agents (claude-code/devin/copilot) → their session_id is stable.
- *   • everything else → undefined (no reliable per-chat anchor).
+ * Cursor's per-chat identity for detach / reuse.
+ *
+ * `conversation_id` is the stable chat (agent-transcripts/<id>/). `session_id`
+ * rotates every turn, so treating it as the chat id is what made a second
+ * prompt look like a NEW conversation and mint a twin Origin session (prod:
+ * locked 6f636f7d, incoming c49a1512, auto-created 562314d8 beside the
+ * session-start row). Only a PRESENT conversation_id can prove a mismatch.
  */
+export function cursorIncomingChatId(input: Record<string, unknown>): string {
+  return (typeof input.conversation_id === 'string' && input.conversation_id.trim()) || '';
+}
+
 /**
  * The id that identifies this CONVERSATION on stdin.
  *
@@ -177,6 +206,50 @@ export function conversationAnchorId(
   const conv = (typeof conversationId === 'string' && conversationId) || '';
   const sess = (typeof sessionId === 'string' && sessionId) || '';
   return agentSlug === 'cursor' ? (conv || sess) : (sess || conv);
+}
+
+/**
+ * Recover the conversation that existed before a missing SessionStart hook.
+ *
+ * A late UserPromptSubmit is still able to read Claude's complete JSONL.  The
+ * old fallback created a state with only the newly-submitted prompt, which
+ * made every older commit look like work for that one live turn and told the
+ * server it had joined mid-stream.  Transcript edits are real evidence, so
+ * retain them; git baselines for the older turns are gone, so mark those turns
+ * explicitly unanchored rather than reconstructing a cumulative diff.
+ */
+export function recoverLateAttachTranscript(
+  transcriptPath: unknown,
+  incomingPrompt: string,
+  repoRoots: string[],
+): { prompts: string[]; mappings: PromptFileMapping[]; startedAt?: string } {
+  if (typeof transcriptPath !== 'string' || !transcriptPath || !fs.existsSync(transcriptPath)) {
+    return { prompts: [], mappings: [] };
+  }
+  try {
+    const mappings = extractPromptFileMappings(transcriptPath, { repoRoots });
+    const prompts = mappings.map((m) => m.promptText);
+    // Claude normally invokes UserPromptSubmit before it appends the new user
+    // entry. If a build wrote it first, leave it for the ordinary hook path so
+    // it still gets this turn's journal mark and start shadow.
+    if (prompts.length > 0 && samePromptText(prompts[prompts.length - 1], incomingPrompt)) {
+      prompts.pop();
+      mappings.pop();
+    }
+    let startedAt: string | undefined;
+    for (const line of fs.readFileSync(transcriptPath, 'utf-8').split('\n')) {
+      try {
+        const timestamp = JSON.parse(line)?.timestamp;
+        if (typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp))) {
+          startedAt = new Date(timestamp).toISOString();
+          break;
+        }
+      } catch { /* malformed transcript entries are already ignored by the parser */ }
+    }
+    return { prompts, mappings, startedAt };
+  } catch {
+    return { prompts: [], mappings: [] };
+  }
 }
 
 // How many recent HEAD SHAs a session-creating call advertises so the
@@ -251,8 +324,26 @@ export function selectRecoverableArchiveSession(
   for (const s of states) {
     if (!s?.sessionId || !s?.startedAt) continue;
     const age = opts.nowMs - new Date(s.startedAt).getTime();
-    if (!(age >= 0) || age > opts.maxAgeMs) continue;
-    if (s.status === 'ENDED' && s.endedAt) continue;
+    // An archive that names THIS chat is the conversation the prompt came from
+    // — the agent handing us its own id, not a guess from repo + recency. That
+    // is the one case an ENDED row is resumable: the heartbeat retires a
+    // Cursor session after 20 idle minutes (and, before the open-turn veto,
+    // in the middle of a long generation), the user keeps typing in the same
+    // chat, and the next prompt used to land here, find nothing, and mint a
+    // twin. Prod 2026-09-08: conversation 7b2b1608 became 49b1c722 (ended
+    // 23:04) and then c1e361a4 (auto-created 23:13), the second replaying the
+    // first's prompts. The server already reopens the row on a genuinely new
+    // prompt turn; resuming the LOCAL state is what keeps the numbering and
+    // the ledger continuous instead of restarting at prompt 0.
+    //
+    // Same rule as the server's identity ladder: age caps and the ENDED skip
+    // exist for rows the client cannot NAME. Positive identity relaxes both.
+    const sameChat = !!opts.incomingChatId && !!s.agentSessionId && s.agentSessionId === opts.incomingChatId;
+    if (!(age >= 0) || (age > opts.maxAgeMs && !sameChat)) continue;
+    if (s.status === 'ENDED' && s.endedAt && !sameChat) continue;
+    // ...but never a row the user archived or deleted on the web. The
+    // heartbeat marks those when it drops them (dropLocalSessionAndExit).
+    if (s.serverTerminal === true) continue;
     if (s.repoPath !== opts.repoPath && s.repoPath !== opts.canonicalRepoPath) continue;
     if (opts.agentSlug && !sessionMatchesAgent(s, opts.agentSlug)) continue;
     // Don't recover a different Cursor chat's session (see note above).
@@ -281,12 +372,11 @@ export function stateMatchesIncomingChat(
   input: Record<string, any>,
 ): boolean {
   if (agentSlug === 'cursor') {
-    const incomingChatId =
-      (typeof input.conversation_id === 'string' && input.conversation_id) ||
-      (typeof input.session_id === 'string' && input.session_id) ||
-      '';
+    const incomingChatId = cursorIncomingChatId(input);
     // No id to compare, or a state that hasn't locked one yet, is not evidence
     // of a mismatch — the first guard adopts in both cases, so must this.
+    // A rotating session_id with no conversation_id is also not a mismatch:
+    // that used to detach the second prompt of the SAME chat.
     if (!incomingChatId || !candidate.agentSessionId) return true;
     return candidate.agentSessionId === incomingChatId;
   }
@@ -483,10 +573,21 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
     return;
   }
 
+  // Cursor injects Task-tool / subagent-completion follow-ups as a user_query.
+  // They fire this hook and land in agent-transcripts, so without this they
+  // splice into the real conversation (session 562314d8). Anchored-match only
+  // — a prompt that merely mentions the instruction is kept.
+  if (agentSlug === 'cursor' && isKnownCursorInternalPrompt(input.prompt)) {
+    debugLog('user-prompt-submit', 'skip: cursor harness follow-up prompt', {
+      promptPreview: String(input.prompt || '').slice(0, 80),
+    });
+    return;
+  }
+
   // ── Find session state using concurrent-aware lookup ────────────────────────
   // For agents with unstable session_id (Cursor, Codex), don't use it for lookup
   const stableAgents = STABLE_SESSION_ID_AGENTS;
-  const lookupSessionId = hookLookupSessionId(input.session_id, agentSlug);
+  const lookupSessionId = hookLookupSessionId(input.session_id, agentSlug, input.conversation_id);
   // Reassigned when a concurrent session-start publishes its reservation while
   // this hook is doing its slow pre-mint work — see the re-check before
   // auto-create below, which needs `saveCwd` to follow the adopted session.
@@ -522,20 +623,61 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
     //
     // Codex is NOT detached here — its stdin rotates per turn.
     if (agentSlug === 'cursor') {
-      const incomingChatId =
-        (typeof input.conversation_id === 'string' && input.conversation_id) ||
-        (typeof input.session_id === 'string' && input.session_id) ||
-        '';
+      const incomingChatId = cursorIncomingChatId(input);
       if (incomingChatId) {
         if (!state.agentSessionId) {
           state.agentSessionId = incomingChatId;
         } else if (state.agentSessionId !== incomingChatId) {
-          debugLog('user-prompt-submit', 'cursor: new chat id — detaching from prior state', {
-            locked: state.agentSessionId,
-            incoming: incomingChatId,
-            priorOriginSession: state.sessionId,
-          });
-          state = null;
+          // Cursor sessionStart fires on the MAIN checkout (composer id),
+          // then the harness moves the agent into a linked worktree and the
+          // first prompt carries a NEW conversation_id. That is the same
+          // session, not a second chat — detaching here minted a twin row
+          // (main + cursor/<id>) that the empty-session sweep later hid.
+          const incomingWorking = getWorkingGitRoot(hookCwd) || hookCwd;
+          const incomingCanonical = getCanonicalRepoPath(incomingWorking);
+          if (isEmptyWorktreeBootstrap({
+            promptCount: state.prompts?.length || 0,
+            startedAt: state.startedAt,
+            priorWorkingRoot: state.repoPath,
+            priorCanonicalRoot: state.canonicalRepoPath || state.repoPath,
+            incomingWorkingRoot: incomingWorking,
+            incomingCanonicalRoot: incomingCanonical,
+            nowMs: Date.now(),
+          })) {
+            debugLog('user-prompt-submit', 'cursor: adopting empty worktree-bootstrap session', {
+              locked: state.agentSessionId,
+              incoming: incomingChatId,
+              priorOriginSession: state.sessionId,
+            });
+            restampWorktreeBootstrap(state, {
+              agentSessionId: incomingChatId,
+              lastCwd: hookCwd,
+              repoPath: incomingWorking,
+              canonicalRepoPath: incomingCanonical,
+              branch: resolveSessionBranch(state, hookCwd),
+            });
+            // The server row was registered by session-start under the
+            // composer id Cursor sent THEN (the main-checkout handshake), and
+            // it kept that id after the restamp — only the branch was pushed.
+            // Every server rung that reopens a closed row keys on
+            // agentSessionId, so a later prompt in this chat (after the idle
+            // reap) sent the real conversation id, matched nothing, and got a
+            // twin (prod 49b1c722: server id dad65359, chat 7b2b1608). Push
+            // the corrected id along with the branch.
+            if (isConnectedMode() && state.sessionId && !state.sessionId.startsWith('local-')) {
+              durableUpdate(state.sessionId, {
+                ...(state.branch && { branch: state.branch }),
+                agentSessionId: incomingChatId,
+              }).catch(() => {});
+            }
+          } else {
+            debugLog('user-prompt-submit', 'cursor: new chat id — detaching from prior state', {
+              locked: state.agentSessionId,
+              incoming: incomingChatId,
+              priorOriginSession: state.sessionId,
+            });
+            state = null;
+          }
         }
       }
     } else if (agentSlug === 'gemini') {
@@ -577,11 +719,42 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
     }
     if (state) {
       if (input.transcript_path) state.transcriptPath = input.transcript_path;
+      const heldProvisional = isProvisionalSessionId(state.sessionId);
       saveSessionState(state, found!.saveCwd, state.sessionTag);
+      // The save re-reads a pending reservation and takes the id session-start
+      // registered meanwhile. The identity pushes above were skipped while the
+      // id was provisional, so the row on the server still carries what
+      // session-start registered — main's branch and, for Cursor, the
+      // handshake's composer id — and every server rung that reopens a row
+      // keys on that id. Push what this hook knows now.
+      if (heldProvisional && !isProvisionalSessionId(state.sessionId)) {
+        debugLog('user-prompt-submit', 'session-start registered the reservation meanwhile — continuing on its id', {
+          sessionId: state.sessionId, tag: state.sessionTag, agentSlug,
+          branch: state.branch, agentSessionId: state.agentSessionId,
+        });
+        if (isConnectedMode() && (state.branch || state.agentSessionId)) {
+          durableUpdate(state.sessionId, {
+            ...(state.branch && { branch: state.branch }),
+            ...(state.agentSessionId && { agentSessionId: state.agentSessionId }),
+          }).catch(() => {});
+        }
+      }
       // Self-heal a local-only session here too — every prompt is a retry
       // point, so a transient server outage at start no longer hides the
       // whole session from Origin until (or unless) stop runs.
       await ensureServerSession(state, found!.saveCwd, agentSlug, 'user-prompt-submit');
+    }
+  }
+  if (!state && stableAgents.includes(agentSlug || '') && typeof input.session_id === 'string' && input.session_id) {
+    // This conversation's own state, ended by the heartbeat's idle reap while
+    // the conversation was still open. Auto-creating here made a SECOND state
+    // file for the same session and left the turn history in the first (this
+    // session, 2026-09-09) — resume the row instead.
+    const resumed = resumeEndedConversationState(hookCwd, input.session_id, agentSlug, 'user-prompt-submit');
+    if (resumed) {
+      found = resumed;
+      state = resumed.state;
+      if (input.transcript_path) state.transcriptPath = input.transcript_path;
     }
   }
   if (!state) {
@@ -621,11 +794,22 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
         });
         if (bestCandidate) {
           const bestAge = Date.now() - new Date(bestCandidate.startedAt).getTime();
-          debugLog('user-prompt-submit', 'recovered session from archive', {
+          const wasEnded = bestCandidate.status === 'ENDED' || !!bestCandidate.endedAt;
+          debugLog('user-prompt-submit', wasEnded ? 'resuming ended session from archive (same chat)' : 'recovered session from archive', {
             sessionId: bestCandidate.sessionId,
             tag: bestCandidate.sessionTag,
             ageMin: Math.round(bestAge / 60000),
+            endedAt: bestCandidate.endedAt,
           });
+          // An ENDED row is dead to every liveness check (isSessionAlive,
+          // listActiveSessions) for as long as `endedAt` stands, and the
+          // heartbeat restart below keys on the same. Reopen it here; the
+          // prompt PATCH carries a new turn, which is what the server accepts
+          // as a genuine resume (COMPLETED → RUNNING, endedAt cleared).
+          if (wasEnded) {
+            bestCandidate.status = 'RUNNING';
+            delete bestCandidate.endedAt;
+          }
           // Restore the .git state file so subsequent hooks can find it
           saveSessionState(bestCandidate, recoveryRepoPath, bestCandidate.sessionTag);
           state = bestCandidate;
@@ -684,8 +868,19 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
       // files this prompt, and the turn's whole diff, onto the previous chat's
       // session. Re-apply the same chat-id rule before adopting.
       const racedCandidate = findStateForHook(hookCwd, lookupSessionId, agentSlug);
+      const racedIncomingWorking = getWorkingGitRoot(hookCwd) || hookCwd;
+      const racedIncomingCanonical = getCanonicalRepoPath(racedIncomingWorking);
+      const racedIsBootstrap = !!(racedCandidate && isEmptyWorktreeBootstrap({
+        promptCount: racedCandidate.state.prompts?.length || 0,
+        startedAt: racedCandidate.state.startedAt,
+        priorWorkingRoot: racedCandidate.state.repoPath,
+        priorCanonicalRoot: racedCandidate.state.canonicalRepoPath || racedCandidate.state.repoPath,
+        incomingWorkingRoot: racedIncomingWorking,
+        incomingCanonicalRoot: racedIncomingCanonical,
+        nowMs: Date.now(),
+      }));
       const raced =
-        racedCandidate && stateMatchesIncomingChat(racedCandidate.state, agentSlug, input)
+        racedCandidate && (stateMatchesIncomingChat(racedCandidate.state, agentSlug, input) || racedIsBootstrap)
           ? racedCandidate
           : null;
       if (racedCandidate && !raced) {
@@ -695,6 +890,24 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           priorOriginSession: racedCandidate.state.sessionId,
           agentSlug,
         });
+      }
+      if (raced && racedIsBootstrap) {
+        const incomingChatId = cursorIncomingChatId(input) || (typeof input.session_id === 'string' ? input.session_id : '');
+        restampWorktreeBootstrap(raced.state, {
+          agentSessionId: incomingChatId || undefined,
+          lastCwd: hookCwd,
+          repoPath: racedIncomingWorking,
+          canonicalRepoPath: racedIncomingCanonical,
+          branch: resolveSessionBranch(raced.state, hookCwd),
+        });
+        // Same as the first adoption site: the server row still carries the
+        // handshake's composer id until told otherwise.
+        if (isConnectedMode() && raced.state.sessionId && !raced.state.sessionId.startsWith('local-') && (raced.state.branch || incomingChatId)) {
+          durableUpdate(raced.state.sessionId, {
+            ...(raced.state.branch && { branch: raced.state.branch }),
+            ...(incomingChatId && { agentSessionId: incomingChatId }),
+          }).catch(() => {});
+        }
       }
       if (raced) {
         found = raced;
@@ -714,6 +927,22 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           await ensureServerSession(state, raced.saveCwd, agentSlug, 'user-prompt-submit');
         }
       }
+
+      // Derived exactly as session-start derives its tag, from the same
+      // conversation anchor. Using `session_id` here while session-start used
+      // `claudeSessionId` is what put one Cursor chat in two files — Cursor
+      // has no claudeSessionId, so session-start fell through to a timestamp
+      // (`smtfv1cat`) while this path used the conversation (`ceb22e9b-221`).
+      // Same string on both sides means the loser of the race finds the
+      // winner's file instead of creating a second session.
+      //
+      // Declared OUTSIDE the try below, not inside it: the catch builds the
+      // local fallback session from both of these, and a `const` in a `try` is
+      // not in scope in its `catch`. Inside, the fallback did not compile.
+      const autoAgentSessionId = resolveAutoAgentSessionId(agentSlug, input.conversation_id, input.session_id);
+      const autoTag = sessionTagFor(
+        '', conversationAnchorId(agentSlug, input.conversation_id, input.session_id),
+      );
 
       if (!state) try {
         // Auto-create agent config in standalone mode
@@ -775,17 +1004,6 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           const cm = readCopilotModel(input.transcript_path);
           if (cm) model = cm;
         }
-        // Derived exactly as session-start derives its tag, from the same
-        // conversation anchor. Using `session_id` here while session-start used
-        // `claudeSessionId` is what put one Cursor chat in two files — Cursor
-        // has no claudeSessionId, so session-start fell through to a timestamp
-        // (`smtfv1cat`) while this path used the conversation (`ceb22e9b-221`).
-        // Same string on both sides means the loser of the race finds the
-        // winner's file instead of creating a second session.
-        const autoTag = sessionTagFor(
-          '', conversationAnchorId(agentSlug, input.conversation_id, input.session_id),
-        );
-
         // Get git remote URL for better repo matching on the server
         let repoUrl = '';
         try {
@@ -816,7 +1034,6 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
             // Cursor's replayed transcript re-copies every prior prompt (prod
             // 3a5328e9 duplicated e6f72dcc's 4 prompts). resolveAutoAgentSessionId
             // resolves it EXACTLY as session-start does.
-            const autoAgentSessionId = resolveAutoAgentSessionId(agentSlug, input.conversation_id, input.session_id);
             const result = await api.startSession({
               machineId: autoAgentConfig.machineId,
               prompt: input.prompt || '',
@@ -899,8 +1116,35 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
         // the whole reason we are here is that the lookup rejected it.
         // `completedPromptMappings` carries promptText, so a state whose
         // prompts were already lost to an earlier reset still rebuilds.
-        const priorState = loadSessionState(repoPath, autoTag);
+        // By tag first. A session the desktop app started on the primary
+        // checkout and Origin adopted into a worktree lives under the
+        // HANDSHAKE's tag, not this conversation's — so when the tag misses,
+        // find the file by the server's session id or the conversation id,
+        // ENDED files included. Session 8a06aaf6 re-attached after an 11h gap
+        // with nothing carried: commits, rewrite pairs, turn ids, counter.
+        // (resumeEndedConversationState above is the first line of defence;
+        // this is the fallback inside auto-create when it did not apply.)
+        let priorState = loadSessionState(repoPath, autoTag);
+        if (!priorState) {
+          priorState = findPriorStateForConversation(
+            hookCwd, [autoAgentSessionId, input.session_id], sessionId,
+          );
+          if (priorState) {
+            debugLog('user-prompt-submit', 'auto-create re-attach — prior state found by conversation, not tag', {
+              tag: autoTag, priorTag: priorState.sessionTag, priorStatus: (priorState as any)?.status || null,
+            });
+          }
+        }
         const carriedPrompts = promptHistoryFromPriorState(priorState);
+        // A missing SessionStart is different from a re-attach: there is no
+        // state to carry, but Claude's transcript still holds the history.
+        // Seed every earlier row before this hook appends the live prompt, so
+        // the first API update includes index 0 and later commits cannot be
+        // collapsed onto the newly-created row.
+        const lateAttach = carriedPrompts.length === 0
+          ? recoverLateAttachTranscript(input.transcript_path, String(input.prompt || ''), [repoPath, hookCwd])
+          : { prompts: [], mappings: [] as PromptFileMapping[] };
+        const initialPrompts = carriedPrompts.length > 0 ? carriedPrompts : lateAttach.prompts;
         if (carriedPrompts.length > 0) {
           debugLog('user-prompt-submit', 'auto-create re-attach — carrying prompt history', {
             tag: autoTag,
@@ -908,18 +1152,41 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
             priorMappings: priorState?.completedPromptMappings?.length || 0,
             priorStatus: (priorState as any)?.status || null,
           });
+        } else if (lateAttach.prompts.length > 0) {
+          debugLog('user-prompt-submit', 'auto-create recovered transcript history after missing SessionStart', {
+            tag: autoTag,
+            recovered: lateAttach.prompts.length,
+            mappings: lateAttach.mappings.length,
+          });
         }
         state = {
           sessionId,
-          claudeSessionId: input.session_id || '',
+          claudeSessionId: autoAgentSessionId || input.session_id || '',
+          agentSessionId: autoAgentSessionId || undefined,
           transcriptPath: input.transcript_path || '',
           model,
-          startedAt: priorState?.startedAt || new Date().toISOString(),
-          prompts: carriedPrompts,
-          completedPromptMappings: priorState?.completedPromptMappings,
+          startedAt: priorState?.startedAt || lateAttach.startedAt || new Date().toISOString(),
+          prompts: initialPrompts,
+          // Written out rather than routed through a local:
+          // `reattach-carries-index-base.test.ts` reads this object literal as
+          // TEXT and asserts `<field>: priorState?.<field>` for each field
+          // whose loss renumbers or re-mints turns. That guard cannot follow a
+          // variable, and it is protecting the exact failure this PR is near —
+          // so satisfy it in place instead of loosening it.
+          completedPromptMappings: priorState?.completedPromptMappings
+            || (lateAttach.mappings.length > 0 ? lateAttach.mappings : undefined),
           promptResponses: priorState?.promptResponses,
           promptShadows: priorState?.promptShadows,
+          // The transcript proves these prompts existed, but no hook observed
+          // their start trees. Never let a later Stop borrow today's baseline
+          // and falsely assign their cumulative git range to the new turn.
+          promptsWithoutBaseline: priorState?.promptsWithoutBaseline
+            || (lateAttach.prompts.length > 0 ? lateAttach.prompts.map((_, i) => i) : undefined),
           sessionCommitShas: priorState?.sessionCommitShas,
+          // The (orphan → rewrite) pairs. Without them the next Stop re-sends
+          // the originals' attestation and the server counts a squash on top
+          // of the commits it replaced.
+          rewrittenCommits: priorState?.rewrittenCommits,
           // Carry the local→server offset and the turn IDENTITIES with it.
           //
           // This literal is an explicit field list, and every field missing
@@ -948,8 +1215,12 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           // it null makes the next capture bind lastClosedTurnIndex + 1, which
           // is the turn that is actually starting.
           repoPath,
+          lastCwd: hookCwd,
           canonicalRepoPath: canonicalRepoPath || undefined,
-          headShaAtStart: getHeadSha(hookCwd),
+          // The session's baseline is where the CONVERSATION started. Re-set
+          // to today's HEAD, the header's committed walk starts after the
+          // work it should count.
+          headShaAtStart: priorState?.headShaAtStart || getHeadSha(hookCwd),
           headShaAtLastStop: null,
           prePromptSha: autoPrePromptSha,
           prePromptDirtyFiles: autoPrePromptDirtyFiles,
@@ -1021,16 +1292,18 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           const fbId = `local-${crypto.randomUUID()}`;
           const fbModel = input.model || agentSlug || 'unknown';
           const fbBranch = getBranch(hookCwd);
-          const fbTag = (input.session_id || '').slice(0, 12) || `s${Date.now().toString(36)}`;
+          const fbTag = autoTag || (input.session_id || '').slice(0, 12) || `s${Date.now().toString(36)}`;
           const fbSessionStartDirty = getDirtyFiles(hookCwd);
           state = {
             sessionId: fbId,
-            claudeSessionId: input.session_id || '',
+            claudeSessionId: autoAgentSessionId || input.session_id || '',
+            agentSessionId: autoAgentSessionId || undefined,
             transcriptPath: input.transcript_path || '',
             model: fbModel,
             startedAt: new Date().toISOString(),
             prompts: [],
             repoPath,
+            lastCwd: hookCwd,
             headShaAtStart: getHeadSha(hookCwd),
             headShaAtLastStop: null,
             prePromptSha: getHeadSha(hookCwd),
@@ -1079,39 +1352,17 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
   }
 
   const rawPrompt = input.prompt || '';
-  // If the raw prompt contains the literal Origin-managed marker, it's our own
-  // AGENTS.md / CLAUDE.md content round-tripping through the agent (Codex
-  // reads AGENTS.md natively and re-emits it as the first user turn). Drop
-  // outright — it is never a real user input.
-  const isOriginManagedEcho = rawPrompt.includes('<!-- origin-managed -->') ||
-    /^#\s+AGENTS\.md instructions for /m.test(rawPrompt);
-  // Filter out system/hook messages and internal agent tags that aren't real user prompts
-  const prompt = isOriginManagedEcho ? '' : rawPrompt
-    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-    .replace(/<task-notification>[\s\S]*?<\/task-notification>/g, '')
-    .replace(/<task-id>[\s\S]*?<\/task-id>/g, '')
-    .replace(/<tool-use-id>[\s\S]*?<\/tool-use-id>/g, '')
-    .replace(/<output-file>[\s\S]*?<\/output-file>/g, '')
-    .replace(/<command-name>[\s\S]*?<\/command-name>/g, '')
-    .replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/g, '')
-    .replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/g, '')
-    .replace(/<command-message>[\s\S]*?<\/command-message>/g, '')
-    .replace(/<command-args>[\s\S]*?<\/command-args>/g, '')
-    .replace(/<local-command-[^>]*>[\s\S]*?<\/local-command-[^>]*>/g, '')
-    // Codex wraps AGENTS.md context in <INSTRUCTIONS>...</INSTRUCTIONS> on
-    // its first user turn. Strip the envelope so any actual user text that
-    // follows still makes it through. Same for <environment_context>
-    // (Codex's session-init blob with cwd/shell/date) and
-    // <user_instructions> (Codex's wrapper for AGENTS.md and friends).
-    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
-    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
-    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
-    // Cursor wraps each user message in <user_query>...</user_query>. Keep
-    // the inner text so the dashboard shows "make little change and commit"
-    // instead of "<user_query> make little change and commit </user_query>".
-    .replace(/<user_query>([\s\S]*?)<\/user_query>/g, '$1')
-    .trim();
-  const isSystemMsg = !prompt || /^Stop hook feedback:|^Stop:Callback hook blocking error|^PostToolUse:.*hook|^PreToolUse:.*hook/i.test(prompt);
+  // Same cleaner the transcript parser uses. The hook used to unwrap only
+  // `<user_query>` and leave Cursor's `<timestamp>` / `<image_files>` /
+  // leading `[Image]` line in the stored row. Stop then parsed the inner
+  // text, `samePromptText` could not match them, and the dashboard showed
+  // every illustrated turn twice (session 562314d8). promptTextForEntry is
+  // also how captionless screenshots stay a turn (`[image]` placeholder).
+  const prompt = promptTextForEntry({
+    type: 'user',
+    message: { role: 'user', content: rawPrompt },
+  }) || '';
+  const isSystemMsg = !prompt;
   if (prompt && !isSystemMsg) {
     // ── Dual-hook dedup ──────────────────────────────────────────────────
     // The Devin CLI reads BOTH ~/.claude (claude-code) and ~/.devin (devin)
@@ -1139,6 +1390,35 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
         promptId: incomingPromptId, agentSlug, promptCount: state.prompts.length,
       });
       return;
+    }
+    // Cursor fires this hook twice for one illustrated turn (envelope vs
+    // inner text) and sometimes twice with no prompt_id at all. After
+    // promptTextForEntry they are the same sentence. Other agents can
+    // genuinely re-send "try again"; only Cursor is known to double-fire.
+    const lastStored = state.prompts[state.prompts.length - 1];
+    if (agentSlug === 'cursor' && lastStored && samePromptText(prompt, lastStored)) {
+      debugLog('user-prompt-submit', 'SKIP duplicate prompt (same text as last Cursor turn)', {
+        promptCount: state.prompts.length,
+      });
+      return;
+    }
+    // Write-ahead copy of the prompt list, BEFORE the git work below. Cursor
+    // kills this hook when the next prompt overlaps a slow captureGitState /
+    // shadow commit — session e24477e2: submit matched the session at 02:41
+    // and never logged "prompt saved", so prompt 3 never reached the API.
+    // Only the queue entry is written here; the state file keeps its single
+    // save after the turn boundary is complete (shadow, journal mark, turn
+    // id), so a kill leaves either the whole turn or none of it on disk. The
+    // real send at the end of this hook supersedes the entry.
+    let prePersisted: string | null = null;
+    if (isConnectedMode() && state.sessionId && !String(state.sessionId).startsWith('local-')) {
+      try {
+        const earlyRedact = loadConfig()?.secretRedaction !== false;
+        const earlyPrompts = [...state.prompts, prompt].map((p) => (earlyRedact ? redactSecrets(p).redacted : p));
+        const earlyPayload = { prompt: earlyPrompts.join('\n\n---\n\n') || undefined };
+        prePersisted = persistUpdateBeforeWork(state.sessionId, earlyPayload, (e, m, d) => debugLog(e, m, d));
+        debugLog('user-prompt-submit', 'prompts persisted before git capture', { promptCount: earlyPrompts.length });
+      } catch { /* never block the prompt on a queue write */ }
     }
     // ── Per-prompt diff: capture previous prompt's changes before recording new prompt ──
     const repoPath = state.repoPath || hookCwd;
@@ -1220,15 +1500,23 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
         }
         const prevFilesChanged = Array.from(prevFilesSet);
         if (prevGitCapture.diff || filteredUncommitted || prevFilesChanged.length > 0) {
-          // Get current HEAD + working-tree SHA for restore support.
+          // Get the current checkout SHA + working-tree SHA for restore
+          // support. A checkout SHA is not, by itself, proof that this prompt
+          // authored that commit; only retain it when post-commit bound it to
+          // this stable turn id (see attestedHeadForPrompt).
           let prevCommitSha: string | null = null;
+          let currentHeadSha: string | null = null;
           let prevTreeSha: string | null = null;
           try {
-            prevCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { windowsHide: true, cwd: state.repoPath || hookCwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+            currentHeadSha = execFileSync('git', ['rev-parse', 'HEAD'], { windowsHide: true, cwd: state.repoPath || hookCwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
           } catch { /* ignore */ }
+          prevCommitSha = attestedHeadForPrompt(state, prevPromptIdx, currentHeadSha);
           prevTreeSha = getWorkingTreeSha(state.repoPath || hookCwd);
-          const diffText = (sessionCommitted +
-            (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim();
+          const diffText = combineApplyableTurnDiff({
+            committedDiff: sessionCommitted,
+            uncommittedDiff: filteredUncommitted,
+            workingTreeDiff: prevGitCapture.workingTreeDiff || '',
+          });
           const prevMapping = {
             promptIndex: prevPromptIdx,
             // …but the TEXT comes out of our own list, which is local-space.
@@ -1262,14 +1550,14 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
                 promptIndex: prevPromptIdx,
               });
             } else if (newHasDiff || !existingHasDiff) {
-              state.completedPromptMappings[existingIdx] = prevMapping;
+              state.completedPromptMappings[existingIdx] = stampCaptured(prevMapping);
             } else {
               debugLog('user-prompt-submit', 'kept existing previous-prompt mapping (new diff was empty)', {
                 promptIndex: prevPromptIdx,
               });
             }
           } else {
-            state.completedPromptMappings.push(prevMapping);
+            state.completedPromptMappings.push(stampCaptured(prevMapping));
           }
           debugLog('user-prompt-submit', 'captured per-prompt diff for previous prompt', {
             promptIndex: prevPromptIdx, filesChanged: prevFilesChanged.length,
@@ -1368,6 +1656,16 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
     // by the per-prompt capture above; until now only the heartbeat daemon
     // (Codex/Gemini) ever populated it, so it was empty for every hook-driven
     // session on disk.
+    // Prompts that arrived since the last hook run were never anchored, and a
+    // baseline cannot be reconstructed for them after the fact. Record the
+    // absence so they stop borrowing the session's start-state and re-stating
+    // every turn before them.
+    const unanchored = markSkippedPromptBaselines(state, state.prompts.length - 1);
+    if (unanchored.length > 0) {
+      debugLog('user-prompt-submit', 'prompts arrived without a hook run — no baseline for them', {
+        promptIndexes: unanchored, throughIndex: state.prompts.length - 1,
+      });
+    }
     recordPromptShadow(state, state.prompts.length - 1, state.prePromptSha);
     // Stable identity for this turn, assigned once and never renumbered. The
     // server keys the PromptChange row on it, so a later reshuffle of the
@@ -1474,9 +1772,20 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
     debugLog('user-prompt-submit', 'prompt saved', { promptCount: state.prompts.length, sessionId: state.sessionId, tag: state.sessionTag });
 
     // ── Heartbeat: send incremental update to API on every prompt (connected mode only) ──
+    // Not on a session-start reservation still being registered: the id is a
+    // placeholder the server has never seen, so the PATCH and ping below 404,
+    // and a daemon started on it would sit on the state file that session-start
+    // is about to settle under the real id (it starts the daemon itself). The
+    // prompt is on disk; Stop sends it once the id is real.
+    const registrationInFlight = isPendingReservation(state) && isProvisionalSessionId(state.sessionId);
+    if (registrationInFlight) {
+      debugLog('user-prompt-submit', 'reservation still registering — no server update or daemon on the placeholder id', {
+        sessionId: state.sessionId, tag: state.sessionTag, agentSlug,
+      });
+    }
     try {
       const config = loadConfig();
-      if (config && isConnectedMode()) {
+      if (config && isConnectedMode() && !registrationInFlight) {
         const durationMs = Date.now() - new Date(state.startedAt).getTime();
 
         // Try to parse transcript for live token/cost data
@@ -1646,14 +1955,15 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
                   diff: capDiff(pm.diff, MAX_PROMPT_DIFF_LEN),
                   linesAdded: dl.filter((l: string) => l.startsWith('+') && !l.startsWith('+++')).length,
                   linesRemoved: dl.filter((l: string) => l.startsWith('-') && !l.startsWith('---')).length,
-                  ...(turnIdFor(state, pm.promptIndex) && { turnId: turnIdFor(state, pm.promptIndex) }),
+                  // Mappings are numbered by SERVER row; ids are local.
+                  ...(turnIdForServerRow(state, pm.promptIndex) && { turnId: turnIdForServerRow(state, pm.promptIndex) }),
                   ...captureStamp(),
                   aiPercentage: 100,
                   checkpointType: 'auto',
                 };
               })
             : undefined,
-        }).catch((err: any) => {
+        }, { supersedes: prePersisted }).catch((err: any) => {
           debugLog('user-prompt-submit', 'background updateSession failed (non-fatal)', { message: err?.message });
         });
         debugLog('user-prompt-submit', 'heartbeat dispatched (fire-and-forget)', { sessionId: state.sessionId, promptCount: state.prompts.length, costUsd, promptChanges: state.completedPromptMappings?.length || 0, payload: summarizePromptPayload(state.completedPromptMappings as any) });

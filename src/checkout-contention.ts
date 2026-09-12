@@ -18,7 +18,8 @@
 // something Origin can offer and assist with, but cannot impose: the agent is
 // already running in a directory of the user's choosing, and a hook cannot
 // relocate it.
-import type { SessionState } from './session-state.js';
+import fs from 'fs';
+import { listActiveSessions, type SessionState } from './session-state.js';
 import { samePath } from './paths.js';
 
 export interface ContentionPeer {
@@ -83,6 +84,35 @@ export function detectContention(
     found.push({ sessionId: p.sessionId, agentSlug: p.agentSlug, workTree: peerTree });
   }
   return { contested: found.length > 0, peers: found };
+}
+
+/**
+ * Re-check contention at the moment a capture is about to be claimed.
+ *
+ * The prompt hook records a historical list of rivals for the UI, but that
+ * list cannot decide whether a later capture is safe: the other session may
+ * have ended, or a new one may have started after the prompt.  Ledger capture
+ * needs the live answer.  It is deliberately separate from the historical
+ * note so callers can decline an unprovable claim without making the session
+ * permanently ineligible for journal capture.
+ */
+export function detectLiveContention(
+  self: Pick<SessionState, 'sessionId'>,
+  workTree: string,
+  sessions: readonly SessionState[] = listActiveSessions(workTree),
+  now: number = Date.now(),
+): ContentionReport {
+  const peers: PeerSession[] = sessions.map((p) => ({
+    sessionId: p.sessionId,
+    agentSlug: p.agentSlug,
+    repoPath: p.repoPath,
+    lastCwd: p.lastCwd,
+    status: p.status,
+    lastSeenMs: (() => {
+      try { return fs.statSync((p as SessionState & { __statePath?: string }).__statePath || '').mtimeMs; } catch { return undefined; }
+    })(),
+  }));
+  return detectContention(self, workTree, peers, now);
 }
 
 /** One line for the user, or null when there is nothing to say. */

@@ -124,16 +124,15 @@ describe('every per-turn caller passes a window', () => {
       if (argc < 3) offenders.push(`${i + 1}: ${lines[i].trim()}`);
     }
 
-    // Two sites build a SESSION-level diff and are session-scoped on purpose:
-    //   1. handleStop's snapshot, which feeds sessionDiff and AI Blame;
-    //   2. sessionToDateCommittedSnapshot, which post-commit sends as the
-    //      session-to-date snapshot — the same question, asked every commit so
-    //      a commit-and-go agent that never reaches Stop still gets it right.
-    // Asserted BY NAME, not by count, so a third site or a per-turn caller
-    // that forgot its window still fails here.
+    // ONE site builds the SESSION-level diff and is session-scoped on purpose:
+    // sessionAuthoredSnapshot, which handleStop, post-commit, session-end and
+    // the transcript watcher all derive from. There used to be two (Stop's
+    // own snapshot and post-commit's), each with its own arithmetic — the
+    // shape that let a merge get three different answers (51995e1c). Asserted
+    // BY NAME, not by count, so a second site or a per-turn caller that forgot
+    // its window still fails here.
     const named = offenders.join('\n');
-    expect(named).toMatch(/let sessionCommitted = sessionScopedCommittedDiff/);
-    expect(named).toMatch(/owned = sessionScopedCommittedDiff/);
-    expect(offenders).toHaveLength(2);
+    expect(named).toMatch(/committed = sessionScopedCommittedDiff\(repoPath, state\)/);
+    expect(offenders).toHaveLength(1);
   });
 });

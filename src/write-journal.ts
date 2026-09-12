@@ -94,10 +94,12 @@ export interface TurnMark {
    */
   reclaim?: string[];
 }
+export interface JournalFence { at: number; }
 
 export type JournalEntry =
   | ({ kind: 'write' } & WriteRecord)
-  | ({ kind: 'turn' } & TurnMark);
+  | ({ kind: 'turn' } & TurnMark)
+  | ({ kind: 'fence' } & JournalFence);
 
 export interface TurnWindow {
   /** Epoch ms the turn began. */
@@ -130,6 +132,7 @@ export function serializeTurnMark(mark: TurnMark): string {
   if (mark.reclaim && mark.reclaim.length > 0) o.c = mark.reclaim;
   return JSON.stringify(o) + '\n';
 }
+export function serializeFence(at: number): string { return JSON.stringify({ k: 'f', t: at }) + '\n'; }
 
 /**
  * Parse a journal into its ordered entries, skipping anything malformed rather
@@ -154,6 +157,7 @@ export function parseJournalEntries(text: string): JournalEntry[] {
         }
         continue;
       }
+      if (o.k === 'f' && typeof o.t === 'number' && Number.isFinite(o.t)) { out.push({ kind: 'fence', at: o.t }); continue; }
       if (typeof o.f === 'string' && o.f && typeof o.t === 'number' && Number.isFinite(o.t)) {
         const rec: JournalEntry = { kind: 'write', file: o.f, at: o.t };
         if (typeof o.h === 'string' && o.h) rec.hash = o.h;
@@ -303,7 +307,7 @@ export function turnSpan(entries: readonly JournalEntry[], turnId: string): { st
   if (start < 0) return null;
   let end = entries.length;
   for (let i = start; i < entries.length; i++) {
-    if (entries[i].kind === 'turn') { end = i; break; }
+    if (entries[i].kind === 'turn' || entries[i].kind === 'fence') { end = i; break; }
   }
   return { start, end };
 }

@@ -10,7 +10,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { serializeRecord, serializeTurnMark, parseJournalEntries } from '../write-journal.js';
+import { serializeRecord, serializeTurnMark, serializeFence, parseJournalEntries } from '../write-journal.js';
 import { putSnapshot } from '../write-journal-store.js';
 import { captureTurnFromLedger, ledgerCaptureIsUsable, applyLedgerToMappings } from '../capture-from-ledger.js';
 import { verifyTurn, parseUnifiedDiff } from '../capture-verify.js';
@@ -70,6 +70,14 @@ describe('captureTurnFromLedger', () => {
     expect(cap.diff).toContain('+two');
     expect(cap.diff).not.toContain('+one');   // turn 1's work is CONTEXT, not credit
     expectSelfConsistent(cap);
+  });
+
+  it('ends a turn at a checkout fence so Git rewrites are never credited', () => {
+    const log = t('T1', 1) + w('mine.ts', 2, put('mine\n'))
+      + serializeFence(3) + w('theirs.ts', 4, put('theirs\n'));
+    const cap = capture(log, 'T1')!;
+    expect(cap.filesChanged).toEqual(['mine.ts']);
+    expect(cap.diff).not.toContain('theirs.ts');
   });
 
   it('makes the cumulative-diff defect unreachable across many turns', () => {
@@ -241,6 +249,21 @@ describe('applyLedgerToMappings', () => {
     expect(JSON.parse(JSON.stringify(pm))).toHaveProperty('uncommittedDiff', '');
   });
 
+  it('declines journal evidence while a live peer shares the working tree', () => {
+    const log = t('T1', 1) + w('f.ts', 2, put('x\n'));
+    const pm: Record<string, unknown> = {
+      promptIndex: 0, filesChanged: ['keep.ts'], diff: 'keep', uncommittedDiff: 'keep-unc',
+    };
+    const n = applyLedgerToMappings(
+      { ...ledgerState(['T1']), ledgerContended: true },
+      [pm as never],
+      journal(log),
+    );
+    expect(n).toBe(0);
+    expect(pm).toMatchObject({ filesChanged: ['keep.ts'], diff: 'keep', uncommittedDiff: 'keep-unc' });
+    expect(pm.diffSource).toBeUndefined();
+  });
+
   it('leaves a mapping untouched when the journal never marked its turn', () => {
     const log = t('T1', 1) + w('f.ts', 2, put('x\n'));
     const pm: Record<string, unknown> = {
@@ -330,5 +353,58 @@ describe('gitignored files are not the turn\'s work', () => {
       { ...journal(log), ignoredFiles: (files) => new Set(files.filter((f) => f.startsWith('dist/'))) },
     );
     expect(pm.filesChanged).toEqual(['src/a.ts']);
+  });
+});
+
+describe('a resumed conversation: rows numbered from the base, ids from 0', () => {
+  // Prod 8a626742 (2026-09-09), base 21. The mapping for this launch's first
+  // turn is row 21; its id is promptTurnIds[0]. Read without the base, row 21
+  // had no id and row 0 — turn one from the day before — borrowed this
+  // launch's first turn, so the ledger's answer was written onto row 0.
+  const journal = (log: string) => ({ readEntries: () => parseJournalEntries(log) });
+
+  it('replaces THIS launch\'s row, found through the base', () => {
+    const log = t('T1', 1) + w('f.ts', 2, put('one\n'));
+    const pm: Record<string, unknown> = { promptIndex: 21, filesChanged: ['stale.ts'], diff: 'stale' };
+    const n = applyLedgerToMappings(
+      { writeJournalPath: '/x', writeSnapshotDir: store, promptTurnIds: ['T1'], promptIndexBase: 21 },
+      [pm as never], journal(log),
+    );
+    expect(n).toBe(1);
+    expect(pm.filesChanged).toEqual(['f.ts']);
+    expect(pm.diffSource).toBe('ledger');
+  });
+
+  it('THE BUG: a row from before the launch is left alone, not handed turn one\'s ledger', () => {
+    const log = t('T1', 1) + w('f.ts', 2, put('one\n'));
+    const rowZero: Record<string, unknown> = { promptIndex: 0, filesChanged: ['theirs.ts'], diff: 'theirs' };
+    const n = applyLedgerToMappings(
+      { writeJournalPath: '/x', writeSnapshotDir: store, promptTurnIds: ['T1'], promptIndexBase: 21 },
+      [rowZero as never], journal(log),
+    );
+    expect(n).toBe(0);
+    expect(rowZero).toMatchObject({ filesChanged: ['theirs.ts'], diff: 'theirs' });
+    expect(rowZero.diffSource).toBeUndefined();
+  });
+
+  it('reads the turn\'s shadow at its LOCAL index', () => {
+    // A shadow recorded for local turn 0 must baseline row 21, not be missed
+    // because the row number is looked up in the shadow list.
+    const v1 = put('a\n');
+    const v2 = put('a\nb\n');
+    const log = t('T1', 1) + w('f.ts', 2, v2);
+    const pm: Record<string, unknown> = { promptIndex: 21 };
+    applyLedgerToMappings(
+      {
+        writeJournalPath: '/x', writeSnapshotDir: store, promptTurnIds: ['T1'], promptIndexBase: 21,
+        promptShadows: [{ promptIndex: 0, shadowSha: 'shadow0' }],
+      },
+      [pm as never],
+      { ...journal(log), readAtRev: (sha, file) => (sha === 'shadow0' && file === 'f.ts' ? 'a\n' : null) },
+    );
+    // Diffed against the shadow's content: one added line, not a two-line create.
+    expect(pm.linesAdded).toBe(1);
+    expect(pm.linesRemoved).toBe(0);
+    void v1;
   });
 });

@@ -6,7 +6,7 @@
 // recorded pid is dead.
 
 import { describe, it, expect } from 'vitest';
-import { parentLooksDead, heartbeatSuperseded, isServerTerminalDefinitive } from '../heartbeat-liveness.js';
+import { parentLooksDead, heartbeatSuperseded, isServerTerminalDefinitive, turnInProgress, OPEN_TURN_MAX_MS } from '../heartbeat-liveness.js';
 
 // A healthy terminal agent: recorded pid alive.
 const ALIVE = {
@@ -64,6 +64,75 @@ describe('parentLooksDead', () => {
 
   it('active-writing veto never overrides an ALREADY-alive parent (no-op)', () => {
     expect(parentLooksDead({ ...ALIVE, agentActivelyWriting: false })).toBe(false);
+  });
+
+  // Prod c1e361a4 (Cursor, 2026-09-08): the prompt landed 23:14:55, the agent
+  // read and thought until 23:44, Stop came 23:45:30 — and the heartbeat ended
+  // the session 23:36:37. Cursor writes its transcript when a generation ends,
+  // so for the whole turn every disk signal read "idle": no pid, transcript
+  // untouched past the 20-minute hookless-IDE window, state file only ever
+  // bumped by Origin itself. The 23:44 edits found no session; the next prompt
+  // minted a twin.
+  it('THE FIX: an OPEN turn vetoes the hookless-IDE transcript reap', () => {
+    expect(parentLooksDead({
+      recordedParentPid: 0,
+      recordedParentAlive: false,
+      transcriptStale: true,
+      stateFileStale: true,
+      agentActivelyWriting: false,
+      turnInProgress: true,
+    })).toBe(false);
+  });
+
+  it('with no open turn the same signals still reap (the zombie case stays fixed)', () => {
+    expect(parentLooksDead({
+      recordedParentPid: 0,
+      recordedParentAlive: false,
+      transcriptStale: true,
+      stateFileStale: true,
+      agentActivelyWriting: false,
+      turnInProgress: false,
+    })).toBe(true);
+  });
+
+  it('an open turn also outranks a dead recorded pid', () => {
+    expect(parentLooksDead({
+      ...ALIVE,
+      recordedParentAlive: false,
+      agentActivelyWriting: false,
+      transcriptStale: true,
+      turnInProgress: true,
+    })).toBe(false);
+  });
+});
+
+describe('turnInProgress (hook-written stamps only)', () => {
+  const NOW = 1_800_000_000_000;
+
+  it('open: a prompt was submitted and no Stop has closed it', () => {
+    expect(turnInProgress({ currentTurnStartedAt: NOW - 30 * 60_000 }, NOW)).toBe(true);
+    expect(turnInProgress({ currentTurnStartedAt: NOW - 30 * 60_000, lastTurnClosedAt: NOW - 60 * 60_000 }, NOW)).toBe(true);
+  });
+
+  it('closed: the Stop after the prompt ends the turn', () => {
+    expect(turnInProgress({ currentTurnStartedAt: NOW - 30 * 60_000, lastTurnClosedAt: NOW - 10 * 60_000 }, NOW)).toBe(false);
+    // Same instant counts as closed — Stop stamps after the prompt did.
+    expect(turnInProgress({ currentTurnStartedAt: NOW, lastTurnClosedAt: NOW }, NOW)).toBe(false);
+  });
+
+  it('a turn that never got its Stop stops counting past the cap', () => {
+    // API error / interrupt / app quit mid-generation: nothing closes the
+    // turn, so the veto must lapse or a dead Cursor would never be reaped.
+    expect(turnInProgress({ currentTurnStartedAt: NOW - OPEN_TURN_MAX_MS - 1 }, NOW)).toBe(false);
+    expect(turnInProgress({ currentTurnStartedAt: NOW - OPEN_TURN_MAX_MS }, NOW)).toBe(true);
+  });
+
+  it('no stamps, garbage stamps, or a stamp from the future → not open', () => {
+    expect(turnInProgress(null, NOW)).toBe(false);
+    expect(turnInProgress({}, NOW)).toBe(false);
+    expect(turnInProgress({ currentTurnStartedAt: NaN }, NOW)).toBe(false);
+    expect(turnInProgress({ currentTurnStartedAt: 0 }, NOW)).toBe(false);
+    expect(turnInProgress({ currentTurnStartedAt: NOW + 60_000 }, NOW)).toBe(false);
   });
 });
 
@@ -125,5 +194,57 @@ describe('isServerTerminalDefinitive', () => {
     expect(isServerTerminalDefinitive(null)).toBe(false);
     expect(isServerTerminalDefinitive(undefined)).toBe(false);
     expect(isServerTerminalDefinitive({})).toBe(false);
+  });
+});
+
+// ── stateFileTakenOver ──────────────────────────────────────────────────────
+// The daemon is spawned on a session id and a state-file path; the file is
+// keyed by conversation TAG. A second registration on the same tag changes the
+// file's sessionId under the daemon, which then feeds the other session's
+// turns to a row nobody owns (prod 2026-09-09: 5431ff0f's daemon pushed
+// e24477e2's turn 1 under 5431ff0f — both rows live, same diff on each).
+import { stateFileTakenOver } from '../heartbeat-liveness.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+describe('stateFileTakenOver', () => {
+  it('a different REGISTERED id in the file means the row moved', () => {
+    expect(stateFileTakenOver({ ownSessionId: '5431ff0f', fileSessionId: 'e24477e2' })).toBe(true);
+  });
+
+  it('our own id is not a takeover', () => {
+    expect(stateFileTakenOver({ ownSessionId: '5431ff0f', fileSessionId: '5431ff0f' })).toBe(false);
+  });
+
+  it('a provisional id in the file is a stale reservation write, not a takeover', () => {
+    // A hook holding the reservation can briefly write `local-…` back; between
+    // placeholders the incumbent wins, and the registered id returns on the
+    // next save.
+    expect(stateFileTakenOver({ ownSessionId: '5431ff0f', fileSessionId: 'local-82aaa929' })).toBe(false);
+    expect(stateFileTakenOver({ ownSessionId: 'local-a', fileSessionId: 'local-b' })).toBe(false);
+  });
+
+  it('a standalone daemon on a placeholder exits once the row is registered', () => {
+    expect(stateFileTakenOver({ ownSessionId: 'local-a', fileSessionId: 'srv-1' })).toBe(true);
+  });
+
+  it('an unreadable file is not a takeover (never tear down on a bad read)', () => {
+    expect(stateFileTakenOver({ ownSessionId: '5431ff0f', fileSessionId: undefined })).toBe(false);
+    expect(stateFileTakenOver({ ownSessionId: '5431ff0f', fileSessionId: null })).toBe(false);
+    expect(stateFileTakenOver({ ownSessionId: '5431ff0f', fileSessionId: '' })).toBe(false);
+  });
+
+  it('is wired into the daemon before any push of the file\'s contents', () => {
+    const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'heartbeat.ts'), 'utf-8');
+    const check = src.indexOf('stateFileTakenOver({ ownSessionId: sessionId');
+    const stamp = src.indexOf('// Liveness stamp: bump the pid file');
+    expect(check).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(stamp);
+    // And it ends OUR row without reading the file's contents into the payload.
+    const orphan = src.indexOf('async function endOrphanedSession');
+    expect(orphan).toBeGreaterThan(-1);
+    const next = src.indexOf('async function endSession', orphan);
+    expect(src.slice(orphan, next)).not.toContain('stateData');
   });
 });

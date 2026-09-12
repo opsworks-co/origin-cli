@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { findCodexRolloutByCwd } from '../agents/codex.js';
+import { findCodexRolloutByCwd, findLatestRollout } from '../agents/codex.js';
 
 let codexDir = '';
 
@@ -58,5 +58,19 @@ describe('findCodexRolloutByCwd', () => {
   it('returns null when no rollout matches the cwd', () => {
     writeRollout('019f0000-0000-7000-8000-000000000002', 'C:\\other\\repo', ['2026', '07', '22']);
     expect(findCodexRolloutByCwd(codexDir, 'C:/soft/origin-demo-1')).toBeNull();
+  });
+});
+
+describe('findLatestRollout', () => {
+  beforeEach(() => { codexDir = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-codexdir-')); });
+  afterEach(() => { try { fs.rmSync(codexDir, { recursive: true, force: true }); } catch { /* ignore */ } });
+
+  it('does not substitute the newest rollout when the requested Codex thread has none', () => {
+    writeRollout('019f0000-0000-7000-8000-000000000003', '/repo/other-task', ['2026', '07', '22']);
+
+    expect(findLatestRollout(
+      path.join(codexDir, 'sessions'),
+      '019f0000-0000-7000-8000-000000000004',
+    )).toBe('');
   });
 });

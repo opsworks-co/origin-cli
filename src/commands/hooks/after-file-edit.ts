@@ -8,7 +8,8 @@ import { isConnectedMode } from '../../config.js';
 import { debugLog } from '../../debug-log.js';
 import { capDiff } from '../../diff-budget.js';
 import { MAX_PROMPT_DIFF_LEN, captureGitState, createShadowCommit, getDirtyFiles } from '../../git-capture.js';
-import { closeTurn, getGitRoot, getHeadSha, getWorkingGitRoot, reconcilePromptHistory, recordPromptShadow, saveSessionState } from '../../session-state.js';
+import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
+import { closeTurn, getGitRoot, getHeadSha, getWorkingGitRoot, reconcilePromptHistory, recordPromptShadow, saveSessionState, stampCaptured } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import { countDiffLines } from '../../transcript-adapters.js';
 import { toRepoRelative } from '../../transcript-watch.js';
@@ -115,7 +116,9 @@ export function adoptUnannouncedPrompts(
   opts?: { now?: () => number; newId?: () => string; revealedBy?: string[] },
 ): number {
   const before = state.prompts?.length || 0;
-  const merged = reconcilePromptHistory(state.prompts, parsedPrompts);
+  const merged = reconcilePromptHistory(state.prompts, parsedPrompts, {
+    collapseTrailingRepeat: state.agentSlug === 'cursor',
+  });
   if (merged.length <= before) return before - 1;
 
   state.prompts = [...merged];
@@ -241,7 +244,7 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
   debugLog('after-file-edit', 'begin', { cwd: input.cwd, file: input.file_path || input.path });
 
   const hookCwd = resolveAfterFileEditCwd(input);
-  const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug), agentSlug);
+  const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug, input.conversation_id), agentSlug);
   if (!found) {
     debugLog('after-file-edit', 'ABORT: no session state', { hookCwd });
     return;
@@ -306,11 +309,16 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
     // signal that could have prevented it.
     //
     // Recorded first so the window below skips it as already covered.
+    // Repo-relative, or not at all. The raw hook path is absolute and, for a
+    // linked worktree, names a tree the diff never mentions: Cursor session
+    // c1e361a4 stored `/Users/…/.cursor/worktrees/origin/z83u/apps/api/…`
+    // beside five repo-relative files, and verify-capture flagged the turn
+    // for claiming a file absent from its own diff.
+    const edited = [input.file_path, input.path]
+      .filter((p): p is string => typeof p === 'string' && p.length > 0)
+      .map((p) => toRepoRelative(state.repoPath!, p))
+      .filter((p) => p && !path.isAbsolute(p));
     try {
-      const edited = [input.file_path, input.path]
-        .filter((p): p is string => typeof p === 'string' && p.length > 0)
-        .map((p) => toRepoRelative(state.repoPath!, p))
-        .filter((p) => p && !path.isAbsolute(p));
       if (edited.length > 0) {
         // `editBaseline`, not `captureBaseline`: when this edit is the one that
         // revealed a missed turn boundary, the new turn's shadow was cut a
@@ -347,7 +355,11 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
     // +125 plus turn 1's committed +119 — and the Stop that followed just
     // re-sent that mapping.
     const sessionCommitted = sessionScopedCommittedDiff(state.repoPath, state, captureBaseline);
-    const fullDiff = (sessionCommitted + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim();
+    const fullDiff = combineApplyableTurnDiff({
+      committedDiff: sessionCommitted,
+      uncommittedDiff: filteredUncommitted,
+      workingTreeDiff: capture.workingTreeDiff || '',
+    });
     if (!fullDiff) {
       debugLog('after-file-edit', 'no diff against shadow, skipping');
       return;
@@ -358,8 +370,7 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
       if (m[1]) filesChanged.add(m[1]);
     }
     // Filesystem path the hook reported, if any — useful when the diff lags.
-    if (typeof input.file_path === 'string') filesChanged.add(input.file_path);
-    if (typeof input.path === 'string') filesChanged.add(input.path);
+    for (const p of edited) filesChanged.add(p);
 
     let commitSha: string | null = null;
     let treeSha: string | null = null;
@@ -381,9 +392,9 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
     };
     const existingIdx = state.completedPromptMappings.findIndex((m) => m.promptIndex === promptIdx);
     if (existingIdx >= 0) {
-      state.completedPromptMappings[existingIdx] = mapping;
+      state.completedPromptMappings[existingIdx] = stampCaptured(mapping);
     } else {
-      state.completedPromptMappings.push(mapping);
+      state.completedPromptMappings.push(stampCaptured(mapping));
     }
     saveSessionState(state, saveCwd, state.sessionTag);
     debugLog('after-file-edit', 'updated mapping', {

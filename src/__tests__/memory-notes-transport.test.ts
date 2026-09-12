@@ -20,6 +20,7 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { forgetCommitMemory } from '../memory.js';
 import {
   syncNotesFromRemote,
   pushMemoryNotes,
@@ -115,6 +116,37 @@ describe('memory notes transport', () => {
     // The high-signal fields survive the round trip, not just the ids.
     expect(got.sessions[0].fileNotes['countdown.py']).toBe('New interactive CLI countdown timer');
     expect(got.sessions[0].decisions).toEqual(['used curses over ANSI — handles terminal resize']);
+  });
+
+  it('a RETRACTION reaches the teammate, and the record it retracts does not come back', () => {
+    // The fold used to read the remote's tombstones and then write only
+    // sessions+commits. `writeMemoryPayload` preserves what it is not given, so
+    // the merged tombstones were replaced by the local ones (none) — the commit
+    // record vanished on this clone with nothing recorded to keep it away, and
+    // the next sync from any clone that still had it put it straight back. That
+    // is the 74d04c6 loop the tombstones were introduced to break, surviving in
+    // the one path that carries them between machines.
+    const commit = {
+      commitSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      sessionId: 'a1', agentSlug: 'antigravity', message: 'wrong agent',
+      filesChanged: ['x.py'], linesAdded: 1, linesRemoved: 0,
+      branch: 'main', committedAt: '2026-08-01T00:30:00.000Z',
+    };
+    writeMemory(alice, [session('a1')], [commit]);
+    pushMemoryNotes(alice, 'origin');
+    expect(syncNotesFromRemote(bob)).toBe(true);
+    expect(readMemory(bob).commits.map((c) => c.commitSha)).toEqual([commit.commitSha]);
+
+    expect(forgetCommitMemory(alice, commit.commitSha, 'filed under antigravity; Cursor made it')).toBe(true);
+    pushMemoryNotes(alice, 'origin');
+    syncNotesFromRemote(bob);
+
+    const got = readMemory(bob) as any;
+    expect(got.commits).toEqual([]);
+    // The retraction has to be PRESENT here, not merely effective: an absence
+    // merges as nothing, and the next fold would restore the record.
+    expect((got.tombstones || []).map((t: any) => t.commitSha)).toEqual([commit.commitSha]);
+    expect(got.tombstones[0].reason).toContain('Cursor made it');
   });
 
   it('the ref actually lands on the remote', () => {

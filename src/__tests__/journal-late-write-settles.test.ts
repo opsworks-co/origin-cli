@@ -48,7 +48,7 @@ describe('settleLateWrites', () => {
     ].join('\n')));
     // b: mtime 2ms before the mark, no earlier record — this turn's own write.
     // c: old mtime but never written before — a phantom for the ledger to judge.
-    expect(entries.map((e) => (e.kind === 'turn' ? e.turnId : e.file))).toEqual(['T1', 'a', 'a', 'T2', 'b', 'c']);
+    expect(entries.map((e) => (e.kind === 'turn' ? e.turnId : e.kind === 'write' ? e.file : 'fence'))).toEqual(['T1', 'a', 'a', 'T2', 'b', 'c']);
   });
 
   it('an mtime a few milliseconds before the mark is the coarse kernel clock, not a late write', () => {
@@ -58,7 +58,7 @@ describe('settleLateWrites', () => {
       mark(100, 'T1'), write('a', 110, 'one', 105),
       mark(200, 'T2'), write('a', 203, 'two', 197),
     ].join('\n')));
-    expect(entries.map((e) => (e.kind === 'turn' ? e.turnId : e.file))).toEqual(['T1', 'a', 'T2', 'a']);
+    expect(entries.map((e) => (e.kind === 'turn' ? e.turnId : e.kind === 'write' ? e.file : 'fence'))).toEqual(['T1', 'a', 'T2', 'a']);
   });
 
   it('a delete after the mark is never moved', () => {
@@ -66,6 +66,6 @@ describe('settleLateWrites', () => {
       mark(100, 'T1'), write('a', 110, 'h', 105),
       mark(200, 'T2'), JSON.stringify({ f: 'a', t: 210, g: 1, m: 50 }),
     ].join('\n')));
-    expect(entries.map((e) => (e.kind === 'turn' ? e.turnId : e.file + (e.gone ? '!' : '')))).toEqual(['T1', 'a', 'T2', 'a!']);
+    expect(entries.map((e) => (e.kind === 'turn' ? e.turnId : e.kind === 'write' ? e.file + (e.gone ? '!' : '') : 'fence'))).toEqual(['T1', 'a', 'T2', 'a!']);
   });
 });

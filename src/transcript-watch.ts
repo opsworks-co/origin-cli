@@ -45,6 +45,7 @@ import path from 'path';
 import { spawn, execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { createShadowCommit, captureAgyDiff, captureGitState, commitDiffScopedToPrompt, captureShadowRangeDiff, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { renderAuthoredCommits } from './history-backfill.js';
 import { capDiff } from './diff-budget.js';
 import { shellWindowEdits, SHELL_WINDOW_SOURCE } from './shell-write-capture.js';
 import { isOriginAutoManagedPath, shouldIgnoreFile } from './ignore-patterns.js';
@@ -329,6 +330,17 @@ export interface WatchDeps {
   // keeps its previous behaviour exactly.
   treeFingerprint?: (workRoot: string) => string | null;
   captureDiff: (workRoot: string, baselineSha: string | null) => {
+    diff: string; filesChanged: string[]; linesAdded: number; linesRemoved: number;
+  };
+  /**
+   * The authored content of this session's OWN commits — each a merge's
+   * resolution or a plain commit's patch, counted from one text. When the
+   * session owns commits, the session-level diff sent to the server is this,
+   * not the `headShaAtStart..HEAD` range `captureGit` walks, which holds every
+   * commit that reached the branch meanwhile. Optional so existing test deps
+   * keep their shape; absent means the range stands (the old behaviour).
+   */
+  authoredCommits?: (workRoot: string, shas: string[]) => {
     diff: string; filesChanged: string[]; linesAdded: number; linesRemoved: number;
   };
   // `preSessionBaseline` is the session's first shadow — measured against for
@@ -1125,7 +1137,7 @@ export async function reconcileSession(
       }
       if (prior.sessionTag) {
         try { deps.endGitState?.(prior.workRoot, prior.sessionTag); } catch { /* best-effort */ }
-        stopJournalWatcher(hookStateTagFor(adapter.slug, prior.sessionTag));
+        stopJournalWatcher(hookStateTagFor(adapter.slug, prior.sessionTag), prior.workRoot || prior.repoPath);
       }
       // Cross-session memory. Only the hook path ever wrote this, and GUI
       // agents fire no hooks on Windows — they are captured HERE — so on a
@@ -1501,6 +1513,27 @@ export async function reconcileSession(
           linesAdded: gc.linesAdded,
           linesRemoved: gc.linesRemoved,
         };
+        // The session-level DIFF is the session's authored content, not the
+        // range. `gc.diff` is `headShaAtStart..HEAD` rendered first-parent: a
+        // concurrent session's commit and a merge's whole other side are both
+        // in it. When this session owns commits, render those and only those —
+        // the same per-commit answer post-commit and Stop use — and send it as
+        // a snapshot so the server REPLACES rather than merges onto whatever
+        // an earlier range capture stored. The sha list stays the walk (the
+        // pairing passes below need it); ownership is decided elsewhere.
+        if (sessionCommitShas.length > 0 && deps.authoredCommits) {
+          try {
+            const own = deps.authoredCommits(repo.workRoot, sessionCommitShas);
+            if (own.diff) {
+              gitCapture.diff = own.diff;
+              gitCapture.linesAdded = own.linesAdded;
+              gitCapture.linesRemoved = own.linesRemoved;
+              gitCapture.snapshot = true;
+            }
+          } catch (err) {
+            debugLog('transcript-watch', 'authored render failed — range kept', { agent: adapter.slug, sessionId: scanned.sessionId, err: String(err) });
+          }
+        }
       }
     } catch (err) {
       debugLog('transcript-watch', 'captureGit failed', { agent: adapter.slug, sessionId: scanned.sessionId, err: String(err) });
@@ -3124,6 +3157,7 @@ export function buildRealDeps(machineId: string, hostname?: string): WatchDeps {
       captureGitState(workRoot, headBefore, {
         committedOnly: true, fullContext: true, preSessionBaseline,
       }),
+    authoredCommits: (workRoot: string, shas: string[]) => renderAuthoredCommits(workRoot, shas),
     loadState: (agentSlug: string, sessionId: string) => loadSessionState(agentSlug, sessionId),
     saveState: (s: SessionWatchState) => saveSessionState(s),
     // Write the `.git/origin-session-<tag>.json` state file the local git hooks

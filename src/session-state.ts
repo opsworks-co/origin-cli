@@ -205,6 +205,16 @@ export interface SessionState {
    */
   writeSnapshotDir?: string;
   currentTurnStartedAt?: number;
+  // Wall-clock (ms) of the Stop that closed the most recent turn. Paired with
+  // currentTurnStartedAt it tells the heartbeat whether a turn is OPEN — a
+  // prompt submitted and not yet stopped — which is proof the agent is
+  // working even when its transcript sits untouched (Cursor writes its
+  // transcript only when a generation ends). Hook-written only.
+  lastTurnClosedAt?: number;
+  // Stamped on the archived copy when the heartbeat dropped the session
+  // because the SERVER said it was archived or deleted. Archive recovery must
+  // not bring such a row back on the chat's next prompt.
+  serverTerminal?: boolean;
   shellProbes?: Array<{
     // The tool call that armed this probe, so post-tool-use resolves ITS OWN
     // window. Parallel tool calls interleave begin/end freely, and without an
@@ -232,6 +242,11 @@ export interface SessionState {
     shadowSha: string;
     capturedAt: string; // ISO timestamp
   }>;
+  // Prompts recovered after their start hook was missed. Their transcript can
+  // prove the turn exists, but not the working-tree state it began from.
+  // Keep that uncertainty explicit so a later capture never assigns a
+  // cumulative diff or commit range to one of these historical turns.
+  promptsWithoutBaseline?: number[];
   // The turn currently EXECUTING, bound when that turn STARTS rather than
   // derived from list position when an edit lands.
   //
@@ -287,6 +302,10 @@ export interface SessionState {
   // commit-time attestation can never exist for it; discovery is the only
   // evidence available.
   commitTurns?: Array<{ sha: string; turnId: string; at: string; via: 'post-commit' | 'transcript' }>;
+  // Shas whose Commit-row patch Stop already rescued via `git show` (post-commit's
+  // PATCH never landed). Once per sha per session — the server keeps the first
+  // patch it gets, so re-sending is spawn cost with no effect.
+  rescuedCommitShas?: string[];
   activeTurn?: {
     index: number;
     turnId: string;
@@ -324,8 +343,16 @@ export interface SessionState {
     // Carried so a turn whose writes all landed elsewhere can explain its
     // empty filesChanged instead of reading as a broken capture.
     outOfRepoFiles?: string[];
+    // Files the turn changed but whose content could not be retained.
+    contentUnavailableFiles?: string[];
     diff: string;
     uncommittedDiff?: string;
+    // The source and ownership guard for a stored diff. A ledger capture is
+    // observed turn evidence and must not later be rebuilt from a commit.
+    diffSource?: 'ledger';
+    ledgerOwned?: boolean;
+    linesAdded?: number;
+    linesRemoved?: number;
     commitSha?: string | null;
     treeSha?: string | null;
     // True when Stop decided this prompt didn't touch code (no commits, no
@@ -338,6 +365,28 @@ export interface SessionState {
     // design. See registerAgySessionState, and capture-verify.ts's
     // `isFileSetRecord` for why the verifier has to be told.
     fileSetOnly?: boolean;
+    // When this row was last WRITTEN, so the release gate can grade the turns
+    // captured since the previous release instead of whole sessions.
+    //
+    // The gate used to window on session `startedAt`, which meant a session
+    // that began before the last tag was never graded at all. With tags cut
+    // minutes apart — two consecutive releases on 2026-09-10 were 50 and 40
+    // minutes after their predecessor — almost nothing STARTS inside the
+    // window, and both graded zero sessions while 25 contradictory turns sat
+    // on the machine. A vacuous pass reads exactly like a real one.
+    //
+    // Windowing on the SESSION cannot fix that: a stored row is final, so any
+    // widening drags a long session's old contradictions back into scope on
+    // every release and wedges the gate for good — the deadlock that needed a
+    // one-time waiver at cli-v0.20260910.630. Per-TURN time is what makes the
+    // window advance honestly.
+    //
+    // Absent on every row written before this existed, and absence keeps a row
+    // OUT of the window. That is deliberate: the backlog can never re-enter
+    // and re-wedge releases, and the gate sharpens as new turns are captured.
+    // Re-stamped whenever the row is rewritten, because a rewritten row is a
+    // new capture and that is exactly when it should be graded again.
+    capturedAt?: string;
   }>;
   // Live per-edit ledger appended by the post-tool-use hook as each
   // Edit / Write / MultiEdit fires, stamped with the prompt index active at
@@ -539,6 +588,21 @@ export interface SessionState {
  * belongs to — which is the class of bug this mechanism exists to stop.
  */
 export function promptKey(text: string): string {
+  // Peel the envelopes Cursor puts around the typed words BEFORE collapsing
+  // whitespace. The hook used to store `<timestamp>…` / `<image_files>…` /
+  // a leading `[Image]` line, while Stop's transcript parser stored the inner
+  // text (session 562314d8: every illustrated turn and several plain ones
+  // rendered twice). The first 200 chars of the envelope never prefix-match
+  // the user's sentence, so `samePromptText` treated them as different turns.
+  // Image-only prompts have nothing left after the peel — keep the original
+  // so two captionless screenshots don't collapse into one empty key.
+  const peeled = String(text || '')
+    .replace(/<image_files>[\s\S]*?<\/image_files>/gi, ' ')
+    .replace(/<timestamp>[\s\S]*?<\/timestamp>/gi, ' ')
+    .replace(/<user_query>([\s\S]*?)<\/user_query>/gi, '$1')
+    .replace(/\[image\]/gi, ' ');
+  const withoutMarks = peeled.replace(/\s+/g, ' ').trim();
+  if (withoutMarks) return withoutMarks.slice(0, 200);
   return String(text || '').replace(/\s+/g, ' ').trim().slice(0, 200);
 }
 
@@ -718,15 +782,23 @@ function adoptNumberingKeepingStored(prev: string[], next: string[]): string[] {
 export function reconcilePromptHistory(
   stored: string[] | undefined | null,
   parsed: string[] | undefined | null,
+  opts?: { collapseTrailingRepeat?: boolean },
 ): string[] {
   const prev = Array.isArray(stored) ? stored : [];
   const next = Array.isArray(parsed) ? parsed : [];
   if (prev.length === 0) return [...next];
   if (next.length === 0) return [...prev];
 
+  const collapseExtra = (extra: string[]): string[] => {
+    if (!opts?.collapseTrailingRepeat || prev.length === 0) return extra;
+    const out = [...extra];
+    while (out.length && samePromptText(out[0], prev[prev.length - 1])) out.shift();
+    return out;
+  };
+
   // Ordinary growth: everything we already recorded is still at the head.
   if (next.length >= prev.length && prev.every((p, i) => samePromptText(p, next[i]))) {
-    return [...prev, ...next.slice(prev.length)];
+    return [...prev, ...collapseExtra(next.slice(prev.length))];
   }
 
   // We started LATE: the transcript still contains everything we stored, in
@@ -772,9 +844,80 @@ export function reconcilePromptHistory(
   for (const candidate of next) {
     const at = unaccounted.findIndex((p) => samePromptText(p, candidate));
     if (at >= 0) unaccounted.splice(at, 1); // already have a row for it
-    else fresh.push(candidate);
+    else if (opts?.collapseTrailingRepeat && prev.length && samePromptText(candidate, prev[prev.length - 1])) {
+      // Cursor transcripts re-emit the last user prompt; the hook already
+      // stored it. Appending would mint a turnId-less empty twin (c7cc460f).
+    } else {
+      fresh.push(candidate);
+    }
   }
   return [...prev, ...fresh];
+}
+
+/**
+ * Transcript parsers number every user JSONL entry, including Cursor's
+ * trailing re-emit of the last prompt. After `reconcilePromptHistory` that
+ * echo is not a turn — but `extractPromptFileMappings` still emits a row for
+ * it, and the first non-empty `promptText` on that index wins server-side
+ * (prod c7cc460f: the echo stored "open PR" at index 4, so the illustrated
+ * prompt that actually occupied that slot never appeared).
+ *
+ * Clip to the reconciled list. Keep the longer copy when hook and
+ * transcript describe the same prompt (`[image]` placeholders, 1000-char
+ * cap). Do not rewrite a different sentence onto the slot — a compact
+ * restatement in the JSONL would then steal the next turn's identity.
+ */
+export function clipMappingsToPromptHistory<T extends { promptIndex: number; promptText?: string }>(
+  mappings: T[],
+  prompts: string[],
+  // `prompts` is THIS LAUNCH's list, numbered from 0; the mappings are
+  // numbered by the transcript. On a resumed conversation the two differ by
+  // the base, and clipping the server rows against the local length kept
+  // exactly the rows that belong to OTHER turns (prod 8a626742: base 21, one
+  // prompt — row 21 was dropped and row 0, turn one from the day before, was
+  // the only mapping left to send).
+  promptIndexBase: number | undefined | null = 0,
+): T[] {
+  if (!Array.isArray(prompts) || prompts.length === 0) return mappings;
+  const base = Number.isFinite(promptIndexBase as number) && (promptIndexBase as number) > 0
+    ? (promptIndexBase as number)
+    : 0;
+  const localOf = (m: T): number => m.promptIndex - base;
+  return mappings
+    .filter((m) => {
+      if (!Number.isInteger(m.promptIndex) || m.promptIndex < 0) return false;
+      const local = localOf(m);
+      if (local >= 0) return local < prompts.length;
+      // BELOW the base: a row for a turn that ran before this launch, which
+      // `prompts` says nothing about.
+      //
+      // An EMPTY one is this launch's own numbering artifact — Stop
+      // synthesizes a chat-only mapping per turn, and on a resumed session
+      // one lands here. Sending it would tell the server that a real earlier
+      // turn authored nothing, erasing what that turn actually did; that is
+      // strictly worse than dropping it, so it goes.
+      //
+      // One that CARRIES work is kept, and left exactly as it is. It is
+      // either a genuine earlier capture or a row a pre-fix build misnumbered
+      // — and this function persists what it returns, so dropping it would
+      // delete the only local copy. The server's cross-turn guards decide
+      // whether it may land; losing it here is not recoverable.
+      return mappingCarriesWork(m as RenumberableMapping);
+    })
+    .map((m) => {
+      const hook = localOf(m) >= 0 ? (prompts[localOf(m)] || '') : '';
+      if (!hook) return m;
+      const mapped = m.promptText || '';
+      if (!mapped) return { ...m, promptText: hook.slice(0, 1000) };
+      // Same prompt, different producers (hook vs transcript `[image]` /
+      // truncation). Keep the richer copy. Different sentences stay as the
+      // transcript numbered them — rewriting would slide a compact-restated
+      // illustrated prompt onto the next turn.
+      if (samePromptText(mapped, hook) && hook.length > mapped.length) {
+        return { ...m, promptText: hook.slice(0, 1000) };
+      }
+      return m;
+    });
 }
 
 /**
@@ -1147,19 +1290,106 @@ export function getGlobalFallbackStatePath(cwd?: string, sessionTag?: string): s
  * this conversation's genuine earlier turns, carried across a re-attach, and
  * are left exactly as they are.
  */
+interface RenumberableMapping {
+  promptIndex: number;
+  promptText?: string;
+  filesChanged?: string[];
+  diff?: string;
+  uncommittedDiff?: string;
+  commitSha?: string | null;
+}
+
+/** Does this mapping carry a capture, or is it an empty shell? */
+function mappingCarriesWork(m: RenumberableMapping): boolean {
+  return (m.filesChanged || []).length > 0
+    || (m.diff || '').length > 0
+    || (m.uncommittedDiff || '').length > 0
+    || !!m.commitSha;
+}
+
+/**
+ * Drop WORKLESS twins a renumbering left behind, whatever the base says.
+ *
+ * The base rule below cannot reach prod 8a626742: seven prompts stored twice,
+ * once at 0..6 carrying every diff and turnId, and once at 8..14 empty and
+ * turnId-less — `buildSessionWriteData`'s `m.promptIndex + 1` on top of a base
+ * of 7, after all seven turns were miscounted as pre-session. Two things went
+ * wrong there that the base rule makes worse rather than better:
+ *
+ *   - it returns early on `base <= 0`, so a LOST base — the very condition it
+ *     documents — disables it;
+ *   - it keeps whichever copy sits at or above the base. Here that is the
+ *     EMPTY set, so had it fired it would have deleted every real capture.
+ *
+ * Choosing by index is the mistake. A renumbering produces one row holding the
+ * work and one holding nothing, and which of them got the higher number is an
+ * artifact. So this pass keeps the copy that carries a capture.
+ *
+ * SAFETY: a user may legitimately send the same prompt twice ("deploy it"),
+ * and the second may genuinely be chat-only — dropping that would delete a real
+ * turn. Text plus emptiness is therefore NOT enough. A renumbering shifts the
+ * whole conversation by one constant, so this only fires where at least two
+ * duplicate pairs share the SAME offset. Two coincidental repeats do not form
+ * an arithmetic series; seven pairs at +8 do.
+ */
+function dropWorklessRenumberedTwins(maps: RenumberableMapping[]): RenumberableMapping[] {
+  const key = (m: RenumberableMapping) => (m.promptText || '').slice(0, 200);
+  const byText = new Map<string, RenumberableMapping[]>();
+  for (const m of maps) {
+    const k = key(m);
+    if (!k) continue;
+    const list = byText.get(k);
+    if (list) list.push(m); else byText.set(k, [m]);
+  }
+
+  // Candidate pairs: exactly one copy with work, the rest without.
+  const pairs: Array<{ offset: number; drop: RenumberableMapping[] }> = [];
+  for (const group of byText.values()) {
+    if (group.length !== 2) continue;
+    const workers = group.filter(mappingCarriesWork);
+    if (workers.length !== 1) continue;
+    const keep = workers[0];
+    const drop = group.find((m) => m !== keep)!;
+    pairs.push({ offset: (drop.promptIndex ?? 0) - (keep.promptIndex ?? 0), drop: [drop] });
+  }
+  if (pairs.length < 2) return maps;
+
+  // The offset shared by the most pairs, and only if at least two agree.
+  const tally = new Map<number, number>();
+  for (const p of pairs) tally.set(p.offset, (tally.get(p.offset) || 0) + 1);
+  let bestOffset = 0;
+  let bestCount = 0;
+  for (const [off, n] of tally) if (n > bestCount) { bestCount = n; bestOffset = off; }
+  if (bestCount < 2 || bestOffset === 0) return maps;
+
+  const condemned = new Set(pairs.filter((p) => p.offset === bestOffset).flatMap((p) => p.drop));
+  return maps.filter((m) => !condemned.has(m));
+}
+
 export function dropRenumberedDuplicateMappings(state: {
   promptIndexBase?: number;
-  completedPromptMappings?: Array<{ promptIndex: number; promptText?: string }>;
+  completedPromptMappings?: RenumberableMapping[];
 }): number {
-  const base = state.promptIndexBase || 0;
   const maps = state.completedPromptMappings;
-  if (base <= 0 || !Array.isArray(maps) || maps.length === 0) return 0;
-  const key = (m: { promptText?: string }) => (m.promptText || '').slice(0, 200);
-  const atOrAboveBase = new Set(
-    maps.filter((m) => (m.promptIndex ?? 0) >= base).map(key).filter((k) => k.length > 0),
-  );
-  if (atOrAboveBase.size === 0) return 0;
-  const kept = maps.filter((m) => (m.promptIndex ?? 0) >= base || !atOrAboveBase.has(key(m)));
+  if (!Array.isArray(maps) || maps.length === 0) return 0;
+
+  // Content first: it needs no base, and it is right about WHICH copy to keep.
+  let kept = dropWorklessRenumberedTwins(maps);
+
+  // Then the original base rule, for the pairs where both copies carry work
+  // (prod f7881a6e: low copies were live resets of this session's turns, not
+  // empty shells) and the base is known.
+  const base = state.promptIndexBase || 0;
+  if (base > 0) {
+    const key = (m: RenumberableMapping) => (m.promptText || '').slice(0, 200);
+    const atOrAboveBase = new Set(
+      kept.filter((m) => (m.promptIndex ?? 0) >= base).map(key).filter((k) => k.length > 0),
+    );
+    if (atOrAboveBase.size > 0) {
+      kept = kept.filter((m) => (m.promptIndex ?? 0) >= base || !atOrAboveBase.has(key(m)));
+    }
+  }
+
   const dropped = maps.length - kept.length;
   if (dropped > 0) state.completedPromptMappings = kept;
   return dropped;
@@ -1172,6 +1402,14 @@ export function saveSessionState(state: SessionState, cwd?: string, sessionTag?:
   // Never persist a renumbering duplicate: it would be re-sent on every
   // subsequent write and silently overwrite an earlier turn's row.
   dropRenumberedDuplicateMappings(state);
+  // A reservation adopted mid-registration must not write its provisional id
+  // back over the one session-start has registered since it was read.
+  const adoption = adoptRegisteredReservation(state, cwd, sessionTag);
+  if (adoption) {
+    debugLog('session-state', 'reservation was registered while this hook held it — saving under the registered id', {
+      from: adoption.from, to: adoption.to, sessionTag: sessionTag || state.sessionTag,
+    });
+  }
   const statePath = getStatePath(cwd, sessionTag || state.sessionTag);
   try {
     const tmpStatePath = statePath + '.tmp.' + process.pid;
@@ -1255,6 +1493,22 @@ export function dropSessionMirror(sessionId: string | undefined | null): void {
  * of trying to win it: whoever arrives first creates the file, and the other
  * finds it there and merges.
  */
+/**
+ * Stamp a per-turn mapping with the moment it was written.
+ *
+ * Every producer that appends to or replaces an entry in
+ * `completedPromptMappings` goes through this, so the release gate can ask
+ * "which turns were captured since the last release?" instead of "which
+ * SESSIONS started since it?" — see the `capturedAt` note on the type for why
+ * the session-level question cannot be answered without deadlocking the gate.
+ *
+ * Overwrites any existing value on purpose: a row being rewritten is a fresh
+ * capture, and the gate should grade it again.
+ */
+export function stampCaptured<T extends object>(mapping: T, now: Date = new Date()): T & { capturedAt: string } {
+  return Object.assign(mapping as T & { capturedAt: string }, { capturedAt: now.toISOString() });
+}
+
 export function sessionTagFor(
   claudeSessionId: string | undefined,
   agentSessionId?: string,
@@ -1322,6 +1576,85 @@ export function preferRegisteredSessionId(
 }
 
 /**
+ * The state file at `tag`, whatever conversation id it carries.
+ *
+ * `loadSessionState` refuses a row whose `claudeSessionId` is empty — and a
+ * Cursor row's IS empty (Cursor is not a stable-id agent; its conversation
+ * lives on `agentSessionId`). So every reservation-race check that went
+ * through `loadSessionState` was blind for Cursor: session-start could not
+ * see that a concurrent hook had registered its reservation, and could not
+ * see a live file at its own tag before reserving over it. Reads the same
+ * two locations, gated on `sessionId` alone.
+ */
+export function readStateAtTag(cwd?: string, sessionTag?: string): SessionState | null {
+  const tryRead = (p: string): SessionState | null => {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      if (!parsed || typeof parsed !== 'object' || typeof parsed.sessionId !== 'string' || !parsed.sessionId) return null;
+      return parsed as SessionState;
+    } catch {
+      return null;
+    }
+  };
+  const statePath = getStatePath(cwd, sessionTag);
+  const primary = tryRead(statePath);
+  if (primary) return primary;
+  const fb = getGlobalFallbackStatePath(cwd, sessionTag);
+  if (fb !== statePath) return tryRead(fb);
+  return null;
+}
+
+/**
+ * A hook holding a session-start reservation in memory re-reads the file
+ * before writing it, and takes the id session-start registered meanwhile.
+ *
+ * The reservation is adoptable on purpose: a prompt that lands while
+ * `session/start` is in flight finds the provisional row instead of minting
+ * its own. But the adopter then keeps writing the copy it READ — provisional
+ * id, `pendingRegistration` still set — and each of those writes lands over
+ * session-start's registered row. Prod 2026-09-09, one Cursor chat: the
+ * prompt hook read the reservation 150ms before session-start saved
+ * `5431ff0f`, restamped its copy onto the worktree, and wrote `local-…` back
+ * over the registered id. Its migration then minted `e24477e2` for the same
+ * chat; the first row kept a heartbeat that fed it the second row's turns.
+ *
+ * Registered always wins (preferRegisteredSessionId). A settled reservation
+ * — registered, or local after a failed call — also clears the flag, so a
+ * stale in-memory copy cannot re-arm it. Returns the swap when one happened.
+ */
+export function adoptRegisteredReservation(
+  state: SessionState,
+  cwd?: string,
+  sessionTag?: string,
+): { from: string; to: string } | null {
+  const pending = state as SessionState & { pendingRegistration?: boolean };
+  if (!pending.pendingRegistration || !isProvisionalSessionId(state.sessionId)) return null;
+  const onDisk = readStateAtTag(cwd, sessionTag || state.sessionTag) as (SessionState & { pendingRegistration?: boolean }) | null;
+  if (!onDisk) return null;
+  if (!onDisk.pendingRegistration) delete pending.pendingRegistration;
+  const promoted = preferRegisteredSessionId(state.sessionId, onDisk.sessionId);
+  if (promoted === state.sessionId) return null;
+  const from = state.sessionId;
+  state.sessionId = promoted;
+  // The registered row on disk is session-start's full row: the enforcement
+  // rules and policies the server handed back, the system prompt, the
+  // previous-session link, the baseline it captured. The copy this hook holds
+  // is the bare reservation plus its own work. Ours wins on everything it
+  // set (its prompt, the identity it restamped); what it never had comes from
+  // the row it is about to replace.
+  const ours = state as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(onDisk as unknown as Record<string, unknown>)) {
+    if (k === 'pendingRegistration' || k === 'sessionId') continue;
+    if (ours[k] === undefined) ours[k] = v;
+  }
+  // The reservation's mirror is keyed by the provisional id; the save that
+  // follows lands under the registered one, so the placeholder would stay
+  // listed as a live local session.
+  dropSessionMirror(from);
+  return { from, to: promoted };
+}
+
+/**
  * RUNNING sessions from the durable ~/.origin/sessions mirror whose work tree
  * is `tree`.
  *
@@ -1384,6 +1717,153 @@ export function loadSessionState(cwd?: string, sessionTag?: string): SessionStat
   return null;
 }
 
+/** An (orphan → rewrite) pair, as the rescue or git's post-rewrite hook records it. */
+export type RewritePair = { from: string; to: string };
+
+/**
+ * The sha a commit was ultimately rewritten to, following the chain of pairs.
+ *
+ * A rewrite is rarely one hop. Session 8a06aaf6 (2026-09-09) took one PR
+ * through a conflicting rebase, two amends, a second rebase and GitHub's
+ * squash: five pairs, one survivor. Every consumer that applied a pair once
+ * — the sha list, the turn attestation, the server's badge — stopped one
+ * hop short and kept an intermediate copy alive. Cycle-safe; a sha nothing
+ * rewrote is its own answer. Prefix-tolerant in both directions, because
+ * recorded shas may be short.
+ */
+export function finalRewriteOf(sha: string, pairs: ReadonlyArray<RewritePair> | null | undefined): string {
+  if (!sha || !Array.isArray(pairs) || pairs.length === 0) return sha;
+  const same = (a: string, b: string) => {
+    const x = a.toLowerCase(); const y = b.toLowerCase();
+    return x === y || x.startsWith(y) || y.startsWith(x);
+  };
+  let cur = sha;
+  const seen = new Set<string>([cur.toLowerCase()]);
+  for (let hops = 0; hops < 32; hops++) {
+    const next = pairs.find((p) => p?.from && p?.to && same(p.from, cur) && !same(p.to, cur))?.to;
+    if (!next || seen.has(next.toLowerCase())) return cur;
+    seen.add(next.toLowerCase());
+    cur = next;
+  }
+  return cur;
+}
+
+/**
+ * Record rewrite pairs on the session and move every local reading of an
+ * orphan onto its final survivor: the sha list (deduped) and the turn
+ * attestation (`commitTurns`, keeping the earliest observation per survivor).
+ * `rewrittenCommits` keeps every pair ever seen — the server follows the
+ * chain itself — but never a self-map or a duplicate `from`.
+ *
+ * Returns true when anything changed. Does not save.
+ */
+export function applyRewritePairsToState(
+  state: Pick<SessionState, 'sessionCommitShas' | 'rewrittenCommits' | 'commitTurns'>,
+  incoming: ReadonlyArray<RewritePair>,
+): boolean {
+  const pairs: RewritePair[] = Array.isArray(state.rewrittenCommits) ? [...state.rewrittenCommits] : [];
+  let changed = false;
+  for (const p of incoming) {
+    if (!p?.from || !p?.to || p.from.toLowerCase() === p.to.toLowerCase()) continue;
+    const at = pairs.findIndex((q) => q.from.toLowerCase() === p.from.toLowerCase());
+    if (at >= 0) {
+      // The same sha rewritten again — after a reset back to it, or an amend
+      // that reproduced a byte-identical commit. git's LATEST word for a sha
+      // is the truth; keeping the first left a stale hop (and, with the
+      // identical-commit case, a cycle) that stopped every chain short.
+      if (pairs[at].to.toLowerCase() === p.to.toLowerCase()) continue;
+      pairs[at] = { from: p.from, to: p.to };
+    } else {
+      pairs.push({ from: p.from, to: p.to });
+    }
+    changed = true;
+  }
+  if (!changed) return false;
+  state.rewrittenCommits = pairs;
+  if (Array.isArray(state.sessionCommitShas)) {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const s of state.sessionCommitShas) {
+      const f = finalRewriteOf(s, pairs);
+      const key = f.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key); out.push(f);
+    }
+    state.sessionCommitShas = out;
+  }
+  if (Array.isArray(state.commitTurns) && state.commitTurns.length > 0) {
+    type CommitTurn = NonNullable<SessionState['commitTurns']>[number];
+    const bySha = new Map<string, CommitTurn>();
+    for (const ct of state.commitTurns) {
+      if (!ct?.sha) continue;
+      const sha = finalRewriteOf(ct.sha, pairs);
+      const prev = bySha.get(sha.toLowerCase());
+      if (!prev || (ct.at && prev.at && ct.at < prev.at)) bySha.set(sha.toLowerCase(), { ...ct, sha });
+    }
+    state.commitTurns = [...bySha.values()];
+  }
+  return true;
+}
+
+/**
+ * The most recent state file — ENDED or not — that belongs to this
+ * conversation, when the tag-addressed lookup found nothing.
+ *
+ * A re-attach after an idle end rebuilds `state` from the prior file under
+ * the conversation-derived tag. That is the wrong address for a session the
+ * desktop app started on the primary checkout and Origin then adopted into a
+ * worktree: its file was minted under the HANDSHAKE's tag and only its
+ * `claudeSessionId` says which conversation it is. Session 8a06aaf6
+ * (2026-09-09): ended under tag 2e5b67ac after an 11h gap, the next prompt
+ * looked under tag 46012a70, found nothing, and started from scratch — the
+ * recorded commits, the rewrite pairs, the turn ids and the turn counter all
+ * gone, the header rebuilt from a baseline that postdated the work.
+ *
+ * Matches by the server's session id first (the API deduped the re-attach to
+ * it, so it is the strongest key), then by conversation id. Newest file wins.
+ * Both places a state can land are read: the git common dir and the global
+ * fallback for this cwd.
+ */
+export function findPriorStateForConversation(
+  cwd: string | undefined,
+  conversationIds: ReadonlyArray<string | undefined | null>,
+  sessionId?: string | null,
+): SessionState | null {
+  const ids = new Set(conversationIds.filter((v): v is string => typeof v === 'string' && v.length > 0));
+  const wantSession = typeof sessionId === 'string' && sessionId.length > 0 && !sessionId.startsWith('local-') ? sessionId : null;
+  if (ids.size === 0 && !wantSession) return null;
+  const dirs = new Set<string>();
+  const primary = getStatePath(cwd, 'probe');
+  dirs.add(path.dirname(primary));
+  const fallback = getGlobalFallbackStatePath(cwd, 'probe');
+  const cwdHash = path.basename(fallback).split('-')[0];
+  dirs.add(path.dirname(fallback));
+  let best: { state: SessionState; rank: number; at: number } | null = null;
+  for (const dir of dirs) {
+    let entries: string[] = [];
+    try { entries = fs.readdirSync(dir); } catch { continue; }
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue;
+      const inGitDir = entry.startsWith('origin-session-');
+      const inFallback = entry.startsWith(`${cwdHash}-`);
+      if (!inGitDir && !inFallback) continue;
+      let st: SessionState | null = null;
+      try { st = JSON.parse(fs.readFileSync(path.join(dir, entry), 'utf-8')); } catch { continue; }
+      if (!st || typeof st !== 'object' || !st.sessionId) continue;
+      const convo = [st.claudeSessionId, (st as { agentSessionId?: string }).agentSessionId];
+      const bySession = !!wantSession && st.sessionId === wantSession;
+      const byConversation = convo.some((c) => typeof c === 'string' && ids.has(c));
+      if (!bySession && !byConversation) continue;
+      const rank = bySession ? 2 : 1;
+      const stamp = (st as { lastStopAt?: string; endedAt?: string }).lastStopAt
+        || (st as { endedAt?: string }).endedAt || st.startedAt || '';
+      const at = Date.parse(stamp) || 0;
+      if (!best || rank > best.rank || (rank === best.rank && at > best.at)) best = { state: st, rank, at };
+    }
+  }
+  return best?.state ?? null;
+}
+
 export function clearSessionState(cwd?: string, sessionTag?: string): void {
   const statePath = getStatePath(cwd, sessionTag);
   const fbPath = getGlobalFallbackStatePath(cwd, sessionTag);
@@ -1423,11 +1903,42 @@ export function clearSessionState(cwd?: string, sessionTag?: string): void {
 const SESSION_STALE_MS = 3 * 60 * 60 * 1000; // 3 hours — matches findSessionByClaudeId / listAllActiveSessions
 
 /**
+ * Is this session's heartbeat daemon both RUNNING and still pinging?
+ *
+ * A bare live PID is not proof of health: a heartbeat whose ping loop hung
+ * (unresolved await, wedged fs/network) stays alive as a process but stops
+ * pinging and stops writing state — the server then marks the session
+ * COMPLETED via its no-ping sweep, while a naive pid check keeps reporting it
+ * "alive" forever (observed: a bake-off session pinned active 16h after the
+ * server ended it). The heartbeat re-touches its pid file every tick, so
+ * require that mtime to be within the stale window: a healthy daemon stays
+ * fresh, a hung one goes stale and reads as dead. (Older heartbeats predating
+ * the per-tick touch self-heal once they restart onto the new binary; a
+ * connected session's git-state bump covers them meanwhile.)
+ *
+ * Split out of isSessionAlive so a caller about to do something destructive
+ * can ask for this signal alone — it is the only one backed by a live process
+ * rather than a file mtime, and `origin sessions clean` refuses to end a
+ * session that has it, at any age.
+ */
+export function hasHealthyHeartbeat(sessionId: string): boolean {
+  try {
+    const pidFile = getHeartbeatPidFile(sessionId);
+    if (!fs.existsSync(pidFile)) return false;
+    const fresh = Date.now() - fs.statSync(pidFile).mtimeMs < SESSION_STALE_MS;
+    const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+    if (pid > 0 && fresh) { process.kill(pid, 0); return true; }
+  } catch { /* process dead */ }
+  return false;
+}
+
+/**
  * Is this session genuinely still alive? An ENDED session is dead. Otherwise it
  * counts as alive only if there's a fresh signal: the repo's git-state file was
- * written recently, its heartbeat daemon's PID is live, or the state file the
- * session was loaded from was touched recently. Zombie sessions (process died
- * without a clean end — common for Cursor / stale-file agents) fail all three.
+ * written recently, its heartbeat daemon is running AND still pinging, or the
+ * state file the session was loaded from was touched recently. Zombie sessions
+ * (process died without a clean end — common for Cursor / stale-file agents)
+ * fail all three.
  *
  * `statePath` is the file the state was read from (attached by listActiveSessions
  * as `__statePath`); pass it for the freshest signal.
@@ -1446,25 +1957,9 @@ export function isSessionAlive(state: SessionState, statePath?: string): boolean
       if (Date.now() - fs.statSync(gitStateFile).mtimeMs < SESSION_STALE_MS) return true;
     } catch { /* file gone */ }
   }
-  // 2. The heartbeat daemon's PID is alive AND recently active. A bare live PID
-  // is not proof of health: a heartbeat whose ping loop hung (unresolved await,
-  // wedged fs/network) stays alive as a process but stops pinging and stops
-  // writing state — the server then marks the session COMPLETED via its no-ping
-  // sweep, yet this used to keep reporting it "alive" forever (observed: a
-  // bake-off session pinned active 16h after the server ended it). The heartbeat
-  // re-touches its pid file every tick, so require that mtime to be within the
-  // stale window: a healthy daemon stays fresh, a hung one goes stale and reads
-  // as dead. (Older heartbeats that predate the per-tick touch self-heal once
-  // they restart onto the new binary; a connected session's git-state bump in
-  // check #1 covers them meanwhile.)
-  try {
-    const pidFile = path.join(os.homedir(), '.origin', 'heartbeats', `${state.sessionId}.pid`);
-    if (fs.existsSync(pidFile)) {
-      const fresh = Date.now() - fs.statSync(pidFile).mtimeMs < SESSION_STALE_MS;
-      const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
-      if (pid > 0 && fresh) { process.kill(pid, 0); return true; }
-    }
-  } catch { /* process dead */ }
+  // 2. The heartbeat daemon is alive AND still pinging — see hasHealthyHeartbeat
+  // for why a bare live PID does not count.
+  if (hasHealthyHeartbeat(state.sessionId)) return true;
   // 3. The state file we loaded from was touched recently.
   const p = statePath || (state as any).__statePath;
   if (p) {
@@ -1584,6 +2079,42 @@ export function listActiveSessions(cwd?: string): SessionState[] {
 }
 
 /**
+ * When did this session last show ANY sign of life?
+ *
+ * The companion to isSessionAlive, which answers only yes/no against a fixed
+ * 3h window. A caller deciding whether to do something destructive needs the
+ * magnitude too — "silent for 19 days" and "silent for 4 hours" are both
+ * `false` from isSessionAlive and want very different treatment.
+ *
+ * Reads the same three signals in the same order, and returns the most recent
+ * of them. null means no signal exists at all, which is NOT the same as "long
+ * dead": a hook-only agent that never ran a heartbeat, in a repo whose state
+ * file has been cleaned, looks exactly like this. Callers must decide for
+ * themselves whether absence of evidence justifies acting.
+ */
+export function sessionLastSignMs(state: SessionState, statePath?: string): number | null {
+  let last: number | null = null;
+  const note = (ms: number) => { if (last === null || ms > last) last = ms; };
+
+  if (state?.repoPath && state?.sessionTag) {
+    try {
+      const gitStateFile = gitCommonDirFilePath(state.repoPath, `origin-session-${state.sessionTag}.json`);
+      note(fs.statSync(gitStateFile).mtimeMs);
+    } catch { /* file gone */ }
+  }
+  if (state?.sessionId) {
+    try {
+      note(fs.statSync(getHeartbeatPidFile(state.sessionId)).mtimeMs);
+    } catch { /* no heartbeat */ }
+  }
+  const p = statePath || (state as any)?.__statePath;
+  if (p) {
+    try { note(fs.statSync(p).mtimeMs); } catch { /* gone */ }
+  }
+  return last;
+}
+
+/**
  * List sessions from ALL repos (for --all/--global flag).
  * Scans ~/.origin/sessions/ for both active and archived sessions.
  */
@@ -1607,47 +2138,11 @@ export function listAllActiveSessions(): SessionState[] {
           // Auto-expire RUNNING sessions that are stale:
           // If status is not ENDED, check if the session is actually still alive
           if (state.status !== 'ENDED') {
-            const STALE_MS = 3 * 60 * 60 * 1000; // 3 hours
-            let isAlive = false;
-
-            // Check 1: is there an active .git state file being updated?
-            // (worktree-aware: resolves the per-worktree git dir)
-            if (state.repoPath && state.sessionTag) {
-              try {
-                const gitStateFile = gitCommonDirFilePath(state.repoPath, `origin-session-${state.sessionTag}.json`);
-                const stat = fs.statSync(gitStateFile);
-                if (Date.now() - stat.mtimeMs < STALE_MS) {
-                  isAlive = true;
-                }
-              } catch { /* file gone or not accessible */ }
-            }
-
-            // Check 2: is the heartbeat daemon still running?
-            if (!isAlive) {
-              try {
-                const heartbeatDir = path.join(os.homedir(), '.origin', 'heartbeats');
-                const pidFile = path.join(heartbeatDir, `${state.sessionId}.pid`);
-                if (fs.existsSync(pidFile)) {
-                  const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
-                  if (pid > 0) {
-                    process.kill(pid, 0); // existence check
-                    isAlive = true;
-                  }
-                }
-              } catch { /* process dead or pid file gone */ }
-            }
-
-            // Check 3: was the archive file itself recently updated?
-            if (!isAlive) {
-              try {
-                const stat = fs.statSync(filePath);
-                if (Date.now() - stat.mtimeMs < STALE_MS) {
-                  isAlive = true;
-                }
-              } catch { /* ignore */ }
-            }
-
-            if (!isAlive) {
+            // One liveness rule for the whole CLI. This was a second copy of
+            // isSessionAlive's three checks, inline and subtly weaker: it
+            // lacked the pid-freshness guard, so a HUNG heartbeat read as
+            // alive here and dead there.
+            if (!isSessionAlive(state, filePath)) {
               state.status = 'ENDED';
               state.endedAt = state.endedAt || new Date().toISOString();
               // Persist the correction
@@ -2024,6 +2519,12 @@ export function clearAllSessionStates(cwd?: string): void {
 
 interface ShadowBearingState {
   promptShadows?: Array<{ promptIndex: number; shadowSha: string; capturedAt: string }>;
+  /**
+   * Prompts this launch WATCHED arrive without ever anchoring a start-state —
+   * see `markSkippedPromptBaselines`. Distinct from an index that is simply
+   * absent, which stays "unknown" and keeps its session-start fallback.
+   */
+  promptsWithoutBaseline?: number[];
   sessionStartShadowSha?: string | null;
   headShaAtStart?: string | null;
 }
@@ -2059,5 +2560,97 @@ export function turnBaseline(
   promptIndex: number,
 ): string | null {
   const own = (state.promptShadows || []).find((s) => s.promptIndex === promptIndex)?.shadowSha;
-  return own || state.sessionStartShadowSha || state.headShaAtStart || null;
+  if (own) return own;
+  // A prompt we WATCHED arrive unanchored has no start-state, and the
+  // session's is not a substitute: diffing from there spans every turn since,
+  // so the row re-states earlier turns' work. Session d5cc625b turns 2 and 8
+  // did exactly that — their hops duplicated turn 1's byte for byte, the read
+  // path's echo detector correctly refused them, and both rendered empty.
+  // Null says "unknown", which the callers already handle; the session start
+  // says "this turn began at the dawn of the session", which is false.
+  //
+  // Only for an index MARKED as skipped. A merely absent one is still unknown
+  // in the old sense — a row from before this launch adopted the conversation
+  // — and keeps the documented session-start fallback.
+  if ((state.promptsWithoutBaseline || []).includes(promptIndex)) return null;
+  return state.sessionStartShadowSha || state.headShaAtStart || null;
+}
+
+/**
+ * Mark every prompt that appeared between the last anchored one and
+ * `throughIndex` as having no start-state.
+ *
+ * `recordPromptShadow` is only ever called from user-prompt-submit, for the
+ * prompt that fired it. When two prompts arrive between hook runs — the count
+ * jumps, which it did twice on session d5cc625b (8→10 and 10→14) — the earlier
+ * ones are never anchored and nothing records that they were missed. They then
+ * look identical to a turn we simply have no shadow for, and take the
+ * session-start fallback, which is how an unanchored turn comes to claim every
+ * turn before it.
+ *
+ * The gap CANNOT be filled retroactively: a shadow made now is the tree as it
+ * is now, not as that prompt found it, and a wrong baseline mis-scopes the turn
+ * silently where a missing one merely empties it. So this records the absence
+ * rather than inventing a value.
+ *
+ * Bounded to the span after the highest anchored index on purpose. Before the
+ * first anchor there is nothing to infer from: an adopted conversation's
+ * earlier turns ran before this launch existed, and they keep the fallback
+ * they have always had.
+ */
+export function markSkippedPromptBaselines(
+  state: ShadowBearingState,
+  throughIndex: number,
+): number[] {
+  if (!Number.isInteger(throughIndex) || throughIndex <= 0) return [];
+  const anchored = (state.promptShadows || []).map((s) => s.promptIndex);
+  if (anchored.length === 0) return [];
+  const marked: number[] = [];
+  // From the FIRST anchor, not the last. A batch that arrived together leaves
+  // several holes at once, and Stop fills only the earliest of them (the one
+  // that owns the baseline it is about to replace) — the rest sit BELOW the
+  // highest anchored index and a max()-based scan would walk straight past
+  // them. Everything before the first anchor is still left alone.
+  for (let i = Math.min(...anchored) + 1; i < throughIndex; i++) {
+    if (anchored.includes(i)) continue;
+    if ((state.promptsWithoutBaseline || []).includes(i)) continue;
+    if (!state.promptsWithoutBaseline) state.promptsWithoutBaseline = [];
+    state.promptsWithoutBaseline.push(i);
+    marked.push(i);
+  }
+  return marked;
+}
+
+/**
+ * The prompt that owns the CURRENT rolling baseline: the first one since the
+ * last anchor with no start-state of its own.
+ *
+ * `state.prePromptSha` is re-anchored at the end of every Stop, so while a Stop
+ * is running it still holds the shadow cut at the end of the previous turn —
+ * which is exactly the start-state of the turn now closing. When that turn's
+ * own hook never ran (killed mid-git-work, so the prompt is recovered from the
+ * transcript instead), this is the one baseline that can still be recovered
+ * rather than marked lost.
+ *
+ * The FIRST unanchored index, not the last, and the distinction is load-bearing
+ * only when several prompts arrived without a Stop between them. If Stop ran
+ * for each turn, the earlier holes were already filled by those Stops and the
+ * first unanchored one IS the closing turn — the two readings converge, which
+ * is what makes this safe to apply without knowing which happened.
+ *
+ * Null when everything is anchored, or when nothing is yet — with no anchor at
+ * all this launch has watched nothing arrive, and the rolling baseline says
+ * nothing about a turn that ran before it.
+ */
+export function firstUnanchoredPrompt(
+  state: ShadowBearingState,
+  throughIndex: number,
+): number | null {
+  if (!Number.isInteger(throughIndex) || throughIndex <= 0) return null;
+  const anchored = (state.promptShadows || []).map((s) => s.promptIndex);
+  if (anchored.length === 0) return null;
+  for (let i = Math.min(...anchored) + 1; i < throughIndex; i++) {
+    if (!anchored.includes(i)) return i;
+  }
+  return null;
 }

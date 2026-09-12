@@ -293,7 +293,13 @@ describe('listSessionsForGitHook — agent cwd is a subdirectory', () => {
     expect(ids).not.toContain('sub-far-000003');
   });
 
-  it('an exact lastCwd match still wins outright', () => {
+  it('an exact lastCwd match comes first, and the same-tree siblings stay for the picker', () => {
+    // This used to return the root session ALONE. Session e1095412 lost both
+    // of its commits that way: it had cd-ed into packages/cli, an idle
+    // sibling chat sat at the worktree root, and `ofActive: 1` meant the
+    // picker never weighed the open turn that had staged every file. The
+    // exact match is now the tie-break (pickSessionForCommit 'cwd',
+    // breakTie), not the gate.
     twoSessionsWorkingInSubdirs();
     writeState('atroot', {
       sessionId: 'sub-root-00004',
@@ -305,7 +311,8 @@ describe('listSessionsForGitHook — agent cwd is a subdirectory', () => {
       startedAt: new Date().toISOString(),
     });
     const ids = listSessionsForGitHook(repo).map((s) => s.sessionId);
-    expect(ids).toEqual(['sub-root-00004']);
+    expect(ids[0]).toBe('sub-root-00004');
+    expect([...ids].sort()).toEqual(['sub-api-000002', 'sub-root-00004', 'sub-web-000001']);
   });
 });
 

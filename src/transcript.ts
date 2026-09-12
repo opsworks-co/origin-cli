@@ -381,6 +381,50 @@ function effectiveSinceMs(raw: string, since?: Date | string | null): number {
 
 // ─── Parser ────────────────────────────────────────────────────────────────
 
+/**
+ * The prompts this session has received AS OF NOW — the state's list, or the
+ * transcript's when the transcript is further along.
+ *
+ * `state.prompts` is only as current as the last hook that managed to write it,
+ * and user-prompt-submit is the writer. On a large repo that hook routinely
+ * exceeds the agent's timeout during its git work and is killed before it gets
+ * there: prod session 376378e3 logged 5 `prompt saved` events across 24
+ * prompts. While a turn is in flight and its submit never landed, the list is
+ * short by exactly one — the turn now running, which is also the turn about to
+ * commit. Every commit-time reader then answers with the PREVIOUS turn:
+ * `resolvePromptForCommit` returns `prompts.length - 1`, and the
+ * `Origin-Session: … | N prompts` trailer carries the same short count, so the
+ * server's trailer-ordinal rung faithfully anchors the commit one turn early.
+ * Observed three times in one session (93fb6335, c9f08424, 17776dd6), each
+ * trailer exactly one below its true turn.
+ *
+ * The agent writes the transcript itself, so the in-flight prompt is always
+ * there. Measured mid-turn on 376378e3: state 27, transcript 28, and the extra
+ * one was the prompt being answered.
+ *
+ * LONGER ONLY, never shorter. A transcript can legitimately lag or roll, and
+ * `state.prompts` is the durable record — shrinking it here would renumber
+ * turns that already have rows. Scoped with `since: startedAt` so a RESUMED
+ * conversation (whose transcript replays the parent's history) counts only its
+ * own, matching how every other caller reads it.
+ *
+ * ~35-55ms on a 7.8MB transcript, so it is cheap enough for a hook path.
+ */
+export function livePrompts(
+  state: { prompts?: string[] | null; transcriptPath?: string | null; startedAt?: string | null },
+): string[] {
+  const stored = (state?.prompts || []).filter((p): p is string => typeof p === 'string');
+  if (!state?.transcriptPath) return stored;
+  try {
+    const parsed = parseTranscript(state.transcriptPath, { since: state.startedAt || null });
+    const live = parsed.prompts.filter((p): p is string => typeof p === 'string');
+    return live.length > stored.length ? live : stored;
+  } catch {
+    // A transcript that is missing, unreadable or mid-write decides nothing.
+    return stored;
+  }
+}
+
 export function parseTranscript(
   transcriptPath: string,
   opts: {
@@ -466,6 +510,8 @@ export function parseTranscript(
   // Message ids of assistant turns that ran inside a Task sub-agent, so we can
   // total their tokens separately after the dedup pass.
   const sidechainMsgIds = new Set<string>();
+  let lastKeptPrompt: string | undefined;
+  let cursorTranscript = false;
 
   for (const line of lines) {
     let entry: TranscriptLine;
@@ -480,9 +526,13 @@ export function parseTranscript(
       if (Number.isFinite(t) && t < sinceMs) {
         // Dropped from this session's totals, but still counted: it occupies a
         // native prompt index that the mapping rows keep using.
-        if ((entry.type || (entry as any).role || entry.message?.role) === 'user'
-            && promptTextForEntry(entry)) {
-          result.promptIndexBase++;
+        if ((entry.type || (entry as any).role || entry.message?.role) === 'user') {
+          if (isCursorTranscriptUserEntry(entry)) cursorTranscript = true;
+          const kept = transcriptPromptIfNew(entry, lastKeptPrompt, cursorTranscript);
+          if (kept) {
+            result.promptIndexBase++;
+            lastKeptPrompt = kept;
+          }
         }
         continue;
       }
@@ -506,9 +556,11 @@ export function parseTranscript(
       // (Gemini JSONL) that extractUserPrompt doesn't read — without that
       // fallback every Gemini prompt was dropped from the dashboard — and is
       // the single predicate the image extractor numbers against.
-      const prompt = promptTextForEntry(entry);
+      if (isCursorTranscriptUserEntry(entry)) cursorTranscript = true;
+      const prompt = transcriptPromptIfNew(entry, lastKeptPrompt, cursorTranscript);
       if (prompt) {
         result.prompts.push(prompt);
+        lastKeptPrompt = prompt;
       }
     }
 
@@ -882,6 +934,55 @@ export function promptTextForEntry(entry: any): string | null {
 }
 
 /**
+ * Raw user-role text, before cleanPrompt. Used only to recognise Cursor's
+ * transcript shape so a Claude "try again" still counts as two turns.
+ */
+function rawUserEntryText(entry: any): string {
+  const content = entry?.message?.content ?? entry?.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((b: any) => (typeof b === 'string' ? b : (b && typeof b.text === 'string' ? b.text : '')))
+      .join('\n');
+  }
+  return '';
+}
+
+export function isCursorTranscriptUserEntry(entry: any): boolean {
+  return /<(?:timestamp|user_query|image_files|available_subagent_types|hooks_context|system_reminder)\b/i.test(rawUserEntryText(entry));
+}
+
+/**
+ * The prompt that occupies a turn, or null if this user entry is not one:
+ * an injection cleanPrompt already dropped, or Cursor re-appending the last
+ * message after a conversation summary so the model can continue.
+ *
+ * Session 761adbe8: catalog dump became turn 10; the same illustrated
+ * sentence as turn 9 was replayed as turn 11. The hook already skips a
+ * Cursor payload that matches the last stored prompt; the transcript
+ * parser did not, so Stop's reconcile appended both extras.
+ *
+ * Session 593241fe: after compact, Cursor injected `<hooks_context>` as a
+ * user-role message and then re-appended the previous sentence WITHOUT
+ * `<user_query>` tags. The catalog-shaped skip missed both. `cursorTranscript`
+ * is true once this file has seen a Cursor envelope, so the untagged replay
+ * still collapses. Claude "try again" twice is unchanged — those transcripts
+ * never set the flag.
+ */
+export function transcriptPromptIfNew(
+  entry: any,
+  lastKept: string | undefined | null,
+  cursorTranscript = false,
+): string | null {
+  const prompt = promptTextForEntry(entry);
+  if (!prompt) return null;
+  if (lastKept && prompt === lastKept && (isCursorTranscriptUserEntry(entry) || cursorTranscript)) {
+    return null;
+  }
+  return prompt;
+}
+
+/**
  * Strip the envelopes an agent injects into the user role and decide whether
  * anything the USER actually typed remains. Null means "not a prompt".
  *
@@ -903,6 +1004,11 @@ export function cleanPrompt(text: string): string | null {
     .replace(/<ide_context>[\s\S]*?<\/ide_context>/g, '')
     // Strip Claude Code system reminders and hook feedback
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+    // Cursor's compact / session-hook injection (underscore, not hyphen).
+    // Unclosed-tolerant: the live hook truncates stored promptText at 1000
+    // chars, so the closing tag is often missing (session 593241fe).
+    .replace(/<system_reminder\b[^>]*>[\s\S]*?(?:<\/system_reminder>|$)/gi, '')
+    .replace(/<hooks_context\b[^>]*>[\s\S]*?(?:<\/hooks_context>|$)/gi, '')
     // Strip internal agent tags that leak when prompts overlap with active execution
     .replace(/<task-notification>[\s\S]*?<\/task-notification>/g, '')
     .replace(/<task-id>[\s\S]*?<\/task-id>/g, '')
@@ -937,16 +1043,29 @@ export function cleanPrompt(text: string): string | null {
     // dashboard already shows the prompt's createdAt next to the turn
     // header, surfacing it again inside the prompt body is noise.
     .replace(/<timestamp>[\s\S]*?<\/timestamp>/g, '')
+    // Cursor re-injects its tool catalog as a user-role message after a
+    // conversation summary (session 761adbe8: the card read as
+    // "<available_subagent_types> Available subagent_types…" and the same
+    // user sentence appeared again as the next turn). Strip the blocks so a
+    // dump that is ONLY the catalog is not a prompt, and a dump that also
+    // wraps a <user_query> still keeps the typed words.
+    .replace(/<available_subagent_types>[\s\S]*?<\/available_subagent_types>/gi, '')
+    .replace(/<available_subagent_models>[\s\S]*?<\/available_subagent_models>/gi, '')
+    .replace(/<dynamic_tool_namespaces>[\s\S]*?<\/dynamic_tool_namespaces>/gi, '')
+    .replace(/<dynamic_tools>[\s\S]*?<\/dynamic_tools>/gi, '')
     // Codex's session-init envelope (kept here too as belt-and-suspenders).
     .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
     .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
     // Codex attaches images/files by wrapping the real prompt:
-    //   "# Files mentioned by the user: … ## My request for Codex: <text + <image …>>"
+    //   "# Files mentioned by the user: … ## My request: <text + <image …>>"
+    // Older clients used "My request for Codex" instead. Keep accepting both
+    // forms: otherwise the current desktop envelope becomes a fake-looking
+    // prompt in the timeline instead of showing the user's actual request.
     // Keep only the request that follows the marker, then drop the <image …>
     // tags (the image itself is captured separately as a PromptAttachment).
     // Without this the dashboard showed the whole "Files mentioned by the user
     // … <image name=[Image #1] path="…">" envelope instead of the user's text.
-    .replace(/^#\s*Files mentioned by the user:[\s\S]*?##\s*My request for Codex:\s*/im, '')
+    .replace(/^#\s*Files mentioned by the user:[\s\S]*?##\s*My request(?:\s+for\s+Codex)?:\s*/im, '')
     .replace(/<image\b[^>]*>[\s\S]*?<\/image>/gi, '')
     .replace(/<image\b[^>]*\/?>/gi, '')
     // Cursor's on-disk image envelope. Stripped for the same reason as the
@@ -955,9 +1074,20 @@ export function cleanPrompt(text: string): string | null {
     // the same screenshot in the prompt twice — once as a wall of absolute
     // paths, once as the thing the reader can actually look at.
     .replace(/<image_files>[\s\S]*?<\/image_files>/gi, '')
+    // Cursor prefixes a literal `[Image]` line above `<image_files>`. After
+    // the envelope is gone that token is leftover noise on every illustrated
+    // prompt (session 562314d8). A whole-line header only — a user who types
+    // `[Image] look at this` as the start of a sentence keeps it.
+    .replace(/^\[Image\](?:\s*\n+|$)/i, '')
     .trim();
 
   if (!cleaned) return null;
+
+  // Origin's own session-hook digest, after the <hooks_context> wrapper is
+  // gone (or was never closed before the 1000-char clip).
+  if (/^Origin: Session tracking active/m.test(cleaned) && /Repository AI context:/i.test(cleaned)) {
+    return null;
+  }
 
   // Skip prompts that are purely hook feedback or system messages
   // Claude Code records an interrupt as a user entry. Nobody typed it, no
@@ -974,6 +1104,44 @@ export function cleanPrompt(text: string): string | null {
   return cleaned;
 }
 
+/**
+ * Cursor injects Task / subagent completion follow-ups as a user_query.
+ * They fire a real UserPromptSubmit and land in agent-transcripts JSONL, so
+ * both the hook path and parseTranscript would record them as turns
+ * (session 562314d8 items 10 and 14). Anchored at the start after envelope
+ * unwrap — a prompt that merely MENTIONS the instruction is kept.
+ */
+const CURSOR_INTERNAL_PROMPT_ANCHORS = [
+  /^Briefly inform the user about the task result and perform any follow-up actions/i,
+  /^Perform any necessary follow-up actions in response to the subagent completion above/i,
+  // Conversation-summary / compact restates the tool catalog as a user
+  // message. parseTranscript counted it as a turn, which shifted every
+  // later `[image]` onto the wrong PromptChange (prod c7cc460f).
+  /^Available subagent_types and a quick description/i,
+];
+
+export function isKnownCursorInternalPrompt(prompt: unknown): boolean {
+  if (typeof prompt !== 'string') return false;
+  const original = prompt;
+  const text = prompt
+    .replace(/<timestamp>[\s\S]*?<\/timestamp>/gi, ' ')
+    .replace(/<user_query>([\s\S]*?)<\/user_query>/gi, '$1')
+    .replace(/<hooks_context\b[^>]*>[\s\S]*?(?:<\/hooks_context>|$)/gi, ' ')
+    .replace(/<system_reminder\b[^>]*>[\s\S]*?(?:<\/system_reminder>|$)/gi, ' ')
+    .replace(/\[image\]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) {
+    // Envelope-only payload. A captionless screenshot also cleans to empty
+    // after `[image]` is stripped — those are real turns, so only the
+    // injection envelopes count as internal.
+    return /<(?:available_subagent_types|hooks_context)\b/i.test(original);
+  }
+  if (/^<available_subagent_types>/i.test(text)) return true;
+  if (/^<hooks_context\b/i.test(text)) return true;
+  return CURSOR_INTERNAL_PROMPT_ANCHORS.some((re) => re.test(text));
+}
+
 /** Detect prompts that are actually system/hook messages, not real user input */
 function isSystemMessage(text: string): boolean {
   const systemPatterns = [
@@ -983,7 +1151,8 @@ function isSystemMessage(text: string): boolean {
     /^PreToolUse:.*hook/i,
     /^\[Image: original \d+x\d+/,
   ];
-  return systemPatterns.some(p => p.test(text.trim()));
+  const trimmed = text.trim();
+  return systemPatterns.some(p => p.test(trimmed)) || isKnownCursorInternalPrompt(trimmed);
 }
 
 // ─── Gemini Transcript Parser ──────────────────────────────────────────────
@@ -1346,6 +1515,8 @@ export function extractPromptFileMappings(
 
   let currentPromptIndex = -1;
   let currentPromptText = '';
+  let lastKeptPrompt: string | undefined;
+  let cursorTranscript = false;
   let currentFiles = new Set<string>();
   // Absolute writes this turn made OUTSIDE the repo — see PromptFileMapping.
   let currentOutOfRepo = new Set<string>();
@@ -1459,8 +1630,10 @@ export function extractPromptFileMappings(
       //  1. Actual human prompts (string content or text blocks)
       //  2. Tool results (content is [{type:"tool_result",...}]) — NOT real prompts
       // Only start a new turn when we find real human text.
-      const prompt = extractUserPrompt(entry);
+      if (isCursorTranscriptUserEntry(entry)) cursorTranscript = true;
+      const prompt = transcriptPromptIfNew(entry, lastKeptPrompt, cursorTranscript);
       if (prompt) {
+        lastKeptPrompt = prompt;
         if (hasTurnMarkers) {
           // Queue it. A prompt arriving while a turn is still open also ends
           // that turn — Cursor doesn't always write a turn_ended before the
@@ -2065,6 +2238,8 @@ function formatJSONLMessages(raw: string, verbose: boolean): DisplayMessage[] {
   const lines = raw.split('\n').filter((line) => line.trim());
   const messages: DisplayMessage[] = [];
   const truncate = makeTruncator(verbose);
+  let lastKeptPrompt: string | undefined;
+  let cursorTranscript = false;
 
   // First pass: collect tool_result blocks keyed by tool_use_id so we can
   // attach them inline with the corresponding [Tool: ...] line in the next
@@ -2098,8 +2273,10 @@ function formatJSONLMessages(raw: string, verbose: boolean): DisplayMessage[] {
     const type = entry.type || (entry as any).role || entry.message?.role;
 
     if (type === 'user') {
-      const prompt = extractUserPrompt(entry);
+      if (isCursorTranscriptUserEntry(entry)) cursorTranscript = true;
+      const prompt = transcriptPromptIfNew(entry, lastKeptPrompt, cursorTranscript);
       if (prompt) {
+        lastKeptPrompt = prompt;
         messages.push({ role: 'user', content: prompt });
       }
     }
@@ -2481,11 +2658,27 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   'gpt-5.6-terra': { input: 2.50,  output: 15.00,  cachedInput: 0.25 },
   'gpt-5.6-luna':  { input: 1.00,  output: 6.00,   cachedInput: 0.10 },
   'codex':       { input: 2.00,  output: 8.00 },
-  // Cursor — default to sonnet pricing since most Cursor users are on claude-sonnet-4.
-  // If getCursorModelFromDb resolves the real model, estimateCost will match a more
-  // specific key (e.g. "gpt-4o") instead.
-  'cursor': { input: 3, output: 15 },
-  'composer': { input: 2.50, output: 10.00 },
+  // Cursor first-party — NA list prices (cursor.com/docs/models-and-pricing,
+  // 2026-09). Fast is a speed tier, not a contiguous "grok-4.6-fast"
+  // substring of IDs like "cursor-grok-4.6-high-fast", so
+  // cursorFirstPartyPricingKey() maps those IDs onto these rows.
+  //
+  // Third-party models used *inside* Cursor (claude-*, gpt-*, gemini-*)
+  // stay on the provider rows above. Origin's cost is API-equivalent;
+  // Cursor's Teams $0.25/M token rate is a Cursor surcharge, not an API
+  // price, and must not leak into Claude Code / Codex sessions.
+  'grok-4.6':          { input: 2.00, output: 6.00,  cachedInput: 0.50 },
+  'grok-4.6-fast':     { input: 4.00, output: 12.00, cachedInput: 1.00 },
+  'grok-4.5':          { input: 2.00, output: 6.00,  cachedInput: 0.50 },
+  'grok-4.5-fast':     { input: 4.00, output: 18.00, cachedInput: 1.00 },
+  'grok':              { input: 2.00, output: 6.00,  cachedInput: 0.50 }, // unversioned → current 4.6
+  'composer-2.5':      { input: 0.50, output: 2.50,  cachedInput: 0.20 },
+  'composer-2.5-fast': { input: 3.00, output: 15.00, cachedInput: 0.50 },
+  'composer-1':        { input: 1.25, output: 10.00, cachedInput: 0.125 },
+  'composer':          { input: 0.50, output: 2.50,  cachedInput: 0.20 }, // current Composer 2.5
+  'auto':              { input: 1.25, output: 6.00,  cachedInput: 0.25 },
+  // Unknown Cursor model (hooks send "default"; DB lookup failed)
+  'cursor':            { input: 1.25, output: 6.00,  cachedInput: 0.25 },
 };
 
 // ── Dynamic pricing: API-served, disk-cached, defaults as fallback ──────────
@@ -2552,6 +2745,11 @@ export function getDefaultPricing(): ModelPricing {
   return { ...DEFAULT_MODEL_PRICING };
 }
 
+/** Test-only: ignore ~/.origin/pricing.json so parity tests see compiled rates. */
+export function __resetActivePricingForTests(): void {
+  activePricing = { ...DEFAULT_MODEL_PRICING };
+}
+
 // Strip date/version suffixes so "claude-sonnet-4-5-20250929" → "claude-sonnet-4-5"
 // and "gpt-4o-mini-2024-07-18" → "gpt-4o-mini". Keeps lookups deterministic.
 function normalizeModelKey(model: string): string {
@@ -2563,19 +2761,40 @@ function normalizeModelKey(model: string): string {
 
 // Bare-brand keys lose to specific family keys during substring search so
 // "claude-sonnet-4-5" resolves to "sonnet" not "claude". Two-pass search.
-const BARE_BRAND_KEYS = new Set(['claude', 'gemini', 'cursor', 'codex', 'composer']);
+const BARE_BRAND_KEYS = new Set(['claude', 'gemini', 'cursor', 'codex', 'composer', 'grok', 'auto']);
+
+// Cursor first-party IDs stamp Fast as a *suffix* after the effort level
+// ("cursor-grok-4.6-high-fast"), so "grok-4.6-fast" is not a substring.
+// Call this before the generic matcher or Fast sessions price at the
+// standard row. Returns null for third-party models — including ones
+// Cursor ran — so "cursor-claude-sonnet-4-5" still hits 'sonnet'.
+// KEEP IN SYNC with apps/api/src/utils/pricing.ts.
+export function cursorFirstPartyPricingKey(normalized: string): string | null {
+  const n = (normalized || '').toLowerCase();
+  const isFast = /(^|[-_])fast([-_]|$)/.test(n);
+  if (n.includes('grok-4.6') || n.includes('grok-4-6')) return isFast ? 'grok-4.6-fast' : 'grok-4.6';
+  if (n.includes('grok-4.5') || n.includes('grok-4-5')) return isFast ? 'grok-4.5-fast' : 'grok-4.5';
+  if (n.includes('composer-2.5') || n.includes('composer-2-5')) return isFast ? 'composer-2.5-fast' : 'composer-2.5';
+  if (n.includes('composer-1')) return 'composer-1';
+  if (n.includes('grok')) return isFast ? 'grok-4.6-fast' : 'grok-4.6';
+  if (n === 'auto' || /(^|[-_])auto([-_]|$)/.test(n)) return 'auto';
+  return null;
+}
 
 // Pick the pricing row + matched key for a model. Strategy:
 //   1. Exact match (e.g. bare "claude" → Opus default)
-//   2. Longest specific (non-bare-brand) key that is a substring
-//   3. Longest bare-brand key that is a substring (e.g. "composer-2.5" → "composer")
-//   4. Sonnet default
+//   2. Cursor first-party Fast/standard mapping (Grok / Composer / Auto)
+//   3. Longest specific (non-bare-brand) key that is a substring
+//   4. Longest bare-brand key that is a substring (e.g. "composer-2.5" → "composer")
+//   5. Sonnet default
 export function resolveModelPricing(
   model: string,
   pricing: ModelPricing = ensurePricingLoaded(),
 ): { input: number; output: number; cachedInput?: number; key: string } {
   const normalized = normalizeModelKey(model);
   if (pricing[normalized]) return { ...pricing[normalized], key: normalized };
+  const firstParty = cursorFirstPartyPricingKey(normalized);
+  if (firstParty && pricing[firstParty]) return { ...pricing[firstParty], key: firstParty };
 
   const allKeys = Object.keys(pricing).sort((a, b) => b.length - a.length);
   for (const key of allKeys) {
@@ -2596,7 +2815,9 @@ function cacheMultipliersFor(modelKey: string): { read: number; write: number; w
   if (modelKey.startsWith('gemini')) return { read: 0.25, write: 1.00, write1h: 1.00 };
   if (modelKey.startsWith('gpt-') || modelKey.startsWith('o1') ||
       modelKey.startsWith('o3') || modelKey.startsWith('o4') ||
-      modelKey === 'codex' || modelKey === 'composer') return { read: 0.50, write: 1.00, write1h: 1.00 };
+      modelKey === 'codex') return { read: 0.50, write: 1.00, write1h: 1.00 };
+  if (modelKey.startsWith('grok') || modelKey.startsWith('composer') ||
+      modelKey === 'cursor' || modelKey === 'auto') return { read: 0.25, write: 1.00, write1h: 1.00 };
   return { read: 0.10, write: 1.25, write1h: 2.00 };
 }
 
@@ -2744,6 +2965,8 @@ function extractClaudeCursorImages(lines: string[]): ExtractedImage[] {
   const out: ExtractedImage[] = [];
   let promptIndex = -1;
   let imageIndex = 0;
+  let lastKeptPrompt: string | undefined;
+  let cursorTranscript = false;
 
   for (const line of lines) {
     let entry: any;
@@ -2782,7 +3005,10 @@ function extractClaudeCursorImages(lines: string[]): ExtractedImage[] {
     // wrong in company: parseTranscript's text-only gate skipped captionless
     // screenshots, so from the first one on, every image was uploaded against
     // a promptIndex one higher than the row it belonged to.
-    if (promptTextForEntry(entry) === null) continue;
+    if (isCursorTranscriptUserEntry(entry)) cursorTranscript = true;
+    const prompt = transcriptPromptIfNew(entry, lastKeptPrompt, cursorTranscript);
+    if (!prompt) continue;
+    lastKeptPrompt = prompt;
 
     promptIndex++;
     imageIndex = 0;
@@ -3002,4 +3228,3 @@ function extractGeminiImages(raw: string): ExtractedImage[] {
   }
   return out;
 }
-
