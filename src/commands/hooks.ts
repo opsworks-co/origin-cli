@@ -3210,6 +3210,45 @@ export function inheritedBeforeStatesForTurn(
   }
 }
 
+/**
+ * Did commits this turn did not make land between two of its shadows?
+ *
+ * The shadow-window pass replaces a turn's row with `shadow → next shadow`
+ * (or the live worktree for the turn still open). That delta holds whatever a
+ * `git pull`, checkout, rebase or merge wrote to disk, and the producers that
+ * already subtract inherited commits — the ledger's before-states, the shell
+ * window's foreign-file drop — lose their answer to it. Session 9f8501f7 turn
+ * 2: a fast-forward of #1593 (24 files) turned a ledger row of 4 files into
+ * 26 files, +602/-88.
+ *
+ * Only the commits BETWEEN the two shadows count: a commit after the window
+ * closed belongs to a later turn and says nothing about this one. Leaving the
+ * start's line altogether (a backward or divergent checkout) inherits a tree
+ * nobody in the window wrote. Any failure answers false — today's behaviour.
+ */
+export function windowInheritsCommitsForTurn(
+  repoPath: string,
+  state: SessionState & { commitTurns?: Array<{ sha?: string; turnId?: string }>; promptTurnIds?: string[] },
+  fromShadow: string,
+  toShadow: string | null,
+  promptIndex: number,
+): boolean {
+  try {
+    const deps = inheritedWindowDeps(repoPath, state, promptIndex);
+    const start = deps.baselineCommit!(fromShadow);
+    const end = toShadow ? deps.baselineCommit!(toShadow) : deps.head!();
+    const hex = /^[a-fA-F0-9]{7,40}$/;
+    if (!hex.test(start) || !hex.test(end) || start === end) return false;
+    if (!deps.isAncestor(start, end)) return true;
+    const shas = execFileSync('git', ['rev-list', `${start}..${end}`], {
+      ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+    }).split('\n').map((s) => s.trim()).filter(Boolean);
+    return shas.some((sha) => !deps.isOwnWork(sha));
+  } catch {
+    return false;
+  }
+}
+
 /** The reads both resolvers above share, bound to one repo and one turn. */
 function inheritedWindowDeps(
   repoPath: string,

@@ -1,3 +1,5 @@
+import { createHash, type Hash } from 'node:crypto';
+
 // ── Capture self-consistency verification ───────────────────────────────────
 //
 // Nothing in Origin has ever checked whether a capture is INTERNALLY COHERENT,
@@ -92,14 +94,13 @@ export interface ParsedDiffFile {
   contentless: boolean;
   /** The diff declares this file created (`--- /dev/null`). */
   isNew: boolean;
-  /**
-   * FNV-1a over this file's hunk body — the +/- lines only, so it identifies
-   * the CHANGE rather than the surrounding context, which shifts between
-   * captures. A hash rather than the text itself: the cross-turn check has to
-   * hold one entry per file per turn, and retaining section text would double
-   * the memory cost of verifying a large diff.
-   */
+  /** Signature of ordered additions and ordered removals, independent of hunk grouping. */
   contentHash: string;
+  /** Git blob identities, when the producer supplied them. */
+  oldBlob?: string;
+  newBlob?: string;
+  /** Malformed hunks cannot establish a complete change signature. */
+  incomplete?: boolean;
 }
 
 export interface ParsedDiff {
@@ -131,17 +132,6 @@ const COMBINED_HUNK = /^@{3,} (?:-\d+(?:,\d+)? ){2,}\+\d+(?:,\d+)? @{3,}/;
 // the hunks were truncated away.
 const COMBINED_INDEX = /^index [0-9a-f]+,[0-9a-f]+\.\.[0-9a-f]+/;
 
-/** FNV-1a, 32-bit. Not cryptographic — this only has to separate changes. */
-function fnv1a(seed: string, text: string): string {
-  let h = 0x811c9dc5;
-  const s = seed + '\u0000' + text;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i) & 0xff;
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return h.toString(16).padStart(8, '0');
-}
-
 /**
  * Parse a unified diff into per-file line counts, and report the ways it is
  * malformed.
@@ -163,6 +153,7 @@ export function parseUnifiedDiff(text: string | null | undefined): ParsedDiff {
 
   const lines = raw.split('\n');
   let cur: ParsedDiffFile | null = null;
+  const hashes = new Map<ParsedDiffFile, { added: Hash; removed: Hash }>();
   let aPath = '';
   let bPath = '';
   // Outstanding line budget for the hunk being read.
@@ -174,6 +165,7 @@ export function parseUnifiedDiff(text: string | null | undefined): ParsedDiff {
   const closeHunk = () => {
     if (!inHunk) return;
     if (wantOld !== 0 || wantNew !== 0) {
+      if (cur) cur.incomplete = true;
       malformed.push(
         `hunk at line ${hunkAt} ends ${wantOld} old / ${wantNew} new lines short of its header`,
       );
@@ -200,6 +192,7 @@ export function parseUnifiedDiff(text: string | null | undefined): ParsedDiff {
       isNew: false,
       contentHash: '',
     };
+    hashes.set(opened, { added: createHash('sha256'), removed: createHash('sha256') });
     files.push(opened);
     return opened;
   };
@@ -241,6 +234,13 @@ export function parseUnifiedDiff(text: string | null | undefined): ParsedDiff {
       continue;
     }
 
+    const blobs = !inHunk && /^index ([0-9a-f]{7,40})\.\.([0-9a-f]{7,40})(?: |$)/i.exec(line);
+    if (blobs && cur) {
+      cur.oldBlob = blobs[1].toLowerCase();
+      cur.newBlob = blobs[2].toLowerCase();
+      continue;
+    }
+
     const hh = HUNK_HEADER.exec(line);
     if (hh) {
       closeHunk();
@@ -263,8 +263,13 @@ export function parseUnifiedDiff(text: string | null | undefined): ParsedDiff {
 
     if (!inHunk) continue;
 
-    // `\ No newline at end of file` annotates the preceding line; it is not one.
-    if (line.startsWith('\\')) continue;
+    // A newline marker changes content but contributes no countable line.
+    if (line.startsWith('\\')) {
+      const previous = lines[i - 1] || '';
+      if (previous.startsWith('+')) hashes.get(cur!)!.added.update('{"noNewline":true}');
+      else if (previous.startsWith('-')) hashes.get(cur!)!.removed.update('{"noNewline":true}');
+      continue;
+    }
 
     // The last element of split('\n') on a trailing newline is '', which is not
     // a body line. Any other bare '' IS an empty context line.
@@ -273,11 +278,11 @@ export function parseUnifiedDiff(text: string | null | undefined): ParsedDiff {
     if (line.startsWith('+')) {
       if (wantNew <= 0) { closeHunk(); i--; continue; }
       cur!.added++; wantNew--;
-      cur!.contentHash = fnv1a(cur!.contentHash, line);
+      hashes.get(cur!)!.added.update(JSON.stringify(line.slice(1)));
     } else if (line.startsWith('-')) {
       if (wantOld <= 0) { closeHunk(); i--; continue; }
       cur!.removed++; wantOld--;
-      cur!.contentHash = fnv1a(cur!.contentHash, line);
+      hashes.get(cur!)!.removed.update(JSON.stringify(line.slice(1)));
     } else if (line.startsWith(' ') || line === '') {
       if (wantOld <= 0 && wantNew <= 0) { closeHunk(); i--; continue; }
       wantOld--; wantNew--;
@@ -294,7 +299,10 @@ export function parseUnifiedDiff(text: string | null | undefined): ParsedDiff {
   // ("new file … depends on old contents"); Origin has stored several, from the
   // path that renders a whole-file write without a before-image.
   for (const f of files) {
+    const h = hashes.get(f)!;
+    f.contentHash = `${h.added.digest('hex')}:${h.removed.digest('hex')}`;
     if (f.isNew && f.removed > 0) {
+      f.incomplete = true;
       malformed.push(`${f.file} is declared a new file but its diff removes ${f.removed} line(s)`);
     }
   }
@@ -504,15 +512,18 @@ export function verifyTurn(turn: VerifiableTurn): CaptureViolation[] {
   // and neither does a file whose content the store declined to keep.
   const outOfRepo = [
     ...(turn.outOfRepoFiles || []),
-    ...(turn.contentUnavailableFiles || []),
   ].map(diffPathKey);
+  // Unavailable paths name exact captured claims. Suffix matching here can
+  // exempt a different repository's same-named file from verification.
+  const unavailable = new Set((turn.contentUnavailableFiles || []).map(diffPathKey));
+  const inDiff = [...new Set([...committed.files, ...working.files].map((f) => f.file))];
   const claimed = (turn.filesChanged || [])
     .map(diffPathKey)
-    .filter((f) => f && !outOfRepo.some((o) => sameFile(o, f)));
+    .filter((f) => f && (inDiff.some((d) => diffPathKey(d) === f)
+      || (!unavailable.has(f) && !outOfRepo.some((o) => sameFile(o, f)))));
 
   // Deduped: a file with two sections (see `duplicateFiles`) would otherwise be
   // listed twice in every message built from this.
-  const inDiff = [...new Set([...committed.files, ...working.files].map((f) => f.file))];
   const hasContent = inDiff.length > 0;
 
   if (claimed.length > 0 && !hasContent && badness.length === 0) {
@@ -570,15 +581,6 @@ export function verifyTurn(turn: VerifiableTurn): CaptureViolation[] {
   return out;
 }
 
-/**
- * Check a session's turns against each other.
- *
- * Only ONE cross-turn rule, and it is deliberately narrow: the SAME file
- * carrying a BYTE-IDENTICAL diff on two turns is one write counted twice, not
- * two writes. A file legitimately edited in two turns has different content
- * each time, so this cannot fire on it — the distinction transcript-attribution
- * .ts makes for the same reason.
- */
 /**
  * Check the session header against the turns.
  *
@@ -679,33 +681,50 @@ export function verifySession(turns: VerifiableTurn[], header?: VerifiableHeader
     if (t && Number.isInteger(t.promptIndex)) out.push(...verifyTurn(t));
   }
 
-  // file -> content signature -> turns carrying it
+  // Canonical change signatures see through tool-vs-git hunk grouping.
+  // They are evidence of a possible repeated capture, not proof of ownership.
   const seen = new Map<string, Map<string, number[]>>();
-  for (const t of graded) {
-    if (!t || !Number.isInteger(t.promptIndex)) continue;
-    for (const f of parseUnifiedDiff(t.diff).files) {
-      if (f.contentless || (f.added === 0 && f.removed === 0)) continue;
-      const sig = f.contentHash;
-      const byContent = seen.get(f.file) || new Map<string, number[]>();
-      const idxs = byContent.get(sig) || [];
-      // A file duplicated WITHIN one turn is `duplicate_file_section`, a
-      // different finding. Only distinct turns count as a cross-turn repeat.
-      if (!idxs.includes(t.promptIndex)) byContent.set(sig, [...idxs, t.promptIndex]);
-      else byContent.set(sig, idxs);
-      seen.set(f.file, byContent);
+  const previousEnds = new Map<string, Set<string>>();
+  const repeated = new Map<string, { file: string; idxs: number[] }>();
+  const sameBlob = (a: string, b: string) => !/^0+$/.test(a) && !/^0+$/.test(b)
+    && (a.startsWith(b) || b.startsWith(a));
+  const ordered = graded.filter((t) => t && Number.isInteger(t.promptIndex))
+    .slice().sort((a, b) => a.promptIndex - b.promptIndex);
+  for (const t of ordered) {
+    const currentEnds = new Map<string, Set<string>>();
+    for (const text of [t.diff, t.uncommittedDiff]) {
+      const parsed = parseUnifiedDiff(text);
+      // A truncated/malformed prefix is not a whole change signature.
+      for (const f of parsed.files) {
+        if (f.incomplete || f.contentless || (f.added === 0 && f.removed === 0)) continue;
+        const sig = f.contentHash;
+        const byContent = seen.get(f.file) || new Map<string, number[]>();
+        const chained = f.oldBlob && [...(previousEnds.get(f.file) || [])]
+          .some((end) => sameBlob(end, f.oldBlob!));
+        // This patch starts at the earlier turn's output. Repeating text here
+        // is a new occurrence, or a revert followed by a reapplication.
+        const idxs = chained ? [] : byContent.get(sig) || [];
+        const next = idxs.includes(t.promptIndex) ? idxs : [...idxs, t.promptIndex];
+        byContent.set(sig, next);
+        if (next.length > 1) repeated.set(`${f.file}\0${sig}\0${next[0]}`, { file: f.file, idxs: next });
+        seen.set(f.file, byContent);
+        if (f.newBlob) {
+          const ends = currentEnds.get(f.file) || new Set<string>();
+          ends.add(f.newBlob);
+          currentEnds.set(f.file, ends);
+        }
+      }
     }
+    for (const [file, ends] of currentEnds) previousEnds.set(file, ends);
   }
-  for (const [file, byContent] of seen) {
-    for (const [sig, idxs] of byContent) {
-      if (idxs.length < 2) continue;
-      out.push({
-        code: 'identical_change_in_two_turns',
-        severity: 'suspect',
-        promptIndex: idxs[idxs.length - 1],
-        detail: `${file} carries a byte-identical change on turns ${idxs.join(', ')}`,
-        files: [file],
-      });
-    }
+  for (const { file, idxs } of repeated.values()) {
+    out.push({
+      code: 'identical_change_in_two_turns',
+      severity: 'suspect',
+      promptIndex: idxs[idxs.length - 1],
+      detail: `${file} carries the same ordered additions and deletions on turns ${idxs.join(', ')}; possible repeated capture`,
+      files: [file],
+    });
   }
 
   return out;

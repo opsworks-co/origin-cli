@@ -6,12 +6,29 @@ import { randomUUID } from 'crypto';
 
 export interface JournalLock { release(): void; owned(): boolean; }
 
-export function acquireJournalLock(dir: string): JournalLock | null {
+export interface AcquireOptions {
+  /**
+   * How long an EMPTY lock directory is presumed to be a claimant between its
+   * mkdir and its identity write. A long-lived lease can afford to wait a
+   * minute; the per-write mutation lock cannot.
+   */
+  emptyGraceMs?: number;
+}
+
+// mkdir on a directory whose removal has not finished yet. Native Windows
+// reports that as a permission or busy error rather than EEXIST, and it clears
+// on its own a moment later. It is contention, not a reason to give up.
+const TRANSIENT_MKDIR = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+export function acquireJournalLock(dir: string, opts: AcquireOptions = {}): JournalLock | null {
   const name = `${process.pid}-${randomUUID()}`;
+  const emptyGraceMs = opts.emptyGraceMs ?? 60_000;
   try {
     fs.mkdirSync(dir);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code && TRANSIENT_MKDIR.has(code)) return null;
+    if (code !== 'EEXIST') throw error;
     // Remove only the dead owner's unique entry. A competing reaper cannot
     // remove a successor's entry, and rmdir refuses a nonempty directory.
     let removedDeadOwner = false;
@@ -27,9 +44,12 @@ export function acquireJournalLock(dir: string): JournalLock | null {
       }
     }
     // An empty directory can be a claimant between mkdir and writing its
-    // identity. Give that startup window a minute before recovering it.
+    // identity — or what a release left behind when its rmdir failed (on
+    // Windows, while a scanner still holds the identity it just unlinked).
+    // Recovering one that was a live claimant is safe: the identity check
+    // below makes a resumed claimant back off rather than join the new owner.
     try {
-      if (fs.readdirSync(dir).length || (!removedDeadOwner && Date.now() - fs.statSync(dir).mtimeMs < 60_000)) return null;
+      if (fs.readdirSync(dir).length || (!removedDeadOwner && Date.now() - fs.statSync(dir).mtimeMs < emptyGraceMs)) return null;
       fs.rmdirSync(dir);
       fs.mkdirSync(dir);
     } catch { return null; }
@@ -48,24 +68,95 @@ export function acquireJournalLock(dir: string): JournalLock | null {
     owned: () => fs.existsSync(identity),
     release: () => {
       try { fs.unlinkSync(identity); } catch { return; }
-      try { fs.rmdirSync(dir); } catch { /* a new owner already arrived */ }
+      try { fs.rmdirSync(dir); } catch { /* a new owner arrived, or Windows still holds the identity */ }
     },
   };
 }
 
-/** Serialize snapshots, appends, and read/replace/prune as one transaction. */
-export function mutateJournal<T>(journalPath: string, action: () => T): T {
-  const deadline = Date.now() + 2_000;
-  let lock: JournalLock | null;
-  do {
-    lock = acquireJournalLock(`${journalPath}.mutation`);
-    if (lock) break;
-    if (Date.now() >= deadline) {
-      // An incomplete log cannot safely claim authoritative turn evidence.
-      fs.writeFileSync(`${journalPath}.contended`, 'journal mutation timed out');
-      throw new Error('journal mutation timed out');
+const MUTATION_TIMEOUT_MS = 5_000;
+// The mkdir-to-identity window of a mutation is two syscalls, and a leftover
+// directory must not stall every writer: see acquireJournalLock.
+const EMPTY_MUTATION_DIR_GRACE_MS = 250;
+const POLL_MS = 5;
+// A waiter removes its ticket when it gets the lock or gives up, so no live
+// ticket outlives the longest timeout. Older ones belong to a process that
+// hung or died under a reused pid.
+const ABANDONED_TICKET_MS = 30_000;
+
+const sleep = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+
+/**
+ * Take a numbered place in line. Numbers are wall-clock microseconds, bumped
+ * past every ticket already waiting, so a process that arrives while others
+ * wait always lands behind them — including a holder coming straight back for
+ * its next write, which is what starved everyone else when the lock was a
+ * free-for-all. Null when the line cannot be joined; the caller then competes
+ * unordered, which is how every mutation worked before there was a line.
+ */
+function joinLine(line: string): string | null {
+  try {
+    fs.mkdirSync(line, { recursive: true });
+    let last = 0;
+    for (const entry of fs.readdirSync(line)) {
+      const n = Number(entry.split('-')[0]);
+      if (Number.isSafeInteger(n) && n > last) last = n;
     }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-  } while (true);
+    const key = Math.max(Date.now() * 1000, last + 1);
+    const ticket = `${String(key).padStart(20, '0')}-${process.pid}-${randomUUID()}`;
+    fs.writeFileSync(path.join(line, ticket), '', { flag: 'wx' });
+    return ticket;
+  } catch {
+    return null;
+  }
+}
+
+function alive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+/** Is nobody still waiting ahead of `ticket`? Clears abandoned tickets it passes. */
+function frontOfLine(line: string, ticket: string): boolean {
+  let entries: string[];
+  try { entries = fs.readdirSync(line); } catch { return true; }
+  const now = Date.now();
+  for (const entry of entries.sort()) {
+    if (entry >= ticket) return true;
+    const [keyText, pidText] = entry.split('-');
+    const key = Number(keyText);
+    const pid = Number(pidText);
+    const abandoned = !Number.isSafeInteger(key) || !Number.isSafeInteger(pid) || pid <= 0
+      || now - key / 1000 > ABANDONED_TICKET_MS || !alive(pid);
+    if (!abandoned) return false;
+    try { fs.unlinkSync(path.join(line, entry)); } catch { /* another waiter cleared it */ }
+  }
+  return true;
+}
+
+/** Serialize snapshots, appends, and read/replace/prune as one transaction. */
+export function mutateJournal<T>(journalPath: string, action: () => T, opts: { timeoutMs?: number } = {}): T {
+  const deadline = Date.now() + (opts.timeoutMs ?? MUTATION_TIMEOUT_MS);
+  const line = `${journalPath}.mutation-queue`;
+  const ticket = joinLine(line);
+  let lock: JournalLock | null = null;
+  try {
+    do {
+      if (!ticket || frontOfLine(line, ticket)) {
+        lock = acquireJournalLock(`${journalPath}.mutation`, { emptyGraceMs: EMPTY_MUTATION_DIR_GRACE_MS });
+        if (lock) break;
+      }
+      if (Date.now() >= deadline) {
+        // An incomplete log cannot safely claim authoritative turn evidence.
+        fs.writeFileSync(`${journalPath}.contended`, 'journal mutation timed out');
+        throw new Error('journal mutation timed out');
+      }
+      sleep(POLL_MS);
+    } while (true);
+  } finally {
+    // Leave the line as soon as the lock is ours, so the next waiter can start
+    // polling for it; and on the way out of a timeout, so nobody waits on us.
+    if (ticket) try { fs.unlinkSync(path.join(line, ticket)); } catch { /* already cleared */ }
+  }
   try { return action(); } finally { lock.release(); }
 }

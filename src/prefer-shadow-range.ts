@@ -54,6 +54,13 @@ export interface ShadowRangeMapping {
 
 export interface PreferShadowRangeDeps {
   log?: (event: string, data: Record<string, unknown>) => void;
+  /**
+   * Did commits the turn did not make land between these two shadows (`to`
+   * null = the live worktree)? A pull, checkout, rebase or merge inside the
+   * window rewrites files on disk, and the window's tree delta cannot tell
+   * those bytes from the turn's own.
+   */
+  windowInheritsCommits?: (fromShadow: string, toShadow: string | null, localTurn: number) => boolean;
 }
 
 function blank(pm: ShadowRangeMapping): void {
@@ -145,6 +152,22 @@ export function preferShadowRangeForTurns(
             promptIndex: pm.promptIndex,
           });
         }
+        continue;
+      }
+
+      // A window that spans inherited commits is not the turn's authorship.
+      // Session 9f8501f7 turn 2 ran `git merge --ff-only origin/main`, which
+      // brought in #1593 (24 files, +404/-80). The ledger subtracted it —
+      // `inherited:24, files:4` — and this pass then replaced that row with the
+      // raw window: 26 files, +602/-88. The producers before this one already
+      // exclude inherited commits (the ledger's before-states, the shell
+      // window's foreign-file drop); keep what they built.
+      let inherits = false;
+      try { inherits = !!deps.windowInheritsCommits?.(from, to, local); } catch { inherits = false; }
+      if (inherits) {
+        deps.log?.('shadow window spans commits the turn did not make — kept the capture', {
+          promptIndex: pm.promptIndex, files: win.filesChanged.length,
+        });
         continue;
       }
 

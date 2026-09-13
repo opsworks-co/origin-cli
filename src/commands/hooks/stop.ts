@@ -51,7 +51,7 @@ import os from 'os';
 import path from 'path';
 import { serverRowForLocalTurn, turnIdForServerRow } from '../../turn-index.js';
 import { firstUnanchoredPrompt, markSkippedPromptBaselines, recordPromptShadow } from '../../session-state.js';
-import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, applyLiveLedger, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesNamedInDiff, filterUncommittedDiff, findStateForHook, getWorkingTreeSha, hookLookupSessionId, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
+import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, windowInheritsCommitsForTurn, applyLiveLedger, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesNamedInDiff, filterUncommittedDiff, findStateForHook, getWorkingTreeSha, hookLookupSessionId, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
 
 
 // ─── Debug Logger ─────────────────────────────────────────────────────────
@@ -1245,7 +1245,7 @@ function captureMultiRepoFiles({ state, filesChanged }: { state: SessionState; f
  * files ARE this turn's — `captureMultiRepoFiles` measures each repo against
  * its own per-prompt baseline — and their content lives in a diff this row
  * does not store. Nothing here can re-derive them, so they are kept exactly as
- * they were rather than dropped by a rule that cannot see them.
+ * they were and declared content-unavailable when absent from the stored text.
  */
 function synthesizedTurnFiles(
   storedDiffs: Array<string | null | undefined>,
@@ -1281,7 +1281,7 @@ function synthesizedTurnFiles(
  * field's own rule: "A known change with no bytes is information; a silently
  * missing file is not."
  */
-function budgetedTurnCapture(
+export function budgetedTurnCapture(
   primaryDiff: string,
   uncommittedDiff: string,
   otherRepoFiles: readonly string[],
@@ -1292,13 +1292,17 @@ function budgetedTurnCapture(
     ...primary.omittedFiles, ...primary.partialFiles,
     ...uncommitted.omittedFiles, ...uncommitted.partialFiles,
   ])];
+  // Repository-qualified claims are distinct from local diff paths, even
+  // when both repositories changed a file with the same relative name.
+  const storedFiles = synthesizedTurnFiles([primary.diff, uncommitted.diff], []);
+  for (const f of otherRepoFiles) if (!storedFiles.has(f)) cut.push(f);
   const named = synthesizedTurnFiles([primary.diff, uncommitted.diff], otherRepoFiles);
   for (const f of cut) named.add(f);
   return {
     diff: primary.diff,
     uncommittedDiff: uncommitted.diff,
     filesChanged: [...named],
-    ...(cut.length > 0 ? { contentUnavailableFiles: cut } : {}),
+    ...(cut.length > 0 ? { contentUnavailableFiles: [...new Set(cut)] } : {}),
   };
 }
 
@@ -2293,7 +2297,12 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
     // with git's. Committed-clean turns still get the commit-scoped patch below.
     const fromShadows = preferShadowRangeForTurns(
       state, promptMappings as any, state.repoPath || hookCwd,
-      { log: (event, data) => debugLog('stop', event, data) },
+      {
+        log: (event, data) => debugLog('stop', event, data),
+        windowInheritsCommits: (fromShadow, toShadow, localTurn) => windowInheritsCommitsForTurn(
+          state.repoPath || hookCwd, state as any, fromShadow, toShadow, localTurn,
+        ),
+      },
     );
     if (fromShadows > 0) {
       debugLog('stop', 'turns scoped to their shadow window', {

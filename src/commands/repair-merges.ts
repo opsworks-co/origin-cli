@@ -257,6 +257,12 @@ export function planSessionDiffRepair(
   dropFiles: Set<string>,
 ): SessionDiffRepair | null {
   if (!storedDiff.trim() || dropFiles.size === 0) return null;
+  // A display response may compact or truncate the stored patch. Replacing
+  // the snapshot from that projection would remove work beyond the foreign
+  // sections we can prove. Require the input text to explain its counters.
+  const counted = countDiff(storedDiff);
+  if (counted.linesAdded !== storedTotals.linesAdded
+    || counted.linesRemoved !== storedTotals.linesRemoved) return null;
   const sections = storedDiff.split(/^(?=diff --git )/m).filter((p) => p.trim());
   const kept: string[] = [];
   const dropped = new Set<string>();
@@ -333,8 +339,12 @@ export function planEditsJsonRepair(
   const out: EditsRepair[] = [];
   if (dropFiles.size === 0) return out;
   for (const row of rows) {
+    // Omitted is not empty: the session detail endpoint does not expose
+    // editsJson. Never manufacture an empty authoritative capture from it.
+    if (row.editsJson === undefined) continue;
     let cap: any = null;
-    try { cap = row.editsJson ? JSON.parse(row.editsJson) : null; } catch { cap = null; }
+    try { cap = row.editsJson ? JSON.parse(row.editsJson) : null; } catch { continue; }
+    if (cap !== null && !Array.isArray(cap?.edits)) continue;
     const edits: any[] = Array.isArray(cap?.edits) ? cap.edits : [];
     const keptEdits = edits.filter((e) => !dropFiles.has(e?.file));
     const files = row.filesChanged || [];
@@ -496,13 +506,19 @@ export async function repairMergesCommand(
   // a stored capture does not — it removes named files git proves came from
   // another branch. So the two are separable, and on a session whose commit
   // attribution has gone bad the inference is the half you want to skip.
-  const skipTurnRules = opts.headerOnly || opts.skipTurnRules;
+  const missingCaptures = (session.promptChanges || []).some((pc: any) => pc.editsJson === undefined);
+  if (missingCaptures && !opts.headerOnly) {
+    console.log('  Turn repair unavailable: the API response omits stored editsJson; refusing to overwrite captures from display data.');
+  }
+  const skipTurnRules = opts.headerOnly || opts.skipTurnRules || missingCaptures;
   const plan = skipTurnRules
     ? {
       repairs: [] as MergeRepair[],
       skipped: [{
         promptIndex: -1,
-        reason: opts.headerOnly
+        reason: missingCaptures && !opts.headerOnly
+          ? 'stored capture evidence unavailable — turn rules disabled'
+          : opts.headerOnly
           ? '--header-only: turn rows left alone'
           : '--skip-turn-rules: captures cleaned, but no row rewritten from inference',
       }],
@@ -528,11 +544,18 @@ export async function repairMergesCommand(
       foreign,
     );
   const storedSessionDiff = session.sessionDiff || {};
-  const headerPlan = planSessionDiffRepair(
+  const headerCounts = countDiff(storedSessionDiff.diff || '');
+  const incompleteHeader = !!storedSessionDiff.diffTruncated
+    || headerCounts.linesAdded !== (storedSessionDiff.linesAdded || 0)
+    || headerCounts.linesRemoved !== (storedSessionDiff.linesRemoved || 0);
+  const headerPlan = incompleteHeader ? null : planSessionDiffRepair(
     storedSessionDiff.diff || '',
     { linesAdded: storedSessionDiff.linesAdded || 0, linesRemoved: storedSessionDiff.linesRemoved || 0 },
     foreign,
   );
+  if (incompleteHeader) {
+    console.log('  Header repair unavailable: the returned patch is truncated or does not explain its totals; refusing a snapshot replacement.');
+  }
 
   console.log(`Session ${sessionId} — ${stored.length} stored turns, ${merges.length} merge commit(s)\n`);
   for (const m of merges) {
@@ -549,7 +572,12 @@ export async function repairMergesCommand(
   if (plan.skipped.length > 0 && (plan.repairs.length > 0 || headerPlan)) console.log('');
 
   if (plan.repairs.length === 0 && !headerPlan && editsRepairs.length === 0) {
-    console.log('Nothing to repair.');
+    if (missingCaptures || incompleteHeader) {
+      console.log('No safe repair proposed. Full stored capture data is required; this does not mean the session is correct.');
+      process.exitCode = 1;
+    } else {
+      console.log('Nothing to repair.');
+    }
     return;
   }
 

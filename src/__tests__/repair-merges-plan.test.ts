@@ -173,6 +173,13 @@ describe('planSessionDiffRepair', () => {
     expect(planSessionDiffRepair(stored, { linesAdded: 290, linesRemoved: 69 }, new Set())).toBeNull();
   });
 
+  it('refuses a projected patch whose counts do not explain the header', () => {
+    // The live 51995e1c display response contains fewer sign lines than
+    // its header. A snapshot replacement would erase the omitted work too.
+    expect(planSessionDiffRepair(stored, { linesAdded: 600, linesRemoved: 100 },
+      new Set(['packages/cli/src/final-state-blame.ts']))).toBeNull();
+  });
+
   it('is null when the result would not be smaller', () => {
     // Stored totals already lower than the text — something else is wrong and
     // this repair must not "correct" it upward.
@@ -237,5 +244,15 @@ describe('planEditsJsonRepair', () => {
 
   it('does nothing when there is no foreign set', () => {
     expect(planEditsJsonRepair([row()], new Set())).toHaveLength(0);
+  });
+
+  it('does not interpret an omitted capture as an empty capture', () => {
+    expect(planEditsJsonRepair([row({ editsJson: undefined })], new Set([FOREIGN]))).toEqual([]);
+  });
+
+  it('does not replace malformed capture evidence with an empty capture', () => {
+    for (const editsJson of ['{broken', '{}']) {
+      expect(planEditsJsonRepair([row({ editsJson })], new Set([FOREIGN]))).toEqual([]);
+    }
   });
 });

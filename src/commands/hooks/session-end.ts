@@ -56,7 +56,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { localTurnForServerRow, rebaseToServerRows, turnIdForServerRow } from '../../turn-index.js';
-import { applyAuthoredTotals, currentSessionWorkTree, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, filterUncommittedDiff, findStateForHook, hookLookupSessionId, liveCaptureEnabled, normalizeWorkspaceRoot, recordShellWindowEdits, sessionAuthoredSnapshot, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
+import { applyAuthoredTotals, currentSessionWorkTree, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, windowInheritsCommitsForTurn, filterUncommittedDiff, findStateForHook, hookLookupSessionId, liveCaptureEnabled, normalizeWorkspaceRoot, recordShellWindowEdits, sessionAuthoredSnapshot, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
 
 
 /**
@@ -1100,7 +1100,12 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
     try {
       const fromShadows = preferShadowRangeForTurns(
         state, promptMappings as any, state.repoPath || '',
-        { log: (event, data) => debugLog('session-end', event, data) },
+        {
+          log: (event, data) => debugLog('session-end', event, data),
+          windowInheritsCommits: (fromShadow, toShadow, localTurn) => windowInheritsCommitsForTurn(
+            state.repoPath || '', state, fromShadow, toShadow, localTurn,
+          ),
+        },
       );
       if (fromShadows > 0) {
         debugLog('session-end', 'turns scoped to their shadow window', {

@@ -29,7 +29,7 @@ import { capDiff } from './diff-budget.js';
 import { applyLedgerToMappings } from './capture-from-ledger.js';
 import { preferCommitPatchForCommittedTurns } from './commit-patch-for-committed-turn.js';
 import { preferShadowRangeForTurns } from './prefer-shadow-range.js';
-import { inheritedBaselineForTurn, inheritedBeforeStatesForTurn } from './commands/hooks.js';
+import { inheritedBaselineForTurn, inheritedBeforeStatesForTurn, windowInheritsCommitsForTurn } from './commands/hooks.js';
 import { readJournalEntries, journalPathsForTag } from './write-journal-watch.js';
 import { ensureInProcessJournal, stateLedgerIsContended } from './ledger-producer.js';
 import { stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
@@ -730,7 +730,11 @@ async function pushInflightDiff(): Promise<void> {
     });
     // Empty shadow window: leftover HEAD..worktree is not this turn. Changed
     // window: git hunks, not a journal fragment at line 1.
-    preferShadowRangeForTurns(state as any, [hbMapping as any], repoPath);
+    preferShadowRangeForTurns(state as any, [hbMapping as any], repoPath, {
+      windowInheritsCommits: (fromShadow, toShadow, localTurn) => windowInheritsCommitsForTurn(
+        repoPath, state as any, fromShadow, toShadow, localTurn,
+      ),
+    });
     // Same pass Stop runs: a committed turn's diff is the commit patch, not
     // `baseline..HEAD`. Without this, a 30s tick after post-commit overwrites
     // the badge-matching row with the fast-forward range (session 761adbe8).
