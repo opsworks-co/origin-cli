@@ -26,6 +26,7 @@ import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { foldStopRows } from './helpers/fold-stop-rows.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -226,9 +227,10 @@ describe.skipIf(!haveDist)('cursor: the same chat stays one session across an id
 
     const stop2 = await run('stop', { cwd: repo, roots: [repo], conversation: CONV, transcript, payload: { status: 'completed' } });
     expect(stop2.code, stop2.stderr).toBe(0);
-    const rows = patchesTo(sessionId).filter((h) => Array.isArray(h.body?.promptChanges)).map((h) => h.body.promptChanges);
-    const last = rows[rows.length - 1] || [];
-    expect(last.map((r: any) => r.promptIndex).sort()).toEqual([0, 1]);
+    const rows = foldStopRows(
+      patchesTo(sessionId).filter((h) => Array.isArray(h.body?.promptChanges)).map((h) => h.body.promptChanges),
+    );
+    expect(rows.map((r: any) => r.promptIndex)).toEqual([0, 1]);
     expect(startHits().length).toBe(1);
   }, 120_000 * WINDOWS_SLOWDOWN);
 

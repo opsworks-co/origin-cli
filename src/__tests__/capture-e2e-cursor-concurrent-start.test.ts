@@ -227,22 +227,31 @@ async function raceOneChat(label: string, delayMs: number): Promise<{ sessionId:
   return { sessionId, stateFile, wt, conv: CONV, transcript, logFrom };
 }
 
-// HELD BACK from the Windows sweep — the one file of the 15 that did not earn
-// its place. Windows record: pass, pass, FAIL across three runs, against 13
-// files that passed all three. macOS: 4 for 4.
+// This was held back from the Windows sweep after an intermittent lost first
+// prompt. #1577 closes the stale final-write window that caused it, so run the
+// same built-binary race on native Windows rather than leaving its most
+// important session-start path unguarded.
 //
 //   AssertionError: the prompt filed against the reservation must survive:
 //     expected [] to deeply equal [ 'hello from the worktree' ]
 //
-// That is a LOST PROMPT, not a mis-sorted one, in exactly the scenario this
-// file is named for — so it may be a real Windows capture defect rather than a
-// flaky test, and #1568 tracks tracing the reservation fold before anyone
-// assumes the test is at fault. Enabling it now would put a rotating red on
-// the Windows leg for every other PR, which is the opposite of what lifting
-// these skips is for.
+// RE-HELD on Windows. #1577 narrowed the stale final-write window in
+// session-start and #1580 lifted this skip on the strength of ONE green
+// Windows run. It failed again on #1579:
 //
-// This is a deliberate, evidenced, single-file exception with an owner — not
-// the blanket `!posix` that helpers/windows-e2e.ts exists to complain about.
+//   AssertionError: the prompt filed against the reservation must survive:
+//     expected [] to deeply equal [ 'hello from the worktree' ]
+//
+// Windows record, before #1577: 3 runs, 1 failure. After #1577 + the
+// un-hold: 4 runs, 1 failure. Roughly UNCHANGED — #1577 closed a real
+// window but not the one that loses this prompt. #1568 is reopened with
+// the evidence.
+//
+// Lifting a hold wants several consecutive green runs on a race that only
+// opens on a slow host; it got one, and #1579 — an unrelated Cursor replay
+// fix — paid for it with a red leg. Re-held so the Windows signal means
+// something again, NOT because the test is wrong: the assertion is a lost
+// prompt in the exact scenario this file is named for.
 describe.skipIf(!haveDist || isWindows)('cursor: session-start and the first prompt race, one session (built binary)', () => {
   beforeAll(async () => {
     await startFakeApi();
@@ -280,6 +289,8 @@ describe.skipIf(!haveDist || isWindows)('cursor: session-start and the first pro
     expect(startHits().length).toBe(1);
     const rows = patchesTo(r.sessionId).filter((h) => Array.isArray(h.body?.promptChanges)).map((h) => h.body.promptChanges);
     expect(rows.length, 'Stop must land its capture on the registered row').toBeGreaterThan(0);
+    // One-turn session: both Stop shapes are `[0]`, so the last send is the
+    // whole session either way. Left as a last-payload read on purpose.
     expect(rows[rows.length - 1].map((x: any) => x.promptIndex)).toEqual([0]);
     expect(readState(r.stateFile).sessionId).toBe(r.sessionId);
   }, 120_000 * WINDOWS_SLOWDOWN);

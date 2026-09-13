@@ -31,14 +31,28 @@ import path from 'path';
 import { startWriteJournal } from '../write-journal-watch.js';
 
 let dir: string;
+let journalDir: string;
 let journal: string;
 
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-journal-ref-'));
-  journal = path.join(dir, 'j.jsonl');
+  // The journal lives OUTSIDE the watched tree, as it always does in
+  // production: journalPathsForTag puts every journal, lock and lease under
+  // ~/.origin/journals, while the watcher watches the repo.
+  //
+  // Keeping it inside `dir` made the handle counts below measure more than the
+  // watcher. The journal's writer lease is a DIRECTORY created beside it
+  // (`${journal}.writer/`, holding an identity file) before fs.watch starts,
+  // so it sat inside the recursive watch. Linux counts watched entries that
+  // macOS does not — the probe below records the same divergence — so the
+  // counts picked up the lease and read `expected 7 to be 5` on the Linux
+  // runner only, while macOS stayed green.
+  journalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-journal-store-'));
+  journal = path.join(journalDir, 'j.jsonl');
 });
 afterEach(() => {
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  try { fs.rmSync(journalDir, { recursive: true, force: true }); } catch { /* best effort */ }
 });
 
 /**

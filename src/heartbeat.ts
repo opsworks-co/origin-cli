@@ -766,6 +766,8 @@ async function pushInflightDiff(): Promise<void> {
             // mix. `uncommittedDiff` is sent even when empty so a ledger-owned
             // turn CLEARS the stale working-tree diff a previous tick stored;
             // the server distinguishes "field absent" from "field empty".
+            ...((hbMapping as any).turnWindowCaptured
+              ? { turnWindowCaptured: true, contentAuthoritative: true } : {}),
             filesChanged: hbMapping.filesChanged,
             diff: hbMapping.diff,
             uncommittedDiff: hbMapping.uncommittedDiff ?? '',
@@ -776,7 +778,7 @@ async function pushInflightDiff(): Promise<void> {
               ? { contentUnavailableFiles: hbMapping.contentUnavailableFiles }
               : {}),
             checkpointType: 'auto',
-            commitSha: heartbeatCommitSha,
+            commitSha: (hbMapping as any).turnWindowCaptured && !String(hbMapping.diff || '').trim() ? null : heartbeatCommitSha,
             treeSha: heartbeatTreeSha,
           },
         ],

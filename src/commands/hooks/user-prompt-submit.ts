@@ -1666,7 +1666,11 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
         promptIndexes: unanchored, throughIndex: state.prompts.length - 1,
       });
     }
-    recordPromptShadow(state, state.prompts.length - 1, state.prePromptSha);
+    recordPromptShadow(state, state.prompts.length - 1, state.prePromptSha, {
+      // HEAD is a complete baseline only when the prompt began clean. A
+      // failed dirty-tree snapshot must never authorize an empty correction.
+      completeBaseline: Array.isArray(state.prePromptDirtyFiles) && state.prePromptDirtyFiles.length === 0,
+    });
     // Stable identity for this turn, assigned once and never renumbered. The
     // server keys the PromptChange row on it, so a later reshuffle of the
     // prompt LIST cannot slide one turn's diff onto another turn's row.

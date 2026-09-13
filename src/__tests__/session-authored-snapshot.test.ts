@@ -18,6 +18,7 @@ import os from 'os';
 import path from 'path';
 import { commitAuthoredDelta, renderAuthoredCommits } from '../history-backfill.js';
 import { sessionAuthoredSnapshot, applyAuthoredTotals } from '../commands/hooks/post-commit.js';
+import { hasDuplicateFileSections } from '../applyable-turn-diff.js';
 
 let repo: string;
 const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, encoding: 'utf-8' }).trim();
@@ -117,6 +118,26 @@ describe('commitAuthoredDelta', () => {
 });
 
 describe('sessionAuthoredSnapshot', () => {
+  it('renders two commits to one file as one session-header section', () => {
+    git('checkout', '-q', '-b', 'repeated-header-section', sessionStart);
+    try {
+      fs.writeFileSync(path.join(repo, 'base.ts'), 'export const BASE = 2;\n');
+      git('add', '-A'); git('commit', '-q', '-m', 'base first edit');
+      const first = git('rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(repo, 'base.ts'), 'export const BASE = 3;\n');
+      git('add', '-A'); git('commit', '-q', '-m', 'base second edit');
+      const second = git('rev-parse', 'HEAD');
+
+      const snap = sessionAuthoredSnapshot(repo, stateWith([first, second]));
+      expect(hasDuplicateFileSections(snap.diff)).toBe(false);
+      expect(snap.diff.match(/^diff --git a\/base\.ts b\/base\.ts$/gm)).toHaveLength(1);
+      expect(snap.diff).toContain('+export const BASE = 3;');
+      expect(snap.diff).not.toContain('+export const BASE = 2;');
+    } finally {
+      git('checkout', '-q', 'main');
+    }
+  });
+
   it('renders owned commits by their authored contribution — a merge adds none of the branch it absorbed', () => {
     const snap = sessionAuthoredSnapshot(repo, stateWith([ourSha, cleanMergeSha]));
     expect(snap.source).toBe('owned');
@@ -201,6 +222,19 @@ describe('renderAuthoredCommits', () => {
     expect(own.filesChanged.sort()).toEqual(['ours.ts', 'shared.ts']);
     expect(own.diff).not.toContain('THEIRS_');
     expect(own.linesAdded).toBe(2);
+  });
+
+  it('does not concatenate two commit patches for the same file', () => {
+    git('checkout', '-q', 'repeated-header-section');
+    try {
+      const first = git('rev-parse', 'HEAD~1');
+      const second = git('rev-parse', 'HEAD');
+      const own = renderAuthoredCommits(repo, [first, second]);
+      expect(hasDuplicateFileSections(own.diff)).toBe(false);
+      expect(own.diff.match(/^diff --git a\/base\.ts b\/base\.ts$/gm)).toHaveLength(1);
+    } finally {
+      git('checkout', '-q', 'main');
+    }
   });
 });
 

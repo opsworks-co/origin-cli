@@ -106,7 +106,9 @@ export interface PromptChange {
    * wrong against the ledger, which sees shell writes editsJson cannot and
    * needs no hunk stitching. This is how it tells them apart.
    */
-  diffSource?: 'ledger';
+  diffSource?: 'ledger' | 'turn-window';
+  /** The content unit can replace an earlier capture, including with empty. */
+  contentAuthoritative?: boolean;
 }
 
 /** Bump to 2 when shipping editsJson / commit refs; importers gate richer

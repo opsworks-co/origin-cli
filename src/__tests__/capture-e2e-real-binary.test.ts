@@ -28,7 +28,7 @@ import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { verifyTurn, parseUnifiedDiff } from '../capture-verify.js';
-import { WINDOWS_SLOWDOWN, isWindows } from './helpers/windows-e2e.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -221,28 +221,12 @@ async function killJournalWatcher(): Promise<void> {
 
 // ─── the session ─────────────────────────────────────────────────────────────
 
-// HELD BACK from the Windows sweep — the second of two files that did not
-// earn their place, and the more painful one, because this IS the capture
-// gate. Windows record: fail / fail / pass / fail, on TWO unrelated
-// assertions, against 13 files that are 4 for 4.
-//
-//   runs 1-2  turn 5  — #1561, the test read the last Stop payload
-//                       instead of folding them. A real test bug, fixed in
-//                       #1564, and it passed in run 3.
-//   run 4     turn 4  — "turn 4's own write is missing from its evidence".
-//                       A SHELL WRITE absent from the turn, which is the
-//                       opposite shape to #1561 and may be a genuine capture
-//                       loss on slow Windows hosts. Tracked in #1570.
-//
-// One green run was taken as proof this file was clean after #1564. It was
-// not — run 4 found a different assertion. That is the same weak-evidence
-// mistake the sweep's own PR warns about, made about this very file.
-//
-// Skipping it means the native-Windows job does NOT exercise the capture
-// gate, which is the single file most worth running there. That is a real
-// loss, deliberately taken so the leg can be green on the 13 clean files
-// instead of red on a rotating cast. #1570 is the debt; do not let it idle.
-describe.skipIf(!haveDist || isWindows)('capture end to end through the built binary', () => {
+// Re-enabled after exclusive journal writer ownership and serialization of
+// append/compaction. Historical Windows failures: fail / fail / pass / fail
+// (#1570); the last failure lost turn 4's shell write. Keep this gate running
+// to collect fresh Windows evidence; a local pass does not establish that the
+// historical Windows failure is resolved.
+describe.skipIf(!haveDist)('capture end to end through the built binary', () => {
   let tmp = '';
 
   beforeAll(async () => {
@@ -347,7 +331,7 @@ describe.skipIf(!haveDist || isWindows)('capture end to end through the built bi
     expect(t1.diff).not.toContain('+main()');
     expect(t1.linesAdded).toBe(2);
     expect(t1.linesRemoved).toBe(1);
-    expect(t1.diffSource).toBe('ledger');
+    expect(t1.diffSource).toBe('turn-window');
     expect(t1.turnId).toMatch(/^t_/);
     const parsed = parseUnifiedDiff(t1.diff);
     expect(parsed.files.find((f) => f.file === 'app.py')?.isNew).toBe(false);

@@ -29,7 +29,7 @@ import { pushSessionBranch, writeSessionFiles } from '../../local-entrypoint.js'
 import type { PromptChange, PromptEntry, SessionWriteData } from '../../local-entrypoint.js';
 import { enrichDecisionsForSession, isSubstantiveMemory, memoryBriefSignature, memoryUpdateTrigger, readAllSessionMemory, readMemoryBrief, shouldWriteMemoryOnSessionEnd, summarizeFromCommitSubjects, writeSessionMemory } from '../../memory.js';
 import type { SessionMemoryEntry } from '../../memory.js';
-import { parseMarkersFromTranscript, parseMarkersFromTranscriptPath } from '../../origin-markers.js';
+import { closesFromMarkers, parseMarkersFromTranscript, parseMarkersFromTranscriptPath, parseOriginMarkers } from '../../origin-markers.js';
 import type { OriginMarkers } from '../../origin-markers.js';
 import { toRepoRelativePath } from '../../paths.js';
 import { anchorEditPositions, backfillWriteBaselines, buildCapturesFromLedger, capturePromptEdits, dropOutOfRepoEdits, mergeLedgerWithTranscript } from '../../prompt-capture/index.js';
@@ -43,7 +43,7 @@ import type { SessionState } from '../../session-state.js';
 import { memorySummaryMode, synthesizeSessionSummary } from '../../session-summary.js';
 import { samePath, sessionWorkTree, shellWindowTarget } from '../../session-worktree.js';
 import { addTodosFromSession, readMemoryTodos } from '../../todo.js';
-import { recordPendingClosures } from '../../todo-sweep.js';
+import { claimSessionCloses } from '../../todo-sweep.js';
 import { estimateCost, extractPromptFileMappings, formatTranscriptForDisplay, parseTranscript } from '../../transcript.js';
 import type { ParsedTranscript, PromptFileMapping } from '../../transcript.js';
 import { durableEndSession } from '../../update-queue.js';
@@ -342,7 +342,7 @@ export function buildSessionWriteData(opts: {
     // turn actually wrote, so re-deriving from git here would replace an
     // observation with a guess, which is the one thing stage 2 forbids.
     const ledgerOwned = (m as { ledgerOwned?: boolean }).ledgerOwned === true
-      || (m as { diffSource?: string }).diffSource === 'ledger';
+      || ['ledger', 'turn-window'].includes((m as { diffSource?: string }).diffSource || '');
     if (!ledgerOwned && (!diff.trim() || soleForCommit) && commitSha && /^[0-9a-f]{7,40}$/i.test(commitSha) && repoRoot) {
       try {
         const out = execFileSync(
@@ -386,7 +386,8 @@ export function buildSessionWriteData(opts: {
         : {}),
       // Provenance travels WITH the content it describes, so the read path can
       // tell an observed diff from a reconstructed one.
-      ...((m as { diffSource?: 'ledger' }).diffSource ? { diffSource: 'ledger' as const } : {}),
+      ...((m as { contentAuthoritative?: boolean }).contentAuthoritative ? { contentAuthoritative: true } : {}),
+      ...((m as { diffSource?: 'ledger' | 'turn-window' }).diffSource ? { diffSource: (m as { diffSource?: 'ledger' | 'turn-window' }).diffSource } : {}),
     };
   });
 
@@ -1566,16 +1567,21 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
     // that already contains this session's own leftovers — a session that
     // opened and closed the same loop should not leave it open.
     //
-    // Recorded as PENDING. At session end the work is in a working tree or on a
-    // branch; the promotion to closed happens once it is on the default branch
-    // (todo-sweep.ts). Nothing disappears from `origin todo list` here.
+    // Stop records the same claim mid-session so a long Cursor chat does not
+    // wait for End. Recorded as PENDING; promotion to closed happens once the
+    // work is on the default branch (todo-sweep.ts). Nothing disappears from
+    // `origin todo list` here unless those SHAs have already landed.
     try {
-      const closes = sessionMarkers?.closes || [];
+      const closes = closesFromMarkers(
+        sessionMarkers,
+        parseMarkersFromTranscript(parsed.transcript),
+        parseOriginMarkers((state.promptResponses || []).join('\n')),
+      );
       if (closes.length > 0) {
-        const recorded = recordPendingClosures({
+        const recorded = claimSessionCloses({
           repoPath: state.repoPath,
           sessionId: state.sessionId,
-          markers: closes,
+          closes,
           openTodos: readMemoryTodos(state.repoPath).map((t) => ({ id: t.id, text: t.text })),
           shas: gitCapture.commitShas,
         });

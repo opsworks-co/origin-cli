@@ -20,16 +20,18 @@
  * throw, wholesale replace. Runs AFTER the ledger and BEFORE the commit
  * patch, so a committed-clean turn still gets git's commit-scoped rendering.
  */
-import { captureShadowWindow } from './git-capture.js';
+import { captureShadowWindow, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { fitDiffToBudget } from './diff-budget.js';
 import { localTurnForServerRow } from './turn-index.js';
 
 export interface ShadowRangeState {
   /** LOCAL-numbered: index L is this launch's turn L. */
-  promptShadows?: Array<{ promptIndex: number; shadowSha: string }>;
+  promptShadows?: Array<{ promptIndex: number; shadowSha: string; completeBaseline?: boolean }>;
   /** Server row of this launch's turn 0 — see turn-index.ts. */
   promptIndexBase?: number | null;
   /** LOCAL prompt list — the last index is the turn still in flight. */
   prompts?: unknown[];
+  contendingSessionIds?: string[];
 }
 
 export interface ShadowRangeMapping {
@@ -41,8 +43,13 @@ export interface ShadowRangeMapping {
   linesRemoved?: number;
   chatOnly?: boolean;
   contentUnavailableFiles?: string[];
-  /** Set by applyLedgerToMappings — this row came from the write journal. */
-  diffSource?: 'ledger';
+  /** The source that establishes this turn's content and file coverage. */
+  diffSource?: 'ledger' | 'turn-window';
+  /** A complete snapshot window, not a partial transcript or a metadata update. */
+  turnWindowCaptured?: boolean;
+  contentAuthoritative?: boolean;
+  editsJson?: string;
+  commitSha?: string | null;
 }
 
 export interface PreferShadowRangeDeps {
@@ -56,7 +63,16 @@ function blank(pm: ShadowRangeMapping): void {
   pm.linesAdded = 0;
   pm.linesRemoved = 0;
   pm.chatOnly = true;
-  delete pm.contentUnavailableFiles;
+  pm.contentUnavailableFiles = [];
+  pm.commitSha = null;
+}
+
+/** Empty and nonempty answers use the same replacement contract on the wire. */
+function markWindowCaptured(pm: ShadowRangeMapping): void {
+  pm.turnWindowCaptured = true;
+  pm.contentAuthoritative = true;
+  // A partial agent extractor must not replace a complete tree delta on read.
+  pm.diffSource = 'turn-window';
 }
 
 /**
@@ -70,6 +86,7 @@ export function preferShadowRangeForTurns(
   repoPath: string,
   deps: PreferShadowRangeDeps = {},
 ): number {
+  if (state.contendingSessionIds?.length) return 0;
   const shadows = state.promptShadows || [];
   if (shadows.length === 0 || !repoPath || !Array.isArray(mappings)) return 0;
   const currentLocal = Number.isInteger(state.prompts?.length)
@@ -82,15 +99,19 @@ export function preferShadowRangeForTurns(
       if (!pm || !Number.isInteger(pm.promptIndex)) continue;
       const local = localTurnForServerRow(pm.promptIndex, state.promptIndexBase);
       if (local === null) continue;
-      const from = shadows.find((s) => s.promptIndex === local)?.shadowSha || null;
-      const to = shadows.find((s) => s.promptIndex === local + 1)?.shadowSha || null;
+      const start = shadows.find((s) => s.promptIndex === local);
+      if (start?.completeBaseline === false) continue;
+      const from = start?.shadowSha || null;
+      const next = shadows.find((s) => s.promptIndex === local + 1);
+      if (next?.completeBaseline === false) continue;
+      const to = next?.shadowSha || null;
       // A completed turn without the next shadow cannot be scoped to the
       // current worktree — that tree includes later turns. Only the in-flight
       // turn (no next shadow yet) diffs against the live tree.
       const end = to || (local === currentLocal ? null : undefined);
       if (!from || end === undefined) continue;
 
-      const win = captureShadowWindow(repoPath, from, end);
+      const win = captureShadowWindow(repoPath, from, end, { completeBaseline: start?.completeBaseline });
       if (win.status === 'identical-sha' || win.status === 'unavailable' || win.status === 'not-shadow') {
         continue;
       }
@@ -104,16 +125,20 @@ export function preferShadowRangeForTurns(
         // contains, reads empty, and blanking would delete the very edit that
         // found the turn — `capture-e2e-cursor-binary` turn 2 exactly.
         //
-        // The ledger does not guess: it has the journal marks bounding this
+        // Legacy snapshots do not record boundary completeness. Preserve the
+        // ledger for those; an explicitly complete start and end can prove
+        // zero net work even when an earlier reconstruction carried content.
+        // The ledger has the journal marks bounding this
         // turn, so where it produced the row, it outranks the window. The
         // 4b51bd70 dump this pass exists to drop carries no such evidence.
-        if (pm.diffSource === 'ledger' && had) {
+        if (pm.diffSource === 'ledger' && had && start?.completeBaseline !== true) {
           deps.log?.('shadow window empty but the ledger captured this turn — kept', {
             promptIndex: pm.promptIndex,
           });
           continue;
         }
         blank(pm);
+        markWindowCaptured(pm);
         if (had) {
           changed += 1;
           deps.log?.('shadow window empty — dropped leftover HEAD..worktree dump', {
@@ -123,15 +148,30 @@ export function preferShadowRangeForTurns(
         continue;
       }
 
+      markWindowCaptured(pm);
       const prevDiff = pm.diff || '';
       const prevFiles = Array.isArray(pm.filesChanged) ? pm.filesChanged.join('\0') : '';
+      // A window is authoritative about WHICH files moved, but its diff is a
+      // whole tree delta and can exceed the per-prompt budget. Cutting it
+      // without saying so produces a row that names a file it cannot show —
+      // the shape `capture-verify` flags as `files_without_content`, and the
+      // one the legacy path avoids by declaring the shortfall (see
+      // budgetedTurnCapture in hooks/stop.ts).
+      //
+      // So fit the diff, then name what did not fit. `filesChanged` keeps the
+      // window's full list — the files are real either way; only their content
+      // is missing — and `contentUnavailableFiles` is what lets the row
+      // explain itself instead of reading as a broken capture.
+      const budgeted = fitDiffToBudget(win.diff || '', MAX_PROMPT_DIFF_LEN);
+      const cut = [...new Set([...budgeted.omittedFiles, ...budgeted.partialFiles])];
       pm.filesChanged = win.filesChanged;
-      pm.diff = win.diff;
+      pm.diff = budgeted.diff;
       pm.uncommittedDiff = '';
       pm.linesAdded = win.linesAdded;
       pm.linesRemoved = win.linesRemoved;
+      pm.contentUnavailableFiles = cut;
       if (win.filesChanged.length > 0 || win.diff) delete pm.chatOnly;
-      if (prevDiff !== win.diff || prevFiles !== win.filesChanged.join('\0')) {
+      if (prevDiff !== budgeted.diff || prevFiles !== win.filesChanged.join('\0')) {
         changed += 1;
         deps.log?.('shadow window replaced reconstructed diff with git', {
           promptIndex: pm.promptIndex,

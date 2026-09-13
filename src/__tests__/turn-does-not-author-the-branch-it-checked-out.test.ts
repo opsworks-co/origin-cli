@@ -262,3 +262,61 @@ describe('a turn does not author the branch it checked out', () => {
     expect(pm.diff).not.toContain('prefer-shadow-range');
   });
 });
+
+describe('leaving a branch does not become authored deletions', () => {
+  it('does not replace a dirty shadow for ordinary work on the same branch', () => {
+    write('src/stop.ts', lines(20, 'stop') + 'const preexisting = true;\n');
+    git('add', '.');
+    const tree = git('write-tree');
+    const shadow = git('commit-tree', tree, '-p', 'HEAD', '-m', 'origin shadow prompt-0');
+    write('src/stop.ts', lines(20, 'stop') + 'const preexisting = true;\nconst mine = true;\n');
+    git('add', '.'); git('commit', '-q', '-m', 'my edit');
+    const state = stateFor(shadow, git('rev-parse', 'HEAD'));
+    expect(inheritedBaselineForTurn(repo, state, shadow, 0)).toBeNull();
+  });
+
+  it('declines a single replacement baseline when the turn already committed on the branch it left', () => {
+    git('checkout', '-q', 'pr1538');
+    const shadow = shadowAt('pr1538');
+    write('src/mine.ts', 'const mine = true;\n');
+    git('add', '.'); git('commit', '-q', '-m', 'own work before leaving');
+    const own = git('rev-parse', 'HEAD');
+    git('checkout', '-q', 'main');
+    expect(inheritedBaselineForTurn(repo, stateFor(shadow, own), shadow, 0)).toBeNull();
+  });
+
+  for (const committed of [false, true]) {
+    it(`keeps only edits after switching back to main (${committed ? 'committed' : 'uncommitted'})`, () => {
+      git('checkout', '-q', 'pr1538');
+      const shadow = shadowAt('pr1538');
+      git('checkout', '-q', 'main');
+      const destination = git('rev-parse', 'HEAD');
+      write('src/stop.ts', lines(20, 'stop') + 'export const actualWork = true;\n');
+      if (committed) { git('add', '.'); git('commit', '-q', '-m', 'actual turn work'); }
+      const state = stateFor(shadow, committed ? git('rev-parse', 'HEAD') : '');
+      if (!committed) { state.commitTurns = []; state.sessionCommitShas = []; }
+      expect(inheritedBaselineForTurn(repo, state, shadow, 0)).toBe(destination);
+      const before = inheritedBeforeStatesForTurn(repo, state, shadow, 0);
+      expect(before.has('src/prefer-shadow-range.ts')).toBe(true);
+      expect(before.get('src/prefer-shadow-range.ts')).toBeNull();
+
+      const snapshotDir = path.join(home, 'snapshots');
+      fs.mkdirSync(snapshotDir);
+      const at = Date.parse(SESSION_STARTED_AT) + 60_000;
+      const journalPath = path.join(home, 'journal.jsonl');
+      fs.writeFileSync(journalPath, serializeTurnMark({ turnId: TURN, at })
+        + ['src/prefer-shadow-range.ts', 'src/prefer-shadow-range.test.ts', 'src/heartbeat.ts']
+          .map((file) => serializeRecord({ file, at: at + 1, gone: true })).join('')
+        + serializeRecord({ file: 'src/stop.ts', at: at + 2,
+          hash: putSnapshot(snapshotDir, fs.readFileSync(path.join(repo, 'src/stop.ts'), 'utf-8')).hash,
+          retained: true }));
+      state.writeJournalPath = journalPath;
+      state.writeSnapshotDir = snapshotDir;
+      const pm: any = { promptIndex: 0, filesChanged: [], linesAdded: 0, linesRemoved: 0, diff: '' };
+      expect(applyLedgerCaptures(state, [pm])).toBe(1);
+      expect(pm.filesChanged).toEqual(['src/stop.ts']);
+      expect([pm.linesAdded, pm.linesRemoved]).toEqual([1, 0]);
+      expect(pm.diff).toContain('+export const actualWork = true;');
+    });
+  }
+});

@@ -14,6 +14,7 @@ import { debugLog } from '../../debug-log.js';
 import { readDevinDesktopSessions, selectDevinSessionForRepo } from '../../devin-desktop.js';
 import type { DevinDesktopSession } from '../../devin-desktop.js';
 import { capDiff, fitDiffToBudget } from '../../diff-budget.js';
+import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
 import { MAX_PROMPT_DIFF_LEN, capCommitMessage, captureGitState, commitDiffScopedToPrompt, commitLineCounts } from '../../git-capture.js';
 import { writeGitNotes } from '../../git-notes.js';
 import { BACKFILL_TIMEOUT_MS, COMMIT_INGEST_TIMEOUT_MS, RECENT_SHAS_LIMIT, acquireBackfillLock, backfillUnknownCommits, commitAuthoredDelta, extractCommitDiff, listRecentShas, releaseBackfillLock, shouldAdvertiseHistory, writeSyncMarker } from '../../history-backfill.js';
@@ -189,6 +190,19 @@ export function sessionAuthoredSnapshot(
   let source: SessionAuthoredSnapshot['source'] = 'none';
   let commitShas: string[] = [];
   try {
+    // A session-start baseline lets the scoped renderer ask Git for one net
+    // patch when the complete window is ours. Without it, two session commits
+    // that touch one file are joined as two `diff --git` sections in the
+    // session header — the same non-applyable concatenation fixed in the
+    // per-turn producers.
+    // Deliberately UNWINDOWED, and guarded as such by
+    // per-turn-committed-window-guard.test.ts. This is the SESSION-level
+    // diff — the one site that is session-scoped on purpose — and the guard
+    // asserts it BY NAME so that a per-turn caller which forgets its window
+    // still fails there. Passing `state.headShaAtStart` here narrowed the
+    // session diff as a side effect of a change about coalescing sections,
+    // and silently retired the invariant that prod 192cdf12 (turn 3 claiming
+    // 244 = 119 + 125 lines across 13 files) was the cost of learning.
     committed = sessionScopedCommittedDiff(repoPath, state);
   } catch { /* range unreadable — fall through to the trailer walk */ }
   if (committed) {
@@ -215,7 +229,11 @@ export function sessionAuthoredSnapshot(
     }
   }
   const uncommitted = (opts.uncommittedDiff || '').trim();
-  const diff = (committed + (uncommitted ? '\n' + uncommitted : '')).trim();
+  // Do not reintroduce duplicate file sections at the session layer when a
+  // file was committed and then edited again before this snapshot. The
+  // combiner preserves the two sides when they are disjoint and coalesces
+  // overlap into one section.
+  const diff = combineApplyableTurnDiff({ committedDiff: committed, uncommittedDiff: uncommitted });
   return {
     diff,
     committedDiff: committed,

@@ -21,7 +21,7 @@ import path from 'path';
 import { pushMemoryNotes, syncNotesFromRemote } from '../git-notes.js';
 import { mergeMemoryPayloads, readTodoClosures, todoClosureKey } from '../memory.js';
 import { getOpenTodos, markTodoDone } from '../todo.js';
-import { matchTodoForClosure, recordPendingClosures, sweepTodoClosures } from '../todo-sweep.js';
+import { claimSessionCloses, matchTodoForClosure, recordPendingClosures, sweepTodoClosures } from '../todo-sweep.js';
 
 const TODO = 'the shadow-ref leak still has no owner; a retention policy needs designing';
 const OTHER = 'mobile layout unverified; alert() still used on a few pages';
@@ -279,5 +279,45 @@ describe('a [Origin: Closes] marker only closes what it unambiguously names', ()
     // suppress a future TODO that happens to be phrased the same way.
     expect(n).toBe(0);
     expect(readTodoClosures(alice)).toEqual([]);
+  });
+});
+
+describe('claimSessionCloses records at Stop, not only at session-end', () => {
+  it('annotates a leftover as pending when the closing sha is still on a branch', () => {
+    writeMemory(alice, [session('s1', [TODO])]);
+    git(alice, 'checkout', '-q', '-b', 'feature');
+    fs.writeFileSync(path.join(alice, 'fix.txt'), 'fix\n');
+    git(alice, 'add', '.'); git(alice, 'commit', '-m', 'the fix');
+    const sha = git(alice, 'rev-parse', 'HEAD');
+    asMachine(aliceHome);
+
+    expect(claimSessionCloses({
+      repoPath: alice, sessionId: SID, closes: [TODO],
+      openTodos: getOpenTodos(alice).map((t) => ({ id: t.id, text: t.text })),
+      shas: [sha],
+    })).toBe(1);
+
+    const still = getOpenTodos(alice).find((t) => t.text === TODO);
+    expect(still?.pending?.sessionId).toBe(SID);
+    expect(readTodoClosures(alice)[0].state).toBe('pending');
+  });
+
+  it('hides it immediately when that sha is already on the default branch', () => {
+    writeMemory(alice, [session('s1', [TODO])]);
+    fs.writeFileSync(path.join(alice, 'fix.txt'), 'fix\n');
+    git(alice, 'add', '.'); git(alice, 'commit', '-m', 'the fix');
+    const sha = git(alice, 'rev-parse', 'HEAD');
+    git(alice, 'push', 'origin', 'HEAD:main');
+    git(alice, 'fetch', '-q', 'origin');
+    asMachine(aliceHome);
+
+    expect(claimSessionCloses({
+      repoPath: alice, sessionId: SID, closes: [TODO],
+      openTodos: getOpenTodos(alice).map((t) => ({ id: t.id, text: t.text })),
+      shas: [sha],
+    })).toBe(1);
+
+    expect(getOpenTodos(alice).map((t) => t.text)).not.toContain(TODO);
+    expect(readTodoClosures(alice)[0].state).toBe('closed');
   });
 });

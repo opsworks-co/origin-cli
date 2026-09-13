@@ -71,13 +71,13 @@ import { ADOPT_IDLESS_MAX_AGE_MS, ORIGIN_FRAMEWORK_MARKER, agentFileCarriesFrame
 import { SESSION_START_RECENT_SHAS, budgetLockoutDecision, buildContextInjectionPayload, contextInjectionStampPath, conversationAnchorId, cursorIncomingChatId, cursorSessionReusable, enforceBudgetLockout, enforceSessionDurationLimit, fullContextAlreadyInjected, handleUserPromptSubmit, noteCheckoutContention, recordFullContextInjection, recordWorkTreeBaseline, retroactiveTurnFiles, selectRecoverableArchiveSession, stateMatchesIncomingChat } from './hooks/user-prompt-submit.js';
 // Moved to ./hooks/stop.ts — imported for the dispatcher, re-exported so
 // every existing `from './commands/hooks.js'` import keeps resolving.
-import { SHELL_PROBE_TOOL, WRITE_JOURNAL_TOOL, applyBudgetSignal, attestedCommitShas, baselineShaForTree, buildSubagentSummary, dropForeignCommitsFromCapture, durableUpdate, excludeUntouchedSessionStartDirt, fileNamedInCommand, filesOwnedByTurn, getCursorConversationSummary, handleStop, headIsAttested, isInsideRepo, isSessionGoneError, journalFilesForTurn, keepRicherTurnCapture, normalizeTurnFiles, ownedRangeCommitShas, recordJournalEdits, recordProbedShellEdits, resolveAutoAgentSessionId, rewrittenCommitsPayload, serverRowForLocalTurn, sessionFilesFromRangeCapture, shouldAutoSnapshot, warnIfSpawnerRenamed } from './hooks/stop.js';
+import { SHELL_PROBE_TOOL, WRITE_JOURNAL_TOOL, applyBudgetSignal, attestedCommitShas, baselineShaForTree, buildSubagentSummary, dropAdjacentCursorDiffReplays, dropForeignCommitsFromCapture, durableUpdate, excludeUntouchedSessionStartDirt, fileNamedInCommand, filesOwnedByTurn, getCursorConversationSummary, handleStop, headIsAttested, isInsideRepo, isSessionGoneError, journalFilesForTurn, keepRicherTurnCapture, normalizeTurnFiles, ownedRangeCommitShas, recordJournalEdits, recordProbedShellEdits, resolveAutoAgentSessionId, rewrittenCommitsPayload, serverRowForLocalTurn, sessionFilesFromRangeCapture, shouldAutoSnapshot, warnIfSpawnerRenamed } from './hooks/stop.js';
 // Moved to ./hooks/session-end.ts — imported for the dispatcher, re-exported so
 // every existing `from './commands/hooks.js'` import keeps resolving.
 import { CAPTURE_ID, applyLedgerCaptures, applyLiveLedger, buildMemoryEntry, buildPromptNoteEntries, buildSessionWriteData, captureStamp, describePromptImages, durableEnd, ensureServerSession, getWorkingTreeSha, handleSessionEnd, localTurnForServerRow, mergeFilesRead, mergePromptMappings, nestedRepoFilesWritten, nestedRepoWritesForOpenTurn, outOfRepoFilesFor, outOfRepoFilesFromEditsJson, promptMappingHasContent, recordDiscoveredWorkTreeEdits, repoRemoteUrl, resolveAgentSessionName, scheduleMemoryBriefRefresh, scopeSessionDiffToStart, sessionRepoRoots, spawnMemoryBriefChild, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, withDerivedLineCounts } from './hooks/session-end.js';
 export { CAPTURE_ID, applyLedgerCaptures, applyLiveLedger, buildMemoryEntry, buildPromptNoteEntries, buildSessionWriteData, captureStamp, describePromptImages, durableEnd, ensureServerSession, getWorkingTreeSha, handleSessionEnd, localTurnForServerRow, mergeFilesRead, mergePromptMappings, nestedRepoFilesWritten, nestedRepoWritesForOpenTurn, outOfRepoFilesFor, outOfRepoFilesFromEditsJson, promptMappingHasContent, recordDiscoveredWorkTreeEdits, repoRemoteUrl, resolveAgentSessionName, scheduleMemoryBriefRefresh, scopeSessionDiffToStart, sessionRepoRoots, spawnMemoryBriefChild, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, withDerivedLineCounts };
 
-export { SHELL_PROBE_TOOL, WRITE_JOURNAL_TOOL, applyBudgetSignal, attestedCommitShas, baselineShaForTree, buildSubagentSummary, dropForeignCommitsFromCapture, durableUpdate, excludeUntouchedSessionStartDirt, fileNamedInCommand, filesOwnedByTurn, getCursorConversationSummary, handleStop, headIsAttested, isInsideRepo, isSessionGoneError, journalFilesForTurn, keepRicherTurnCapture, normalizeTurnFiles, ownedRangeCommitShas, recordJournalEdits, recordProbedShellEdits, resolveAutoAgentSessionId, rewrittenCommitsPayload, serverRowForLocalTurn, sessionFilesFromRangeCapture, shouldAutoSnapshot, warnIfSpawnerRenamed };
+export { SHELL_PROBE_TOOL, WRITE_JOURNAL_TOOL, applyBudgetSignal, attestedCommitShas, baselineShaForTree, buildSubagentSummary, dropAdjacentCursorDiffReplays, dropForeignCommitsFromCapture, durableUpdate, excludeUntouchedSessionStartDirt, fileNamedInCommand, filesOwnedByTurn, getCursorConversationSummary, handleStop, headIsAttested, isInsideRepo, isSessionGoneError, journalFilesForTurn, keepRicherTurnCapture, normalizeTurnFiles, ownedRangeCommitShas, recordJournalEdits, recordProbedShellEdits, resolveAutoAgentSessionId, rewrittenCommitsPayload, serverRowForLocalTurn, sessionFilesFromRangeCapture, shouldAutoSnapshot, warnIfSpawnerRenamed };
 
 export { SESSION_START_RECENT_SHAS, budgetLockoutDecision, buildContextInjectionPayload, contextInjectionStampPath, conversationAnchorId, cursorIncomingChatId, cursorSessionReusable, enforceBudgetLockout, enforceSessionDurationLimit, fullContextAlreadyInjected, handleUserPromptSubmit, noteCheckoutContention, recordFullContextInjection, recordWorkTreeBaseline, retroactiveTurnFiles, selectRecoverableArchiveSession, stateMatchesIncomingChat };
 
@@ -2218,7 +2218,7 @@ export function buildOriginFrameworkGuidance(): string {
     '',
     'Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.',
     '',
-    '[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it only for one you actually finished in this session, naming its id. It is recorded as a claim and confirmed when the change reaches the default branch, so a wrong one is visible rather than silent.',
+    '[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.',
     '',
     'Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn\'t do. These appear on the PR review surface alongside Origin\'s server-synthesized summary; agent-emitted markers take precedence.',
   ].join('\n');
@@ -2918,13 +2918,20 @@ export function ensureDetachedJournalWatcher(
       },
     });
     child.unref();
-    // Claim the lock NOW, on the child's behalf. The watcher refreshes it on
-    // a 15s timer, and its FIRST write used to be the first tick — so every
-    // hook that fired inside those 15 seconds (a tool call, an adopted turn,
-    // a pre-mark) found no lock and spawned another watcher. Two watchers on
-    // one journal append every write twice, and each one's compaction
-    // rewrites the file under the other. Seen on the Cursor e2e: two spawns
-    // two seconds apart.
+    // Publish the child's pid NOW, before it has booted. The child writes
+    // `.lock` only from refresh(), after Node has started, loaded the CLI and
+    // won the `.writer` lease. Until then the watcher is invisible to anything
+    // that reads `.lock`: the freshness check at the top of this function (so
+    // every hook inside that window spawns another child) and any teardown that
+    // stops the recorder by pid. On a slow runner the window is wide enough for
+    // a turn to be journalled by a watcher its caller believed it had already
+    // stopped — the e2e `chat-only-turn-claims-session-files` does exactly that
+    // on Linux. main wrote this line for the same boot window.
+    //
+    // The lease still decides ownership. If this child loses the race, the
+    // winner's first refresh() rewrites `.lock` with its own pid, so a losing
+    // child's pid is visible only briefly, and naming a process that is about to
+    // exit is harmless both to the freshness check and to a stop.
     try { if (lockPath) fs.writeFileSync(lockPath, String(child.pid || 0)); } catch { /* the child will write it */ }
     debugLog('journal', 'write-journal watcher spawned', { repoPath, journalPath, pid: child.pid });
     return paths;
@@ -2977,7 +2984,7 @@ export async function runJournalWatcher(): Promise<void> {
     return;
   }
 
-  const watcher = startWriteJournal(repoPath, journalPath, snapshotDir ? { snapshotDir } : {});
+  const watcher = startWriteJournal(repoPath, journalPath, { snapshotDir: snapshotDir || undefined, lockPath: lockPath || undefined });
   if (!watcher) {
     // No recursive watch on this platform — say so once and leave, rather than
     // holding a process open that records nothing.
@@ -2987,8 +2994,6 @@ export async function runJournalWatcher(): Promise<void> {
 
   let lastSize = -1;
   let idleSince = Date.now();
-  // Own the lock from the first instant, not from the first tick.
-  try { if (lockPath) fs.writeFileSync(lockPath, String(process.pid)); } catch { /* ignore */ }
   const timer = setInterval(() => {
     // Same rule as the startup guard, for a teardown that lands AFTER we are
     // up. Checked before the lock is rewritten, because writing the lock is
@@ -2999,16 +3004,14 @@ export async function runJournalWatcher(): Promise<void> {
       debugLog('journal-watch', 'home removed under a running watcher, exiting', { originDir });
       process.exit(0);
     }
-    try { if (lockPath) fs.writeFileSync(lockPath, String(process.pid)); } catch { /* ignore */ }
     try {
       const size = fs.statSync(journalPath).size;
       if (size !== lastSize) { lastSize = size; idleSince = Date.now(); }
     } catch { /* ignore */ }
     if (Date.now() - idleSince > JOURNAL_WATCH_IDLE_MS) {
       clearInterval(timer);
-      watcher.stop();
       try { compactJournal(journalPath, Date.now(), snapshotDir || undefined); } catch { /* ignore */ }
-      try { if (lockPath) fs.unlinkSync(lockPath); } catch { /* ignore */ }
+      watcher.stop();
       process.exit(0);
     }
   }, 15_000);
@@ -3218,6 +3221,22 @@ function inheritedWindowDeps(
   let localEmail = '';
   try { localEmail = localCommitterEmail(repoPath); } catch { localEmail = ''; }
   return {
+    ownCommits: mappings.filter((m) => m.sha && thisTurnId && m.turnId === thisTurnId).map((m) => m.sha!),
+    baselineCommit: (sha) => {
+      const record = execFileSync('git', ['show', '-s', '--format=%s%n%P', sha], {
+        ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+      }).trim().split('\n');
+      return record[0].startsWith('origin shadow ') ? record[1].split(' ')[0] : sha;
+    },
+    head: () => execFileSync('git', ['rev-parse', 'HEAD'], {
+      ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+    }).trim(),
+    firstParent: (sha) => execFileSync('git', ['rev-parse', `${sha}^1`], {
+      ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+    }).trim(),
+    changedFilesBetween: (from, to) => execFileSync('git', ['diff', '--name-only', '--no-renames', '-z', from, to, '--'], {
+      ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+    }).split('\0').filter(Boolean),
     listWindow: (sha) => shasInWindow(repoPath, sha),
     isOwnWork: (sha) => {
       const owner = mappings.find((m) => m.sha && sameSha(m.sha, sha));

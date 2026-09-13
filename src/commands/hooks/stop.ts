@@ -25,7 +25,9 @@ import { writeGitNotes } from '../../git-notes.js';
 import { extractTodosFromPrompts, handoffRepresentsWork, writeHandoff } from '../../handoff.js';
 import { isOriginAutoManagedPath, shouldIgnoreFile } from '../../ignore-patterns.js';
 import { writeSessionFiles } from '../../local-entrypoint.js';
-import { parseMarkersFromTranscript } from '../../origin-markers.js';
+import { closesFromMarkers, parseMarkersFromTranscript, parseMarkersFromTranscriptPath, parseOriginMarkers } from '../../origin-markers.js';
+import { readMemoryTodos } from '../../todo.js';
+import { claimSessionCloses } from '../../todo-sweep.js';
 import { anchorEditPositions, backfillWriteBaselines, capturePromptEdits } from '../../prompt-capture/index.js';
 import type { PromptEdit } from '../../prompt-capture/index.js';
 import { editSourceForAgent } from '../../prompt-capture/types.js';
@@ -618,6 +620,51 @@ export function keepRicherTurnCapture<
     const merged = { ...pm, filesChanged, diff };
     if (filesChanged.length > 0 || diff) delete (merged as { chatOnly?: boolean }).chatOnly;
     return merged;
+  });
+}
+
+/**
+ * Cursor can discover a prompt only after it has already folded that prompt
+ * into the generation before it. In that narrow race, two adjacent rows can
+ * carry the exact same reconstructed patch: the older row is the stale,
+ * pre-discovery window and the newer row is the turn we just discovered.
+ *
+ * Keeping both makes one write look like two turns of work. Do not use a
+ * broad "same files" rule here — two real turns often touch the same files.
+ * An exact, non-empty patch and an identical file set on adjacent turns is
+ * the replay fingerprint. Keep the newer row, whose turn id/baseline was
+ * minted after the boundary was known, and leave the older prompt visible as
+ * chat-only rather than deleting it.
+ */
+export function dropAdjacentCursorDiffReplays<
+  T extends { promptIndex: number; filesChanged?: string[]; diff?: string; uncommittedDiff?: string; chatOnly?: boolean },
+>(mappings: T[]): T[] {
+  const sameFiles = (left: string[] | undefined, right: string[] | undefined) => {
+    const normalize = (files: string[] | undefined) => [...new Set(files || [])].sort();
+    const a = normalize(left);
+    const b = normalize(right);
+    return a.length === b.length && a.every((file, index) => file === b[index]);
+  };
+  const replay = (older: T, newer: T) => {
+    const olderDiff = (older.diff || '').trim();
+    return newer.promptIndex === older.promptIndex + 1
+      && olderDiff.length > 0
+      && olderDiff === (newer.diff || '').trim()
+      && (older.uncommittedDiff || '').trim() === (newer.uncommittedDiff || '').trim()
+      && sameFiles(older.filesChanged, newer.filesChanged);
+  };
+
+  const sorted = [...mappings].sort((a, b) => a.promptIndex - b.promptIndex);
+  return sorted.map((mapping, index) => {
+    const newer = sorted[index + 1];
+    if (!newer || !replay(mapping, newer)) return mapping;
+    return {
+      ...mapping,
+      filesChanged: [],
+      diff: '',
+      uncommittedDiff: '',
+      chatOnly: true,
+    } as T;
   });
 }
 
@@ -1650,6 +1697,19 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
       });
     }
 
+    // Cursor can report a prompt typed mid-generation only after it has
+    // already sent a live capture for the older turn. Remove only the exact
+    // adjacent replay shape; normal same-file follow-up turns are untouched.
+    if (state.agentSlug === 'cursor') {
+      const replayed = dropAdjacentCursorDiffReplays(promptMappings as any) as any;
+      const replayCount = replayed.filter((pm: any) => pm.chatOnly).length
+        - promptMappings.filter((pm: any) => pm.chatOnly).length;
+      promptMappings = replayed;
+      if (replayCount > 0) {
+        debugLog('stop', 'cleared stale Cursor patch replay before sending mappings', { replayCount });
+      }
+    }
+
     if (rehomeGitOnlyCommitStamp(promptMappings as any, gitCapture.commitDetails || [])) {
       debugLog('stop', 'rehomed git-only commit stamp onto the authoring turn', {
         mappings: (promptMappings as any[]).map((pm) => ({
@@ -2498,10 +2558,47 @@ function writeCommitNotes({ gitCapture, state, model, agentSlug, prompts, prompt
         debugLog('stop', 'git notes written for missing commits', { count: missingNotes.length });
       }
     }
-  } catch (notesErr: any) {
+    } catch (notesErr: any) {
     debugLog('stop', 'git notes error (non-fatal)', { message: notesErr.message });
   }
 }
+
+/**
+ * Record `[Origin: Closes]` at Stop so a long-running session does not wait
+ * for SessionEnd to claim a leftover it already finished.
+ *
+ * Pending until the closing work is on the default branch — same rule as
+ * session-end. A claim that fails to record leaves the TODO open.
+ */
+function claimTurnCloses({
+  state, parsed, gitCapture, stopHookReply,
+}: {
+  state: SessionState;
+  parsed: ParsedTranscript;
+  gitCapture: ReturnType<typeof captureGitState>;
+  stopHookReply: string;
+}): void {
+  try {
+    const closes = closesFromMarkers(
+      parseMarkersFromTranscript(parsed.transcript),
+      parseMarkersFromTranscriptPath(state.transcriptPath),
+      parseOriginMarkers(stopHookReply),
+      parseOriginMarkers((state.promptResponses || []).join('\n')),
+    );
+    if (closes.length === 0) return;
+    const recorded = claimSessionCloses({
+      repoPath: state.repoPath,
+      sessionId: state.sessionId,
+      closes,
+      openTodos: readMemoryTodos(state.repoPath).map((t) => ({ id: t.id, text: t.text })),
+      shas: gitCapture.commitShas,
+    });
+    debugLog('stop', 'todo closures claimed', { claimed: closes.length, recorded });
+  } catch {
+    // Non-fatal
+  }
+}
+
 function advanceTurnBaselines({ state, gitCapture }: { state: SessionState; gitCapture: ReturnType<typeof captureGitState> }): void {
   // Update per-prompt baselines so next prompt only sees its own changes.
   //
@@ -2597,8 +2694,8 @@ export function persistCompletedMappings({ promptMappings, state }: { promptMapp
       // field not listed here is silently dropped — and the heartbeat re-sends
       // from this state, so losing it lets the server's editsJson synthesis
       // win back a row the ledger had already answered for.
-        ...((pm as { diffSource?: 'ledger' }).diffSource
-          ? { diffSource: (pm as { diffSource?: 'ledger' }).diffSource }
+        ...((pm as { diffSource?: 'ledger' | 'turn-window' }).diffSource
+          ? { diffSource: (pm as { diffSource?: 'ledger' | 'turn-window' }).diffSource }
           : {}),
       // The "never rebuild this from a commit" guard travels with the
       // provenance. Picking `diffSource` alone kept the label and lost the
@@ -2612,6 +2709,7 @@ export function persistCompletedMappings({ promptMappings, state }: { promptMapp
         ...('commitSha' in pm ? { commitSha: pm.commitSha ?? null } : {}),
         ...('treeSha' in pm ? { treeSha: pm.treeSha ?? null } : {}),
         ...(pm.chatOnly ? { chatOnly: true } : {}),
+        ...(pm.turnWindowCaptured ? { turnWindowCaptured: true, contentAuthoritative: true } : {}),
         ...((pm as { fileSetOnly?: boolean }).fileSetOnly ? { fileSetOnly: true } : {}),
       }, capturedNow);
     });
@@ -3280,6 +3378,8 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     ({ promptEditsByIndex, model } = await sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, model, parsed, costUsd, promptMappings, filesChanged, turnExcludeFiles, promptBaseline, found, input, codexData, gitCapture, promptEditsByIndex, joinedPrompt, displayTranscript, sessionFilesChanged, tokensEstimated, durationMs, devinPromptTimes, prePersisted }));
     // Phase: writeCommitNotes.
     writeCommitNotes({ gitCapture, state, model, agentSlug, prompts, promptEditsByIndex, parsed, costUsd, durationMs, config });
+    // Phase: claimTurnCloses.
+    claimTurnCloses({ state, parsed, gitCapture, stopHookReply });
     // Phase: advanceTurnBaselines.
     advanceTurnBaselines({ state, gitCapture });
     // The running turn is finished. Closing it here — rather than letting the

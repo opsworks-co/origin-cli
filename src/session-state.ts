@@ -241,6 +241,7 @@ export interface SessionState {
     promptIndex: number;
     shadowSha: string;
     capturedAt: string; // ISO timestamp
+    completeBaseline?: boolean; // Full tree captured at the prompt hook, including a clean HEAD.
   }>;
   // Prompts recovered after their start hook was missed. Their transcript can
   // prove the turn exists, but not the working-tree state it began from.
@@ -349,7 +350,9 @@ export interface SessionState {
     uncommittedDiff?: string;
     // The source and ownership guard for a stored diff. A ledger capture is
     // observed turn evidence and must not later be rebuilt from a commit.
-    diffSource?: 'ledger';
+    diffSource?: 'ledger' | 'turn-window';
+    turnWindowCaptured?: boolean;
+    contentAuthoritative?: boolean;
     ledgerOwned?: boolean;
     linesAdded?: number;
     linesRemoved?: number;
@@ -2518,7 +2521,7 @@ export function clearAllSessionStates(cwd?: string): void {
 // so it was empty on every hook-driven session on disk.
 
 interface ShadowBearingState {
-  promptShadows?: Array<{ promptIndex: number; shadowSha: string; capturedAt: string }>;
+  promptShadows?: Array<{ promptIndex: number; shadowSha: string; capturedAt: string; completeBaseline?: boolean }>;
   /**
    * Prompts this launch WATCHED arrive without ever anchoring a start-state —
    * see `markSkippedPromptBaselines`. Distinct from an index that is simply
@@ -2538,7 +2541,7 @@ export function recordPromptShadow(
   state: ShadowBearingState,
   promptIndex: number,
   shadowSha: string | null | undefined,
-  opts?: { now?: () => string },
+  opts?: { now?: () => string; completeBaseline?: boolean },
 ): void {
   if (!shadowSha || !Number.isInteger(promptIndex) || promptIndex < 0) return;
   if (!state.promptShadows) state.promptShadows = [];
@@ -2547,6 +2550,7 @@ export function recordPromptShadow(
     promptIndex,
     shadowSha,
     capturedAt: (opts?.now ?? (() => new Date().toISOString()))(),
+    ...(opts?.completeBaseline !== undefined ? { completeBaseline: opts.completeBaseline } : {}),
   });
 }
 

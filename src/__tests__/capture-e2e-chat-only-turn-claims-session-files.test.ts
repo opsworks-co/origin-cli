@@ -225,10 +225,18 @@ describe.skipIf(!haveDist)('a chat-only turn beside untracked churn', () => {
     const turn1 = rows.find((r: any) => r.promptIndex === 1);
     expect(turn1, 'turn 1 must have a row').toBeTruthy();
 
-    // The row must have come from the legacy reconstruction. With a live
-    // watcher the ledger owns the turn and produces a self-consistent row on
-    // its own, so a test that let that happen would pass without the fix.
-    expect(turn1.diffSource, 'turn 1 must be the legacy path, not the ledger').toBeUndefined();
+    // The row must NOT come from the ledger. With a live watcher the ledger
+    // owns the turn and produces a self-consistent row on its own, so a test
+    // that let that happen would pass without the fix — hence the watcher is
+    // killed above.
+    //
+    // `turn-window` (#1585) is also a complete-window owner and is likewise
+    // self-consistent by construction, so it does not exercise the legacy
+    // reconstruction this test was written for either. It is permitted here
+    // rather than asserted against, because on this fixture the window is the
+    // more truthful answer — but see the note at the bottom of this file:
+    // legacy coverage for THIS defect now needs its own case.
+    expect(turn1.diffSource, 'turn 1 must not be the ledger').not.toBe('ledger');
 
     const claimed: string[] = turn1.filesChanged || [];
     const carried = new Set([
@@ -274,7 +282,7 @@ describe.skipIf(!haveDist)('a chat-only turn beside untracked churn', () => {
     const rows = state().completedPromptMappings || [];
     const turn = rows.find((r: any) => r.promptIndex === 2);
     expect(turn, 'turn 2 must have a row').toBeTruthy();
-    expect(turn.diffSource, 'must be the legacy path, not the ledger').toBeUndefined();
+    expect(turn.diffSource, 'must not be the ledger').not.toBe('ledger');
 
     // Over budget, so something had to give — that is the case under test.
     expect(String(turn.diff || '').length).toBeGreaterThan(0);
@@ -300,3 +308,17 @@ describe.skipIf(!haveDist)('a chat-only turn beside untracked churn', () => {
     }
   }, 120_000 * WINDOWS_SLOWDOWN);
 });
+
+// COVERAGE NOTE (#1585). Both assertions above were `toBeUndefined()` — they
+// required the LEGACY reconstruction, because that is the path whose defect
+// this file exists to pin: a row naming a file it cannot show.
+//
+// #1585 introduced `diffSource: 'turn-window'`, a complete-window capture that
+// now owns these turns. It declares its own shortfall (contentUnavailableFiles
+// on budget truncation), so the substantive assertions below still hold — but
+// they hold BY CONSTRUCTION rather than by exercising the legacy code.
+//
+// The legacy path still runs wherever a turn has no usable shadow window, and
+// its defect is no longer covered here. A case that forces it — no
+// promptShadows, or contention that makes preferShadowRangeForTurns bail — is
+// what would close that gap.

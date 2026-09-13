@@ -160,6 +160,39 @@ export function recordPendingClosures(opts: {
 }
 
 /**
+ * Record `[Origin: Closes]` claims from a live turn (Stop) or session-end.
+ *
+ * Same pending-until-merge rule as `recordPendingClosures`. If the closing
+ * SHAs are already on the default branch, confirm them now so `origin todo
+ * list` updates in this session instead of waiting for the next list read.
+ *
+ * Never throws — a TODO claim must not fail a hook.
+ */
+export function claimSessionCloses(opts: {
+  repoPath: string;
+  sessionId: string;
+  closes: string[] | undefined;
+  openTodos: { id: string; text: string }[];
+  shas?: string[];
+}): number {
+  const markers = (opts.closes || []).map((m) => m.trim()).filter(Boolean);
+  if (!markers.length) return 0;
+  try {
+    const recorded = recordPendingClosures({
+      repoPath: opts.repoPath,
+      sessionId: opts.sessionId,
+      markers,
+      openTodos: opts.openTodos,
+      shas: opts.shas,
+    });
+    if (recorded > 0) sweepTodoClosures(opts.repoPath);
+    return recorded;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Promote every pending closure whose work has reached the default branch.
  *
  * Cheap when there is nothing to do: one note read, and no git process at all

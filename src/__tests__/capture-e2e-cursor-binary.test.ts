@@ -19,6 +19,7 @@ import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { verifyTurn, parseUnifiedDiff } from '../capture-verify.js';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { foldStopRows } from './helpers/fold-stop-rows.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -126,8 +127,9 @@ function marksIn(): number {
   try { return (fs.readFileSync(jf.journal, 'utf-8').match(/"k":"t"/g) || []).length; } catch { return 0; }
 }
 function lastRows(): any[] {
-  const p = hits.filter((h) => h.method === 'PATCH' && Array.isArray(h.body?.promptChanges)).map((h) => h.body.promptChanges);
-  return p.length ? p[p.length - 1] : [];
+  return foldStopRows(
+    hits.filter((h) => h.method === 'PATCH' && Array.isArray(h.body?.promptChanges)).map((h) => h.body.promptChanges),
+  );
 }
 async function killJournalWatcher(): Promise<void> {
   const jf = journalFiles();
@@ -215,7 +217,7 @@ describe.skipIf(!haveDist)('cursor capture end to end through the built binary',
     expect(stop.code, stop.stderr).toBe(0);
     const t1 = lastRows().find((r: any) => r.promptIndex === 0);
     expect(t1, 'no row for turn 1').toBeTruthy();
-    expect(t1.diffSource).toBe('ledger');
+    expect(t1.diffSource).toBe('turn-window');
     expect(t1.filesChanged).toEqual(['app.py']);
     expect(t1.diff).toContain('-    print("old")');
     expect(t1.diff).toContain('+    print("new")');

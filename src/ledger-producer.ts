@@ -29,20 +29,10 @@ import { detectLiveContention } from './checkout-contention.js';
  * Write-journal watchers this process is holding open, keyed by tag AND the
  * tree each one is recording — the same key the journal file itself uses.
  *
- * Held IN-PROCESS rather than spawned. A daemon already runs for the life of
- * the session, so an in-process watcher needs no lock file, no orphan reaping
- * and no second node process per session.
- *
- * The lock path travels WITH the watcher rather than being re-derived on stop:
- * the derivation now needs the root, and a stop that re-derived it from the tag
- * alone would unlink somebody else's lock.
+ * Held in-process by long-lived producers. The watcher itself owns its lease,
+ * heartbeat, and cleanup, shared with the detached hook path.
  */
-const journalWatchers = new Map<string, { watcher: JournalWatcher; lockPath: string }>();
-/** The lock refreshers that go with them — see ensureInProcessJournal. */
-const lockRefreshers = new Map<string, NodeJS.Timeout>();
-/** Same cadence as the detached watcher, so a reader's staleness rule fits both. */
-const LOCK_REFRESH_MS = 15_000;
-
+const journalWatchers = new Map<string, JournalWatcher>();
 /** Bound the fleet: a box with dozens of stale transcripts must not open dozens
  *  of recursive watchers. Sessions past this simply keep the old behaviour. */
 export const MAX_JOURNAL_WATCHERS = 12;
@@ -64,13 +54,10 @@ export function __stopAllJournalWatchers(): void {
 }
 
 function stopWatcherByKey(key: string): void {
-  const t = lockRefreshers.get(key);
-  if (t) { clearInterval(t); lockRefreshers.delete(key); }
   const held = journalWatchers.get(key);
   if (!held) return;
-  try { held.watcher.stop(); } catch { /* already gone */ }
+  try { held.stop(); } catch { /* already gone */ }
   journalWatchers.delete(key);
-  try { fs.unlinkSync(held.lockPath); } catch { /* not ours, or gone */ }
 }
 
 /**
@@ -131,18 +118,7 @@ export function ensureInProcessJournal(
       // null = no recursive watch on this platform; leave the map empty so the
       // next poll can retry rather than caching the failure forever.
       if (w) {
-        journalWatchers.set(key, { watcher: w, lockPath });
-        // OWN THE LOCK. The lock is how every producer tells the others a
-        // recorder is live; an in-process watcher that held none was invisible
-        // to the hook path, which then spawned a detached watcher beside it,
-        // and both appended every write. Two identical records per write is
-        // not harmless: the reclaim of a revealed turn took one copy and left
-        // the other behind, so the turn read its own write as already there.
-        const claim = (): void => { try { fs.writeFileSync(lockPath, String(process.pid)); } catch { /* best-effort */ } };
-        claim();
-        const timer = setInterval(claim, LOCK_REFRESH_MS);
-        timer.unref?.();
-        lockRefreshers.set(key, timer);
+        journalWatchers.set(key, w);
       }
     }
     const latest = turnIds[turnIds.length - 1];

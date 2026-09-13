@@ -55,6 +55,13 @@ export interface InheritedWindowDeps {
   readAtRev: (sha: string, file: string) => string | null;
   /** `git merge-base --is-ancestor <a> <b>`. */
   isAncestor: (a: string, b: string) => boolean;
+  /** Real commit behind a turn shadow (or the baseline itself when not a shadow). */
+  baselineCommit?: (baselineSha: string) => string;
+  head?: () => string;
+  /** Known commits made by this turn, including ones on branches it left. */
+  ownCommits?: string[];
+  firstParent?: (sha: string) => string;
+  changedFilesBetween?: (from: string, to: string) => string[];
   /** Ceiling on file reads, mirroring FOREIGN_WINDOW_FILE_BUDGET in hooks.ts. */
   fileBudget?: number;
 }
@@ -77,7 +84,7 @@ export function inheritedBaseline(
   if (!baselineSha || !HEX.test(baselineSha)) return null;
   let window: string[];
   try { window = deps.listWindow(baselineSha); } catch { return null; }
-  if (!Array.isArray(window) || window.length === 0) return null;
+  if (!Array.isArray(window)) return null;
   // An unanswerable commit counts as the turn's own: re-baselining PAST work
   // the turn authored erases it from the record, where failing to re-baseline
   // only leaves today's behaviour.
@@ -103,6 +110,24 @@ export function inheritedBaseline(
     }
     if (behindOurs) return sha;
   }
+  // A backward/divergent checkout can add NO foreign commits to baseline..HEAD.
+  // In that case the destination is HEAD, or the parent before this turn's
+  // first own commit. Only use it when it is outside the baseline's ancestry;
+  // an ordinary commit atop a dirty shadow must keep that shadow's dirty bytes.
+  if (deps.baselineCommit && deps.head && deps.firstParent) {
+    try {
+      // A turn that already committed on a branch it then left needs multiple
+      // windows. One destination baseline would erase that earlier work.
+      if (deps.ownCommits?.some((own) => !window.some((sha) => sha.startsWith(own) || own.startsWith(sha)))) return null;
+      const start = deps.baselineCommit(baselineSha);
+      const firstOwn = [...ours].find((sha) =>
+        [...ours].every((other) => sha === other || deps.isAncestor(sha, other)));
+      if (ours.size && !firstOwn) return null;
+      const destination = firstOwn ? deps.firstParent(firstOwn) : deps.head();
+      if (HEX.test(start) && HEX.test(destination) && start !== destination
+        && !deps.isAncestor(start, destination)) return destination;
+    } catch { /* No proven checkout boundary: retain the original baseline. */ }
+  }
   return null;
 }
 
@@ -124,6 +149,17 @@ export function inheritedBeforeStates(
   const out = new Map<string, string | null>();
   const upTo = inheritedBaseline(baselineSha, deps);
   if (!upTo || !baselineSha) return out;
+  // Comparing trees includes files removed by LEAVING the old branch, which
+  // a walk of newly reachable commits cannot name.
+  if (deps.changedFilesBetween && deps.baselineCommit) {
+    try {
+      const files = deps.changedFilesBetween(deps.baselineCommit(baselineSha), upTo);
+      for (const file of [...new Set(files)].slice(0, deps.fileBudget ?? DEFAULT_FILE_BUDGET)) {
+        out.set(file, deps.readAtRev(upTo, file));
+      }
+      return out;
+    } catch { return new Map(); }
+  }
   let window: string[];
   try { window = deps.listWindow(baselineSha); } catch { return out; }
   let budget = deps.fileBudget ?? DEFAULT_FILE_BUDGET;

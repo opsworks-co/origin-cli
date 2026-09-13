@@ -19,6 +19,7 @@ import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { foldStopRows } from './helpers/fold-stop-rows.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -120,6 +121,7 @@ async function killJournalWatchers(): Promise<void> {
 const stopPayloads = () => hits
   .filter((h) => h.method === 'PATCH' && /^\/api\/mcp\/session\/e2e-session-wt-0001/.test(h.url))
   .map((h) => h.body).filter((b) => b && Array.isArray(b.promptChanges));
+const lastRows = (): any[] => foldStopRows(stopPayloads());
 
 describe.skipIf(!haveDist)('a main handshake adopted into a worktree that is ahead of main', () => {
   let wtHead = '';
@@ -188,9 +190,9 @@ describe.skipIf(!haveDist)('a main handshake adopted into a worktree that is ahe
     const stop = await run(wt, WT_SESSION, 'stop', { stop_hook_active: false });
     expect(stop.code, stop.stderr).toBe(0);
 
-    const payloads = stopPayloads();
-    expect(payloads.length, 'Stop sent no per-turn rows').toBeGreaterThan(0);
-    const t1 = payloads[payloads.length - 1].promptChanges.find((r: any) => r.promptIndex === 0);
+    const rows = lastRows();
+    expect(rows.length, 'Stop sent no per-turn rows').toBeGreaterThan(0);
+    const t1 = rows.find((r: any) => r.promptIndex === 0);
     expect(t1, 'no row for turn 1').toBeTruthy();
     expect(t1.filesChanged).toEqual(['notes.md']);
     expect([t1.linesAdded, t1.linesRemoved]).toEqual([1, 0]);
@@ -221,8 +223,7 @@ describe.skipIf(!haveDist)('a main handshake adopted into a worktree that is ahe
     expect(stop.code, stop.stderr).toBe(0);
 
     // The committing turn carries the commit; turn 1 keeps its write.
-    const payloads = stopPayloads();
-    const rows = payloads[payloads.length - 1].promptChanges;
+    const rows = lastRows();
     const t1 = rows.find((r: any) => r.promptIndex === 0);
     expect(t1.filesChanged).toEqual(['notes.md']);
     const t2 = rows.find((r: any) => r.promptIndex === 1);

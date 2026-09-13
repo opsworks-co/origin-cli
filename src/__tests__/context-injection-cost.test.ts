@@ -16,6 +16,7 @@ import {
   siblingReadsContextFromHook,
   writeAgentRulesFile,
   durableRulesFileMessage,
+  buildOriginFrameworkGuidance,
 } from '../commands/hooks.js';
 
 function makeRepo(): string {
@@ -152,5 +153,14 @@ describe('sibling rules-file refresh', () => {
       // AGENTS.md keeps the full text: it is Codex's ONLY channel.
       expect(fs.readFileSync(path.join(repo, 'AGENTS.md'), 'utf-8')).toContain('Prior work in this repo');
     } finally { fs.rmSync(repo, { recursive: true, force: true }); }
+  });
+});
+
+describe('Origin authoring framework guidance', () => {
+  it('tells the agent Closes is recorded at Stop, and to run origin todo done for leftovers already on the default branch', () => {
+    const g = buildOriginFrameworkGuidance();
+    expect(g).toContain('[Origin: Closes]');
+    expect(g).toMatch(/records it at Stop/);
+    expect(g).toContain('origin todo done');
   });
 });

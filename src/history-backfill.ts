@@ -22,6 +22,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
+import { combineApplyableTurnDiff } from './applyable-turn-diff.js';
 import { git, gitDetailed, gitOrNull } from './utils/exec.js';
 
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
@@ -832,7 +833,11 @@ export function renderAuthoredCommits(
       if (own.diff) parts.push(own.diff);
     } catch { /* a sha a rebase removed */ }
   }
-  const diff = parts.join('\n').trim();
+  // The watcher has no session baseline, but it must still never publish two
+  // sections for one file. The shared combiner keeps ordinary per-commit
+  // sections intact and collapses an overlap rather than shipping a patch no
+  // consumer can apply or count correctly.
+  const diff = combineApplyableTurnDiff({ committedDiff: parts.join('\n'), uncommittedDiff: '' });
   return {
     diff,
     filesChanged: filesInDiff(diff),

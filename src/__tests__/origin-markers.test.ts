@@ -3,6 +3,7 @@ import {
   parseOriginMarkers,
   parseMarkersFromTranscript,
   extractTranscriptText,
+  closesFromMarkers,
 } from '../origin-markers.js';
 
 describe('parseOriginMarkers (plain text)', () => {
@@ -203,5 +204,17 @@ describe('extractTranscriptText', () => {
 
   it('ignores a Closes marker that is only the unfilled template', () => {
     expect(parseOriginMarkers('[Origin: Closes] <id of an open TODO above>')).toBeUndefined();
+  });
+});
+
+describe('closesFromMarkers', () => {
+  it('unions and de-dupes Closes ids across sources', () => {
+    const a = parseOriginMarkers('[Origin: Closes] ab12cd34')!;
+    const b = parseOriginMarkers('[Origin: Closes] AB12CD34\n[Origin: Closes] ef56')!;
+    expect(closesFromMarkers(a, b, undefined)).toEqual(['ab12cd34', 'ef56']);
+  });
+
+  it('returns an empty list when nothing claimed a leftover', () => {
+    expect(closesFromMarkers(undefined, parseOriginMarkers('[Origin: Decision] x — y'))).toEqual([]);
   });
 });

@@ -18,7 +18,7 @@
 // commit — as a chat-only turn.
 
 import { describe, it, expect } from 'vitest';
-import { keepRicherTurnCapture, adoptUnannouncedPrompts } from '../commands/hooks.js';
+import { keepRicherTurnCapture, dropAdjacentCursorDiffReplays, adoptUnannouncedPrompts } from '../commands/hooks.js';
 import type { SessionState } from '../session-state.js';
 
 // What turn 2 ("generate some code") actually wrote: the --vapor transform
@@ -63,6 +63,28 @@ describe('keepRicherTurnCapture — a prior capture that ran past a turn boundar
     expect(turn2.filesChanged?.sort()).toEqual([...TURN2].sort());
     expect(turn2.diff).toBe('the real turn 2 diff');
     expect(turn2.chatOnly).toBeUndefined();
+  });
+});
+
+describe('dropAdjacentCursorDiffReplays', () => {
+  const PATCH = 'diff --git a/src/feature.ts b/src/feature.ts\\n+@@ -1 +1 @@\\n-old\\n+new\\n';
+
+  it('keeps the discovered turn and clears an exact stale replay on its predecessor', () => {
+    const [older, newer] = dropAdjacentCursorDiffReplays([
+      { promptIndex: 1, filesChanged: ['src/feature.ts'], diff: PATCH, uncommittedDiff: PATCH },
+      { promptIndex: 2, filesChanged: ['src/feature.ts'], diff: PATCH, uncommittedDiff: PATCH },
+    ]);
+    expect(older).toMatchObject({ filesChanged: [], diff: '', uncommittedDiff: '', chatOnly: true });
+    expect(newer).toMatchObject({ filesChanged: ['src/feature.ts'], diff: PATCH, uncommittedDiff: PATCH });
+  });
+
+  it('does not erase real follow-up edits that happen to touch the same file', () => {
+    const mappings = dropAdjacentCursorDiffReplays([
+      { promptIndex: 1, filesChanged: ['src/feature.ts'], diff: PATCH, uncommittedDiff: PATCH },
+      { promptIndex: 2, filesChanged: ['src/feature.ts'], diff: `${PATCH}@@ -3 +3 @@\\n-old2\\n+new2\\n`, uncommittedDiff: PATCH },
+    ]);
+    expect(mappings[0].diff).toBe(PATCH);
+    expect(mappings[1].diff).toContain('new2');
   });
 });
 

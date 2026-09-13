@@ -26,6 +26,7 @@ import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { foldStopRows } from './helpers/fold-stop-rows.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -135,10 +136,11 @@ function allRows(): any[] {
     .flatMap((h) => h.body.promptChanges);
 }
 function lastStopRows(): any[] {
-  const p = hits
-    .filter((h) => h.method === 'PATCH' && h.url.includes(SERVER_SESSION) && Array.isArray(h.body?.promptChanges))
-    .map((h) => h.body);
-  return p.length ? p[p.length - 1].promptChanges : [];
+  return foldStopRows(
+    hits
+      .filter((h) => h.method === 'PATCH' && h.url.includes(SERVER_SESSION) && Array.isArray(h.body?.promptChanges))
+      .map((h) => h.body),
+  );
 }
 function journalFiles(): { journal: string; lock: string } | null {
   const dir = path.join(os.homedir(), '.origin', 'journals');

@@ -143,7 +143,7 @@ export function adoptUnannouncedPrompts(
   if (shadow) {
     state.prePromptSha = shadow;
     state.prePromptDirtyFiles = [];
-    recordPromptShadow(state, idx, shadow);
+    recordPromptShadow(state, idx, shadow, { completeBaseline: false });
   }
   state.currentTurnStartedAt = (opts?.now || (() => Date.now()))();
   // Put the boundary in the JOURNAL too, exactly as user-prompt-submit does.

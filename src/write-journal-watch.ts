@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { acquireJournalLock, mutateJournal } from './journal-lock.js';
 import { normalizePath } from './paths.js';
 import {
   serializeRecord, serializeTurnMark, serializeFence, parseJournal, parseJournalEntries, trimJournal,
@@ -152,6 +153,7 @@ export interface JournalOptions {
    * reconstructed. Omit to keep the original path-and-time-only behaviour.
    */
   snapshotDir?: string;
+  lockPath?: string;
   /** Test seam. */
   now?: () => number;
   /**
@@ -183,12 +185,12 @@ export function markTurn(journalPath: string, turnId: string, at = Date.now(), r
   if (!journalPath || !turnId) return;
   try {
     fs.mkdirSync(path.dirname(journalPath), { recursive: true });
-    fs.appendFileSync(journalPath, serializeTurnMark(reclaim && reclaim.length > 0 ? { at, turnId, reclaim } : { at, turnId }));
+    mutateJournal(journalPath, () => fs.appendFileSync(journalPath, serializeTurnMark(reclaim && reclaim.length > 0 ? { at, turnId, reclaim } : { at, turnId })));
   } catch { /* best-effort, exactly like the writes */ }
 }
 
 export function fenceJournal(journalPath: string): void {
-  try { if (journalPath) fs.appendFileSync(journalPath, serializeFence(Date.now())); } catch { /* best effort */ }
+  try { if (journalPath) mutateJournal(journalPath, () => fs.appendFileSync(journalPath, serializeFence(Date.now()))); } catch { /* best effort */ }
 }
 
 /**
@@ -204,6 +206,14 @@ export function startWriteJournal(
   opts: JournalOptions = {},
 ): JournalWatcher | null {
   if (!repoPath || !journalPath) return null;
+  // All producers claim here, including detached children racing their parent.
+  // A heartbeat is only discovery; this exclusive lease is write permission.
+  let lease;
+  try {
+    fs.mkdirSync(path.dirname(journalPath), { recursive: true });
+    lease = acquireJournalLock(`${journalPath}.writer`);
+  } catch { return null; }
+  if (!lease) return null;
   const lastSeen = new Map<string, number>();
   const now = opts.now ?? Date.now;
   // A journal that cannot be appended silently downgrades every turn to the
@@ -211,6 +221,15 @@ export function startWriteJournal(
   let appendFailureLogged = false;
   let stopped = false;
   let watcher: fs.FSWatcher | null = null;
+  const lockPath = opts.lockPath ?? journalPath.replace(/\.jsonl$/, '') + '.lock';
+  let heartbeat: NodeJS.Timeout | undefined;
+  const release = (): void => {
+    if (heartbeat) clearInterval(heartbeat);
+    if (lease.owned()) {
+      try { fs.unlinkSync(lockPath); } catch { /* already removed */ }
+      lease.release();
+    }
+  };
 
   // Running total, seeded once. `storeBytes` walks the whole store, which is
   // fine on a hook but not on every keystroke-triggered write event.
@@ -234,6 +253,7 @@ export function startWriteJournal(
   // journal, which shifted every "wait for N records" downstream.
   const lastKey = new Map<string, string>();
   const append = (rel: string, gone: boolean, mtime?: number, onlyIfChanged = false): void => {
+    if (stopped || !lease.owned()) return;
     const t = now();
     const prev = lastSeen.get(rel);
     if (prev !== undefined && t - prev < DEBOUNCE_MS) {
@@ -258,29 +278,31 @@ export function startWriteJournal(
     }
     lastSeen.set(rel, t);
 
-    const rec: WriteRecord = { file: rel, at: t };
-    if (typeof mtime === 'number' && Number.isFinite(mtime)) rec.mtime = mtime;
-    if (gone) {
-      rec.gone = true;
-    } else if (snapshotDir) {
-      // A delete is recorded as a delete, never as a write of empty content —
-      // an empty file exists and a deleted one does not.
-      const put = snapshotFile(snapshotDir, path.join(repoPath, rel), {
-        maxStoreBytes: MAX_STORE_BYTES,
-        currentStoreBytes: used,
-      });
-      if (put) {
-        if (put.hash) rec.hash = put.hash;
-        rec.size = put.size;
-        if (put.retained) rec.retained = true;
-        if (put.outcome === 'stored') used += put.size;
-      }
-    }
-    const key = gone ? 'gone' : (rec.hash || (rec.mtime !== undefined ? `m:${rec.mtime}` : ''));
-    if (onlyIfChanged && key && lastKey.get(rel) === key) return;
-    if (key) lastKey.set(rel, key);
     try {
-      fs.appendFileSync(journalPath, serializeRecord(rec));
+      mutateJournal(journalPath, () => {
+        const rec: WriteRecord = { file: rel, at: t };
+        if (typeof mtime === 'number' && Number.isFinite(mtime)) rec.mtime = mtime;
+        if (gone) {
+          rec.gone = true;
+        } else if (snapshotDir) {
+          // A delete is recorded as a delete, never as a write of empty content —
+          // an empty file exists and a deleted one does not.
+          const put = snapshotFile(snapshotDir, path.join(repoPath, rel), {
+            maxStoreBytes: MAX_STORE_BYTES,
+            currentStoreBytes: used,
+          });
+          if (put) {
+            if (put.hash) rec.hash = put.hash;
+            rec.size = put.size;
+            if (put.retained) rec.retained = true;
+            if (put.outcome === 'stored') used += put.size;
+          }
+        }
+        const key = gone ? 'gone' : (rec.hash || (rec.mtime !== undefined ? `m:${rec.mtime}` : ''));
+        if (onlyIfChanged && key && lastKey.get(rel) === key) return;
+        fs.appendFileSync(journalPath, serializeRecord(rec));
+        if (key) lastKey.set(rel, key);
+      });
     } catch (err: unknown) {
       // Best-effort — never break the agent — but a journal that stops
       // recording makes the ledger decline every turn from here on, and that
@@ -315,6 +337,14 @@ export function startWriteJournal(
     watcher = fs.watch(repoPath, { recursive: true, persistent: true }, (_event, filename) => {
       if (stopped || !filename) return;
       const rel = String(filename).replace(/\\/g, '/');
+      // Tests and custom callers may put the journal inside the watched tree.
+      // Never observe our own lock entries, snapshots, or compaction temp files.
+      const absolute = path.resolve(repoPath, rel);
+      const ownJournal = path.resolve(journalPath);
+      if (absolute === ownJournal || absolute.startsWith(ownJournal + '.')
+        || absolute === path.resolve(lockPath)
+        || (snapshotDir && (absolute === path.resolve(snapshotDir)
+          || absolute.startsWith(path.resolve(snapshotDir) + path.sep)))) return;
       if (isJournalIgnored(rel)) return;
       // A directory event carries the directory name; only record real files.
       let gone = false;
@@ -333,7 +363,7 @@ export function startWriteJournal(
       }
       append(rel, gone, mtime);
     });
-    watcher.on('error', () => { try { watcher?.close(); } catch { /* ignore */ } });
+    watcher.on('error', () => { stopped = true; release(); try { watcher?.close(); } catch { /* ignore */ } });
 
     // …but only the dedicated watcher PROCESS may be held open by it.
     //
@@ -360,12 +390,23 @@ export function startWriteJournal(
       try { (watcher as unknown as { unref?: () => void }).unref?.(); } catch { /* ignore */ }
     }
   } catch {
+    release();
     return null;
   }
 
+  const refresh = (): void => {
+    if (!lease.owned()) { stopped = true; watcher?.close(); if (heartbeat) clearInterval(heartbeat); return; }
+    try { fs.writeFileSync(lockPath, String(process.pid)); } catch { /* home removed */ }
+  };
+  refresh();
+  heartbeat = setInterval(refresh, 15_000);
+  heartbeat.unref?.();
   return {
     stop(): void {
       stopped = true;
+      for (const timer of pending.values()) clearTimeout(timer);
+      pending.clear();
+      release();
       try { watcher?.close(); } catch { /* ignore */ }
     },
   };
@@ -397,27 +438,35 @@ export function readJournalEntries(journalPath: string): JournalEntry[] {
  */
 export function compactJournal(journalPath: string, now = Date.now(), snapshotDir?: string): void {
   try {
-    const entries = readJournalEntries(journalPath);
-    if (entries.length === 0) return;
-    const writes = entries.filter((e): e is { kind: 'write' } & WriteRecord => e.kind === 'write');
-    const keep = new Set(
-      trimJournal(writes.map(({ kind: _k, ...r }) => r), now, JOURNAL_KEEP_MS, JOURNAL_MAX_RECORDS)
-        .map((r) => `${r.file}\u0000${r.at}`),
-    );
-    const out: string[] = [];
-    for (const e of entries) {
-      if (e.kind === 'turn') { out.push(serializeTurnMark(e)); continue; }
-      if (e.kind === 'fence') { out.push(serializeFence(e.at)); continue; }
-      const { kind: _k, ...rec } = e;
-      if (keep.has(`${rec.file}\u0000${rec.at}`)) out.push(serializeRecord(rec));
-    }
-    fs.writeFileSync(journalPath, out.join(''));
-    // Whatever the compacted journal no longer names can go. Done here because
-    // this is the only moment a hash stops being reachable.
-    if (snapshotDir) {
-      const live: string[] = [];
-      for (const e of parseJournalEntries(out.join(''))) if (e.kind === 'write' && e.hash) live.push(e.hash);
-      pruneUnreferenced(snapshotDir, live);
-    }
+    mutateJournal(journalPath, () => {
+      const entries = readJournalEntries(journalPath);
+      if (entries.length === 0) return;
+      const writes = entries.filter((e): e is { kind: 'write' } & WriteRecord => e.kind === 'write');
+      const keep = new Set(
+        trimJournal(writes.map(({ kind: _k, ...r }) => r), now, JOURNAL_KEEP_MS, JOURNAL_MAX_RECORDS)
+          .map((r) => `${r.file}\u0000${r.at}`),
+      );
+      const out: string[] = [];
+      for (const e of entries) {
+        if (e.kind === 'turn') { out.push(serializeTurnMark(e)); continue; }
+        if (e.kind === 'fence') { out.push(serializeFence(e.at)); continue; }
+        const { kind: _k, ...rec } = e;
+        if (keep.has(`${rec.file}\u0000${rec.at}`)) out.push(serializeRecord(rec));
+      }
+      const temporary = `${journalPath}.tmp.${process.pid}.${crypto.randomUUID()}`;
+      try {
+        fs.writeFileSync(temporary, out.join(''));
+        fs.renameSync(temporary, journalPath);
+      } finally {
+        try { fs.unlinkSync(temporary); } catch { /* renamed */ }
+      }
+      // Whatever the compacted journal no longer names can go. Done here because
+      // this is the only moment a hash stops being reachable.
+      if (snapshotDir) {
+        const live: string[] = [];
+        for (const e of parseJournalEntries(out.join(''))) if (e.kind === 'write' && e.hash) live.push(e.hash);
+        pruneUnreferenced(snapshotDir, live);
+      }
+    });
   } catch { /* best-effort */ }
 }

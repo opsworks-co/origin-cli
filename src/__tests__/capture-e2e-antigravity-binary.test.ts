@@ -20,6 +20,7 @@ import { fileURLToPath } from 'url';
 import { journalPathsForTag } from '../write-journal-watch.js';
 import { verifyTurn, parseUnifiedDiff } from '../capture-verify.js';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { foldStopRows } from './helpers/fold-stop-rows.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -108,6 +109,9 @@ function writesIn(): number {
 }
 function rowsSent(): any[] {
   return hits.filter((h) => h.method === 'PATCH' && Array.isArray(h.body?.promptChanges)).map((h) => h.body.promptChanges);
+}
+function lastRows(): any[] {
+  return foldStopRows(rowsSent());
 }
 
 async function killJournalWatcher(): Promise<void> {
@@ -201,9 +205,9 @@ describe.skipIf(!haveDist)('antigravity capture end to end through the built bin
     const stop = await run('stop', { transcriptPath: transcript });
     expect(stop.code, stop.stderr).toBe(0);
 
-    const sent = rowsSent();
-    expect(sent.length, 'no per-turn rows reached the API').toBeGreaterThan(0);
-    const t1 = sent[sent.length - 1].find((r: any) => r.promptIndex === 0);
+    const rows = lastRows();
+    expect(rows.length, 'no per-turn rows reached the API').toBeGreaterThan(0);
+    const t1 = rows.find((r: any) => r.promptIndex === 0);
     expect(t1, 'no row for turn 1').toBeTruthy();
     expect(t1.diffSource).toBe('ledger');
     expect(t1.turnId).toMatch(/^t_/);
@@ -232,8 +236,7 @@ describe.skipIf(!haveDist)('antigravity capture end to end through the built bin
     const stop = await run('stop', { transcriptPath: transcript });
     expect(stop.code, stop.stderr).toBe(0);
 
-    const sent = rowsSent();
-    const rows = sent[sent.length - 1];
+    const rows = lastRows();
     const t2 = rows.find((r: any) => r.promptIndex === 1);
     expect(t2, 'no row for turn 2').toBeTruthy();
     expect(t2.diffSource).toBe('ledger');

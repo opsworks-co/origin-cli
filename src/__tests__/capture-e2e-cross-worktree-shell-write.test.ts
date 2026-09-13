@@ -35,6 +35,7 @@ import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { foldStopRows } from './helpers/fold-stop-rows.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -169,10 +170,11 @@ function siblingClaims(): string[] {
 }
 
 function rowsFor(sessionId: string): any[] {
-  const p = hits
-    .filter((h) => h.method === 'PATCH' && h.url.includes(sessionId) && Array.isArray(h.body?.promptChanges))
-    .map((h) => h.body.promptChanges);
-  return p.length ? p[p.length - 1] : [];
+  return foldStopRows(
+    hits
+      .filter((h) => h.method === 'PATCH' && h.url.includes(sessionId) && Array.isArray(h.body?.promptChanges))
+      .map((h) => h.body.promptChanges),
+  );
 }
 
 describe.skipIf(!haveDist)('a script-driven write in a worktree survives a sibling in the main checkout', () => {

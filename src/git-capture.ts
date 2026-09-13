@@ -1060,11 +1060,8 @@ export function createShadowCommit(repoPath: string, tag: string): string | null
 
       // 2. Stage all changes from the working tree (tracked changes +
       //    deletions) into the temp index.
-      try {
-        git(['add', '-A', '--', '.'], indexOpts);
-      } catch {
-        // best-effort: continue even if some paths fail
-      }
+      // A partial index cannot serve as proof of a complete turn boundary.
+      git(['add', '-A', '--', '.'], indexOpts);
 
       // 3. write-tree against the temp index
       const treeSha = git(['write-tree'], indexOpts).trim();
@@ -1158,6 +1155,7 @@ function diffTreeToTree(
   targetTree: string,
   gitOpts: { cwd: string; timeoutMs: number; maxBuffer: number },
   unified = 2000,
+  requireComplete = false,
 ): AgyDiffResult {
   let diff = '';
   const files = new Set<string>();
@@ -1165,9 +1163,10 @@ function diffTreeToTree(
     diff = trimDiffText(git(['diff', `--unified=${unified}`, baseTree, targetTree], gitOpts));
     const names = git(['diff', '--name-only', baseTree, targetTree], gitOpts).trim();
     if (names) for (const f of names.split('\n').filter(Boolean)) files.add(f);
-  } catch { /* best-effort */ }
+  } catch (err) { if (requireComplete) throw err; }
 
   diff = stripIgnoredSectionsFromDiff(diff);
+  if (requireComplete && diff.length > MAX_DIFF_SIZE) throw new Error('Turn window exceeds capture budget');
   if (diff.length > MAX_DIFF_SIZE) diff = diff.slice(0, MAX_DIFF_SIZE);
 
   let linesAdded = 0;
@@ -1250,16 +1249,17 @@ export function captureShadowWindow(
   repoPath: string,
   fromSha: string | null,
   toSha: string | null,
-  opts?: { unified?: number },
+  opts?: { unified?: number; completeBaseline?: boolean },
 ): ShadowWindowCapture {
   const none = (status: ShadowWindowStatus): ShadowWindowCapture => ({ status, ...EMPTY_WINDOW });
   if (!fromSha || !HEX.test(fromSha)) return none('unavailable');
   if (toSha && !HEX.test(toSha)) return none('unavailable');
-  if (toSha && fromSha === toSha) return none('identical-sha');
+  if (toSha && fromSha === toSha && !opts?.completeBaseline) return none('identical-sha');
 
   const gitOpts = { cwd: repoPath, timeoutMs: 15_000, maxBuffer: 10 * 1024 * 1024 };
   const author = gitOrNull(['log', '-1', '--format=%ae', fromSha], gitOpts);
-  if (author !== SHADOW_IDENTITY_EMAIL) return none('not-shadow');
+  if (!author) return none('unavailable');
+  if (author !== SHADOW_IDENTITY_EMAIL && !opts?.completeBaseline) return none('not-shadow');
 
   const fromTree = gitOrNull(['rev-parse', `${fromSha}^{tree}`], gitOpts);
   if (!fromTree || !HEX.test(fromTree)) return none('unavailable');
@@ -1272,8 +1272,10 @@ export function captureShadowWindow(
   if (fromTree === toTree) return none('empty'); // path-compare-ok
 
   const unified = opts?.unified ?? 3;
-  const cap = diffTreeToTree(fromTree, toTree, gitOpts, unified);
-  return { status: 'changed', ...cap };
+  try {
+    const cap = diffTreeToTree(fromTree, toTree, gitOpts, unified, true);
+    return { status: 'changed', ...cap };
+  } catch { return none('unavailable'); }
 }
 
 /**
@@ -1286,7 +1288,7 @@ function writeWorkingTree(repoPath: string, gitOpts: { cwd: string; timeoutMs: n
   const indexOpts = { ...gitOpts, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } };
   try {
     git(['read-tree', 'HEAD'], indexOpts);
-    try { git(['add', '-A', '--', '.'], indexOpts); } catch { /* best-effort */ }
+    git(['add', '-A', '--', '.'], indexOpts);
     const tree = git(['write-tree'], indexOpts).trim();
     return HEX.test(tree) ? tree : null;
   } catch {

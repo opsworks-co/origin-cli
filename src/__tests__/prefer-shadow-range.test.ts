@@ -148,8 +148,8 @@ describe('preferShadowRangeForTurns', () => {
     expect(mapping.filesChanged).toEqual(['sessions.ts']);
     expect(mapping.linesAdded).toBe(2);
     expect(mapping.linesRemoved).toBe(0);
-    // Provenance stays: still this turn's observed work, now in git's rendering.
-    expect((mapping as { diffSource?: string }).diffSource).toBe('ledger');
+    // Provenance names the complete tree window used for the replacement.
+    expect((mapping as { diffSource?: string }).diffSource).toBe('turn-window');
   });
 
   it('does not paint the live worktree onto an earlier turn that has no next shadow', () => {

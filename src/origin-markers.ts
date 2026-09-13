@@ -11,8 +11,8 @@
 //
 // The server parses these from the stored transcript for the PR review
 // surface (apps/api/src/services/self-reported-brief.ts). This module is
-// the CLI-side mirror: it parses the SAME markers at session-end and
-// stores them in refs/notes/origin so the "why" behind a change travels
+// the CLI-side mirror: it parses the SAME markers at Stop and session-end
+// and stores them in refs/notes/origin so the "why" behind a change travels
 // with the repo and can be pulled per-file by a later agent
 // (get_file_context) — without an Origin DB account.
 //
@@ -265,6 +265,31 @@ export function parseMarkersFromTranscript(
   transcript: string | null | undefined,
 ): OriginMarkers | undefined {
   return parseOriginMarkers(extractTranscriptText(transcript));
+}
+
+/**
+ * Union `[Origin: Closes]` ids from several already-parsed marker sets.
+ *
+ * Stop sees the same claim in more than one place (the transcript file, the
+ * parsed blob, a last-assistant-message on stdin). De-duping here means the
+ * recorder does not have to care which source won.
+ */
+export function closesFromMarkers(
+  ...sources: Array<OriginMarkers | undefined | null>
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const src of sources) {
+    for (const raw of src?.closes || []) {
+      const c = raw.trim();
+      if (!c) continue;
+      const key = c.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(c);
+    }
+  }
+  return out;
 }
 
 // Read markers straight from a transcript file. Used by the note-write

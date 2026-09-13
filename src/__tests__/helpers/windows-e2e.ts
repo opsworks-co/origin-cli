@@ -38,19 +38,14 @@
 //
 //   13 files                            pass / pass / pass / pass
 //   capture-e2e-real-binary             fail / fail / pass / FAIL  (#1570, held)
-//   capture-e2e-cursor-concurrent-start pass / pass / FAIL / -     (#1568, held)
+//   capture-e2e-cursor-concurrent-start pass / pass / FAIL / -     (#1568, fixed)
 //
-// So 13 of the 15 are enabled here, not 14. An earlier revision of this
-// comment cleared `capture-e2e-real-binary` after its single green run in
-// run 3, once #1564 fixed the `turn 5` cause. Run 4 then failed it on `turn
-// 4` — a different assertion, about a shell write missing from its turn.
-// One green run is not evidence a flaky file is fixed; that is the trap this
-// file's own PR description warns about, and it was walked into here.
-//
-// `capture-e2e-cursor-concurrent-start` is skipped on Windows at its own
-// describe, with the evidence and an owner in #1568. One evidenced exception
-// with a tracking issue is the opposite of the blanket `!posix` above: that
-// one had no recorded reason and hid 15 files for months.
+// All 15 are enabled now. The cursor start race returned after #1577; the
+// real-binary capture gate returned with exclusive journal writer ownership
+// and serialized append/compaction. The table above is historical evidence,
+// not a claim that the journal changes have passed Windows CI. Collect fresh
+// Windows runs before closing #1570: one green run previously hid another
+// failure, so it cannot establish that the intermittent loss is resolved.
 export const isWindows = process.platform === 'win32';
 
 /** Multiply an explicit test/hook timeout by this. 1 everywhere but Windows. */

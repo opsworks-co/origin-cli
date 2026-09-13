@@ -342,7 +342,7 @@ export interface LedgerApplicableMapping {
   linesRemoved?: number;
   contentUnavailableFiles?: string[];
   /** Provenance, sent on the wire. See utils/diff-provenance.ts on the server. */
-  diffSource?: 'ledger';
+  diffSource?: 'ledger' | 'turn-window';
   /** Internal marker for callers that must suppress their own re-derivation. */
   ledgerOwned?: boolean;
 }
