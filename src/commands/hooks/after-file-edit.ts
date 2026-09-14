@@ -230,6 +230,34 @@ export function buildLiveEditPromptChanges(
   });
 }
 
+/**
+ * HEAD, if a commit landed on top of the tree the turn started from; null when
+ * HEAD is still that commit (or cannot be resolved).
+ *
+ * `baselineSha` is the turn's shadow — a commit whose subject starts
+ * `origin shadow ` and whose first parent is the real commit it was cut on —
+ * or, for a clean tree, that commit itself (as `inheritedWindowDeps` reads
+ * them in commands/hooks.ts). HEAD must be a strict descendant of it: equal
+ * means nothing was committed during the turn, and a HEAD outside its
+ * ancestry (a checkout elsewhere) is no commit of this turn's either.
+ */
+export function headCommitMadeSince(repoPath: string, baselineSha: string | null | undefined): string | null {
+  if (!repoPath || !baselineSha || !/^[a-fA-F0-9]{7,40}$/.test(baselineSha)) return null;
+  const git = (args: string[]): string => execFileSync('git', args, {
+    windowsHide: true, cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+  }).trim();
+  try {
+    const record = git(['show', '-s', '--format=%s%n%P', baselineSha]).split('\n');
+    const start = git(['rev-parse', record[0].startsWith('origin shadow ') ? (record[1] || '').split(' ')[0] : baselineSha]);
+    const head = git(['rev-parse', 'HEAD']);
+    if (!start || !head || head === start) return null;
+    try { git(['merge-base', '--is-ancestor', start, head]); } catch { return null; }
+    return head;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Cursor: afterFileEdit ───────────────────────────────────────────────
 //
 // Fires after every Cursor edit (StrReplace / Write / etc.). Cursor's git
@@ -372,14 +400,24 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
     // Filesystem path the hook reported, if any — useful when the diff lags.
     for (const p of edited) filesChanged.add(p);
 
-    let commitSha: string | null = null;
-    let treeSha: string | null = null;
-    try {
-      commitSha = execFileSync('git', ['rev-parse', 'HEAD'], { windowsHide: true, cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-      treeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { windowsHide: true, cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    } catch { /* ignore */ }
-
     if (!state.completedPromptMappings) state.completedPromptMappings = [];
+    // HEAD is this turn's commit only when the turn moved it. Stamping HEAD
+    // unconditionally put the commit the turn STARTED from on every edited
+    // turn: capture-e2e-cursor-binary turn 1 was sent — and, the server's
+    // sha being fill-only, stored — with `commit: base`, the repo's
+    // pre-session commit. An unmoved HEAD keeps whatever the mapping already
+    // carries (post-commit's attestation, if it ran).
+    const prior = state.completedPromptMappings.find((m) => m.promptIndex === promptIdx) as { commitSha?: string | null; treeSha?: string | null } | undefined;
+    const madeSince = headCommitMadeSince(state.repoPath, captureBaseline);
+    let commitSha: string | null = prior?.commitSha ?? null;
+    let treeSha: string | null = prior?.treeSha ?? null;
+    if (madeSince) {
+      commitSha = madeSince;
+      try {
+        treeSha = execFileSync('git', ['rev-parse', `${madeSince}^{tree}`], { windowsHide: true, cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      } catch { /* keep the prior tree */ }
+    }
+
     const promptText = (state.prompts?.[promptIdx] || '').slice(0, 1000);
     const mapping = {
       promptIndex: promptIdx,

@@ -55,6 +55,7 @@ import { sessionTagFor } from './session-state.js';
 import { loadConfig, loadAgentConfig } from './config.js';
 import { debugLog, logSkipOnce } from './debug-log.js';
 import { writeWatchMeta, touchWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
+import { compareResolverWithPasses, createTurnObserver, observeReconstruction, onlyDifferences } from './resolve-turn.js';
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -717,18 +718,25 @@ export async function reconcileThread(
       checkpointType: 'auto',
     });
   }
+  // Side by side with resolveTurn (resolve-turn.ts). Logging only.
+  const observer = createTurnObserver();
+  observeReconstruction(promptChanges as any, observer);
   applyLedgerToProducerRows({
     tag: journalTag,
     workRoot: repo.workRoot,
     promptTurnIds: promptTurns.map((t) => t.turnId),
-    promptShadows: promptShadows.map((s) => ({ promptIndex: s.promptIndex, shadowSha: s.baselineSha })),
+    promptShadows: promptShadows.map((s) => ({ promptIndex: s.promptIndex, shadowSha: s.baselineSha, promptStartedAt: s.promptStartedAt })),
     prePromptSha: promptShadows.find((s) => s.promptIndex === 0)?.baselineSha || null,
     headShaAtStart: headShaAtStart || null,
-  }, promptChanges, 'codex-watch');
+  }, promptChanges, 'codex-watch', { observe: observer.observe });
   for (let k = promptChanges.length - 1; k >= 0; k--) {
     const pc = promptChanges[k];
     if (candidateIdx.has(pc.promptIndex) && pc.diffSource !== 'ledger') promptChanges.splice(k, 1);
   }
+  // After the drop: a placeholder the ledger declined was never going to be sent.
+  try {
+    compareResolverWithPasses(promptChanges as any, observer, onlyDifferences((event, data) => debugLog('codex-watch', event, data)));
+  } catch { /* logging only */ }
   // A ledger answer for a COMPLETED turn is final: its span is closed by the
   // next mark and cannot grow. Seal it so it is computed once, like a range.
   for (const pc of promptChanges) {

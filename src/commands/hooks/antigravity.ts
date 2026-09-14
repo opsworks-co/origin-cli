@@ -27,6 +27,7 @@ import os from 'os';
 import path from 'path';
 import { agyWatchDonePath, agyWatchLockPath, buildMemoryEntry, deriveAgyRoots, ensureDetachedJournalWatcher, nestedRepoFilesWritten, scheduleMemoryBriefRefresh, scopeAgyDiffToSessionEdits } from '../hooks.js';
 import { newCaptureStamp } from '../../capture-stamp.js';
+import { compareResolverWithPasses, createTurnObserver, observeReconstruction, onlyDifferences } from '../../resolve-turn.js';
 
 
 /**
@@ -811,6 +812,9 @@ export async function handleAntigravity(event: string, input: Record<string, any
   try {
     const jp = journalPathsForTag(agySessionTag(conversationId), workRoot);
     const row: Record<string, unknown> & { promptIndex: number } = { promptIndex: currentIdx, filesChanged, diff, linesAdded, linesRemoved };
+    // Side by side with resolveTurn (resolve-turn.ts). Logging only.
+    const observer = createTurnObserver();
+    observeReconstruction([row as any], observer);
     const owned = applyLedgerToMappings({
       writeJournalPath: jp.journalPath,
       writeSnapshotDir: jp.snapshotDir,
@@ -822,7 +826,11 @@ export async function handleAntigravity(event: string, input: Record<string, any
       readAtRev: (sha, file) => readFileAtRev(workRoot, sha, file),
       ignoredFiles: (files) => gitIgnoredFiles(workRoot, files),
       log: (ev, data) => debugLog('ledger', ev, { via: 'antigravity', ...data }),
+      observe: observer.observe,
     });
+    try {
+      compareResolverWithPasses([row as any], observer, onlyDifferences((ev, data) => debugLog(event, ev, data)));
+    } catch { /* logging only */ }
     if (owned > 0) {
       ledgerOwned = true;
       filesChanged = row.filesChanged as string[];

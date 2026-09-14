@@ -1,4 +1,5 @@
 import { createHash, type Hash } from 'node:crypto';
+import { isOriginAutoManagedPath } from './ignore-patterns.js';
 
 // ── Capture self-consistency verification ───────────────────────────────────
 //
@@ -516,10 +517,18 @@ export function verifyTurn(turn: VerifiableTurn): CaptureViolation[] {
   // Unavailable paths name exact captured claims. Suffix matching here can
   // exempt a different repository's same-named file from verification.
   const unavailable = new Set((turn.contentUnavailableFiles || []).map(diffPathKey));
-  const inDiff = [...new Set([...committed.files, ...working.files].map((f) => f.file))];
+  // Origin's own context files (AGENTS.md, CLAUDE.md, …) are stripped from
+  // every captured diff by basename, so a claim naming one can never be
+  // matched by the stored diff. Exempt on BOTH sides: dropping only the claim
+  // would turn an older row whose diff still carries the file into
+  // `diff_file_unclaimed`. Session 081e0a26 turn 1 blocked a release on
+  // `claimed_file_absent_from_diff` naming only AGENTS.md.
+  const inDiff = [...new Set([...committed.files, ...working.files].map((f) => f.file))]
+    .filter((f) => !isOriginAutoManagedPath(f));
   const claimed = (turn.filesChanged || [])
     .map(diffPathKey)
-    .filter((f) => f && (inDiff.some((d) => diffPathKey(d) === f)
+    .filter((f) => f && !isOriginAutoManagedPath(f))
+    .filter((f) => (inDiff.some((d) => diffPathKey(d) === f)
       || (!unavailable.has(f) && !outOfRepo.some((o) => sameFile(o, f)))));
 
   // Deduped: a file with two sections (see `duplicateFiles`) would otherwise be
@@ -640,7 +649,12 @@ export function verifyHeader(
     }
   }
 
-  const headerFiles = (header.filesChanged || []).filter((f) => typeof f === 'string' && f.trim().length > 0);
+  // Same exemption as the per-turn rule: turn producers drop Origin's context
+  // files from their lists, so a header still naming one is not a leak. The
+  // totals need nothing — the header's committed walk already drops those
+  // sections (`dropBookkeepingSections`), and turn sums come from stripped text.
+  const headerFiles = (header.filesChanged || [])
+    .filter((f) => typeof f === 'string' && f.trim().length > 0 && !isOriginAutoManagedPath(f));
   const unclaimed = headerFiles.filter((f) => !named.some((n) => sameFile(n, f)));
   if (unclaimed.length > 0) {
     out.push({

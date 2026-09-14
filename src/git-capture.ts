@@ -130,7 +130,7 @@ export interface GitCaptureResult {
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
-const MAX_DIFF_SIZE = 500_000; // 500KB max diff size
+export const MAX_DIFF_SIZE = 500_000; // 500KB max diff size
 
 /**
  * Author identity stamped on every shadow commit `createShadowCommit` writes.
@@ -1299,23 +1299,38 @@ function writeWorkingTree(repoPath: string, gitOpts: { cwd: string; timeoutMs: n
 }
 
 /**
+ * True when `relPath` must not be passed to `git show <sha>:<path>`.
+ *
+ * A leading `./` or `../` (or a later `..` segment) would make git resolve
+ * against cwd rather than the repo root; an absolute / Windows-drive path is
+ * never valid in this form. Hidden repo paths (`.github/…`, `.gitignore`)
+ * are ordinary tree entries and must be readable — `startsWith('.')` used
+ * to reject them, so a checkout rewrite of `.github/workflows/test.yml`
+ * (session 9a1ef9e3 turn 3) was billed as a 312-line creation.
+ */
+export function isUnsafeGitShowPath(relPath: string): boolean {
+  if (!relPath) return true;
+  if (relPath.startsWith('/') || /^[A-Za-z]:/.test(relPath)) return true;
+  const parts = relPath.split(/[/\\]/);
+  if (parts[0] === '.' || parts[0] === '..') return true;
+  if (parts.includes('..')) return true;
+  return false;
+}
+
+/**
  * Read a repo-relative file's content as of a commit/tree sha (shadow commits
  * included — they're ordinary objects kept reachable by a ref).
  *
- * Used to anchor Codex `apply_patch` hunks to their real line numbers: Codex's
- * Update-File sections carry a bare `@@` with no ranges, so the only way to
- * know where a hunk lands is to look at the file it was applied to. Returns
- * null on any failure (path absent at that rev, bad sha, binary blowup) —
- * callers must degrade gracefully rather than emit a guessed position.
+ * Used to anchor Codex `apply_patch` hunks and as the before-state for ledger
+ * / inherited-window capture. Returns null on any failure (unsafe path, path
+ * absent at that rev, bad sha, binary blowup) — callers must degrade
+ * gracefully rather than emit a guessed position.
  *
  * `relPath` must be relative to the repo ROOT and use forward slashes, which is
  * what `git show <sha>:<path>` expects.
  */
 export function readFileAtRev(repoPath: string, sha: string, relPath: string): string | null {
-  if (!sha || !HEX.test(sha) || !relPath) return null;
-  // A leading `./` or `../` would make git resolve the path against cwd rather
-  // than the repo root; an absolute path is never valid in this form.
-  if (relPath.startsWith('.') || relPath.startsWith('/') || /^[A-Za-z]:/.test(relPath)) return null;
+  if (!sha || !HEX.test(sha) || isUnsafeGitShowPath(relPath)) return null;
   try {
     return git(['show', `${sha}:${relPath}`], {
       cwd: repoPath, timeoutMs: 10_000, maxBuffer: 10 * 1024 * 1024,

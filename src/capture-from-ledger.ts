@@ -28,11 +28,13 @@ import {
   turnSpan,
   type JournalEntry,
 } from './write-journal.js';
+import { recoverJournalTurns } from './recover-journal-turns.js';
 import { getSnapshot } from './write-journal-store.js';
 import { localTurnForServerRow } from './turn-index.js';
 import { renderFileDiff, type FileDiffInput } from './write-journal-diff.js';
 import { fitDiffToBudget } from './diff-budget.js';
 import { MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import type { TurnObservation } from './resolve-turn.js';
 
 /**
  * How far a file's mtime may sit BEFORE its turn's mark and still be that
@@ -318,7 +320,7 @@ export interface LedgerSessionState {
   /** LOCAL-numbered: index L is this launch's turn L. */
   promptTurnIds?: string[];
   /** LOCAL-numbered, like the ids. */
-  promptShadows?: Array<{ promptIndex: number; shadowSha: string }>;
+  promptShadows?: Array<{ promptIndex: number; shadowSha: string; promptStartedAt?: number }>;
   prePromptSha?: string | null;
   headShaAtStart?: string | null;
   /** Server row of this launch's turn 0 — see turn-index.ts. */
@@ -362,6 +364,8 @@ export interface ApplyLedgerDeps {
   inheritedBefore?: (baselineSha: string, localTurn: number) => Map<string, string | null>;
   /** Optional trace hook; never throws. */
   log?: (event: string, data: Record<string, unknown>) => void;
+  /** What the ledger found for each row — see resolve-turn.ts. */
+  observe?: (promptIndex: number, observation: TurnObservation) => void;
 }
 
 /**
@@ -388,16 +392,22 @@ export function applyLedgerToMappings(
   mappings: LedgerApplicableMapping[],
   deps: ApplyLedgerDeps,
 ): number {
+  const declined = (pm: LedgerApplicableMapping, reason: string) =>
+    deps.observe?.(pm.promptIndex, { source: 'ledger', outcome: 'declined', reason });
   try {
     const journalPath = state.writeJournalPath;
     const snapshotDir = state.writeSnapshotDir;
     if (!journalPath || !snapshotDir || !Array.isArray(mappings)) return 0;
     if (state.ledgerContended) {
       deps.log?.('ledger declined: another live session shares this working tree', {});
+      for (const pm of mappings) {
+        if (pm && Number.isInteger(pm.promptIndex)) declined(pm, 'another live session shares this working tree');
+      }
       return 0;
     }
-    const entries = deps.readEntries(journalPath);
-    if (entries.length === 0) return 0;
+    const recorded = deps.readEntries(journalPath);
+    if (recorded.length === 0) return 0;
+    const { entries, turnIds } = recoverJournalTurns(recorded, state);
 
     let replaced = 0;
     for (const pm of mappings) {
@@ -410,11 +420,13 @@ export function applyLedgerToMappings(
       const local = localTurnForServerRow(pm.promptIndex, state.promptIndexBase);
       if (local === null) {
         deps.log?.('ledger declined: row predates this launch', { promptIndex: pm.promptIndex });
+        declined(pm, 'row predates this launch');
         continue;
       }
-      const turnId = state.promptTurnIds?.[local];
+      const turnId = turnIds[local];
       if (typeof turnId !== 'string' || !turnId) {
         deps.log?.('ledger declined: turn has no id', { promptIndex: pm.promptIndex });
+        declined(pm, 'turn has no id');
         continue;
       }
 
@@ -448,6 +460,7 @@ export function applyLedgerToMappings(
         deps.log?.(cap ? 'ledger declined: turn is marked but resolved nothing' : 'ledger declined: turn is not marked in the journal', {
           promptIndex: pm.promptIndex, turnId,
         });
+        declined(pm, cap ? 'turn is marked but resolved nothing' : 'turn is not marked in the journal');
         continue;
       }
 
@@ -475,6 +488,11 @@ export function applyLedgerToMappings(
       pm.ledgerOwned = true;
       if (cap.contentUnavailable.length > 0) pm.contentUnavailableFiles = cap.contentUnavailable;
       replaced++;
+      deps.observe?.(pm.promptIndex, {
+        source: 'ledger', outcome: 'applied',
+        files: [...cap.filesChanged], diff: cap.diff, added: cap.linesAdded, removed: cap.linesRemoved,
+        contentUnavailable: [...cap.contentUnavailable],
+      });
       deps.log?.('turn capture taken from the write journal', {
         promptIndex: pm.promptIndex,
         turnId,

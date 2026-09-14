@@ -1,0 +1,84 @@
+{
+ "note": "Recorded by packages/cli capture-e2e with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api capture-golden-stored-rows.test.ts.",
+ "roots": [
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-pull-wEJdHE/repo",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-pull-wEJdHE"
+ ],
+ "commits": {
+  "247001ae067be779dbcbe30c38d68c89e33ff030": "commit: session e2e-pull: claude — fix the greeting, and pull main",
+  "96bc7d9f19ef752c4ff25542759fb90a7a55e654": "commit: {\"id\":\"8d7793c17b7d\",\"timestamp\":\"2026-09-13T23:07:58.611Z\",\"sessionTag\":\"e2e-pull-ses\",\"filesChanged\":[\"app.py\"],\"treeSha\":\"5ca858065f8b39b448beea33e2afba773e1c181e\",\"branch\":\"origin/shadow/e2e-pull-ses\",\"prompt\":\"fix the greeting, and pull main\",\"model\":\"claude\",\"tokensUsed\":32,\"costUsd\":0.0006,\"promptIndex\":0,\"type\":\"auto\",\"commitSha\":\"e533b16b6cfca34f4389088b87bf33abe63eb528\",\"attribution\":{\"linesAdded\":61,\"linesRemoved\":1,\"aiLinesAdded\":61,\"humanLinesAdded\":0,\"aiPercentage\":100}}",
+  "b098aee8750a0f70fe1536b1611e25c95004cc43": "commit: origin shadow e2e-pull-ses 2026-09-13T23:07:58.344Z",
+  "2cd862806c5652b363501bb9dab43e07864b1a96": "commit: origin shadow prompt-e2e-pull-ses 2026-09-13T23:07:48.823Z",
+  "e533b16b6cfca34f4389088b87bf33abe63eb528": "commit: fix: another PR (#1593)",
+  "d650012980632160a1e59f7d0a77f3a812f41211": "commit: base"
+ },
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "fix the greeting, and pull main",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "app.py"
+    ],
+    "tokensUsed": 32,
+    "tokensEstimated": true,
+    "inputTokens": 8,
+    "outputTokens": 24,
+    "toolCalls": 2,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 1
+     },
+     {
+      "name": "Bash",
+      "count": 1
+     }
+    ],
+    "durationMs": 7909,
+    "costUsd": 0.0006,
+    "gitCapture": {
+     "headBefore": "d650012980632160a1e59f7d0a77f3a812f41211",
+     "headAfter": "e533b16b6cfca34f4389088b87bf33abe63eb528",
+     "commitShas": [],
+     "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+     "linesAdded": 1,
+     "linesRemoved": 1,
+     "commitDetails": [],
+     "snapshot": true
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "fix the greeting, and pull main",
+      "filesChanged": [
+       "app.py"
+      ],
+      "diff": "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\n",
+      "edits": [
+       {
+        "file": "app.py",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-pull-wEJdHE/repo/app.py",
+         "content": "def main():\n    print(\"new\")\n\n\nmain()\n"
+        }
+       }
+      ],
+      "ranCommit": false,
+      "wroteViaShell": true,
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "diffSource": "ledger",
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"fix the greeting, and pull main\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"upstream_a.py\",\"op\":\"create\",\"newContent\":\"upstream_a_0 = 0\\nupstream_a_1 = 1\\nupstream_a_2 = 2\\nupstream_a_3 = 3\\nupstream_a_4 = 4\\nupstream_a_5 = 5\\nupstream_a_6 = 6\\nupstream_a_7 = 7\\nupstream_a_8 = 8\\nupstream_a_9 = 9\\nupstream_a_10 = 10\\nupstream_a_11 = 11\\nupstream_a_12 = 12\\nupstream_a_13 = 13\\nupstream_a_14 = 14\\nupstream_a_15 = 15\\nupstream_a_16 = 16\\nupstream_a_17 = 17\\nupstream_a_18 = 18\\nupstream_a_19 = 19\\nupstream_a_20 = 20\\nupstream_a_21 = 21\\nupstream_a_22 = 22\\nupstream_a_23 = 23\\nupstream_a_24 = 24\\nupstream_a_25 = 25\\nupstream_a_26 = 26\\nupstream_a_27 = 27\\nupstream_a_28 = 28\\nupstream_a_29 = 29\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"upstream_b.py\",\"op\":\"create\",\"newContent\":\"upstream_b_0 = 0\\nupstream_b_1 = 1\\nupstream_b_2 = 2\\nupstream_b_3 = 3\\nupstream_b_4 = 4\\nupstream_b_5 = 5\\nupstream_b_6 = 6\\nupstream_b_7 = 7\\nupstream_b_8 = 8\\nupstream_b_9 = 9\\nupstream_b_10 = 10\\nupstream_b_11 = 11\\nupstream_b_12 = 12\\nupstream_b_13 = 13\\nupstream_b_14 = 14\\nupstream_b_15 = 15\\nupstream_b_16 = 16\\nupstream_b_17 = 17\\nupstream_b_18 = 18\\nupstream_b_19 = 19\\nupstream_b_20 = 20\\nupstream_b_21 = 21\\nupstream_b_22 = 22\\nupstream_b_23 = 23\\nupstream_b_24 = 24\\nupstream_b_25 = 25\\nupstream_b_26 = 26\\nupstream_b_27 = 27\\nupstream_b_28 = 28\\nupstream_b_29 = 29\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1}],\"commits\":[],\"finalHunks\":[{\"file\":\"app.py\",\"start\":2,\"lines\":[\"    print(\\\"new\\\")\"]},{\"file\":\"upstream_a.py\",\"start\":1,\"lines\":[\"upstream_a_0 = 0\",\"upstream_a_1 = 1\",\"upstream_a_2 = 2\",\"upstream_a_3 = 3\",\"upstream_a_4 = 4\",\"upstream_a_5 = 5\",\"upstream_a_6 = 6\",\"upstream_a_7 = 7\",\"upstream_a_8 = 8\",\"upstream_a_9 = 9\",\"upstream_a_10 = 10\",\"upstream_a_11 = 11\",\"upstream_a_12 = 12\",\"upstream_a_13 = 13\",\"upstream_a_14 = 14\",\"upstream_a_15 = 15\",\"upstream_a_16 = 16\",\"upstream_a_17 = 17\",\"upstream_a_18 = 18\",\"upstream_a_19 = 19\",\"upstream_a_20 = 20\",\"upstream_a_21 = 21\",\"upstream_a_22 = 22\",\"upstream_a_23 = 23\",\"upstream_a_24 = 24\",\"upstream_a_25 = 25\",\"upstream_a_26 = 26\",\"upstream_a_27 = 27\",\"upstream_a_28 = 28\",\"upstream_a_29 = 29\"]},{\"file\":\"upstream_b.py\",\"start\":1,\"lines\":[\"upstream_b_0 = 0\",\"upstream_b_1 = 1\",\"upstream_b_2 = 2\",\"upstream_b_3 = 3\",\"upstream_b_4 = 4\",\"upstream_b_5 = 5\",\"upstream_b_6 = 6\",\"upstream_b_7 = 7\",\"upstream_b_8 = 8\",\"upstream_b_9 = 9\",\"upstream_b_10 = 10\",\"upstream_b_11 = 11\",\"upstream_b_12 = 12\",\"upstream_b_13 = 13\",\"upstream_b_14 = 14\",\"upstream_b_15 = 15\",\"upstream_b_16 = 16\",\"upstream_b_17 = 17\",\"upstream_b_18 = 18\",\"upstream_b_19 = 19\",\"upstream_b_20 = 20\",\"upstream_b_21 = 21\",\"upstream_b_22 = 22\",\"upstream_b_23 = 23\",\"upstream_b_24 = 24\",\"upstream_b_25 = 25\",\"upstream_b_26 = 26\",\"upstream_b_27 = 27\",\"upstream_b_28 = 28\",\"upstream_b_29 = 29\"]}]}",
+      "turnId": "t_e504ce3493704df0",
+      "captureId": "c_a34ca939ac614760",
+      "capturedAt": 1789340878086
+     }
+    ]
+   }
+  }
+ ]
+}

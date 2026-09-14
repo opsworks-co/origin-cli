@@ -50,6 +50,7 @@ import { durableEndSession } from '../../update-queue.js';
 import { querySqlite } from '../../utils/sqlite.js';
 import { readJournalEntries } from '../../write-journal-watch.js';
 import { handleStop } from '../hooks/stop.js';
+import { sessionNeverStarted } from '../../heartbeat-liveness.js';
 import { condenseAndCleanupSession } from '../snapshot.js';
 import { execFileSync, spawn } from 'child_process';
 import crypto from 'crypto';
@@ -57,6 +58,7 @@ import fs from 'fs';
 import path from 'path';
 import { localTurnForServerRow, rebaseToServerRows, turnIdForServerRow } from '../../turn-index.js';
 import { applyAuthoredTotals, currentSessionWorkTree, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, windowInheritsCommitsForTurn, filterUncommittedDiff, findStateForHook, hookLookupSessionId, liveCaptureEnabled, normalizeWorkspaceRoot, recordShellWindowEdits, sessionAuthoredSnapshot, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
+import { compareResolverWithPasses, createTurnObserver, observeReconstruction, type TurnObservation } from '../../resolve-turn.js';
 
 
 /**
@@ -742,7 +744,25 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
       is_background_agent: input.is_background_agent ?? null,
       conversation_id: input.conversation_id ?? null,
     });
-    return handleStop(input, agentSlug);
+    // Claude Code's desktop app fires SessionEnd on reconnect as well as on
+    // exit, so its SessionEnd stays a Stop, with one exception: a session that
+    // never started. It has no prompt, and Claude Code never created its
+    // transcript. That session cannot resume, so end it here instead of leaving
+    // a Running ghost behind its heartbeat.
+    const ghost = agentSlug === 'claude-code'
+      ? findStateForHook(input.cwd || process.cwd(), hookLookupSessionId(input.session_id, agentSlug, input.conversation_id), agentSlug)?.state
+      : null;
+    const ghostTranscript = (typeof input.transcript_path === 'string' && input.transcript_path) || ghost?.transcriptPath || null;
+    const neverStarted = !!ghost && sessionNeverStarted({
+      promptCount: ghost.prompts?.length || 0,
+      transcriptPath: ghostTranscript,
+      transcriptExists: !!ghostTranscript && fs.existsSync(ghostTranscript),
+      startedAtMs: null,
+      nowMs: Date.now(),
+      graceMs: 0,
+    });
+    if (!neverStarted) return handleStop(input, agentSlug);
+    debugLog('session-end', 'claude-code session never started — ending it', { sessionId: ghost!.sessionId });
   }
 
   debugLog('session-end', 'begin', { cwd: input.cwd });
@@ -1084,8 +1104,12 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
     // here from the git window alone, the reconstruction the ledger exists to
     // replace, and a turn Stop had already captured exactly could be re-sent
     // from the same reconstruction with a fresher stamp.
+    // Side by side with resolveTurn (resolve-turn.ts): what each pass found,
+    // against the row the passes leave. Logging only — the row sent is theirs.
+    const observer = createTurnObserver();
+    observeReconstruction(promptMappings as any, observer);
     try {
-      const fromLedger = applyLedgerCaptures(state, promptMappings as any);
+      const fromLedger = applyLedgerCaptures(state, promptMappings as any, { observe: observer.observe });
       if (fromLedger > 0) {
         debugLog('ledger', 'turns captured from the ledger at session end', { count: fromLedger, of: promptMappings.length });
       }
@@ -1102,6 +1126,7 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
         state, promptMappings as any, state.repoPath || '',
         {
           log: (event, data) => debugLog('session-end', event, data),
+          observe: observer.observe,
           windowInheritsCommits: (fromShadow, toShadow, localTurn) => windowInheritsCommitsForTurn(
             state.repoPath || '', state, fromShadow, toShadow, localTurn,
           ),
@@ -1125,6 +1150,7 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
             state.repoPath || '', state, shadowSha, localTurn,
           ),
           log: (event, data) => debugLog('session-end', event, data),
+          observe: observer.observe,
         },
       );
       if (fromCommits > 0) {
@@ -1133,6 +1159,9 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
         });
       }
     } catch { /* same as the ledger: never block the end of a session */ }
+    try {
+      compareResolverWithPasses(promptMappings as any, observer, (event, data) => debugLog('session-end', event, data));
+    } catch { /* logging only */ }
 
     // Hoisted so writeSessionFiles below the `if (connected)` block can
     // pass editsJson into changes.json (mirrors the stop-hook hoist).
@@ -1233,12 +1262,15 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
               // Give whole-file writes their missing before-state FIRST, so
               // the synthesized diff is a real replace instead of a
               // whole-file insertion (see backfillWriteBaselines).
-              backfillWriteBaselines(
-                cap.edits,
-                state.repoPath,
-                // THIS turn's start-state, not the session's.
-                turnBaselineForServerRow(state, cap.promptIndex),
-              );
+              // THIS turn's start-state — or, when the turn's window inherited
+              // commits it did not make, the tree they left. Mirrors Stop's
+              // backfill; see the note there (TODO 0f2038ef).
+              const turnStart = turnBaselineForServerRow(state, cap.promptIndex);
+              const localTurn = localTurnForServerRow(cap.promptIndex, state.promptIndexBase);
+              const inheritedStart = turnStart && localTurn !== null
+                ? inheritedBaselineForTurn(state.repoPath, state, turnStart, localTurn)
+                : null;
+              backfillWriteBaselines(cap.edits, state.repoPath, inheritedStart || turnStart);
               anchorEditPositions(cap.edits, state.repoPath);
             }
             promptEditsByIndex.set(cap.promptIndex, JSON.stringify(cap));
@@ -2089,6 +2121,7 @@ export function applyLiveLedger(captures: PromptCapture[], state: SessionState, 
 export function applyLedgerCaptures(
   state: SessionState,
   promptMappings: Array<Record<string, unknown> & { promptIndex: number }>,
+  opts: { observe?: (promptIndex: number, observation: TurnObservation) => void } = {},
 ): number {
   const repoPath = currentSessionWorkTree(state) || state.repoPath;
   return applyLedgerToMappings({
@@ -2104,6 +2137,7 @@ export function applyLedgerCaptures(
       ? (baselineSha, localTurn) => inheritedBeforeStatesForTurn(repoPath, state, baselineSha, localTurn)
       : undefined,
     log: (event, data) => debugLog('ledger', event, data),
+    observe: opts.observe,
   });
 }
 

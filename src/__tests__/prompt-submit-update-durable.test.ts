@@ -46,7 +46,7 @@ describe('user-prompt-submit session update', () => {
   it('keeps the durable wrapper bound to the queue', () => {
     // durableUpdate is what enqueues on a retriable failure; if it stopped
     // delegating, the call site above would be durable in name only.
-    expect(src).toMatch(/const durableUpdate = [^;]*durableUpdateSession\(/s);
+    expect(src).toMatch(/const durableUpdate = [^\n]*=>\s*durableUpdateSession\(/);
   });
 
   it('still drains the queue, or nothing ever replays', () => {

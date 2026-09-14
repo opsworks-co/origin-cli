@@ -1,0 +1,32 @@
+[
+  {
+    "promptIndex": 0,
+    "diffSource": "turn-window",
+    "chatOnly": false,
+    "filesChanged": [
+      "src/mod.ts"
+    ],
+    "linesAdded": 1,
+    "linesRemoved": 0,
+    "diff": "diff --git a/src/mod.ts b/src/mod.ts\nnew file mode 100644\nindex <blob>\n--- /dev/null\n+++ b/src/mod.ts\n@@ -0,0 +1 @@\n+export const a = 1;",
+    "uncommittedDiff": "",
+    "editedFiles": [],
+    "contentUnavailableFiles": [],
+    "commits": []
+  },
+  {
+    "promptIndex": 1,
+    "diffSource": "turn-window",
+    "chatOnly": false,
+    "filesChanged": [
+      "src/ship.ts"
+    ],
+    "linesAdded": 30,
+    "linesRemoved": 0,
+    "diff": "diff --git a/src/ship.ts b/src/ship.ts\nnew file mode 100644\nindex <blob>\n--- /dev/null\n+++ b/src/ship.ts\n@@ -0,0 +1,30 @@\n+export const v0 = 0;\n+export const v1 = 1;\n+export const v2 = 2;\n+export const v3 = 3;\n+export const v4 = 4;\n+export const v5 = 5;\n+export const v6 = 6;\n+export const v7 = 7;\n+export const v8 = 8;\n+export const v9 = 9;\n+export const v10 = 10;\n+export const v11 = 11;\n+export const v12 = 12;\n+export const v13 = 13;\n+export const v14 = 14;\n+export const v15 = 15;\n+export const v16 = 16;\n+export const v17 = 17;\n+export const v18 = 18;\n+export const v19 = 19;\n+export const v20 = 20;\n+export const v21 = 21;\n+export const v22 = 22;\n+export const v23 = 23;\n+export const v24 = 24;\n+export const v25 = 25;\n+export const v26 = 26;\n+export const v27 = 27;\n+export const v28 = 28;\n+export const v29 = 29;",
+    "uncommittedDiff": "",
+    "editedFiles": [],
+    "contentUnavailableFiles": [],
+    "commits": []
+  }
+]

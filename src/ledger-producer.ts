@@ -24,6 +24,7 @@ import { readFileAtRev, gitIgnoredFiles } from './git-capture.js';
 import { debugLog } from './debug-log.js';
 import { listActiveSessions, type SessionState } from './session-state.js';
 import { detectLiveContention } from './checkout-contention.js';
+import type { TurnObservation } from './resolve-turn.js';
 
 /**
  * Write-journal watchers this process is holding open, keyed by tag AND the
@@ -82,10 +83,9 @@ export function openJournalWatcherCount(): number {
  * Make sure this session is journalling, and mark the turn now in flight.
  *
  * Marks only the NEWEST turn, and only once. An earlier turn that was never
- * marked cannot be marked correctly after the fact — writes already in the log
- * would fall inside its span — so it is left unmarked and the ledger simply
- * declines to answer for it, which the caller treats as "fall back", not as
- * "the turn wrote nothing".
+ * marked cannot be appended correctly after the fact — its writes already
+ * precede the end of the log. The reader can recover a missing boundary from
+ * a recorded promptStartedAt; without that evidence it still falls back.
  *
  * The boundary here is POLL-BOUNDED, unlike the hook path where the mark is
  * written at prompt submit. A write landing between the real prompt and this
@@ -137,7 +137,7 @@ export interface ProducerLedgerInputs {
   /** `promptTurnIds[i]` is the identity of prompt i. */
   promptTurnIds: readonly string[];
   /** Per-prompt baseline: the tree at the START of prompt i, dirt included. */
-  promptShadows?: ReadonlyArray<{ promptIndex: number; shadowSha: string }>;
+  promptShadows?: ReadonlyArray<{ promptIndex: number; shadowSha: string; promptStartedAt?: number }>;
   /** Fallbacks when a prompt has no shadow of its own. */
   prePromptSha?: string | null;
   headShaAtStart?: string | null;
@@ -211,6 +211,7 @@ export function applyLedgerToProducerRows(
   inputs: ProducerLedgerInputs,
   rows: Array<LedgerApplicableMapping & Record<string, unknown>>,
   via: string,
+  opts: { observe?: (promptIndex: number, observation: TurnObservation) => void } = {},
 ): number {
   const paths = journalPathsForTag(inputs.tag, inputs.workRoot);
   const state = {
@@ -231,6 +232,7 @@ export function applyLedgerToProducerRows(
       ? (files) => gitIgnoredFiles(inputs.workRoot, files)
       : undefined,
     log: (event, data) => debugLog('ledger', event, { via, ...data }),
+    observe: opts.observe,
   });
   for (const row of rows) {
     if (!row.ledgerOwned) continue;

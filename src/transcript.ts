@@ -1009,6 +1009,16 @@ export function cleanPrompt(text: string): string | null {
     // chars, so the closing tag is often missing (session 593241fe).
     .replace(/<system_reminder\b[^>]*>[\s\S]*?(?:<\/system_reminder>|$)/gi, '')
     .replace(/<hooks_context\b[^>]*>[\s\S]*?(?:<\/hooks_context>|$)/gi, '')
+    // A message from another local Claude session (SendMessage) arrives in the
+    // user role: `Another Claude session sent a message:`, a
+    // `<cross-session-message from=… from-name=…>` envelope, then permission
+    // guidance. The transcript flags it isMeta, but the UserPromptSubmit
+    // payload carries no flag, so the hook stored every peer message as a
+    // prompt with its own turn (session 74931d94: 8 of 14 turns). Keyed on the
+    // `from=` attribute so prose that merely names the tag survives.
+    // Unclosed-tolerant: stored promptText is cut at 1000 chars, which drops
+    // the closing tag on a long message.
+    .replace(/(?:Another Claude session sent a message:\s*)?<cross-session-message\s+from=[^>]*>[\s\S]*?(?:<\/cross-session-message>(?:\s*This came from another Claude session[\s\S]*)?|$)/g, '')
     // Strip internal agent tags that leak when prompts overlap with active execution
     .replace(/<task-notification>[\s\S]*?<\/task-notification>/g, '')
     .replace(/<task-id>[\s\S]*?<\/task-id>/g, '')

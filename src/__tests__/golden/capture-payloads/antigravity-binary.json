@@ -1,0 +1,196 @@
+{
+ "note": "Recorded by packages/cli capture-e2e with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api capture-golden-stored-rows.test.ts.",
+ "roots": [
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-agy-0abRLO/repo",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-agy-0abRLO"
+ ],
+ "commits": {
+  "61c36180faeaaa4a10074ebbd33220d6556b5e9f": "commit: origin shadow agy-sync-e2e0agy0-1 2026-09-13T23:08:17.639Z",
+  "6062c5ee86562d1e7b202b07dfd91f64765148fc": "commit: origin shadow agy-sync-e2e0agy0-0 2026-09-13T23:08:15.642Z",
+  "a8acd1c380d44130eefeffc18200177e393a9e99": "commit: base"
+ },
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "promptChanges": [
+     {
+      "captureId": "agy_682532b941c74ffd",
+      "capturedAt": 1789340894295,
+      "promptIndex": 0,
+      "promptText": "change the greeting",
+      "diff": "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\n",
+      "uncommittedDiff": "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\n",
+      "filesChanged": [
+       "app.py"
+      ],
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "authoritative": true,
+      "diffSource": "ledger",
+      "turnId": "t_224f735a42c445d9",
+      "createdAt": 1789340832659
+     }
+    ],
+    "model": "gemini-3-pro",
+    "filesChanged": [
+     "app.py"
+    ],
+    "diff": "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\n",
+    "tokensUsed": 7,
+    "inputTokens": 5,
+    "outputTokens": 2,
+    "tokensEstimated": true,
+    "costUsd": 0,
+    "toolCalls": 1,
+    "toolBreakdown": [
+     {
+      "name": "write_file",
+      "count": 1
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change the greeting",
+    "promptChanges": [
+     {
+      "captureId": "agy_dafb560340a94ce1",
+      "capturedAt": 1789340895372,
+      "promptIndex": 0,
+      "promptText": "change the greeting",
+      "diff": "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\n",
+      "uncommittedDiff": "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\n",
+      "filesChanged": [
+       "app.py"
+      ],
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "authoritative": true,
+      "diffSource": "ledger",
+      "turnId": "t_224f735a42c445d9",
+      "createdAt": 1789340832659
+     }
+    ],
+    "model": "gemini-3-pro",
+    "branch": "main",
+    "filesChanged": [
+     "app.py"
+    ],
+    "diff": "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\n",
+    "tokensUsed": 7,
+    "inputTokens": 5,
+    "outputTokens": 2,
+    "tokensEstimated": true,
+    "costUsd": 0,
+    "toolCalls": 1,
+    "toolBreakdown": [
+     {
+      "name": "write_file",
+      "count": 1
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "promptChanges": [
+     {
+      "captureId": "agy_398db8e76b074070",
+      "capturedAt": 1789340896625,
+      "promptIndex": 0,
+      "promptText": "change the greeting",
+      "createdAt": 1789340832659
+     },
+     {
+      "captureId": "agy_398db8e76b074070",
+      "capturedAt": 1789340896625,
+      "promptIndex": 1,
+      "promptText": "leave a note",
+      "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,1 @@\n+remember this\n",
+      "uncommittedDiff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,1 @@\n+remember this\n",
+      "filesChanged": [
+       "notes.md"
+      ],
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "authoritative": true,
+      "diffSource": "ledger",
+      "turnId": "t_3de302c0973649f0",
+      "createdAt": 1789340834659
+     }
+    ],
+    "model": "gemini-3-pro",
+    "filesChanged": [
+     "notes.md"
+    ],
+    "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,1 @@\n+remember this\n",
+    "tokensUsed": 12,
+    "inputTokens": 8,
+    "outputTokens": 4,
+    "tokensEstimated": true,
+    "costUsd": 0,
+    "toolCalls": 2,
+    "toolBreakdown": [
+     {
+      "name": "write_file",
+      "count": 2
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change the greeting\n\n---\n\nleave a note",
+    "promptChanges": [
+     {
+      "captureId": "agy_01090ed4af954949",
+      "capturedAt": 1789340897416,
+      "promptIndex": 0,
+      "promptText": "change the greeting",
+      "createdAt": 1789340832659
+     },
+     {
+      "captureId": "agy_01090ed4af954949",
+      "capturedAt": 1789340897416,
+      "promptIndex": 1,
+      "promptText": "leave a note",
+      "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,1 @@\n+remember this\n",
+      "uncommittedDiff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,1 @@\n+remember this\n",
+      "filesChanged": [
+       "notes.md"
+      ],
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "authoritative": true,
+      "diffSource": "ledger",
+      "turnId": "t_3de302c0973649f0",
+      "createdAt": 1789340834659
+     }
+    ],
+    "model": "gemini-3-pro",
+    "branch": "main",
+    "filesChanged": [
+     "notes.md"
+    ],
+    "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,1 @@\n+remember this\n",
+    "tokensUsed": 12,
+    "inputTokens": 8,
+    "outputTokens": 4,
+    "tokensEstimated": true,
+    "costUsd": 0,
+    "toolCalls": 2,
+    "toolBreakdown": [
+     {
+      "name": "write_file",
+      "count": 2
+     }
+    ]
+   }
+  }
+ ]
+}

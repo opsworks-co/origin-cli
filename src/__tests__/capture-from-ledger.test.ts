@@ -133,6 +133,18 @@ describe('captureTurnFromLedger', () => {
     expectSelfConsistent(cap);
   });
 
+  it('resolves a first-seen .github file from the baseline, not as a creation', () => {
+    const file = '.github/workflows/test.yml';
+    const log = t('T1', 1) + w(file, 2, put('old\nnew\n'));
+    const cap = capture(log, 'T1', {
+      baselineSha: 'abc123',
+      readAtRev: (sha, rel) => (sha === 'abc123' && rel === file ? 'old\n' : null),
+    })!;
+    expect(cap.linesAdded).toBe(1);
+    expect(parseUnifiedDiff(cap.diff).files[0].isNew).toBe(false);
+    expectSelfConsistent(cap);
+  });
+
   it('treats a baseline miss as a creation, which is what it means', () => {
     const log = t('T1', 1) + w('brand-new.ts', 2, put('hello\n'));
     const cap = capture(log, 'T1', { baselineSha: 'abc123', readAtRev: () => null })!;
@@ -234,6 +246,28 @@ describe('applyLedgerToMappings', () => {
     expect(pm.linesRemoved).toBe(0);
     expect(pm.diffSource).toBe('ledger');
     expect(pm.ledgerOwned).toBe(true);
+  });
+
+  it('reports what it applied, and why it declined, to the resolver', () => {
+    const log = t('T1', 1) + w('f.ts', 2, put('x\n'));
+    const applied: Record<string, unknown> = { promptIndex: 0, filesChanged: [], diff: '' };
+    const unmarked: Record<string, unknown> = { promptIndex: 1, filesChanged: ['kept.ts'], diff: 'kept' };
+    const seen: Array<[number, unknown]> = [];
+    applyLedgerToMappings(ledgerState(['T1', 'T_unmarked']), [applied as never, unmarked as never], {
+      ...journal(log), observe: (i, o) => seen.push([i, o]),
+    });
+    expect(seen).toEqual([
+      [0, { source: 'ledger', outcome: 'applied', files: ['f.ts'], diff: applied.diff, added: 1, removed: 0, contentUnavailable: [] }],
+      [1, { source: 'ledger', outcome: 'declined', reason: 'turn is not marked in the journal' }],
+    ]);
+  });
+
+  it('reports a contended tree as a decline for every row', () => {
+    const seen: Array<[number, unknown]> = [];
+    applyLedgerToMappings({ ...ledgerState(['T1']), ledgerContended: true }, [{ promptIndex: 0 } as never], {
+      ...journal(t('T1', 1)), observe: (i, o) => seen.push([i, o]),
+    });
+    expect(seen).toEqual([[0, { source: 'ledger', outcome: 'declined', reason: 'another live session shares this working tree' }]]);
   });
 
   it('clears uncommittedDiff to the EMPTY STRING, not undefined', () => {
@@ -406,5 +440,42 @@ describe('a resumed conversation: rows numbered from the base, ids from 0', () =
     expect(pm.linesAdded).toBe(1);
     expect(pm.linesRemoved).toBe(0);
     void v1;
+  });
+});
+
+// Codex may discover several prompts in one poll, after their writes landed.
+// Their rollout timestamps repair missing marks without changing wire authority.
+describe('missed submit boundaries', () => {
+  it('recovers a resumed launch’s rows with only each prompt’s own edits', () => {
+    const recorded = parseJournalEntries(t('first', 10)
+      + w('a.ts', 20, put('one\n'))
+      + w('a.ts', 40, put('one\ntwo\n'))
+      + w('a.ts', 60, put('one\ntwo\nthree\n')));
+    const state = {
+      writeJournalPath: 'journal', writeSnapshotDir: store,
+      promptTurnIds: ['first'], promptIndexBase: 7,
+      promptShadows: [10, 30, 50].map((at, i) => ({ promptIndex: i, shadowSha: 'base', promptStartedAt: at })),
+    };
+    const rows = [6, 7, 8, 9].map(promptIndex => ({ promptIndex, diff: 'legacy', editsJson: 'existing evidence' }));
+    expect(applyLedgerToMappings(state, rows, { readEntries: () => recorded, readAtRev: () => null })).toBe(3);
+    expect(rows[0].diff).toBe('legacy');
+    expect(rows.slice(1).map(r => r.diff.split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++'))))
+      .toEqual([['+one'], ['+two'], ['+three']]);
+    for (const row of rows.slice(1)) {
+      expect(row).toMatchObject({ diffSource: 'ledger', linesAdded: 1, linesRemoved: 0, editsJson: 'existing evidence' });
+      expect(row).not.toHaveProperty('turnId');
+      expect(row).not.toHaveProperty('contentAuthoritative');
+      expect(verifyTurn(row as any)).toEqual([]);
+    }
+    expect(state.promptTurnIds).toEqual(['first']);
+    expect(recorded.filter(e => e.kind === 'turn')).toHaveLength(1);
+  });
+
+  it('still declines a contended journal even with recoverable timestamps', () => {
+    const rows = [{ promptIndex: 0, diff: 'legacy' }];
+    expect(applyLedgerToMappings({ writeJournalPath: 'journal', writeSnapshotDir: store,
+      ledgerContended: true, promptShadows: [{ promptIndex: 0, shadowSha: 'base', promptStartedAt: 10 }],
+    }, rows, { readEntries: () => parseJournalEntries(w('a.ts', 20, put('mine?\n'))) })).toBe(0);
+    expect(rows[0].diff).toBe('legacy');
   });
 });

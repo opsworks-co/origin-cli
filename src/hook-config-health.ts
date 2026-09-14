@@ -293,6 +293,9 @@ export function repairHookConfig(report: HookConfigReport): void {
   }
 
   fs.writeFileSync(file, JSON.stringify(doc, null, 2) + '\n');
+  // State the agent keeps outside this file must follow the rewrite: a Codex
+  // hook whose command or timeout changed stays untrusted until its hash does.
+  spec.afterRepair?.(report.basePath);
 }
 
 /**

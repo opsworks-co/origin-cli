@@ -1,0 +1,341 @@
+{
+ "note": "Recorded by packages/cli capture-e2e with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api capture-golden-stored-rows.test.ts.",
+ "roots": [
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-wt-ygctCF/repo/.claude/worktrees/wt",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-wt-ygctCF",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-wt-ygctCF/repo"
+ ],
+ "commits": {
+  "d7519dce288c77ad5e21b43e3e07750f2f83aec9": "commit: session e2e-sess: claude — add a note",
+  "0e420def6d08ff8ea727e9498fc80ee741e98ead": "commit: session e2e-sess: claude — published session",
+  "bc7b4dd1c5f362a185bdb55d72e124644d8d577a": "commit: session e2e-sess: claude — add a note",
+  "4ad9aaa1525d5d9490a06c6403a1c246935935fe": "commit: Notes added by 'git notes add'",
+  "dcb18aa59abff40005aea3c86ae645492d16aeb5": "commit: add a note",
+  "ca53c92575f00e4dd20174f196ffee35af1572a2": "commit: origin shadow prompt-e2e-claude-m 2026-09-13T23:07:58.765Z",
+  "7d2901274d6cfe7dd3ac573b11a9448e8addab3e": "commit: origin shadow e2e-claude-m 2026-09-13T23:07:56.404Z",
+  "1631d99db4664b2c0d06cfe798fd13fd5254f506": "commit: session e2e-sess: claude — add a note",
+  "a92b806316fb557473f581fa0226753ca39f0f74": "commit: base",
+  "7ef8de45cbbcdf384965f33caf16c85d63159fee": "commit: work already on the branch"
+ },
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "add a note",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "notes.md"
+    ],
+    "tokensUsed": 12,
+    "tokensEstimated": true,
+    "inputTokens": 3,
+    "outputTokens": 9,
+    "toolCalls": 1,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 1
+     }
+    ],
+    "durationMs": 7602,
+    "costUsd": 0.0002,
+    "gitCapture": {
+     "headBefore": "7ef8de45cbbcdf384965f33caf16c85d63159fee",
+     "headAfter": "7ef8de45cbbcdf384965f33caf16c85d63159fee",
+     "commitShas": [],
+     "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+     "linesAdded": 1,
+     "linesRemoved": 0,
+     "commitDetails": [],
+     "snapshot": true
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "add a note",
+      "filesChanged": [
+       "notes.md"
+      ],
+      "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+      "edits": [
+       {
+        "file": "notes.md",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-wt-ygctCF/repo/.claude/worktrees/wt/notes.md",
+         "content": "remember this\n"
+        }
+       }
+      ],
+      "ranCommit": false,
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"add a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"notes.md\",\"op\":\"write\",\"newContent\":\"remember this\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
+      "turnId": "t_5fb6a9fee2924f80",
+      "captureId": "c_37840f95929b469c",
+      "capturedAt": 1789340876144
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "add a note\n\n---\n\nnow commit it",
+    "filesChanged": [
+     "notes.md"
+    ],
+    "tokensUsed": 24,
+    "inputTokens": 6,
+    "outputTokens": 18,
+    "toolCalls": 1,
+    "durationMs": 12329,
+    "costUsd": 0.0005,
+    "status": "RUNNING",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "add a note",
+      "filesChanged": [
+       "notes.md"
+      ],
+      "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+      "uncommittedDiff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+      "commitSha": null,
+      "treeSha": "f5b87d179f00cf82c431bab6673f608cad296f14",
+      "capturedAt": 1789340878959,
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "turnId": "t_5fb6a9fee2924f80",
+      "captureId": "c_866df534bdce4739",
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "CLAUDE.md",
+     "notes.md"
+    ],
+    "branch": "feature",
+    "gitCapture": {
+     "headBefore": "7ef8de45cbbcdf384965f33caf16c85d63159fee",
+     "headAfter": "dcb18aa59abff40005aea3c86ae645492d16aeb5",
+     "commitShas": [
+      "dcb18aa59abff40005aea3c86ae645492d16aeb5"
+     ],
+     "commitDetails": [
+      {
+       "sha": "dcb18aa59abff40005aea3c86ae645492d16aeb5",
+       "message": "add a note",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "notes.md"
+       ],
+       "linesAdded": 20,
+       "linesRemoved": 0,
+       "patch": "diff --git a/CLAUDE.md b/CLAUDE.md\nnew file mode 100644\nindex 0000000..d8e075b\n--- /dev/null\n+++ b/CLAUDE.md\n@@ -0,0 +1,19 @@\n+<!-- origin-managed -->\n+Origin: Session tracking active — prompts, files, and tokens will be captured.\n+\n+Origin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\n+\n+REPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\n+\n+  [Origin: Intent] <one sentence on WHY you're making this change>\n+  [Origin: Decision] <choice you made> — <why>\n+  [Origin: Open] <something you didn't finish, or aren't sure about>\n+  [Origin: Verify] <something a human reviewer should check>\n+  [Origin: Closes] <id of an open TODO above that this change finishes>\n+\n+Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\n+\n+[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\n+\n+Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\n+<!-- origin-managed -->\n\\ No newline at end of file\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 1,
+      "turnId": "t_30ca47e6a1504ec7",
+      "captureId": "c_a236d706a53b47cc",
+      "capturedAt": 1789340881779,
+      "promptText": "now commit it",
+      "filesChanged": [],
+      "diff": "",
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "commitSha": "dcb18aa59abff40005aea3c86ae645492d16aeb5",
+      "commitMessage": "add a note"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "7ef8de45cbbcdf384965f33caf16c85d63159fee",
+     "headAfter": "dcb18aa59abff40005aea3c86ae645492d16aeb5",
+     "commitShas": [
+      "dcb18aa59abff40005aea3c86ae645492d16aeb5"
+     ],
+     "commitDetails": [
+      {
+       "sha": "dcb18aa59abff40005aea3c86ae645492d16aeb5",
+       "message": "add a note",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "notes.md"
+       ],
+       "linesAdded": 20,
+       "linesRemoved": 0,
+       "patch": "diff --git a/CLAUDE.md b/CLAUDE.md\nnew file mode 100644\nindex 0000000..d8e075b\n--- /dev/null\n+++ b/CLAUDE.md\n@@ -0,0 +1,19 @@\n+<!-- origin-managed -->\n+Origin: Session tracking active — prompts, files, and tokens will be captured.\n+\n+Origin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\n+\n+REPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\n+\n+  [Origin: Intent] <one sentence on WHY you're making this change>\n+  [Origin: Decision] <choice you made> — <why>\n+  [Origin: Open] <something you didn't finish, or aren't sure about>\n+  [Origin: Verify] <something a human reviewer should check>\n+  [Origin: Closes] <id of an open TODO above that this change finishes>\n+\n+Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\n+\n+[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\n+\n+Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\n+<!-- origin-managed -->\n\\ No newline at end of file\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this"
+      }
+     ],
+     "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+     "diffTruncated": false,
+     "linesAdded": 1,
+     "linesRemoved": 0,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "7ef8de45cbbcdf384965f33caf16c85d63159fee",
+     "headAfter": "dcb18aa59abff40005aea3c86ae645492d16aeb5",
+     "commitShas": [
+      "dcb18aa59abff40005aea3c86ae645492d16aeb5"
+     ],
+     "commitDetails": [
+      {
+       "sha": "dcb18aa59abff40005aea3c86ae645492d16aeb5",
+       "message": "add a note",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "notes.md"
+       ],
+       "linesAdded": 20,
+       "linesRemoved": 0,
+       "patch": "diff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+       "committedAt": 1789340879000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "add a note\n\n---\n\nnow commit it",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "CLAUDE.md",
+     "notes.md"
+    ],
+    "tokensUsed": 24,
+    "tokensEstimated": true,
+    "inputTokens": 6,
+    "outputTokens": 18,
+    "toolCalls": 2,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 1
+     },
+     {
+      "name": "Bash",
+      "count": 1
+     }
+    ],
+    "durationMs": 19373,
+    "costUsd": 0.0005,
+    "gitCapture": {
+     "headBefore": "7ef8de45cbbcdf384965f33caf16c85d63159fee",
+     "headAfter": "dcb18aa59abff40005aea3c86ae645492d16aeb5",
+     "commitShas": [
+      "dcb18aa59abff40005aea3c86ae645492d16aeb5"
+     ],
+     "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+     "linesAdded": 1,
+     "linesRemoved": 0,
+     "commitDetails": [
+      {
+       "sha": "dcb18aa59abff40005aea3c86ae645492d16aeb5",
+       "message": "add a note",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "notes.md"
+       ],
+       "linesAdded": 20,
+       "linesRemoved": 0,
+       "patch": "diff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+       "committedAt": 1789340879000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ],
+     "snapshot": true
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "add a note",
+      "filesChanged": [
+       "notes.md"
+      ],
+      "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+      "edits": [
+       {
+        "file": "notes.md",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-wt-ygctCF/repo/.claude/worktrees/wt/notes.md",
+         "content": "remember this\n"
+        }
+       }
+      ],
+      "ranCommit": false,
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"add a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"notes.md\",\"op\":\"write\",\"newContent\":\"remember this\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"CLAUDE.md\",\"op\":\"create\",\"oldContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"newContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"source\":\"commit\",\"commitSha\":\"dcb18aa59abff40005aea3c86ae645492d16aeb5\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"dcb18aa59abff40005aea3c86ae645492d16aeb5\"],\"finalHunks\":[{\"file\":\"notes.md\",\"start\":1,\"lines\":[\"remember this\"]}]}",
+      "turnId": "t_5fb6a9fee2924f80",
+      "captureId": "c_a4ba613a5fb043f4",
+      "capturedAt": 1789340890458
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "now commit it",
+      "filesChanged": [],
+      "diff": "",
+      "edits": [],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add -A && git commit -q -m \"add a note\""
+      ],
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "chatOnly": true,
+      "contentUnavailableFiles": [],
+      "commitSha": null,
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "diffSource": "turn-window",
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now commit it\",\"agent\":\"claude\",\"edits\":[],\"commits\":[],\"droppedFailedEdits\":0}",
+      "turnId": "t_30ca47e6a1504ec7",
+      "captureId": "c_a4ba613a5fb043f4",
+      "capturedAt": 1789340890459
+     }
+    ]
+   }
+  }
+ ]
+}

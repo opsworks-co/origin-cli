@@ -11,7 +11,7 @@
 // This drives the REAL reconcile loop against a REAL git repo and a REAL
 // journal watcher: one prompt, one shell-style edit to a committed file that
 // the rollout never records as a patch, and the row must come from the ledger.
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -28,6 +28,8 @@ import {
 import { parseCodexRolloutLive, isCodexInternalSubroutine } from '../agents/codex.js';
 import { __stopAllJournalWatchers } from '../ledger-producer.js';
 import { journalPathsForTag, readJournalEntries, DEBOUNCE_MS } from '../write-journal-watch.js';
+import { serializeRecord } from '../write-journal.js';
+import { putSnapshot } from '../write-journal-store.js';
 import { parseUnifiedDiff, verifyTurn } from '../capture-verify.js';
 
 let tmp = '';
@@ -116,6 +118,43 @@ const waitFor = async (cond: () => boolean, timeoutMs = 10_000): Promise<void> =
 };
 
 describe('codex daemon + ledger', () => {
+  it('recovers a prompt missed between polls through the real Codex adapter', async () => {
+    const threadId = 'missed-boundary';
+    const rollout = writeRollout(threadId, ['first']);
+    const updates: any[] = [];
+    const d = deps(updates);
+    const initialTime = Date.now() - 1000;
+    d.parseRollout = p => {
+      const parsed = parseCodexRolloutLive(p);
+      if (parsed) parsed.promptTimestamps = parsed.userPrompts.map((_, i) => initialTime + i * 10000);
+      return parsed;
+    };
+    const scanned = { rolloutPath: rollout, threadId, cwd: repo, mtimeMs: Date.now() };
+    const first = await reconcileThread(scanned, d);
+    expect(first?.sessionId).toBeTruthy();
+    __stopAllJournalWatchers();
+    const paths = journalPathsForTag(codexJournalTag(threadId), repo);
+    // Deterministic observed writes: no dependence on fs.watch delivery timing.
+    fs.appendFileSync(paths.journalPath,
+      serializeRecord({ file: 'app.py', at: initialTime + 5000,
+        hash: putSnapshot(paths.snapshotDir, 'def main():\n    print("first")\n').hash, retained: true })
+      + serializeRecord({ file: 'app.py', at: initialTime + 15000,
+        hash: putSnapshot(paths.snapshotDir, 'def main():\n    print("second")\n').hash, retained: true }));
+    writeRollout(threadId, ['first', 'second', 'third']);
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(initialTime + 30000);
+    try {
+      await reconcileThread({ ...scanned, mtimeMs: initialTime + 30000 }, d);
+    } finally { clock.mockRestore(); }
+    const rows = updates.at(-1).promptChanges;
+    const second = rows.find((r: any) => r.promptIndex === 1);
+    expect(second).toMatchObject({ diffSource: 'ledger', linesAdded: 1, linesRemoved: 1 });
+    expect(second.diff).toContain('-    print("first")');
+    expect(second.diff).toContain('+    print("second")');
+    const firstRow = rows.find((r: any) => r.promptIndex === 0);
+    expect(firstRow.diff).toContain('+    print("first")');
+    expect(firstRow.diff).not.toContain('+    print("second")');
+  });
+
   it('takes a shell write the rollout never patched from the write journal', async () => {
     const threadId = 'ledger-aaaa-0001';
     const rollout = writeRollout(threadId, ['change the greeting']);

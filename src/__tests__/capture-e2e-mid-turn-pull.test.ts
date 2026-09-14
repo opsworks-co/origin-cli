@@ -15,6 +15,7 @@
 // pass (shadow-window-keeps-pulled-commits-out.test.ts) cannot see whether Stop
 // actually wires the check in.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -23,6 +24,7 @@ import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WINDOWS_SLOWDOWN, isWindows } from './helpers/windows-e2e.js';
 import { foldStopRows } from './helpers/fold-stop-rows.js';
+import { expectGoldenTurns, trackTestFailures } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -59,6 +61,7 @@ function startFakeApi(): Promise<void> {
         }
       });
     });
+    holdIdleConnections(server);
     server.listen(0, '127.0.0.1', () => {
       apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       resolve();
@@ -136,6 +139,7 @@ function rows(): any[] {
 const UPSTREAM_FILES = ['upstream_a.py', 'upstream_b.py'];
 
 describe.skipIf(!haveDist || isWindows)('a mid-turn pull through the built binary', () => {
+  const failures = trackTestFailures();
   let tmp = '';
   let upstream = '';
 
@@ -235,4 +239,13 @@ describe.skipIf(!haveDist || isWindows)('a mid-turn pull through the built binar
     expect(t1.diff).toContain('+    print("new")');
     expect(hooksLog()).not.toMatch(/shadow window replaced reconstructed diff with git \{"promptIndex":0,"files":3/);
   }, 120_000 * WINDOWS_SLOWDOWN);
+
+  it('golden: the final turn rows match the recorded baseline', () => {
+    const sent = hits
+      .filter((h) => h.method === 'PATCH' && h.url.startsWith(`/api/mcp/session/${SERVER_SESSION}`) && Array.isArray(h.body?.promptChanges))
+      .flatMap((h) => h.body.promptChanges);
+    expectGoldenTurns('claude-code-mid-turn-pull', rows(), {
+      repo, roots: [tmp], sent, failedBefore: failures(), requests: hits, sessionId: SERVER_SESSION,
+    });
+  });
 });

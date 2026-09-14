@@ -21,6 +21,7 @@
 // detached journal watcher through paths this file does not try to make
 // Windows-safe.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -29,6 +30,8 @@ import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { verifyTurn, parseUnifiedDiff } from '../capture-verify.js';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { foldStopRows } from './helpers/fold-stop-rows.js';
+import { expectGoldenTurns, trackTestFailures } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -61,6 +64,7 @@ function startFakeApi(): Promise<void> {
         }
       });
     });
+    holdIdleConnections(server);
     server.listen(0, '127.0.0.1', () => {
       const addr = server.address() as { port: number };
       apiUrl = `http://127.0.0.1:${addr.port}`;
@@ -184,11 +188,9 @@ function lastRows(): any[] {
   // Fold by promptIndex, last write per index — the same reading the server
   // does, and the only one that does not depend on which send happens to be
   // last.
-  const byIndex = new Map<number, any>();
-  for (const p of stopPayloads()) {
-    for (const r of p.promptChanges || []) byIndex.set(r.promptIndex, r);
-  }
-  return [...byIndex.values()].sort((a, b) => a.promptIndex - b.promptIndex);
+  // Shared with the other capture-e2e harnesses, and it also applies the
+  // server's capturedAt ordering and editsJson preservation — see the helper.
+  return foldStopRows(stopPayloads()) as any[];
 }
 
 /** The journal the session is using, and the detached watcher's lock. */
@@ -228,6 +230,7 @@ async function killJournalWatcher(): Promise<void> {
 // historical Windows failure is resolved.
 describe.skipIf(!haveDist)('capture end to end through the built binary', () => {
   let tmp = '';
+  const failures = trackTestFailures();
 
   beforeAll(async () => {
     await startFakeApi();
@@ -263,7 +266,17 @@ describe.skipIf(!haveDist)('capture end to end through the built binary', () => 
       Array.from({ length: 40 }, (_, i) => `THEIRS_${i} = ${i}`).join('\n') + '\n');
     fs.writeFileSync(path.join(repo, 'README.md'), '# demo\n\nTheir readme.\n');
     git(['add', '-A']);
-    git(['commit', '-q', '-m', 'their PR']);
+    // Dated an hour back, as a PR authored before this session would be.
+    // `commitBelongsToSession` excludes only commits from an EARLIER second
+    // than `startedAt`, so a fixture committed at wall-clock time can share
+    // that second and read as the session's own. Dating it keeps the fixture
+    // honest; it is not what decides turn 5's rendering, which is the merge
+    // against its first parent (#1606, golden re-recorded in #1614).
+    const earlier = new Date(Date.now() - 60 * 60_000).toISOString();
+    execFileSync('git', ['commit', '-q', '-m', 'their PR'], {
+      cwd: repo, stdio: 'pipe',
+      env: { ...process.env, GIT_AUTHOR_DATE: earlier, GIT_COMMITTER_DATE: earlier },
+    });
     git(['checkout', '-q', 'main']);
   }, 60_000 * WINDOWS_SLOWDOWN);
 
@@ -593,6 +606,15 @@ describe.skipIf(!haveDist)('capture end to end through the built binary', () => 
       expect(now.linesRemoved || 0).toBe(prev.linesRemoved || 0);
     }
   }, 120_000 * WINDOWS_SLOWDOWN);
+
+  it('golden: the final turn rows match the recorded baseline', () => {
+    const sent = hits
+      .filter((h) => h.method === 'PATCH' && Array.isArray(h.body?.promptChanges))
+      .flatMap((h) => h.body.promptChanges);
+    expectGoldenTurns('claude-code-real-binary', lastRows(), {
+      repo, roots: [tmp], sent, failedBefore: failures(), requests: hits, sessionId: 'e2e-session-0001',
+    });
+  });
 
   it('the session leaves one state mirror, under the registered id', () => {
     const dir = path.join(os.homedir(), '.origin', 'sessions');

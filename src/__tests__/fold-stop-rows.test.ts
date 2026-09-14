@@ -43,6 +43,32 @@ describe('foldStopRows', () => {
     ]);
   });
 
+  it('a row captured before the one already held does not replace it (server isStaleCapture)', () => {
+    // The heartbeat stamps its in-flight resend, then spends seconds on git on a
+    // loaded runner; Stop's payload for the same turn can reach the API first.
+    const stop = { promptIndex: 3, capturedAt: 2_000, filesChanged: ['notes.md'], editsJson: '{"edits":[{"file":"notes.md"}]}' };
+    const heartbeat = { promptIndex: 3, capturedAt: 1_000, filesChanged: ['notes.md'] };
+    const [row] = foldStopRows([[stop], [heartbeat]]);
+    expect(row).toBe(stop);
+  });
+
+  it('a newer row that omits editsJson keeps the stored evidence, and replaces everything else', () => {
+    const first = { promptIndex: 3, capturedAt: 1_000, linesAdded: 1, editsJson: '{"edits":[{"file":"notes.md"}]}' };
+    const later = { promptIndex: 3, capturedAt: 2_000, linesAdded: 2 };
+    const [row] = foldStopRows([[first], [later]]);
+    expect(row).toMatchObject({ capturedAt: 2_000, linesAdded: 2, editsJson: first.editsJson });
+  });
+
+  it('a newer row with its own editsJson replaces the stored one, and rows without stamps still fold in order', () => {
+    const [stamped] = foldStopRows([
+      [{ promptIndex: 0, capturedAt: 1, editsJson: 'old' }],
+      [{ promptIndex: 0, capturedAt: 2, editsJson: 'new' }],
+    ]);
+    expect(stamped.editsJson).toBe('new');
+    const [unstamped] = foldStopRows([[{ promptIndex: 0, tag: 'a' }], [{ promptIndex: 0, tag: 'b' }]]);
+    expect(unstamped.tag).toBe('b');
+  });
+
   it('returns [] for empty or shapeless input', () => {
     expect(foldStopRows([])).toEqual([]);
     expect(foldStopRows([null, undefined, { promptChanges: undefined }])).toEqual([]);

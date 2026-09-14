@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { promptHistoryPayload } from '../prompt-history-payload.js';
 
 const { TEST_HOME } = vi.hoisted(() => {
   const base = process.env.TMPDIR || '/tmp';
@@ -62,6 +63,55 @@ describe('isRetriableApiError', () => {
 });
 
 describe('durableUpdateSession', () => {
+  it('retries a closed socket immediately with identical capture provenance', async () => {
+    const payload = { promptChanges: [{ captureId: 'capture-1', capturedAt: 123, diff: 'valuable' }] };
+    const log = vi.fn();
+    updateSession.mockRejectedValueOnce(new TypeError('fetch failed')).mockResolvedValueOnce({ ok: true });
+    expect(await durableUpdateSession('s1', payload, log, { logEvent: 'stop' })).toEqual({ ok: true });
+    expect(updateSession).toHaveBeenCalledTimes(2);
+    expect(updateSession.mock.calls[0][1]).toBe(payload);
+    expect(updateSession.mock.calls[1][1]).toBe(payload);
+    expect(entryFiles()).toHaveLength(0);
+    expect(log).toHaveBeenCalledWith('stop', 'session update send failed', expect.objectContaining({ attempt: 1 }));
+  });
+
+  it('queues exactly once after two connection failures', async () => {
+    updateSession.mockRejectedValue(new TypeError('fetch failed'));
+    expect(await durableUpdateSession('s1', { diff: 'valuable' })).toBeNull();
+    expect(updateSession).toHaveBeenCalledTimes(2);
+    expect(entryFiles()).toHaveLength(1);
+    expect(JSON.parse(fs.readFileSync(path.join(QUEUE_DIR, entryFiles()[0]), 'utf8')).payload).toEqual({ diff: 'valuable' });
+  });
+
+  it.each([408, 429, 500, 503])('queues HTTP %s without an immediate retry', async status => {
+    updateSession.mockRejectedValue(httpErr(status));
+    expect(await durableUpdateSession('s1', {})).toBeNull();
+    expect(updateSession).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    Object.assign(new Error('aborted'), { name: 'AbortError' }),
+    Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } }),
+  ])('queues a timeout without spending another request budget', async error => {
+    updateSession.mockRejectedValue(error);
+    expect(await durableUpdateSession('s1', {})).toBeNull();
+    expect(updateSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('rethrows a permanent retry response without queuing', async () => {
+    updateSession.mockRejectedValueOnce(netErr()).mockRejectedValueOnce(httpErr(401));
+    await expect(durableUpdateSession('s1', {})).rejects.toThrow('http 401');
+    expect(updateSession).toHaveBeenCalledTimes(2);
+    expect(entryFiles()).toHaveLength(0);
+  });
+
+  it('does not report queued when persistence fails', async () => {
+    fs.mkdirSync(path.join(TEST_HOME, '.origin'), { recursive: true });
+    fs.writeFileSync(QUEUE_DIR, 'blocks queue directory');
+    updateSession.mockRejectedValue(netErr());
+    await expect(durableUpdateSession('s1', {})).rejects.toThrow('fetch failed');
+  });
+
   it('passes through on success (no queue file)', async () => {
     updateSession.mockResolvedValueOnce({ ok: true });
     const res = await durableUpdateSession('sess-1', { a: 1 });
@@ -70,7 +120,7 @@ describe('durableUpdateSession', () => {
   });
 
   it('queues the payload and returns null on a retriable failure', async () => {
-    updateSession.mockRejectedValueOnce(netErr());
+    updateSession.mockRejectedValue(netErr());
     const res = await durableUpdateSession('sess-1', { transcript: 'valuable' });
     expect(res).toBeNull();
     expect(entryFiles()).toHaveLength(1);
@@ -184,6 +234,16 @@ describe('drainUpdateQueue', () => {
 });
 
 describe('persistUpdateBeforeWork', () => {
+  it('replays every prompt row after Stop dies before its full capture send', async () => {
+    const prompts = Array.from({ length: 21 }, (_, i) => i % 2 ? "what's next?" : 'do it');
+    const payload = promptHistoryPayload(prompts, { promptTurnIds: prompts.map((_, i) => `t_${i}`) });
+    expect(persistUpdateBeforeWork('sess-killed-stop', payload)).toBeTruthy();
+    updateSession.mockResolvedValue({ ok: true });
+    await drainUpdateQueue();
+    expect(updateSession).toHaveBeenCalledWith('sess-killed-stop', payload);
+    expect(entryFiles()).toHaveLength(0);
+    expect(payload.promptChanges.map(row => row.promptIndex)).toEqual(Array.from({ length: 21 }, (_, i) => i));
+  });
   it('writes the payload to the queue without waiting for a failed fetch, and names the entry', () => {
     const name = persistUpdateBeforeWork('sess-kill', { prompt: 'where is prompt 3?' });
     expect(typeof name).toBe('string');
@@ -221,7 +281,7 @@ describe('persistUpdateBeforeWork', () => {
 
   it('a retriable failure of the superseding send still leaves the FULL payload queued', async () => {
     const name = persistUpdateBeforeWork('sess-down', { prompt: 'p1' });
-    updateSession.mockRejectedValueOnce(netErr());
+    updateSession.mockRejectedValue(netErr());
     await durableUpdateSession('sess-down', { prompt: 'p1', tokensUsed: 5 }, undefined, { supersedes: name });
     expect(entryFiles()).toHaveLength(1);
     const entry = JSON.parse(fs.readFileSync(path.join(QUEUE_DIR, entryFiles()[0]), 'utf-8'));

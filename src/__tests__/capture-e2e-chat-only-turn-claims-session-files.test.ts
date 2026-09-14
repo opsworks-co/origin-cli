@@ -26,6 +26,7 @@
 // Attributing that churn is a separate question; naming a file the row has no
 // diff for is this one.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -33,6 +34,7 @@ import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { expectGoldenTurns, trackTestFailures } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -62,6 +64,7 @@ function startFakeApi(): Promise<void> {
         }
       });
     });
+    holdIdleConnections(server);
     server.listen(0, '127.0.0.1', () => {
       apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       resolve();
@@ -150,6 +153,7 @@ async function killJournalWatcher(): Promise<void> {
 }
 
 describe.skipIf(!haveDist)('a chat-only turn beside untracked churn', () => {
+  const failures = trackTestFailures();
   let tmp = '';
 
   beforeAll(async () => {
@@ -307,6 +311,14 @@ describe.skipIf(!haveDist)('a chat-only turn beside untracked churn', () => {
       expect(shown.has(f) || unavailable.includes(f), `${f} claimed with no content and no declaration`).toBe(true);
     }
   }, 120_000 * WINDOWS_SLOWDOWN);
+
+  // This harness's fake API records nothing, so the golden reads the rows the
+  // CLI saved for sending.
+  it('golden: the final turn rows match the recorded baseline', () => {
+    expectGoldenTurns('claude-code-chat-only-turn-claims-session-files', state().completedPromptMappings || [], {
+      repo, roots: [tmp], failedBefore: failures(),
+    });
+  });
 });
 
 // COVERAGE NOTE (#1585). Both assertions above were `toBeUndefined()` — they

@@ -74,6 +74,36 @@ beforeEach(() => {
 afterEach(() => { try { fs.rmSync(repo, { recursive: true, force: true }); } catch {} });
 
 describe('preferShadowRangeForTurns', () => {
+  it('reports each window to the resolver before weighing it against the row', () => {
+    write('leftover.ts', 'seed\nstill dirty from an earlier turn\n');
+    const shadow0 = createShadowCommit(repo, 'observe0')!;
+    write('sessions.ts', INSERTED);
+    const shadow1 = createShadowCommit(repo, 'observe1')!;
+    expect(shadow0 && shadow1).toBeTruthy();
+    const rows: ShadowRangeMapping[] = [
+      { promptIndex: 0, filesChanged: ['sessions.ts'], diff: FAKE_HUNK, linesAdded: 2, linesRemoved: 0 },
+      { promptIndex: 1, filesChanged: ['leftover.ts'], diff: HEAD_DUMP, linesAdded: 1, linesRemoved: 0 },
+    ];
+    const seen: Array<[number, unknown]> = [];
+    preferShadowRangeForTurns(
+      { promptShadows: [{ promptIndex: 0, shadowSha: shadow0 }, { promptIndex: 1, shadowSha: shadow1 }], prompts: ['a', 'b'] },
+      rows, repo, { observe: (i, o) => seen.push([i, o]) },
+    );
+    expect(seen).toEqual([
+      [0, { source: 'turn-window', outcome: 'applied', files: ['sessions.ts'], diff: rows[0].diff, added: 2, removed: 0, contentUnavailable: [] }],
+      [1, { source: 'turn-window', outcome: 'empty', completeBaseline: false }],
+    ]);
+  });
+
+  it('reports a contended tree as a decline for every row', () => {
+    const seen: Array<[number, unknown]> = [];
+    preferShadowRangeForTurns(
+      { contendingSessionIds: ['peer'], promptShadows: [{ promptIndex: 0, shadowSha: 'abc1234' }] },
+      [{ promptIndex: 0 }], repo, { observe: (i, o) => seen.push([i, o]) },
+    );
+    expect(seen).toEqual([[0, { source: 'turn-window', outcome: 'declined', reason: 'another live session shares this working tree' }]]);
+  });
+
   it('blanks a question turn whose shadow window is empty, even when HEAD..worktree is dirty', () => {
     write('leftover.ts', 'seed\nstill dirty from an earlier turn\n');
     const shadow0 = createShadowCommit(repo, 'turn0');

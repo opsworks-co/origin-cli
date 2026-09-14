@@ -37,7 +37,7 @@ import { fetchWithTimeout } from './fetch-timeout.js';
 import { buildCodexThreadByIdQuery, buildCodexThreadByCwdQuery } from './codex-thread-query.js';
 import { ensureSqlite, querySqlite } from './utils/sqlite.js';
 import { isCodexInternalSubroutine, findCodexRolloutByCwd, parseCodexRolloutLive } from './agents/codex.js';
-import { parentLooksDead, heartbeatSuperseded, isServerTerminalDefinitive, stateFileTakenOver } from './heartbeat-liveness.js';
+import { parentLooksDead, heartbeatSuperseded, isServerTerminalDefinitive, stateFileTakenOver, sessionNeverStarted, NEVER_STARTED_GRACE_MS } from './heartbeat-liveness.js';
 import { debugLog } from './debug-log.js';
 
 // Path of a file inside the git dir governing `repoPath` — worktree-aware
@@ -71,6 +71,7 @@ import {
   clearBudgetLockNotice,
   type BudgetBreachState,
 } from './budget-breach.js';
+import { compareResolverWithPasses, createTurnObserver, observeReconstruction, onlyDifferences } from './resolve-turn.js';
 
 const args = process.argv.slice(2);
 const sessionId = args[0];
@@ -231,6 +232,28 @@ function isTranscriptStale(): boolean {
   }
 }
 
+// A session that exited before its first prompt: its transcript was never
+// created, so the stale check above can't see it. See sessionNeverStarted.
+function isTranscriptNeverCreated(): boolean {
+  if (!stateFile) return false;
+  try {
+    const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8')) as {
+      transcriptPath?: string; prompts?: string[]; startedAt?: string;
+    };
+    const tp = typeof state.transcriptPath === 'string' ? state.transcriptPath : null;
+    return sessionNeverStarted({
+      promptCount: state.prompts?.length || 0,
+      transcriptPath: tp,
+      transcriptExists: !!tp && fs.existsSync(tp),
+      startedAtMs: state.startedAt ? Date.parse(state.startedAt) : null,
+      nowMs: Date.now(),
+      graceMs: NEVER_STARTED_GRACE_MS,
+    });
+  } catch {
+    return false;
+  }
+}
+
 // The Codex rollout path the live-capture loop (pushInflightCodexState) last
 // resolved. Codex hooks don't pass transcript_path, so state.transcriptPath is
 // empty and the universal transcript-staleness signal can't see Codex activity
@@ -335,6 +358,8 @@ function getCurrentBranch(): string | null {
  */
 async function pushInflightDiff(): Promise<void> {
   if (!isConnected || !stateFile) return;
+  // Order this observation before any slow Git work, not at send time.
+  const captureStamp = newCaptureStamp('hb');
   try {
     const raw = fs.readFileSync(stateFile, 'utf-8');
     const state = JSON.parse(raw) as {
@@ -712,6 +737,9 @@ async function pushInflightDiff(): Promise<void> {
       linesAdded,
       linesRemoved,
     };
+    // Side by side with resolveTurn (resolve-turn.ts). Logging only.
+    const observer = createTurnObserver();
+    observeReconstruction([hbMapping as any], observer);
     applyLedgerToMappings({
       ...state,
       ledgerContended: stateLedgerIsContended(state as any, state.repoPath || ''),
@@ -727,10 +755,12 @@ async function pushInflightDiff(): Promise<void> {
         ? (baselineSha: string, localTurn: number) =>
           inheritedBeforeStatesForTurn(state.repoPath as string, state as any, baselineSha, localTurn)
         : undefined,
+      observe: observer.observe,
     });
     // Empty shadow window: leftover HEAD..worktree is not this turn. Changed
     // window: git hunks, not a journal fragment at line 1.
     preferShadowRangeForTurns(state as any, [hbMapping as any], repoPath, {
+      observe: observer.observe,
       windowInheritsCommits: (fromShadow, toShadow, localTurn) => windowInheritsCommitsForTurn(
         repoPath, state as any, fromShadow, toShadow, localTurn,
       ),
@@ -739,11 +769,22 @@ async function pushInflightDiff(): Promise<void> {
     // `baseline..HEAD`. Without this, a 30s tick after post-commit overwrites
     // the badge-matching row with the fast-forward range (session 761adbe8).
     preferCommitPatchForCommittedTurns(state as any, [hbMapping as any], repoPath, {
+      observe: observer.observe,
       inheritedBaseline: (shadowSha, localTurn) => inheritedBaselineForTurn(
         repoPath, state as any, shadowSha, localTurn,
       ),
     });
+    try {
+      // A tick every 30s: only a disagreement is worth a line in hooks.log.
+      compareResolverWithPasses([hbMapping as any], observer, onlyDifferences((event, data) => debugLog('heartbeat', event, data)));
+    } catch { /* logging only */ }
     delete hbMapping.ledgerOwned; // internal marker; `diffSource` is what travels
+
+    // Stop runs in another process and can finish while Git is computing.
+    // Do not publish from the stale state snapshot after it closed this turn.
+    // If the state disappeared or cannot be read, the outer catch skips sending.
+    const latestState = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+    if (turnIsClosed(latestState, promptIndex)) return;
 
     await fetchWithTimeout(`${apiUrl}/api/mcp/session/${sessionId}`, {
       method: 'PATCH',
@@ -755,7 +796,7 @@ async function pushInflightDiff(): Promise<void> {
             // periodically, so without it these writes are exempt from
             // ordering and can overwrite a fresher capture. See
             // capture-stamp.ts.
-            ...newCaptureStamp('hb'),
+            ...captureStamp,
             promptIndex: promptRow,
             // Identity, not just position. The heartbeat re-sends this turn
             // every tick, so if the prompt list renumbers underneath it (a
@@ -1574,6 +1615,7 @@ async function ping() {
       stateFileStale: isStateFileStale(),
       agentActivelyWriting: isAgentActivelyWriting(),
       turnInProgress: isTurnInProgress(),
+      transcriptNeverCreated: isTranscriptNeverCreated(),
     });
     if (looksDead) {
       parentDeadTickCount++;

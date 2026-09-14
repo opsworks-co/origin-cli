@@ -1,0 +1,368 @@
+{
+ "note": "Recorded by packages/cli capture-e2e with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api capture-golden-stored-rows.test.ts.",
+ "roots": [
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-amend-sT9EkA/repo",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-amend-sT9EkA"
+ ],
+ "commits": {
+  "66d432e0926005752ff698d19b53ada9d688727a": "commit: session e2e-amen: claude — do some more stuff",
+  "36ebabf46d2f95b76a5e182aecced7e036d8ac3c": "commit: session e2e-amen: claude — published session",
+  "7668cdd17a8d9b5de4e9b09ad59531901372d421": "commit: session e2e-amen: claude — do some more stuff",
+  "0dbd4d4aa8fa589ba67caccea9076d5ab2bc8d8b": "commit: Notes added by 'git notes add'",
+  "65debab9a67fd3427a455fa2520e4a1ad65e5e1e": "commit: Add a shelf that remembers which jars are steeping.",
+  "5c3cf741537051a4739fb4592aba0d6d0a487cd1": "commit: session e2e-amen: claude — published session",
+  "ac990391636b7d938c98f8ba1ef57fba486a9cc4": "commit: session e2e-amen: claude — do some more stuff",
+  "50eca0d8aac5a2d4fad3547ebdd04ec793841ca7": "commit: Notes added by 'git notes add'",
+  "dbc34cf4659ddb687e24202c13156e8ffd3a2d07": "commit: origin shadow prompt-e2e-claude-a 2026-09-13T23:07:48.730Z",
+  "c947ee86191e291e8b669b85349a5c49a4b32504": "commit: base"
+ },
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "CLAUDE.md",
+     "README.md",
+     "shelf.py"
+    ],
+    "branch": "main",
+    "gitCapture": {
+     "headBefore": "c947ee86191e291e8b669b85349a5c49a4b32504",
+     "headAfter": "4a13813dd0d78efaa56cd532c89e8b553a3c309b",
+     "commitShas": [
+      "4a13813dd0d78efaa56cd532c89e8b553a3c309b"
+     ],
+     "commitDetails": [
+      {
+       "sha": "4a13813dd0d78efaa56cd532c89e8b553a3c309b",
+       "message": "Add a shelf that remembers which jars are steeping.",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "README.md",
+        "shelf.py"
+       ],
+       "linesAdded": 22,
+       "linesRemoved": 0,
+       "patch": "diff --git a/CLAUDE.md b/CLAUDE.md\nnew file mode 100644\nindex 0000000..d8e075b\n--- /dev/null\n+++ b/CLAUDE.md\n@@ -0,0 +1,19 @@\n+<!-- origin-managed -->\n+Origin: Session tracking active — prompts, files, and tokens will be captured.\n+\n+Origin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\n+\n+REPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\n+\n+  [Origin: Intent] <one sentence on WHY you're making this change>\n+  [Origin: Decision] <choice you made> — <why>\n+  [Origin: Open] <something you didn't finish, or aren't sure about>\n+  [Origin: Verify] <something a human reviewer should check>\n+  [Origin: Closes] <id of an open TODO above that this change finishes>\n+\n+Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\n+\n+[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\n+\n+Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\n+<!-- origin-managed -->\n\\ No newline at end of file\ndiff --git a/README.md b/README.md\nindex 6d0aa78..7f197d2 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # vodka\n+\n+A shelf.\ndiff --git a/shelf.py b/shelf.py\nnew file mode 100644\nindex 0000000..15a1c28\n--- /dev/null\n+++ b/shelf.py\n@@ -0,0 +1 @@\n+JARS = []"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "turnId": "t_ae7e5bfaf3ce4e91",
+      "captureId": "c_0e1c5b9b8d3b4d63",
+      "capturedAt": 1789340875331,
+      "promptText": "do some more stuff",
+      "filesChanged": [
+       "README.md",
+       "shelf.py"
+      ],
+      "diff": "diff --git a/README.md b/README.md\nindex 6d0aa78..7f197d2 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # vodka\n+\n+A shelf.\ndiff --git a/shelf.py b/shelf.py\nnew file mode 100644\nindex 0000000..15a1c28\n--- /dev/null\n+++ b/shelf.py\n@@ -0,0 +1 @@\n+JARS = []",
+      "linesAdded": 3,
+      "linesRemoved": 0,
+      "commitSha": "4a13813dd0d78efaa56cd532c89e8b553a3c309b",
+      "commitMessage": "Add a shelf that remembers which jars are steeping."
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "c947ee86191e291e8b669b85349a5c49a4b32504",
+     "headAfter": "4a13813dd0d78efaa56cd532c89e8b553a3c309b",
+     "commitShas": [
+      "4a13813dd0d78efaa56cd532c89e8b553a3c309b"
+     ],
+     "commitDetails": [
+      {
+       "sha": "4a13813dd0d78efaa56cd532c89e8b553a3c309b",
+       "message": "Add a shelf that remembers which jars are steeping.",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "README.md",
+        "shelf.py"
+       ],
+       "linesAdded": 22,
+       "linesRemoved": 0,
+       "patch": "diff --git a/CLAUDE.md b/CLAUDE.md\nnew file mode 100644\nindex 0000000..d8e075b\n--- /dev/null\n+++ b/CLAUDE.md\n@@ -0,0 +1,19 @@\n+<!-- origin-managed -->\n+Origin: Session tracking active — prompts, files, and tokens will be captured.\n+\n+Origin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\n+\n+REPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\n+\n+  [Origin: Intent] <one sentence on WHY you're making this change>\n+  [Origin: Decision] <choice you made> — <why>\n+  [Origin: Open] <something you didn't finish, or aren't sure about>\n+  [Origin: Verify] <something a human reviewer should check>\n+  [Origin: Closes] <id of an open TODO above that this change finishes>\n+\n+Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\n+\n+[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\n+\n+Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\n+<!-- origin-managed -->\n\\ No newline at end of file\ndiff --git a/README.md b/README.md\nindex 6d0aa78..7f197d2 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # vodka\n+\n+A shelf.\ndiff --git a/shelf.py b/shelf.py\nnew file mode 100644\nindex 0000000..15a1c28\n--- /dev/null\n+++ b/shelf.py\n@@ -0,0 +1 @@\n+JARS = []"
+      }
+     ],
+     "diff": "diff --git a/README.md b/README.md\nindex 6d0aa78..7f197d2 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # vodka\n+\n+A shelf.\ndiff --git a/shelf.py b/shelf.py\nnew file mode 100644\nindex 0000000..15a1c28\n--- /dev/null\n+++ b/shelf.py\n@@ -0,0 +1 @@\n+JARS = []",
+     "diffTruncated": false,
+     "linesAdded": 3,
+     "linesRemoved": 0,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "CLAUDE.md",
+     "README.md",
+     "infuse.py",
+     "shelf.py"
+    ],
+    "branch": "main",
+    "gitCapture": {
+     "rewrittenCommits": [
+      {
+       "from": "4a13813dd0d78efaa56cd532c89e8b553a3c309b",
+       "to": "65debab9a67fd3427a455fa2520e4a1ad65e5e1e"
+      }
+     ],
+     "headBefore": "c947ee86191e291e8b669b85349a5c49a4b32504",
+     "headAfter": "65debab9a67fd3427a455fa2520e4a1ad65e5e1e",
+     "commitShas": [
+      "65debab9a67fd3427a455fa2520e4a1ad65e5e1e"
+     ],
+     "commitDetails": [
+      {
+       "sha": "65debab9a67fd3427a455fa2520e4a1ad65e5e1e",
+       "message": "Add a shelf that remembers which jars are steeping.",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "README.md",
+        "infuse.py",
+        "shelf.py"
+       ],
+       "linesAdded": 23,
+       "linesRemoved": 0,
+       "patch": "diff --git a/CLAUDE.md b/CLAUDE.md\nnew file mode 100644\nindex 0000000..d8e075b\n--- /dev/null\n+++ b/CLAUDE.md\n@@ -0,0 +1,19 @@\n+<!-- origin-managed -->\n+Origin: Session tracking active — prompts, files, and tokens will be captured.\n+\n+Origin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\n+\n+REPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\n+\n+  [Origin: Intent] <one sentence on WHY you're making this change>\n+  [Origin: Decision] <choice you made> — <why>\n+  [Origin: Open] <something you didn't finish, or aren't sure about>\n+  [Origin: Verify] <something a human reviewer should check>\n+  [Origin: Closes] <id of an open TODO above that this change finishes>\n+\n+Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\n+\n+[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\n+\n+Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\n+<!-- origin-managed -->\n\\ No newline at end of file\ndiff --git a/README.md b/README.md\nindex 6d0aa78..7f197d2 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # vodka\n+\n+A shelf.\ndiff --git a/infuse.py b/infuse.py\nnew file mode 100644\nindex 0000000..426069d\n--- /dev/null\n+++ b/infuse.py\n@@ -0,0 +1 @@\n+from shelf import JARS\ndiff --git a/shelf.py b/shelf.py\nnew file mode 100644\nindex 0000000..15a1c28\n--- /dev/null\n+++ b/shelf.py\n@@ -0,0 +1 @@\n+JARS = []"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "turnId": "t_ae7e5bfaf3ce4e91",
+      "captureId": "c_fd1b3f3a41d64d10",
+      "capturedAt": 1789340881442,
+      "promptText": "do some more stuff",
+      "filesChanged": [
+       "README.md",
+       "infuse.py",
+       "shelf.py"
+      ],
+      "diff": "diff --git a/README.md b/README.md\nindex 6d0aa78..7f197d2 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # vodka\n+\n+A shelf.\ndiff --git a/infuse.py b/infuse.py\nnew file mode 100644\nindex 0000000..426069d\n--- /dev/null\n+++ b/infuse.py\n@@ -0,0 +1 @@\n+from shelf import JARS\ndiff --git a/shelf.py b/shelf.py\nnew file mode 100644\nindex 0000000..15a1c28\n--- /dev/null\n+++ b/shelf.py\n@@ -0,0 +1 @@\n+JARS = []",
+      "linesAdded": 4,
+      "linesRemoved": 0,
+      "commitSha": "65debab9a67fd3427a455fa2520e4a1ad65e5e1e",
+      "commitMessage": "Add a shelf that remembers which jars are steeping."
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "rewrittenCommits": [
+      {
+       "from": "4a13813dd0d78efaa56cd532c89e8b553a3c309b",
+       "to": "65debab9a67fd3427a455fa2520e4a1ad65e5e1e"
+      }
+     ],
+     "headBefore": "c947ee86191e291e8b669b85349a5c49a4b32504",
+     "headAfter": "65debab9a67fd3427a455fa2520e4a1ad65e5e1e",
+     "commitShas": [
+      "65debab9a67fd3427a455fa2520e4a1ad65e5e1e"
+     ],
+     "commitDetails": [
+      {
+       "sha": "65debab9a67fd3427a455fa2520e4a1ad65e5e1e",
+       "message": "Add a shelf that remembers which jars are steeping.",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "README.md",
+        "infuse.py",
+        "shelf.py"
+       ],
+       "linesAdded": 23,
+       "linesRemoved": 0,
+       "patch": "diff --git a/CLAUDE.md b/CLAUDE.md\nnew file mode 100644\nindex 0000000..d8e075b\n--- /dev/null\n+++ b/CLAUDE.md\n@@ -0,0 +1,19 @@\n+<!-- origin-managed -->\n+Origin: Session tracking active — prompts, files, and tokens will be captured.\n+\n+Origin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\n+\n+REPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\n+\n+  [Origin: Intent] <one sentence on WHY you're making this change>\n+  [Origin: Decision] <choice you made> — <why>\n+  [Origin: Open] <something you didn't finish, or aren't sure about>\n+  [Origin: Verify] <something a human reviewer should check>\n+  [Origin: Closes] <id of an open TODO above that this change finishes>\n+\n+Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\n+\n+[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\n+\n+Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\n+<!-- origin-managed -->\n\\ No newline at end of file\ndiff --git a/README.md b/README.md\nindex 6d0aa78..7f197d2 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # vodka\n+\n+A shelf.\ndiff --git a/infuse.py b/infuse.py\nnew file mode 100644\nindex 0000000..426069d\n--- /dev/null\n+++ b/infuse.py\n@@ -0,0 +1 @@\n+from shelf import JARS\ndiff --git a/shelf.py b/shelf.py\nnew file mode 100644\nindex 0000000..15a1c28\n--- /dev/null\n+++ b/shelf.py\n@@ -0,0 +1 @@\n+JARS = []"
+      }
+     ],
+     "diff": "diff --git a/README.md b/README.md\nindex 6d0aa78..7f197d2 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # vodka\n+\n+A shelf.\ndiff --git a/infuse.py b/infuse.py\nnew file mode 100644\nindex 0000000..426069d\n--- /dev/null\n+++ b/infuse.py\n@@ -0,0 +1 @@\n+from shelf import JARS\ndiff --git a/shelf.py b/shelf.py\nnew file mode 100644\nindex 0000000..15a1c28\n--- /dev/null\n+++ b/shelf.py\n@@ -0,0 +1 @@\n+JARS = []",
+     "diffTruncated": false,
+     "linesAdded": 4,
+     "linesRemoved": 0,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "rewrittenCommits": [
+      {
+       "from": "4a13813dd0d78efaa56cd532c89e8b553a3c309b",
+       "to": "65debab9a67fd3427a455fa2520e4a1ad65e5e1e"
+      }
+     ],
+     "headBefore": "c947ee86191e291e8b669b85349a5c49a4b32504",
+     "headAfter": "65debab9a67fd3427a455fa2520e4a1ad65e5e1e",
+     "commitShas": [
+      "65debab9a67fd3427a455fa2520e4a1ad65e5e1e"
+     ],
+     "commitDetails": [
+      {
+       "sha": "65debab9a67fd3427a455fa2520e4a1ad65e5e1e",
+       "message": "Add a shelf that remembers which jars are steeping.",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "README.md",
+        "infuse.py",
+        "shelf.py"
+       ],
+       "linesAdded": 23,
+       "linesRemoved": 0,
+       "patch": "diff --git a/README.md b/README.md\nindex 6d0aa78..7f197d2 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # vodka\n+\n+A shelf.\ndiff --git a/infuse.py b/infuse.py\nnew file mode 100644\nindex 0000000..426069d\n--- /dev/null\n+++ b/infuse.py\n@@ -0,0 +1 @@\n+from shelf import JARS\ndiff --git a/shelf.py b/shelf.py\nnew file mode 100644\nindex 0000000..15a1c28\n--- /dev/null\n+++ b/shelf.py\n@@ -0,0 +1 @@\n+JARS = []",
+       "committedAt": 1789340879000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "do some more stuff",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "CLAUDE.md",
+     "README.md",
+     "infuse.py",
+     "shelf.py"
+    ],
+    "tokensUsed": 20,
+    "tokensEstimated": true,
+    "inputTokens": 5,
+    "outputTokens": 15,
+    "toolCalls": 5,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 3
+     },
+     {
+      "name": "Bash",
+      "count": 2
+     }
+    ],
+    "durationMs": 19686,
+    "costUsd": 0.0004,
+    "gitCapture": {
+     "rewrittenCommits": [
+      {
+       "from": "4a13813dd0d78efaa56cd532c89e8b553a3c309b",
+       "to": "65debab9a67fd3427a455fa2520e4a1ad65e5e1e"
+      }
+     ],
+     "headBefore": "c947ee86191e291e8b669b85349a5c49a4b32504",
+     "headAfter": "65debab9a67fd3427a455fa2520e4a1ad65e5e1e",
+     "commitShas": [
+      "65debab9a67fd3427a455fa2520e4a1ad65e5e1e"
+     ],
+     "diff": "diff --git a/README.md b/README.md\nindex 6d0aa78..7f197d2 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # vodka\n+\n+A shelf.\ndiff --git a/infuse.py b/infuse.py\nnew file mode 100644\nindex 0000000..426069d\n--- /dev/null\n+++ b/infuse.py\n@@ -0,0 +1 @@\n+from shelf import JARS\ndiff --git a/shelf.py b/shelf.py\nnew file mode 100644\nindex 0000000..15a1c28\n--- /dev/null\n+++ b/shelf.py\n@@ -0,0 +1 @@\n+JARS = []",
+     "linesAdded": 4,
+     "linesRemoved": 0,
+     "commitDetails": [
+      {
+       "sha": "65debab9a67fd3427a455fa2520e4a1ad65e5e1e",
+       "message": "Add a shelf that remembers which jars are steeping.",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "README.md",
+        "infuse.py",
+        "shelf.py"
+       ],
+       "linesAdded": 23,
+       "linesRemoved": 0,
+       "patch": "diff --git a/README.md b/README.md\nindex 6d0aa78..7f197d2 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # vodka\n+\n+A shelf.\ndiff --git a/infuse.py b/infuse.py\nnew file mode 100644\nindex 0000000..426069d\n--- /dev/null\n+++ b/infuse.py\n@@ -0,0 +1 @@\n+from shelf import JARS\ndiff --git a/shelf.py b/shelf.py\nnew file mode 100644\nindex 0000000..15a1c28\n--- /dev/null\n+++ b/shelf.py\n@@ -0,0 +1 @@\n+JARS = []",
+       "committedAt": 1789340879000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ],
+     "snapshot": true
+    },
+    "commitTurns": [
+     {
+      "sha": "65debab9a67fd3427a455fa2520e4a1ad65e5e1e",
+      "turnId": "t_ae7e5bfaf3ce4e91",
+      "at": "2026-09-13T23:07:54.697Z",
+      "via": "post-commit"
+     }
+    ],
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "do some more stuff",
+      "filesChanged": [
+       "README.md",
+       "infuse.py",
+       "shelf.py"
+      ],
+      "diff": "diff --git a/README.md b/README.md\nindex 6d0aa78..7f197d2 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # vodka\n+\n+A shelf.\ndiff --git a/infuse.py b/infuse.py\nnew file mode 100644\nindex 0000000..426069d\n--- /dev/null\n+++ b/infuse.py\n@@ -0,0 +1 @@\n+from shelf import JARS\ndiff --git a/shelf.py b/shelf.py\nnew file mode 100644\nindex 0000000..15a1c28\n--- /dev/null\n+++ b/shelf.py\n@@ -0,0 +1 @@\n+JARS = []",
+      "edits": [
+       {
+        "file": "shelf.py",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-amend-sT9EkA/repo/shelf.py",
+         "content": "JARS = []\n"
+        }
+       },
+       {
+        "file": "README.md",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-amend-sT9EkA/repo/README.md",
+         "content": "# vodka\n\nA shelf.\n"
+        }
+       },
+       {
+        "file": "infuse.py",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-amend-sT9EkA/repo/infuse.py",
+         "content": "from shelf import JARS\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add -A && git commit -q -m \"Add a shelf that remembers which jars are steeping.\"",
+       "git add -A && git commit --amend --no-edit"
+      ],
+      "uncommittedDiff": "",
+      "linesAdded": 4,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"do some more stuff\",\"agent\":\"claude\",\"edits\":[{\"file\":\"shelf.py\",\"op\":\"write\",\"newContent\":\"JARS = []\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# vodka\\n\\nA shelf.\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# vodka\\n\"},{\"file\":\"infuse.py\",\"op\":\"write\",\"newContent\":\"from shelf import JARS\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"shelf.py\",\"op\":\"create\",\"newContent\":\"JARS = []\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# vodka\\n\",\"newContent\":\"# vodka\\n\\nA shelf.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"infuse.py\",\"op\":\"create\",\"newContent\":\"from shelf import JARS\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"CLAUDE.md\",\"op\":\"create\",\"oldContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"newContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"source\":\"commit\",\"commitSha\":\"65debab9a67fd3427a455fa2520e4a1ad65e5e1e\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"65debab9a67fd3427a455fa2520e4a1ad65e5e1e\"],\"finalHunks\":[{\"file\":\"shelf.py\",\"start\":1,\"lines\":[\"JARS = []\"]},{\"file\":\"README.md\",\"start\":2,\"lines\":[\"\",\"A shelf.\"]},{\"file\":\"infuse.py\",\"start\":1,\"lines\":[\"from shelf import JARS\"]}]}",
+      "turnId": "t_ae7e5bfaf3ce4e91",
+      "captureId": "c_7e6cac3bd763452a",
+      "capturedAt": 1789340890457
+     }
+    ]
+   }
+  }
+ ]
+}

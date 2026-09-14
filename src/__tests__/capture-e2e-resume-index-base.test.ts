@@ -19,6 +19,7 @@
 //
 // Requires `dist/`. POSIX-only, like the other harnesses.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -27,6 +28,7 @@ import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { foldStopRows } from './helpers/fold-stop-rows.js';
+import { expectGoldenTurns, trackTestFailures } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -58,6 +60,7 @@ function startFakeApi(): Promise<void> {
         }
       });
     });
+    holdIdleConnections(server);
     server.listen(0, '127.0.0.1', () => {
       apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       resolve();
@@ -163,6 +166,7 @@ async function killJournalWatcher(): Promise<void> {
 }
 
 describe.skipIf(!haveDist)('a resumed conversation writes on its own rows', () => {
+  const failures = trackTestFailures();
   let tmp = '';
 
   beforeAll(async () => {
@@ -284,4 +288,10 @@ describe.skipIf(!haveDist)('a resumed conversation writes on its own rows', () =
     expect(t1.linesAdded).toBe(1);
     for (const r of allRows()) expect(r.promptIndex).toBeGreaterThanOrEqual(PRIOR_TURNS);
   }, 120_000 * WINDOWS_SLOWDOWN);
+
+  it('golden: the final turn rows match the recorded baseline', () => {
+    expectGoldenTurns('claude-code-resume-index-base', lastStopRows(), {
+      repo, roots: [tmp], sent: allRows(), failedBefore: failures(), requests: hits, sessionId: SERVER_SESSION,
+    });
+  });
 });

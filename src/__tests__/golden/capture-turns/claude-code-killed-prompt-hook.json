@@ -1,0 +1,32 @@
+[
+  {
+    "promptIndex": 0,
+    "diffSource": "turn-window",
+    "chatOnly": false,
+    "filesChanged": [
+      "src/one.ts"
+    ],
+    "linesAdded": 1,
+    "linesRemoved": 0,
+    "diff": "diff --git a/src/one.ts b/src/one.ts\nnew file mode 100644\nindex <blob>\n--- /dev/null\n+++ b/src/one.ts\n@@ -0,0 +1 @@\n+export const one = 1;",
+    "uncommittedDiff": "",
+    "editedFiles": [],
+    "contentUnavailableFiles": [],
+    "commits": []
+  },
+  {
+    "promptIndex": 1,
+    "diffSource": "turn-window",
+    "chatOnly": false,
+    "filesChanged": [
+      "src/two.ts"
+    ],
+    "linesAdded": 1,
+    "linesRemoved": 0,
+    "diff": "diff --git a/src/two.ts b/src/two.ts\nnew file mode 100644\nindex <blob>\n--- /dev/null\n+++ b/src/two.ts\n@@ -0,0 +1 @@\n+export const two = 2;",
+    "uncommittedDiff": "",
+    "editedFiles": [],
+    "contentUnavailableFiles": [],
+    "commits": []
+  }
+]

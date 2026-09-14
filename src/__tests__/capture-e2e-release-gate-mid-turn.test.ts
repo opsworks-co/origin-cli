@@ -21,6 +21,7 @@
 //
 // Requires `dist/` (locally: `pnpm --filter @origin/cli run build`).
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -28,6 +29,7 @@ import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { expectGoldenTurns, trackTestFailures } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -60,6 +62,7 @@ function startFakeApi(): Promise<void> {
         }
       });
     });
+    holdIdleConnections(server);
     server.listen(0, '127.0.0.1', () => {
       apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       resolve();
@@ -218,6 +221,7 @@ async function killJournalWatcher(): Promise<void> {
 }
 
 describe.skipIf(!haveDist)('the release gate on the session running it', () => {
+  const failures = trackTestFailures();
   let tmp = '';
 
   beforeAll(async () => {
@@ -303,4 +307,11 @@ describe.skipIf(!haveDist)('the release gate on the session running it', () => {
     expect(totals(graded).sessionsHeaderNotChecked,
       `nothing is held back once the turn closes\n${context(graded)}`).toBe(0);
   }, 120_000 * WINDOWS_SLOWDOWN);
+
+  // The rows the CLI saved for sending, as the gate itself reads them.
+  it('golden: the final turn rows match the recorded baseline', () => {
+    expectGoldenTurns('claude-code-release-gate-mid-turn', state().completedPromptMappings || [], {
+      repo, roots: [tmp], failedBefore: failures(),
+    });
+  });
 });

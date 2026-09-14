@@ -1,0 +1,142 @@
+{
+ "note": "Recorded by packages/cli capture-e2e with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api capture-golden-stored-rows.test.ts.",
+ "roots": [
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-cursor-resume-LFqX9c/repo-a",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-cursor-resume-LFqX9c"
+ ],
+ "commits": {
+  "99076256ff5644c4fbc7d38c9579e5fd1de1f714": "commit: session e2e-resu: cursor-e2e-model — first prompt",
+  "1cfed4647c0b38f10247a9f87e978d9bafc33090": "commit: session e2e-resu: gemini — first prompt",
+  "7648b694b5b53322fe4eb6eea210937eadff266f": "commit: base"
+ },
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "first prompt",
+    "agentSlug": "cursor",
+    "model": "cursor-e2e-model",
+    "tokensUsed": 12,
+    "tokensEstimated": true,
+    "inputTokens": 3,
+    "outputTokens": 9,
+    "durationMs": 1640,
+    "costUsd": 0.0001,
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "first prompt",
+      "filesChanged": [],
+      "diff": "",
+      "uncommittedDiff": "",
+      "chatOnly": true,
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "contentUnavailableFiles": [],
+      "commitSha": null,
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "diffSource": "turn-window",
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"first prompt\",\"agent\":\"cursor\",\"edits\":[],\"commits\":[],\"droppedFailedEdits\":0}",
+      "turnId": "t_fb7a68d92915466b",
+      "captureId": "c_f51dd50510ef4a90",
+      "capturedAt": 1789340894811
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "first prompt\n\n---\n\nsecond prompt",
+    "model": "cursor-e2e-model",
+    "tokensUsed": 24,
+    "inputTokens": 6,
+    "outputTokens": 18,
+    "durationMs": 4118,
+    "costUsd": 0.0001,
+    "status": "RUNNING",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "first prompt",
+      "filesChanged": [],
+      "contentUnavailableFiles": [],
+      "diffSource": "turn-window",
+      "diff": "",
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "commitSha": null,
+      "chatOnly": true,
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "capturedAt": 1789340896141,
+      "turnId": "t_fb7a68d92915466b",
+      "captureId": "c_ca8e945684d64a55",
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "first prompt\n\n---\n\nsecond prompt",
+    "agentSlug": "cursor",
+    "model": "cursor-e2e-model",
+    "tokensUsed": 24,
+    "tokensEstimated": true,
+    "inputTokens": 6,
+    "outputTokens": 18,
+    "durationMs": 4886,
+    "costUsd": 0.0001,
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "first prompt",
+      "filesChanged": [],
+      "diff": "",
+      "edits": [],
+      "ranCommit": false,
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "chatOnly": true,
+      "contentUnavailableFiles": [],
+      "commitSha": null,
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "diffSource": "turn-window",
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"first prompt\",\"agent\":\"cursor\",\"edits\":[],\"commits\":[],\"droppedFailedEdits\":0}",
+      "turnId": "t_fb7a68d92915466b",
+      "captureId": "c_97f7f5c2ffb84dcb",
+      "capturedAt": 1789340897674
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "second prompt",
+      "filesChanged": [],
+      "diff": "",
+      "edits": [],
+      "ranCommit": false,
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "chatOnly": true,
+      "contentUnavailableFiles": [],
+      "commitSha": null,
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "diffSource": "turn-window",
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"second prompt\",\"agent\":\"cursor\",\"edits\":[],\"commits\":[],\"droppedFailedEdits\":0}",
+      "turnId": "t_1c0b5af735bb4ab5",
+      "captureId": "c_97f7f5c2ffb84dcb",
+      "capturedAt": 1789340897675
+     }
+    ]
+   }
+  }
+ ]
+}

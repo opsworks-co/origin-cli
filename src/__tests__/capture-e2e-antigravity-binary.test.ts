@@ -11,6 +11,7 @@
 //
 // Requires `dist/`. POSIX-only, like the Claude Code harness.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -21,6 +22,7 @@ import { journalPathsForTag } from '../write-journal-watch.js';
 import { verifyTurn, parseUnifiedDiff } from '../capture-verify.js';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { foldStopRows } from './helpers/fold-stop-rows.js';
+import { expectGoldenTurns, trackTestFailures } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -51,6 +53,7 @@ function startFakeApi(): Promise<void> {
         }
       });
     });
+    holdIdleConnections(server);
     server.listen(0, '127.0.0.1', () => {
       apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       resolve();
@@ -127,6 +130,7 @@ async function killJournalWatcher(): Promise<void> {
 }
 
 describe.skipIf(!haveDist)('antigravity capture end to end through the built binary', () => {
+  const failures = trackTestFailures();
   let tmp = '';
 
   beforeAll(async () => {
@@ -250,4 +254,10 @@ describe.skipIf(!haveDist)('antigravity capture end to end through the built bin
     expect(t1.turnId).not.toBe(t2.turnId);
     expect(verifyTurn({ promptIndex: 1, filesChanged: t2.filesChanged, diff: t2.diff, linesAdded: t2.linesAdded, linesRemoved: t2.linesRemoved })).toEqual([]);
   }, 120_000 * WINDOWS_SLOWDOWN);
+
+  it('golden: the final turn rows match the recorded baseline', () => {
+    expectGoldenTurns('antigravity-binary', lastRows(), {
+      repo, roots: [tmp], sent: rowsSent().flat(), failedBefore: failures(), requests: hits, sessionId: 'e2e-agy-session-0001',
+    });
+  });
 });

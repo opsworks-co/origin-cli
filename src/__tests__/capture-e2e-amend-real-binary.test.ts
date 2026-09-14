@@ -13,6 +13,7 @@
 // Requires `dist/` (CI builds before it tests). POSIX-only, like the harness
 // it is modelled on (capture-e2e-real-binary.test.ts).
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -21,6 +22,8 @@ import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { commitDiffScopedToPrompt } from '../git-capture.js';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { foldStopRows } from './helpers/fold-stop-rows.js';
+import { expectGoldenTurns, trackTestFailures } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -51,6 +54,7 @@ function startFakeApi(): Promise<void> {
         }
       });
     });
+    holdIdleConnections(server);
     server.listen(0, '127.0.0.1', () => {
       const addr = server.address() as { port: number };
       apiUrl = `http://127.0.0.1:${addr.port}`;
@@ -157,6 +161,7 @@ async function killJournalWatcher(): Promise<void> {
 const patches = () => hits.filter((h) => h.method === 'PATCH' && /^\/api\/mcp\/session\/e2e-amend-session-0001/.test(h.url)).map((h) => h.body);
 
 describe.skipIf(!haveDist)('git commit --amend end to end through the built binary', () => {
+  const failures = trackTestFailures();
   let tmp = '';
 
   beforeAll(async () => {
@@ -251,4 +256,12 @@ describe.skipIf(!haveDist)('git commit --amend end to end through the built bina
     expect(lastList).toContain(amended);
     expect(lastList).not.toContain(original);
   }, 120_000 * WINDOWS_SLOWDOWN);
+
+  it('golden: the final turn rows match the recorded baseline', () => {
+    const payloads = patches().filter((b) => Array.isArray(b?.promptChanges));
+    expectGoldenTurns('claude-code-amend', foldStopRows(payloads), {
+      repo, roots: [tmp], sent: payloads.flatMap((b) => b.promptChanges), failedBefore: failures(),
+      requests: hits, sessionId: 'e2e-amend-session-0001',
+    });
+  });
 });

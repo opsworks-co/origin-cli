@@ -1,0 +1,79 @@
+{
+ "note": "Recorded by packages/cli capture-e2e with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api capture-golden-stored-rows.test.ts.",
+ "roots": [
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-legacy-yW2Dc1/repo",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-legacy-yW2Dc1"
+ ],
+ "commits": {
+  "2b512d800862909da9d5781cf0ff645f714dbe94": "commit: session dddddddd: claude — add a module",
+  "37e55358f79af5aafabd37587a4690d37ce81525": "commit: origin shadow e2e-legacy-w 2026-09-14T02:28:43.235Z",
+  "ab401e70e12714146b47a4388f6e1407c9735e32": "commit: origin shadow prompt-e2e-legacy-w 2026-09-14T02:28:40.886Z",
+  "e0a9356a2a7d6e85986fe134e719e8eea3eab884": "commit: origin shadow start-e2e-legacy-w 2026-09-14T02:28:40.107Z",
+  "8e7a4d7f5956b92b0b43faffe5191796aed1abff": "commit: session cccccccc: claude — what does this repo do?",
+  "3f5eddbdb6675a132ed2bf6c02464bb2bf3a87be": "commit: origin shadow e2e-legacy-s 2026-09-14T02:28:39.127Z",
+  "58344f2fb6e02e7d4a981c856063d1077f057e52": "commit: origin shadow prompt-e2e-legacy-s 2026-09-14T02:28:37.618Z",
+  "fdaa88047e358644171f867a3068eceed96761b7": "commit: base"
+ },
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "add a module",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "src/mod.ts"
+    ],
+    "tokensUsed": 12,
+    "tokensEstimated": true,
+    "inputTokens": 3,
+    "outputTokens": 9,
+    "toolCalls": 1,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 1
+     }
+    ],
+    "durationMs": 1949,
+    "costUsd": 0.0002,
+    "gitCapture": {
+     "headBefore": "fdaa88047e358644171f867a3068eceed96761b7",
+     "headAfter": "fdaa88047e358644171f867a3068eceed96761b7",
+     "commitShas": [],
+     "diff": "diff --git a/src/mod.ts b/src/mod.ts\nnew file mode 100644\nindex 0000000..2d2ad4b\n--- /dev/null\n+++ b/src/mod.ts\n@@ -0,0 +1,2 @@\n+export const answer = 42;\n+export const also = true;",
+     "linesAdded": 2,
+     "linesRemoved": 0,
+     "commitDetails": [],
+     "snapshot": true
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "add a module",
+      "filesChanged": [
+       "src/mod.ts"
+      ],
+      "diff": "diff --git a/src/mod.ts b/src/mod.ts\nnew file mode 100644\n--- /dev/null\n+++ b/src/mod.ts\n@@ -0,0 +1,2 @@\n+export const answer = 42;\n+export const also = true;",
+      "edits": [
+       {
+        "file": "src/mod.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-legacy-yW2Dc1/repo/src/mod.ts",
+         "content": "export const answer = 42;\nexport const also = true;\n"
+        }
+       }
+      ],
+      "ranCommit": false,
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"add a module\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/mod.ts\",\"op\":\"write\",\"newContent\":\"export const answer = 42;\\nexport const also = true;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/mod.ts\",\"op\":\"create\",\"newContent\":\"export const answer = 42;\\nexport const also = true;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
+      "turnId": "t_8970f5672dbd4f2f",
+      "captureId": "c_10d5e72eae834f82",
+      "capturedAt": 1789352923117
+     }
+    ]
+   }
+  }
+ ]
+}

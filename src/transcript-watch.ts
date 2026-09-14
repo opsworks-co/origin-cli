@@ -84,6 +84,7 @@ import {
 import { extractTodosFromPrompts } from './handoff.js';
 import { parseMarkersFromTranscriptPath } from './origin-markers.js';
 import { anchorEditPositions, backfillWriteBaselines, chainWholeFileWrites, type PromptCapture } from './prompt-capture/index.js';
+import { compareResolverWithPasses, createTurnObserver, observeReconstruction, onlyDifferences } from './resolve-turn.js';
 
 export type { TranscriptAdapter, ScannedTranscript, ParsedSession };
 
@@ -449,6 +450,19 @@ export interface WatchDeps {
     originSessionId: string,
     opts: { sessionTag: string; model?: string; promptIndex: number; transcriptPath: string; filesChanged: string[]; linesAdded: number; linesRemoved: number },
   ) => Promise<void>;
+  /**
+   * `inheritedBaselineForTurn` from commands/hooks.ts: the tree a turn's own
+   * pull left, for backfilling a whole-file write. INJECTED, never imported:
+   * commands/hooks.ts imports this module, so a static import back makes a
+   * cycle and changes module evaluation order for everything loading either.
+   * Absent means the prompt's shadow stands (the old behaviour).
+   */
+  inheritedBaseline?: (
+    repoPath: string,
+    state: any,
+    baselineSha: string | null | undefined,
+    promptIndex: number,
+  ) => string | null;
 }
 
 // Server rejections that will NOT resolve on their own — the repo has to be
@@ -1757,10 +1771,31 @@ export async function reconcileSession(
         // the fallback so those writes recover a real before-state instead of
         // collapsing to no-ops (see backfillWriteBaselines; agy 65953fe2 lost
         // 5 files / +422 lines to exactly this).
+        //
+        // A turn that pulled someone else's commit and then rewrote a file it
+        // touched must be measured from the tree the pull LEFT, or every pulled
+        // line reads as the turn's own — the same resolver Stop and session-end
+        // use. The state handed to it is the ownership facts this watcher
+        // observed, shadows in the SAME shape it writes to the hook state file:
+        // `inheritedWindowDeps` closes a completed turn's window at the next
+        // turn's shadow, and without them a LATER turn's pull would re-baseline
+        // an earlier turn. The hook path's `commitTurns` / `promptTurnIds` are
+        // deliberately absent: they are minted in hook numbering, and an
+        // unattributed commit falls back to `commitBelongsToSession`.
+        const turnShadow = promptShadows.find((sh) => sh.promptIndex === pe.promptIndex)?.baselineSha || null;
+        const inheritedStart = turnShadow && deps.inheritedBaseline
+          ? deps.inheritedBaseline(repo.workRoot, {
+            sessionId: originSessionId,
+            startedAt: prior?.createdAt,
+            repoPath: repo.workRoot,
+            sessionCommitShas,
+            promptShadows: promptShadows.map((s) => ({ promptIndex: s.promptIndex, shadowSha: s.baselineSha, capturedAt: s.capturedAt })),
+          }, turnShadow, pe.promptIndex)
+          : null;
         backfillWriteBaselines(
           edits as Parameters<typeof backfillWriteBaselines>[0],
           repo.workRoot,
-          promptShadows.find((sh) => sh.promptIndex === pe.promptIndex)?.baselineSha || null,
+          inheritedStart || turnShadow,
           sessionStartShadowSha || headShaAtStart || null,
         );
         anchorEditPositions(edits as Parameters<typeof anchorEditPositions>[0], repo.workRoot);
@@ -2428,6 +2463,9 @@ export async function reconcileSession(
   // here rather than read off a SessionState: the journal paths come from the
   // session tag (the same derivation the hook path writes to) and the turn ids
   // from `promptTurns`, which the watcher already keys its rows by.
+  // Side by side with resolveTurn (resolve-turn.ts). Logging only.
+  const observer = createTurnObserver();
+  observeReconstruction(promptChanges as any, observer);
   applyLedgerToProducerRows({
     tag: journalTag,
     workRoot: repo.workRoot,
@@ -2440,7 +2478,10 @@ export async function reconcileSession(
     promptShadows: promptShadows.map((s) => ({ promptIndex: s.promptIndex, shadowSha: s.baselineSha })),
     prePromptSha: sessionStartShadowSha || null,
     headShaAtStart: headShaAtStart || null,
-  }, promptChanges as any, 'transcript-watch');
+  }, promptChanges as any, 'transcript-watch', { observe: observer.observe });
+  try {
+    compareResolverWithPasses(promptChanges as any, observer, onlyDifferences((event, data) => debugLog('transcript-watch', event, data)));
+  } catch { /* logging only */ }
 
   const joinedPrompt = parsed.userPrompts.join('\n\n---\n\n');
 
@@ -3226,6 +3267,12 @@ export async function transcriptWatchCommand(opts: TranscriptWatchOptions = {}):
     return;
   }
   const deps = buildRealDeps(machineId, agentConfig?.hostname);
+  // Loaded lazily — see WatchDeps.inheritedBaseline for why this is not a
+  // static import.
+  try {
+    const { inheritedBaselineForTurn } = await import('./commands/hooks.js');
+    deps.inheritedBaseline = inheritedBaselineForTurn as NonNullable<WatchDeps['inheritedBaseline']>;
+  } catch { /* the backfill keeps each prompt's shadow */ }
 
   if (opts.once) {
     await runWatchCycle(adapters, deps);

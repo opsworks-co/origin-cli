@@ -95,6 +95,9 @@ beforeEach(() => {
   write('src/prefer-shadow-range.test.ts', lines(195, 'psrt')); // created there
   write('src/heartbeat.ts', lines(4, 'hb'));                    // created there
   write('src/stop.ts', lines(20, 'stop') + lines(24, 'branchStop')); // grown there
+  // Session 9a1ef9e3: a checkout rewrite of a `.github/` file was billed as a
+  // whole-file add because readFileAtRev rejected any path starting with `.`.
+  write('.github/workflows/ci.yml', lines(312, 'gha'));
   git('add', '.');
   execFileSync('git', ['commit', '-q', '-m', 'feat: the PR, by someone else'], {
     cwd: repo,
@@ -159,9 +162,10 @@ function journalForTheCheckout(branchTip: string): { journalPath: string; snapsh
     + rec('src/prefer-shadow-range.ts', show('src/prefer-shadow-range.ts'), 1)
     + rec('src/prefer-shadow-range.test.ts', show('src/prefer-shadow-range.test.ts'), 2)
     + rec('src/heartbeat.ts', show('src/heartbeat.ts'), 3)
-    + rec('src/stop.ts', show('src/stop.ts'), 4)
+    + rec('.github/workflows/ci.yml', show('.github/workflows/ci.yml'), 4)
+    + rec('src/stop.ts', show('src/stop.ts'), 5)
     // What the turn itself then wrote.
-    + rec('src/stop.ts', fs.readFileSync(path.join(repo, 'src/stop.ts'), 'utf-8'), 5);
+    + rec('src/stop.ts', fs.readFileSync(path.join(repo, 'src/stop.ts'), 'utf-8'), 6);
   const journalPath = path.join(dir, 'journal.log');
   fs.writeFileSync(journalPath, log);
   return { journalPath, snapshotDir };
@@ -222,6 +226,10 @@ describe('a turn does not author the branch it checked out', () => {
     // is what the branch left, so the ledger renders no change for it at all.
     expect(before.get('src/prefer-shadow-range.ts'))
       .toBe(execFileSync('git', ['show', `${branchTip}:src/prefer-shadow-range.ts`], { cwd: repo, encoding: 'utf-8' }));
+    // Hidden dirs are real tree paths. The old `startsWith('.')` guard made
+    // this read null, so the ledger billed the checkout as a whole-file add.
+    expect(before.get('.github/workflows/ci.yml'))
+      .toBe(execFileSync('git', ['show', `${branchTip}:.github/workflows/ci.yml`], { cwd: repo, encoding: 'utf-8' }));
     // A file the turn edited on top: measured from the branch's version, the
     // diff is the turn's three lines rather than the branch's twenty-four.
     expect(before.get('src/stop.ts'))
@@ -260,6 +268,10 @@ describe('a turn does not author the branch it checked out', () => {
     expect(pm.linesAdded).toBe(3);
     expect(pm.linesRemoved).toBe(1);
     expect(pm.diff).not.toContain('prefer-shadow-range');
+    // `.github/workflows/ci.yml` was rewritten by the checkout and journalled
+    // as a first sighting. It must cancel, not show up as +312/-0.
+    expect(pm.diff).not.toContain('.github/workflows/ci.yml');
+    expect(pm.linesAdded).toBeLessThan(20);
   });
 });
 

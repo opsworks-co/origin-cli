@@ -1,0 +1,28 @@
+[
+  {
+    "promptIndex": 0,
+    "diffSource": "turn-window",
+    "chatOnly": true,
+    "filesChanged": [],
+    "linesAdded": 0,
+    "linesRemoved": 0,
+    "diff": "",
+    "uncommittedDiff": "",
+    "editedFiles": [],
+    "contentUnavailableFiles": [],
+    "commits": []
+  },
+  {
+    "promptIndex": 1,
+    "diffSource": null,
+    "chatOnly": false,
+    "filesChanged": [],
+    "linesAdded": 0,
+    "linesRemoved": 0,
+    "diff": "",
+    "uncommittedDiff": "",
+    "editedFiles": [],
+    "contentUnavailableFiles": [],
+    "commits": []
+  }
+]

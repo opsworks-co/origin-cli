@@ -1,0 +1,95 @@
+[
+  {
+    "promptIndex": 0,
+    "diffSource": "turn-window",
+    "chatOnly": false,
+    "filesChanged": [
+      "app.py",
+      "notes.md"
+    ],
+    "linesAdded": 2,
+    "linesRemoved": 1,
+    "diff": "diff --git a/app.py b/app.py\nindex <blob>\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex <blob>\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+    "uncommittedDiff": "",
+    "editedFiles": [
+      "app.py",
+      "notes.md"
+    ],
+    "contentUnavailableFiles": [],
+    "commits": []
+  },
+  {
+    "promptIndex": 1,
+    "diffSource": "turn-window",
+    "chatOnly": false,
+    "filesChanged": [
+      "README.md"
+    ],
+    "linesAdded": 2,
+    "linesRemoved": 0,
+    "diff": "diff --git a/README.md b/README.md\nindex <blob>\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.",
+    "uncommittedDiff": "",
+    "editedFiles": [
+      "CLAUDE.md",
+      "README.md",
+      "app.py",
+      "notes.md"
+    ],
+    "contentUnavailableFiles": [],
+    "commits": [
+      "commit: tidy the readme"
+    ]
+  },
+  {
+    "promptIndex": 2,
+    "diffSource": "turn-window",
+    "chatOnly": true,
+    "filesChanged": [],
+    "linesAdded": 0,
+    "linesRemoved": 0,
+    "diff": "",
+    "uncommittedDiff": "",
+    "editedFiles": [],
+    "contentUnavailableFiles": [],
+    "commits": []
+  },
+  {
+    "promptIndex": 3,
+    "diffSource": "turn-window",
+    "chatOnly": false,
+    "filesChanged": [
+      "notes.md"
+    ],
+    "linesAdded": 1,
+    "linesRemoved": 0,
+    "diff": "diff --git a/notes.md b/notes.md\nindex <blob>\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
+    "uncommittedDiff": "",
+    "editedFiles": [
+      "notes.md"
+    ],
+    "contentUnavailableFiles": [],
+    "commits": [
+      "commit: more notes"
+    ]
+  },
+  {
+    "promptIndex": 4,
+    "diffSource": "ledger",
+    "chatOnly": false,
+    "filesChanged": [
+      "README.md"
+    ],
+    "linesAdded": 1,
+    "linesRemoved": 1,
+    "diff": "diff --git a/README.md b/README.md\nindex <blob>\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # demo\n \n-A tidy readme.\n+A tidy readme, merged.",
+    "uncommittedDiff": "",
+    "editedFiles": [
+      "README.md",
+      "their_feature.py"
+    ],
+    "contentUnavailableFiles": [],
+    "commits": [
+      "commit: merge theirs"
+    ]
+  }
+]

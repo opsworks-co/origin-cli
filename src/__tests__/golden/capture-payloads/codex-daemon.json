@@ -1,0 +1,60 @@
+{
+ "note": "Recorded by packages/cli capture-e2e with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api capture-golden-stored-rows.test.ts.",
+ "roots": [
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-codex-lAcHUR/repo",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-codex-lAcHUR"
+ ],
+ "commits": {
+  "a8acd1c380d44130eefeffc18200177e393a9e99": "commit: base"
+ },
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change the greeting",
+    "toolCalls": 1,
+    "promptChanges": [
+     {
+      "captureId": "cw_78a7bd1375144688",
+      "capturedAt": 1789340892076,
+      "promptIndex": 0,
+      "turnId": "w_64hrkw70mu0fd8l0",
+      "promptText": "change the greeting",
+      "filesChanged": [],
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "checkpointType": "auto"
+     }
+    ],
+    "status": "RUNNING"
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change the greeting",
+    "toolCalls": 2,
+    "promptChanges": [
+     {
+      "captureId": "cw_95152de6210d4939",
+      "capturedAt": 1789340900557,
+      "promptIndex": 0,
+      "turnId": "w_64hrkw70mu0fd8l0",
+      "promptText": "change the greeting",
+      "filesChanged": [
+       "app.py"
+      ],
+      "diff": "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\n",
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "checkpointType": "auto",
+      "uncommittedDiff": "",
+      "diffSource": "ledger",
+      "authoritative": true
+     }
+    ],
+    "status": "RUNNING"
+   }
+  }
+ ]
+}

@@ -1,0 +1,53 @@
+[
+  {
+    "promptIndex": 0,
+    "diffSource": "turn-window",
+    "chatOnly": false,
+    "filesChanged": [
+      "src/components/layout/Section.tsx"
+    ],
+    "linesAdded": 1,
+    "linesRemoved": 0,
+    "diff": "diff --git a/src/components/layout/Section.tsx b/src/components/layout/Section.tsx\nnew file mode 100644\nindex <blob>\n--- /dev/null\n+++ b/src/components/layout/Section.tsx\n@@ -0,0 +1 @@\n+export const Section = () => null;",
+    "uncommittedDiff": "",
+    "editedFiles": [],
+    "contentUnavailableFiles": [],
+    "commits": []
+  },
+  {
+    "promptIndex": 1,
+    "diffSource": "turn-window",
+    "chatOnly": false,
+    "filesChanged": [],
+    "linesAdded": 0,
+    "linesRemoved": 0,
+    "diff": "",
+    "uncommittedDiff": "",
+    "editedFiles": [],
+    "contentUnavailableFiles": [],
+    "commits": []
+  },
+  {
+    "promptIndex": 2,
+    "diffSource": "turn-window",
+    "chatOnly": false,
+    "filesChanged": [
+      "src/bulk/a.ts",
+      "src/bulk/b.ts",
+      "src/bulk/c.ts",
+      "src/bulk/d.ts",
+      "src/bulk/e.ts",
+      "src/bulk/f.ts"
+    ],
+    "linesAdded": 7200,
+    "linesRemoved": 0,
+    "diff": "<193240 chars, sha256 25ceb37ab0de1627>",
+    "uncommittedDiff": "",
+    "editedFiles": [],
+    "contentUnavailableFiles": [
+      "src/bulk/e.ts",
+      "src/bulk/f.ts"
+    ],
+    "commits": []
+  }
+]

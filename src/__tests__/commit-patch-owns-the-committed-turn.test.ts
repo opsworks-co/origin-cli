@@ -244,3 +244,60 @@ describe('a resumed conversation: the mapping is a server row, the id and shadow
     expect(rowZero.diff).toBe(LEDGER_DIFF);
   });
 });
+
+
+describe('a merge resolution does not depend on the journal baseline', () => {
+  function mergeTurn() {
+    const oldBaseline = git('rev-parse', 'HEAD');
+    git('checkout', '-qb', 'theirs');
+    write('README.md', '# vodka\nTheir readme.\n');
+    write('foreign.ts', 'export const foreign = true;\n');
+    git('add', '-A'); git('commit', '-qm', 'other branch');
+    git('checkout', '-q', 'main');
+    write('README.md', '# vodka\nOur readme.\n');
+    write('earlier.txt', 'work before the merge\n');
+    git('add', '-A'); git('commit', '-qm', 'earlier turn');
+    const start = git('rev-parse', 'HEAD');
+    try { git('merge', '--no-edit', 'theirs'); } catch { /* intentional conflict */ }
+    expect(fs.readFileSync(path.join(repo, 'README.md'), 'utf8')).toContain('<<<<<<<');
+    write('README.md', '# vodka\nResolved readme.\n');
+    git('add', '-A'); git('commit', '-qm', 'resolution');
+    const sha = git('rev-parse', 'HEAD');
+    const state = { promptTurnIds: ['merge'], commitTurns: [{ sha, turnId: 'merge' }],
+      promptShadows: [{ promptIndex: 0, shadowSha: start }], prePromptSha: null as string | null };
+    const mapping = { promptIndex: 0, filesChanged: ['README.md'],
+      diff: 'diff --git a/README.md b/README.md\n--- /dev/null\n+++ b/README.md\n@@ -0,0 +1,2 @@\n+# vodka\n+Resolved readme.\n',
+      linesAdded: 2, linesRemoved: 0 };
+    return { state, mapping, oldBaseline, sha };
+  }
+
+  it.each(['missing', 'stale', 'current'])('uses the resolution with a %s prompt baseline', mode => {
+    const { state, mapping, oldBaseline } = mergeTurn();
+    if (mode === 'missing') state.promptShadows = [];
+    if (mode === 'stale') state.promptShadows[0].shadowSha = oldBaseline;
+    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo)).toBe(1);
+    expect(mapping.filesChanged).toEqual(['README.md']);
+    expect([mapping.linesAdded, mapping.linesRemoved]).toEqual([1, 1]);
+    expect(mapping.diff).toContain('-Our readme.');
+    expect(mapping.diff).toContain('+Resolved readme.');
+    expect(mapping.diff).not.toContain('foreign');
+  });
+
+  it('keeps the full turn range when the turn also committed before merging', () => {
+    const { state, mapping, sha, oldBaseline } = mergeTurn();
+    state.promptShadows[0].shadowSha = oldBaseline;
+    state.commitTurns.unshift({ sha: git('rev-parse', `${sha}^1`), turnId: 'merge' });
+    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo)).toBe(1);
+    expect(mapping.filesChanged).toContain('earlier.txt');
+    expect(mapping.diff).toContain('+work before the merge');
+    expect(mapping.diff).not.toContain('foreign.ts');
+  });
+
+  it('still preserves edits made after committing the resolution', () => {
+    const { state, mapping } = mergeTurn();
+    state.promptShadows = [];
+    fs.appendFileSync(path.join(repo, 'README.md'), 'More work.\n');
+    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo)).toBe(0);
+    expect(mapping.linesRemoved).toBe(0);
+  });
+});

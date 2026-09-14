@@ -292,16 +292,17 @@ export function persistUpdateBeforeWork(
 }
 
 /**
- * updateSession that never loses the payload: drains this session's queued
- * backlog first (ordering), then sends. On retriable failure the payload is
+ * Durable updateSession: drains this session's queued
+ * backlog first (ordering), then sends. Connection failures get one immediate
+ * retry with the same payload and capture IDs. On retriable failure the payload is
  * queued and null is returned — callers treat null as "accepted for later".
- * Non-retriable errors still throw (they are caller bugs / auth problems).
+ * Non-retriable errors and failed queue writes still throw.
  */
 export async function durableUpdateSession(
   sessionId: string,
   data: any,
   log: Log = noop,
-  opts: { supersedes?: string | null } = {},
+  opts: { supersedes?: string | null; logEvent?: string } = {},
 ): Promise<any | null> {
   // The write-ahead copy this payload replaces (persistUpdateBeforeWork).
   // Removed BEFORE the drain so it is neither replayed ahead of this send
@@ -311,14 +312,32 @@ export async function durableUpdateSession(
   try {
     await drainUpdateQueue(log, { forSessionId: sessionId });
   } catch { /* drain is best-effort */ }
-  try {
-    return await api.updateSession(sessionId, data);
-  } catch (err: any) {
-    if (isRetriableApiError(err)) {
-      enqueueFailedUpdate('updateSession', sessionId, data, err, log);
-      return null;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await api.updateSession(sessionId, data);
+    } catch (err: any) {
+      // A pooled socket may close just as fetch reuses it. Retry that transport
+      // failure once, without reminting capture IDs. HTTP errors and timeouts
+      // go straight to the existing queue policy; another timeout could exceed
+      // the hook's wall-clock budget before it persists the capture.
+      const code = err?.cause?.code ?? err?.code;
+      const connectionFailure = typeof err?.status !== 'number'
+        && err?.name !== 'AbortError' && err?.name !== 'TimeoutError'
+        && (err?.message === 'fetch failed'
+          || ['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_SOCKET'].includes(code))
+        && !['ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT'].includes(code);
+      log(opts.logEvent || 'queue', 'session update send failed', {
+        sessionId, attempt: attempt + 1, error: err?.message, status: err?.status,
+      });
+      if (attempt === 0 && connectionFailure) {
+        log(opts.logEvent || 'queue', 'retrying session update after connection failure', { sessionId });
+        continue;
+      }
+      if (isRetriableApiError(err)) {
+        if (enqueueFailedUpdate('updateSession', sessionId, data, err, log)) return null;
+      }
+      throw err;
     }
-    throw err;
   }
 }
 

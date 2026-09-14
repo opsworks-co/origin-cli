@@ -19,6 +19,7 @@
 //
 // Requires `dist/`. POSIX-only, like the other harnesses.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -27,6 +28,7 @@ import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { foldStopRows } from './helpers/fold-stop-rows.js';
+import { expectGoldenTurns } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -59,6 +61,7 @@ function startFakeApi(): Promise<void> {
         }
       });
     });
+    holdIdleConnections(server);
     server.listen(0, '127.0.0.1', () => {
       apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       resolve();
@@ -232,6 +235,10 @@ describe.skipIf(!haveDist)('cursor: the same chat stays one session across an id
     );
     expect(rows.map((r: any) => r.promptIndex)).toEqual([0, 1]);
     expect(startHits().length).toBe(1);
+    expectGoldenTurns('cursor-resume-after-idle-end', rows, {
+      repo, roots: [tmp], requests: hits, sessionId,
+      sent: patchesTo(sessionId).flatMap((h) => (Array.isArray(h.body?.promptChanges) ? h.body.promptChanges : [])),
+    });
   }, 120_000 * WINDOWS_SLOWDOWN);
 
   it('scenario 2: a main-checkout handshake adopted from a worktree pushes the real conversation id to the server', async () => {

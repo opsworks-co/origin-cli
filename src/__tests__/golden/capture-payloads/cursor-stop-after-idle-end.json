@@ -1,0 +1,98 @@
+{
+ "note": "Recorded by packages/cli capture-e2e with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api capture-golden-stored-rows.test.ts.",
+ "roots": [
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-cursor-idle-stop-RGhRv9/repo-wt",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-cursor-idle-stop-RGhRv9",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-cursor-idle-stop-RGhRv9/repo"
+ ],
+ "commits": {
+  "eded5aade1abb68f2806d899d43b6f449253fd65": "commit: session e2e-idle: cursor-e2e-model — first prompt",
+  "7830160d0f49169804e8f608de24f8f5146bc2f2": "commit: session e2e-idle: gemini — first prompt",
+  "9912248db88071a6092364f8fec894017ce403f4": "commit: base"
+ },
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "first prompt",
+    "agentSlug": "cursor",
+    "model": "cursor-e2e-model",
+    "tokensUsed": 12,
+    "tokensEstimated": true,
+    "inputTokens": 3,
+    "outputTokens": 9,
+    "durationMs": 1735,
+    "costUsd": 0.0001,
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "first prompt",
+      "filesChanged": [],
+      "diff": "",
+      "uncommittedDiff": "",
+      "chatOnly": true,
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "contentUnavailableFiles": [],
+      "commitSha": null,
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "diffSource": "turn-window",
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"first prompt\",\"agent\":\"cursor\",\"edits\":[],\"commits\":[],\"droppedFailedEdits\":0}",
+      "turnId": "t_3fa4dc540a8e412e",
+      "captureId": "c_729e9cdf703e4d85",
+      "capturedAt": 1789340895742
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "first prompt\n\n---\n\nsecond prompt",
+    "agentSlug": "cursor",
+    "model": "cursor-e2e-model",
+    "tokensUsed": 12,
+    "tokensEstimated": true,
+    "inputTokens": 3,
+    "outputTokens": 9,
+    "durationMs": 3682,
+    "costUsd": 0.0001,
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "first prompt",
+      "filesChanged": [],
+      "diff": "",
+      "edits": [],
+      "ranCommit": false,
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "chatOnly": true,
+      "contentUnavailableFiles": [],
+      "commitSha": null,
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "diffSource": "turn-window",
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"first prompt\",\"agent\":\"cursor\",\"edits\":[],\"commits\":[],\"droppedFailedEdits\":0}",
+      "turnId": "t_3fa4dc540a8e412e",
+      "captureId": "c_4cf0aa89d9a743e0",
+      "capturedAt": 1789340897551
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "second prompt",
+      "filesChanged": [],
+      "diff": "",
+      "edits": [],
+      "ranCommit": false,
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"second prompt\",\"agent\":\"cursor\",\"edits\":[],\"commits\":[],\"droppedFailedEdits\":0}",
+      "captureId": "c_4cf0aa89d9a743e0",
+      "capturedAt": 1789340897551
+     }
+    ]
+   }
+  }
+ ]
+}

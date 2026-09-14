@@ -18,6 +18,22 @@ export type StopTurnRow = { promptIndex: number; [k: string]: unknown };
  * Folding is the only reading that does not depend on which send happens to
  * be last. Accepts either `{ promptChanges }` bodies or already-extracted
  * row arrays, so each harness can pass what it already collects.
+ *
+ * "The way the server does" includes two rules the PATCH handler applies
+ * (routes/mcp.ts) that a plain last-write fold did not:
+ *
+ *   1. A row captured EARLIER than the one already held cannot replace it
+ *      (`isStaleCapture`: `capturedAt` older than the stored capture).
+ *   2. A row that omits `editsJson` keeps the one already stored
+ *      (`pcEditsJson !== null && …`).
+ *
+ * Without them the fold read a heartbeat's in-flight resend — stamped before
+ * Stop, carrying no `editsJson`, but delivered after Stop on a loaded runner —
+ * as the turn's final row. Real-binary turn 4 then kept its files and diff and
+ * lost its edit evidence: "turn 4's own write is missing from its evidence",
+ * on native Windows only, and only under the full suite's load. The journal
+ * and Stop's own payload were both correct (E2E_DUMP of main's run
+ * 34765915421); the server would have kept Stop's row.
  */
 export function foldStopRows(
   payloads: Array<{ promptChanges?: StopTurnRow[] } | StopTurnRow[] | null | undefined>,
@@ -27,7 +43,13 @@ export function foldStopRows(
     const rows = Array.isArray(p) ? p : p?.promptChanges;
     if (!Array.isArray(rows)) continue;
     for (const r of rows) {
-      if (r && typeof r.promptIndex === 'number') byIndex.set(r.promptIndex, r);
+      if (!r || typeof r.promptIndex !== 'number') continue;
+      const prev = byIndex.get(r.promptIndex);
+      if (!prev) { byIndex.set(r.promptIndex, r); continue; }
+      if (typeof r.capturedAt === 'number' && typeof prev.capturedAt === 'number' && r.capturedAt < prev.capturedAt) {
+        continue;
+      }
+      byIndex.set(r.promptIndex, r.editsJson == null && prev.editsJson != null ? { ...r, editsJson: prev.editsJson } : r);
     }
   }
   return [...byIndex.values()].sort((a, b) => a.promptIndex - b.promptIndex);

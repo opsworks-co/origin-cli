@@ -1,0 +1,67 @@
+{
+ "note": "Recorded by packages/cli capture-e2e with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api capture-golden-stored-rows.test.ts.",
+ "roots": [
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-xwt-CtKZJO/linked",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-xwt-CtKZJO",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-xwt-CtKZJO/repo"
+ ],
+ "commits": {
+  "8c9bf81ac1973682fb69874882645c6a61f99c7c": "commit: session bbbbbbbb: gemini — bump the CLI version and open a PR",
+  "fc1460625846f1cf8d49c01cd16ecd6762b19b3e": "commit: {\"id\":\"b064e6a4ff35\",\"timestamp\":\"2026-09-14T00:39:08.762Z\",\"sessionTag\":\"d0d0cafe-e2e\",\"filesChanged\":[\"packages/cli/package.json\"],\"treeSha\":\"f55e4caf90be0e66fec4ddfb7eeab40c07275c66\",\"branch\":\"origin/shadow/d0d0cafe-e2e\",\"prompt\":\"bump the CLI version and open a PR\",\"model\":\"cursor-e2e-model\",\"tokensUsed\":36,\"costUsd\":0.0002,\"promptIndex\":0,\"type\":\"auto\",\"commitSha\":\"86d25dd52b9087c79793371bc623cb25534e4342\",\"attribution\":{\"linesAdded\":1,\"linesRemoved\":1,\"aiLinesAdded\":1,\"humanLinesAdded\":0,\"aiPercentage\":100}}",
+  "f3e11189958db6696d5a815dbcbbdc3c8168e54e": "commit: origin shadow d0d0cafe-e2e 2026-09-14T00:39:08.638Z",
+  "d5aaa19fc61591d3fd4e32dbe9fef234a1181cd2": "commit: {\"id\":\"9b3c57d5d33d\",\"timestamp\":\"2026-09-14T00:39:05.297Z\",\"sessionTag\":\"e2e-xwt-main\",\"filesChanged\":[\"packages/cli/package.json\"],\"treeSha\":\"58c98b6f6348da231d8b33961f4dddf9658a9144\",\"branch\":\"origin/shadow/e2e-xwt-main\",\"prompt\":\"bump the version here too\",\"model\":\"claude\",\"tokensUsed\":24,\"costUsd\":0.0005,\"promptIndex\":0,\"type\":\"auto\",\"commitSha\":\"86d25dd52b9087c79793371bc623cb25534e4342\",\"attribution\":{\"linesAdded\":1,\"linesRemoved\":1,\"aiLinesAdded\":1,\"humanLinesAdded\":0,\"aiPercentage\":100}}",
+  "08d06dff34fe5ca756d476c80e8cc3de26d6f207": "commit: session aaaaaaaa: claude — bump the version here too",
+  "3006fedff627cd80b8ad4f206551f955e224b505": "commit: origin shadow e2e-xwt-main 2026-09-14T00:39:05.169Z",
+  "74842c68c6e7979d40a511d500ed5148000e09ea": "commit: origin shadow prompt-e2e-xwt-main 2026-09-14T00:39:02.974Z",
+  "86d25dd52b9087c79793371bc623cb25534e4342": "commit: base"
+ },
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "bump the CLI version and open a PR",
+    "agentSlug": "cursor",
+    "model": "cursor-e2e-model",
+    "tokensUsed": 36,
+    "tokensEstimated": true,
+    "inputTokens": 9,
+    "outputTokens": 27,
+    "durationMs": 1611,
+    "costUsd": 0.0002,
+    "gitCapture": {
+     "headBefore": "86d25dd52b9087c79793371bc623cb25534e4342",
+     "headAfter": "86d25dd52b9087c79793371bc623cb25534e4342",
+     "commitShas": [],
+     "diff": "diff --git a/packages/cli/package.json b/packages/cli/package.json\nindex d4f0f7f..6b41566 100644\n--- a/packages/cli/package.json\n+++ b/packages/cli/package.json\n@@ -1,4 +1,4 @@\n {\n   \"name\": \"@origin/cli\",\n-  \"version\": \"0.20260909.2214\"\n+  \"version\": \"0.20260909.2300\"\n }",
+     "linesAdded": 1,
+     "linesRemoved": 1,
+     "commitDetails": [],
+     "snapshot": true
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "bump the CLI version and open a PR",
+      "diff": "diff --git a/packages/cli/package.json b/packages/cli/package.json\nindex d4f0f7f..6b41566 100644\n--- a/packages/cli/package.json\n+++ b/packages/cli/package.json\n@@ -1,4 +1,4 @@\n {\n   \"name\": \"@origin/cli\",\n-  \"version\": \"0.20260909.2214\"\n+  \"version\": \"0.20260909.2300\"\n }",
+      "uncommittedDiff": "",
+      "filesChanged": [
+       "packages/cli/package.json"
+      ],
+      "commitSha": null,
+      "treeSha": "f55e4caf90be0e66fec4ddfb7eeab40c07275c66",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "diffSource": "turn-window",
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"bump the CLI version and open a PR\",\"agent\":\"claude\",\"edits\":[{\"file\":\"packages/cli/package.json\",\"op\":\"edit\",\"oldContent\":\"{\\n  \\\"name\\\": \\\"@origin/cli\\\",\\n  \\\"version\\\": \\\"0.20260909.2214\\\"\\n}\\n\",\"newContent\":\"{\\n  \\\"name\\\": \\\"@origin/cli\\\",\\n  \\\"version\\\": \\\"0.20260909.2300\\\"\\n}\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1}],\"commits\":[],\"finalHunks\":[{\"file\":\"packages/cli/package.json\",\"start\":3,\"lines\":[\"  \\\"version\\\": \\\"0.20260909.2300\\\"\"]}]}",
+      "turnId": "t_579cd4623f2043e9",
+      "captureId": "c_fcc61295e2204b76",
+      "capturedAt": 1789346348522
+     }
+    ]
+   }
+  }
+ ]
+}

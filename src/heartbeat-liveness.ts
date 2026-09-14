@@ -22,6 +22,9 @@ export interface LivenessInputs {
   // The agent is working on that prompt whether or not anything on disk
   // moves, so it is proof of life in its own right. See turnInProgress.
   turnInProgress?: boolean;
+  // sessionNeverStarted() — no prompt and a transcript the agent never created,
+  // past the grace window. Nothing can resume it, so nothing is lost by ending it.
+  transcriptNeverCreated?: boolean;
 }
 
 // A hook-driven turn that has been OPENED (user-prompt-submit) and not yet
@@ -151,8 +154,47 @@ export function parentLooksDead(i: LivenessInputs): boolean {
     // catches the hookless-IDE zombie (parentPid=0, pings forever after close).
     (!processConfirmedAlive && i.transcriptStale) ||
     // Hookless agent with no pid: fall back to our own state-file staleness.
-    (i.recordedParentPid <= 0 && i.stateFileStale)
+    (i.recordedParentPid <= 0 && i.stateFileStale) ||
+    // A session that exited before its first prompt (see sessionNeverStarted).
+    (!processConfirmedAlive && i.transcriptNeverCreated === true)
   );
+}
+
+// ─── A session that never started ─────────────────────────────────────────
+//
+// Claude Code creates its transcript file only when the first message lands. A
+// session whose SessionStart fired but which exited before any prompt leaves an
+// empty prompt list and a transcript path that points at nothing. It cannot be
+// resumed, because a resumed conversation always has its file, so there is
+// nothing to keep alive.
+//
+// Seen 2026-09-14: three such sessions sat on the Sessions page as Running with
+// no name, $0.00 and 0 tokens. Their SessionEnd was downgraded to a Stop (the
+// desktop app also fires SessionEnd on reconnect, so it can't be terminal in
+// general). The heartbeat read the missing transcript as inconclusive for the
+// 90-minute stale window, and since #1605 a pinging session is never swept.
+export const NEVER_STARTED_GRACE_MS = 10 * 60_000;
+
+export interface NeverStartedInputs {
+  promptCount: number;
+  transcriptPath: string | null | undefined;
+  transcriptExists: boolean;
+  // When the session started. Required only when graceMs > 0.
+  startedAtMs: number | null;
+  nowMs: number;
+  graceMs: number;
+}
+
+export function sessionNeverStarted(i: NeverStartedInputs): boolean {
+  if (i.promptCount > 0) return false;
+  // No path recorded (Codex passes none): absence proves nothing.
+  if (!i.transcriptPath) return false;
+  if (i.transcriptExists) return false;
+  if (i.graceMs > 0) {
+    if (i.startedAtMs == null || !Number.isFinite(i.startedAtMs)) return false;
+    if (i.nowMs - i.startedAtMs < i.graceMs) return false;
+  }
+  return true;
 }
 
 // ─── Transcript-idle policy ───────────────────────────────────────────────

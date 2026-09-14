@@ -29,9 +29,11 @@ import { closesFromMarkers, parseMarkersFromTranscript, parseMarkersFromTranscri
 import { readMemoryTodos } from '../../todo.js';
 import { claimSessionCloses } from '../../todo-sweep.js';
 import { anchorEditPositions, backfillWriteBaselines, capturePromptEdits } from '../../prompt-capture/index.js';
+import { reRenderCreatedWrites } from '../../legacy-write-diff.js';
 import type { PromptEdit } from '../../prompt-capture/index.js';
 import { editSourceForAgent } from '../../prompt-capture/types.js';
 import { uploadPromptImages } from '../../prompt-images.js';
+import { promptHistoryPayload } from '../../prompt-history-payload.js';
 import { redactSecrets } from '../../redaction.js';
 import { clipMappingsToPromptHistory, closeTurn, discoverGitRoot, getBranch, getCanonicalRepoPath, getGitRoot, getHeadSha, getWorkingGitRoot, homePromptIndexByText, reconcilePromptHistory, samePromptText, saveSessionState, stampCaptured } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
@@ -49,8 +51,8 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { serverRowForLocalTurn, turnIdForServerRow } from '../../turn-index.js';
-import { firstUnanchoredPrompt, markSkippedPromptBaselines, recordPromptShadow } from '../../session-state.js';
+import { localTurnForServerRow, serverRowForLocalTurn, turnIdForServerRow } from '../../turn-index.js';
+import { finalRewriteOf, firstUnanchoredPrompt, markSkippedPromptBaselines, recordPromptShadow } from '../../session-state.js';
 import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, windowInheritsCommitsForTurn, applyLiveLedger, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesNamedInDiff, filterUncommittedDiff, findStateForHook, getWorkingTreeSha, hookLookupSessionId, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
 
 
@@ -60,7 +62,7 @@ import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE
 // Durable upload wrappers (update-queue.ts) bound to this file's debugLog.
 // On a retriable API failure the payload is persisted to ~/.origin/queue/
 // and replayed by a later hook — capture data is never silently lost.
-export const durableUpdate = (sessionId: string, data: any, opts: { supersedes?: string | null } = {}) =>
+export const durableUpdate = (sessionId: string, data: any, opts: { supersedes?: string | null; logEvent?: string } = {}) =>
   durableUpdateSession(sessionId, data, (e, m, d) => debugLog(e, m, d), opts);
 
 // FIX 3 — SESSION-LEVEL pre-existing-dirt exclusion.
@@ -619,8 +621,53 @@ export function keepRicherTurnCapture<
     if (filesChanged.length === curFiles.length && diff === curDiff) return pm;
     const merged = { ...pm, filesChanged, diff };
     if (filesChanged.length > 0 || diff) delete (merged as { chatOnly?: boolean }).chatOnly;
+    // The file lists union, but only ONE diff survives — so a file only the
+    // losing capture carried is named with no content. Prod 9f8501f7 turn 1:
+    // 20 files claimed over a 4-file diff, `claimed_file_absent_from_diff`
+    // at the release gate. Declare what the kept diff cannot show, the same
+    // way a budget cut does, so the row explains itself instead of reading as
+    // a broken capture. The blend itself stays until the ledger covers every
+    // path (see the ledger early-return above).
+    const carried = [...diff.matchAll(/^diff --git a\/(.*?) b\//gm)].map((m) => m[1]);
+    const withoutContent = filesChanged.filter((f) => !carried.some((c) => sameFileBySuffix(c, f)));
+    if (withoutContent.length > 0) {
+      const declared = (pm as { contentUnavailableFiles?: string[] }).contentUnavailableFiles || [];
+      (merged as { contentUnavailableFiles?: string[] }).contentUnavailableFiles = Array.from(new Set([...declared, ...withoutContent]));
+    }
     return merged;
   });
+}
+
+/**
+ * The commit a synthesized turn row may carry: the newest commit this turn's
+ * capture OWNS, else HEAD only when this session already attested it (a rebase
+ * that left `commitDetails` empty). Never HEAD merely because it is HEAD.
+ *
+ * Stamping current HEAD unconditionally puts the commit a turn STARTED from on
+ * a turn that committed nothing — capture-e2e-cross-worktree-shell-write turn 0
+ * was sent with `commit: base` — and a later commit's sha on turns that never
+ * made it (the cumulative-stamp class, prod petrushka 2a3a52aa). "A commit
+ * landed" is read off the OWNED list, not off HEAD or committedDiff, which
+ * answer "did the repo move" — on a shared checkout, somebody else's commit
+ * (prod 97ad4482). The server's sha is fill-only, so the first wrong stamp is
+ * the one that stays.
+ */
+export function ownedTurnCommitSha(
+  repoPath: string,
+  state: SessionState,
+  capture: { commitDetails?: Array<{ sha?: string | null }> },
+): string | null {
+  const owned = capture.commitDetails || [];
+  const newest = owned.length > 0 ? owned[owned.length - 1]?.sha || null : null;
+  if (newest) return newest;
+  try {
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      windowsHide: true, cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    return headIsAttested(head, attestedCommitShas(state)) ? head : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -666,6 +713,28 @@ export function dropAdjacentCursorDiffReplays<
       chatOnly: true,
     } as T;
   });
+}
+
+/**
+ * A legacy row's whole-file Writes, rendered from the before-state Stop
+ * backfilled instead of as creations. See legacy-write-diff.ts.
+ *
+ * Only a row NO observed capture owns: a `diffSource` row's diff came from the
+ * ledger or a shadow window and is already measured from a real before-state.
+ * Counts are cleared when the diff changes, so `withDerivedLineCounts` derives
+ * them from the rendering that is actually sent.
+ */
+export function withLegacyWritesRendered<T extends {
+  promptIndex: number; diff?: string; diffSource?: string; linesAdded?: number; linesRemoved?: number;
+}>(pm: T, editsJson: string | undefined): T {
+  if (pm.diffSource || !pm.diff) return pm;
+  const { diff, changed } = reRenderCreatedWrites(pm.diff, editsJson);
+  if (changed.length === 0) return pm;
+  debugLog('stop', 'legacy whole-file writes rendered from their backfilled before-state', {
+    promptIndex: pm.promptIndex, files: changed.slice(0, 20),
+  });
+  const { linesAdded: _added, linesRemoved: _removed, ...rest } = pm;
+  return { ...(rest as T), diff };
 }
 
 /**
@@ -1434,11 +1503,11 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
             });
         const budgeted = budgetedTurnCapture(synthDiff, filteredUncommitted, otherRepoFiles);
         // Capture commit/tree SHAs so the commit-detail page can link
-        // this prompt to the commit it produced.
-        let synthCommitSha: string | null = null;
+        // this prompt to the commit it produced — the turn's own commit
+        // only, the same rule as the safety-net branch below.
+        const synthCommitSha = ownedTurnCommitSha(state.repoPath, state, gitCapture);
         let synthTreeSha: string | null = null;
         try {
-          synthCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { windowsHide: true, cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
           synthTreeSha = getWorkingTreeSha(state.repoPath);
         } catch { /* ignore */ }
         const currentMapping = {
@@ -1616,24 +1685,15 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
         // the newest OWNED commit (list is `git log --reverse`, so oldest
         // first) also keeps this turn off a foreign HEAD that happens to sit
         // on top of our own commit.
-        let synthCommitSha: string | null = null;
+        //
+        // An attested HEAD still counts: post-commit never ran, so
+        // commitDetails is empty after a rebase dropped the foreign range —
+        // but HEAD is the rewrite this session already claimed, and the turn
+        // must not read `c:null` beside a files-only Commit pill (e24477e2
+        // turn 7 / d30d8c99). Shared with the no-transcript branch above.
+        const synthCommitSha = ownedTurnCommitSha(state.repoPath, state, gitCapture);
         let synthTreeSha: string | null = null;
         try {
-          const ownedThisTurn = gitCapture.commitDetails || [];
-          if (ownedThisTurn.length > 0) {
-            synthCommitSha = ownedThisTurn[ownedThisTurn.length - 1].sha || null;
-          }
-          // Post-commit never ran, so commitDetails is empty after a rebase
-          // dropped the foreign range — but HEAD is the rewrite this session
-          // already claimed. Stamp it so the turn isn't `c:null` beside a
-          // files-only Commit pill (e24477e2 turn 7 / d30d8c99).
-          if (!synthCommitSha) {
-            const head = execFileSync('git', ['rev-parse', 'HEAD'], {
-              windowsHide: true, cwd: state.repoPath, encoding: 'utf-8',
-              stdio: ['pipe', 'pipe', 'pipe'],
-            }).trim();
-            if (headIsAttested(head, attestedCommitShas(state))) synthCommitSha = head;
-          }
           synthTreeSha = getWorkingTreeSha(state.repoPath);
         } catch { /* ignore */ }
         promptMappings.push({
@@ -1736,12 +1796,7 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
       : [];
     const recoveredCommitProofs = recoverCommittedTurnProofs(promptMappings as any, proofDetails);
     if (recoveredCommitProofs.length > 0) {
-      state.commitTurns ||= [];
-      for (const proof of recoveredCommitProofs) {
-        const turnId = turnIdForServerRow(state, proof.promptIndex);
-        if (!turnId || state.commitTurns.some((ct) => sameSha(ct.sha, proof.sha))) continue;
-        state.commitTurns.push({ sha: proof.sha, turnId, at: new Date().toISOString(), via: 'transcript' });
-      }
+      recordTranscriptCommitProofs(state, recoveredCommitProofs);
       debugLog('stop', 'recovered exact commit-to-turn proof', {
         proofs: recoveredCommitProofs.map((proof) => ({
           promptIndex: proof.promptIndex, sha: proof.sha.slice(0, 8),
@@ -2208,12 +2263,19 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
             // Give whole-file writes their missing before-state FIRST, so
             // the synthesized diff is a real replace instead of a
             // whole-file insertion (see backfillWriteBaselines).
-            backfillWriteBaselines(
-              cap.edits,
-              state.repoPath,
-              // THIS turn's start-state, not the session's.
-              turnBaselineForServerRow(state, cap.promptIndex),
-            );
+            // THIS turn's start-state, not the session's — and when a pull,
+            // rebase or checkout inside the turn brought in commits the turn
+            // did not make, the tree those commits LEFT. Measured from the
+            // pre-pull shadow, a file the turn edited on top of a pull
+            // carried every pulled line as the turn's own (TODO 0f2038ef).
+            // Same resolver the ledger (#1542) and the shell window (#1611)
+            // already use; null when nothing was inherited.
+            const turnStart = turnBaselineForServerRow(state, cap.promptIndex);
+            const localTurn = localTurnForServerRow(cap.promptIndex, state.promptIndexBase);
+            const inheritedStart = turnStart && localTurn !== null
+              ? inheritedBaselineForTurn(state.repoPath, state, turnStart, localTurn)
+              : null;
+            backfillWriteBaselines(cap.edits, state.repoPath, inheritedStart || turnStart);
             anchorEditPositions(cap.edits, state.repoPath);
           }
           promptEditsByIndex.set(cap.promptIndex, JSON.stringify(cap));
@@ -2286,7 +2348,11 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
     //
     // Runs AFTER the legacy chain rather than instead of it, so a turn the
     // journal never marked keeps exactly today's behaviour.
-    const fromLedger = applyLedgerCaptures(state, promptMappings as any);
+    // Side by side with resolveTurn (resolve-turn.ts): what each pass found,
+    // against the row the passes leave. Logging only — the row sent is theirs.
+    const observer = createTurnObserver();
+    observeReconstruction(promptMappings as any, observer);
+    const fromLedger = applyLedgerCaptures(state, promptMappings as any, { observe: observer.observe });
     if (fromLedger > 0) {
       debugLog('ledger', 'turns captured from the ledger this stop', {
         count: fromLedger, of: promptMappings.length,
@@ -2299,6 +2365,7 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
       state, promptMappings as any, state.repoPath || hookCwd,
       {
         log: (event, data) => debugLog('stop', event, data),
+        observe: observer.observe,
         windowInheritsCommits: (fromShadow, toShadow, localTurn) => windowInheritsCommitsForTurn(
           state.repoPath || hookCwd, state as any, fromShadow, toShadow, localTurn,
         ),
@@ -2323,6 +2390,7 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
           state.repoPath || hookCwd, state, shadowSha, localTurn,
         ),
         log: (event, data) => debugLog('stop', event, data),
+        observe: observer.observe,
       },
     );
     if (fromCommits > 0) {
@@ -2330,6 +2398,9 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
         count: fromCommits, of: promptMappings.length,
       });
     }
+    try {
+      compareResolverWithPasses(promptMappings as any, observer, (event, data) => debugLog('stop', event, data));
+    } catch { /* logging only */ }
 
     // The server can HARD-DELETE this row out from under us between the
     // session's creation and this PATCH (see isSessionGoneError). The payload
@@ -2403,7 +2474,9 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
           })) }
         : {}),
       promptChanges: promptMappings.length > 0
-        ? promptMappings.map(withDerivedLineCounts).map((pm, _i, all) => ({
+        ? promptMappings
+          .map((pm) => withLegacyWritesRendered(pm as any, promptEditsByIndex?.get(pm.promptIndex)))
+          .map(withDerivedLineCounts).map((pm, _i, all) => ({
             ...pm,
             // Internal marker — `diffSource` is what travels.
             ledgerOwned: undefined,
@@ -2453,7 +2526,7 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
       payload: summarizePromptPayload(stopUpdatePayload.promptChanges as any),
     });
 
-    const sendStopUpdate = (id: string) => durableUpdate(id, stopUpdatePayload, { supersedes: prePersisted });
+    const sendStopUpdate = (id: string) => durableUpdate(id, stopUpdatePayload, { supersedes: prePersisted, logEvent: 'stop' });
     let updateRes: any;
     try {
       updateRes = await sendStopUpdate(state.sessionId);
@@ -2470,9 +2543,8 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
         throw updErr;
       }
       updateRes = await sendStopUpdate(state.sessionId);
-      debugLog('stop', 'resent capture to re-minted session', { sessionId: state.sessionId });
     }
-    debugLog('stop', 'update complete');
+    debugLog('stop', updateRes === null ? 'update queued for retry' : 'update sent', { sessionId: state.sessionId });
 
     // Persist the budget lockout signal the PATCH response carried, so
     // the NEXT prompt / tool call gets blocked when a hard cap was
@@ -3273,7 +3345,10 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     let prePersisted: string | null = null;
     if (connected && state.sessionId && !String(state.sessionId).startsWith('local-')) {
       try {
-        const earlyPayload = { prompt: joinedPrompt || undefined };
+        const earlyPayload = promptHistoryPayload(redactedPrompts, {
+          promptTurnIds: state.promptTurnIds,
+          promptIndexBase: Math.max(parsed.promptIndexBase || 0, state.promptIndexBase || 0),
+        });
         prePersisted = persistUpdateBeforeWork(state.sessionId, earlyPayload, (e, m, d) => debugLog(e, m, d));
         debugLog('stop', 'prompts persisted before git capture', { promptCount: prompts.length });
       } catch { /* never block Stop on a queue write */ }
@@ -3434,6 +3509,7 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
 // paths.ts is the one, re-exported here so every existing import
 // (`from './commands/hooks.js'`) keeps resolving.
 import { isInsideRepo } from '../../paths.js';
+import { compareResolverWithPasses, createTurnObserver, observeReconstruction } from '../../resolve-turn.js';
 export { isInsideRepo };
 
 
@@ -3598,3 +3674,26 @@ export const SHELL_PROBE_TOOL = '__shell_probe__';
 // Ledger slot for write-journal evidence, separate so it never replaces what
 // the more precise tool-hook paths recorded for the same turn.
 export const WRITE_JOURNAL_TOOL = 'origin:write-journal';
+
+/**
+ * File transcript-proven commits on their turns.
+ *
+ * A sha the session already knows was rewritten away — an amend's original, a
+ * rebase's pre-image — is not re-filed. The transcript still prints the sha
+ * the command made, so after `git commit --amend` the proof matched the dead
+ * original and put it back beside its amendment: session 049d69db turn 13 read
+ * "3 commits total +1312/-29" with e79941c2 (+467) and e6ccbb7f (+468) counted
+ * as two commits.
+ */
+export function recordTranscriptCommitProofs(
+  state: SessionState,
+  proofs: ReadonlyArray<{ promptIndex: number; sha: string }>,
+): void {
+  state.commitTurns ||= [];
+  for (const proof of proofs) {
+    if (finalRewriteOf(proof.sha, (state as any).rewrittenCommits) !== proof.sha) continue;
+    const turnId = turnIdForServerRow(state, proof.promptIndex);
+    if (!turnId || state.commitTurns.some((ct) => sameSha(ct.sha, proof.sha))) continue;
+    state.commitTurns.push({ sha: proof.sha, turnId, at: new Date().toISOString(), via: 'transcript' });
+  }
+}

@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { getGitRoot, getGitDir, listActiveSessions } from '../session-state.js';
+import { cleanShadowRefs } from '../shadow-ref-retention.js';
 
 /**
  * origin clean [--dry-run] [--force]
@@ -12,7 +13,19 @@ import { getGitRoot, getGitDir, listActiveSessions } from '../session-state.js';
  *
  * Preview mode by default (--dry-run). Use --force to actually delete.
  */
-export async function cleanCommand(opts?: { dryRun?: boolean; force?: boolean }): Promise<void> {
+export async function cleanCommand(opts?: { dryRun?: boolean; force?: boolean; shadowRefs?: boolean }): Promise<void> {
+  if (opts?.shadowRefs) {
+    try {
+      const result = cleanShadowRefs(process.cwd(), { apply: !!opts.force && !opts.dryRun });
+      console.log(`Shadow refs: ${result.total} total, ${result.candidates.length} eligible, ${result.total - result.candidates.length} retained, ${result.removed} removed.`);
+      for (const ref of result.candidates) console.log(`  ${ref.name}`);
+      if (!opts.force || opts.dryRun) console.log('Preview only. Use origin clean --shadow-refs --force to remove eligible refs.');
+    } catch (error) {
+      console.error(`Shadow cleanup stopped: ${(error as Error).message}`);
+      process.exitCode = 1;
+    }
+    return;
+  }
   const isDryRun = opts?.force ? false : true; // Preview by default unless --force
   const mode = isDryRun ? chalk.yellow('(dry run)') : chalk.red('(removing)');
 

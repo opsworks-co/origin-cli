@@ -1,0 +1,22 @@
+[
+  {
+    "promptIndex": 0,
+    "diffSource": null,
+    "chatOnly": false,
+    "filesChanged": [
+      "packages/cli/src/a.ts"
+    ],
+    "linesAdded": 1,
+    "linesRemoved": 1,
+    "diff": "diff --git a/packages/cli/src/a.ts b/packages/cli/src/a.ts\nindex <blob>\n--- a/packages/cli/src/a.ts\n+++ b/packages/cli/src/a.ts\n@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;",
+    "uncommittedDiff": "",
+    "editedFiles": [
+      "CLAUDE.md",
+      "packages/cli/src/a.ts"
+    ],
+    "contentUnavailableFiles": [],
+    "commits": [
+      "commit: fix a"
+    ]
+  }
+]

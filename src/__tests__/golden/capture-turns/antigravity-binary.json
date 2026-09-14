@@ -1,0 +1,30 @@
+[
+  {
+    "promptIndex": 0,
+    "diffSource": null,
+    "chatOnly": false,
+    "filesChanged": [],
+    "linesAdded": 0,
+    "linesRemoved": 0,
+    "diff": "",
+    "uncommittedDiff": "",
+    "editedFiles": [],
+    "contentUnavailableFiles": [],
+    "commits": []
+  },
+  {
+    "promptIndex": 1,
+    "diffSource": "ledger",
+    "chatOnly": false,
+    "filesChanged": [
+      "notes.md"
+    ],
+    "linesAdded": 1,
+    "linesRemoved": 0,
+    "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,1 @@\n+remember this\n",
+    "uncommittedDiff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,1 @@\n+remember this\n",
+    "editedFiles": [],
+    "contentUnavailableFiles": [],
+    "commits": []
+  }
+]

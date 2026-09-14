@@ -28,6 +28,7 @@
 //
 // Requires `dist/`. POSIX-only, like the other harnesses.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -36,6 +37,7 @@ import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { foldStopRows } from './helpers/fold-stop-rows.js';
+import { expectGoldenTurns, trackTestFailures } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -76,6 +78,7 @@ function startFakeApi(): Promise<void> {
         }
       });
     });
+    holdIdleConnections(server);
     server.listen(0, '127.0.0.1', () => {
       apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       resolve();
@@ -178,6 +181,7 @@ function rowsFor(sessionId: string): any[] {
 }
 
 describe.skipIf(!haveDist)('a script-driven write in a worktree survives a sibling in the main checkout', () => {
+  const failures = trackTestFailures();
   beforeAll(async () => {
     await startFakeApi();
     tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-e2e-xwt-')));
@@ -286,4 +290,13 @@ describe.skipIf(!haveDist)('a script-driven write in a worktree survives a sibli
     // The turn claims its own file and not the sibling's other work.
     expect(turn0.filesChanged).toEqual([BUMPED]);
   }, 120_000 * WINDOWS_SLOWDOWN);
+
+  it('golden: the worktree session\'s final turn rows match the recorded baseline', () => {
+    const sent = hits
+      .filter((h) => h.method === 'PATCH' && h.url.includes(WT_API) && Array.isArray(h.body?.promptChanges))
+      .flatMap((h) => h.body.promptChanges);
+    expectGoldenTurns('claude-code-cross-worktree-shell-write', rowsFor(WT_API), {
+      repo: wt, roots: [tmp, repo], sent, failedBefore: failures(), requests: hits, sessionId: WT_API,
+    });
+  });
 });

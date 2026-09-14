@@ -5,6 +5,7 @@
 // (2026-09-08) lost both of its commits to the idle sibling because the
 // candidate narrowing kept the exact-lastCwd match alone.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -12,6 +13,8 @@ import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { foldStopRows } from './helpers/fold-stop-rows.js';
+import { expectGoldenTurns, trackTestFailures } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -48,6 +51,7 @@ function startFakeApi(): Promise<void> {
         }
       });
     });
+    holdIdleConnections(server);
     server.listen(0, '127.0.0.1', () => {
       apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       resolve();
@@ -104,6 +108,7 @@ async function killJournalWatchers(): Promise<void> {
 }
 
 describe.skipIf(!haveDist)('two live sessions on one tree: the commit goes to the one that made it', () => {
+  const failures = trackTestFailures();
   beforeAll(async () => {
     await startFakeApi();
     tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-e2e-two-')));
@@ -200,4 +205,14 @@ describe.skipIf(!haveDist)('two live sessions on one tree: the commit goes to th
     expect(t0.filesChanged).toEqual(['packages/cli/src/a.ts']);
     if (t0.commitSha) expect(t0.commitSha).toBe(sha);
   }, 120_000 * WINDOWS_SLOWDOWN);
+
+  it('golden: the working session\'s final turn rows match the recorded baseline', () => {
+    const payloads = hits
+      .filter((h) => h.method === 'PATCH' && h.url.includes(WORK_API) && Array.isArray(h.body?.promptChanges))
+      .map((h) => h.body.promptChanges);
+    expectGoldenTurns('claude-code-two-sessions-one-tree', foldStopRows(payloads), {
+      repo, roots: [tmp], sent: payloads.flat(), failedBefore: failures(),
+      requests: hits, sessionId: WORK_API,
+    });
+  });
 });

@@ -23,6 +23,7 @@
 import { captureShadowWindow, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
 import { fitDiffToBudget } from './diff-budget.js';
 import { localTurnForServerRow } from './turn-index.js';
+import type { TurnObservation } from './resolve-turn.js';
 
 export interface ShadowRangeState {
   /** LOCAL-numbered: index L is this launch's turn L. */
@@ -61,6 +62,11 @@ export interface PreferShadowRangeDeps {
    * those bytes from the turn's own.
    */
   windowInheritsCommits?: (fromShadow: string, toShadow: string | null, localTurn: number) => boolean;
+  /**
+   * What the window said for each row, before this pass weighs it against the
+   * row it already holds — see resolve-turn.ts.
+   */
+  observe?: (promptIndex: number, observation: TurnObservation) => void;
 }
 
 function blank(pm: ShadowRangeMapping): void {
@@ -93,9 +99,21 @@ export function preferShadowRangeForTurns(
   repoPath: string,
   deps: PreferShadowRangeDeps = {},
 ): number {
-  if (state.contendingSessionIds?.length) return 0;
+  const declined = (pm: ShadowRangeMapping, reason: string) =>
+    deps.observe?.(pm.promptIndex, { source: 'turn-window', outcome: 'declined', reason });
+  const declineAll = (reason: string) => {
+    if (!deps.observe || !Array.isArray(mappings)) return;
+    for (const pm of mappings) if (pm && Number.isInteger(pm.promptIndex)) declined(pm, reason);
+  };
+  if (state.contendingSessionIds?.length) {
+    declineAll('another live session shares this working tree');
+    return 0;
+  }
   const shadows = state.promptShadows || [];
-  if (shadows.length === 0 || !repoPath || !Array.isArray(mappings)) return 0;
+  if (shadows.length === 0 || !repoPath || !Array.isArray(mappings)) {
+    declineAll('the session has no shadow window');
+    return 0;
+  }
   const currentLocal = Number.isInteger(state.prompts?.length)
     ? Math.max((state.prompts as unknown[]).length - 1, 0)
     : Math.max(...shadows.map((s) => s.promptIndex), 0);
@@ -105,24 +123,29 @@ export function preferShadowRangeForTurns(
     for (const pm of mappings) {
       if (!pm || !Number.isInteger(pm.promptIndex)) continue;
       const local = localTurnForServerRow(pm.promptIndex, state.promptIndexBase);
-      if (local === null) continue;
+      if (local === null) { declined(pm, 'row predates this launch'); continue; }
       const start = shadows.find((s) => s.promptIndex === local);
-      if (start?.completeBaseline === false) continue;
+      if (start?.completeBaseline === false) { declined(pm, 'the start shadow is not a complete baseline'); continue; }
       const from = start?.shadowSha || null;
       const next = shadows.find((s) => s.promptIndex === local + 1);
-      if (next?.completeBaseline === false) continue;
+      if (next?.completeBaseline === false) { declined(pm, 'the next shadow is not a complete baseline'); continue; }
       const to = next?.shadowSha || null;
       // A completed turn without the next shadow cannot be scoped to the
       // current worktree — that tree includes later turns. Only the in-flight
       // turn (no next shadow yet) diffs against the live tree.
       const end = to || (local === currentLocal ? null : undefined);
-      if (!from || end === undefined) continue;
+      if (!from || end === undefined) {
+        declined(pm, !from ? 'the turn has no start shadow' : 'a completed turn has no next shadow');
+        continue;
+      }
 
       const win = captureShadowWindow(repoPath, from, end, { completeBaseline: start?.completeBaseline });
       if (win.status === 'identical-sha' || win.status === 'unavailable' || win.status === 'not-shadow') {
+        declined(pm, `window ${win.status}`);
         continue;
       }
       if (win.status === 'empty') {
+        deps.observe?.(pm.promptIndex, { source: 'turn-window', outcome: 'empty', completeBaseline: start?.completeBaseline === true });
         const had = !!(pm.diff || '').trim() || (Array.isArray(pm.filesChanged) && pm.filesChanged.length > 0);
         // An empty window is only evidence of "no work" when the shadow really
         // is this turn's START state. For a turn nobody announced, it is not:
@@ -165,6 +188,7 @@ export function preferShadowRangeForTurns(
       let inherits = false;
       try { inherits = !!deps.windowInheritsCommits?.(from, to, local); } catch { inherits = false; }
       if (inherits) {
+        declined(pm, 'the window spans commits the turn did not make');
         deps.log?.('shadow window spans commits the turn did not make — kept the capture', {
           promptIndex: pm.promptIndex, files: win.filesChanged.length,
         });
@@ -194,6 +218,10 @@ export function preferShadowRangeForTurns(
       pm.linesRemoved = win.linesRemoved;
       pm.contentUnavailableFiles = cut;
       if (win.filesChanged.length > 0 || win.diff) delete pm.chatOnly;
+      deps.observe?.(pm.promptIndex, {
+        source: 'turn-window', outcome: 'applied',
+        files: [...win.filesChanged], diff: budgeted.diff, added: win.linesAdded, removed: win.linesRemoved, contentUnavailable: cut,
+      });
       if (prevDiff !== budgeted.diff || prevFiles !== win.filesChanged.join('\0')) {
         changed += 1;
         deps.log?.('shadow window replaced reconstructed diff with git', {

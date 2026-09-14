@@ -11,6 +11,7 @@
 //
 // Requires `dist/`. POSIX-only, like the other harnesses.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -20,6 +21,7 @@ import { fileURLToPath } from 'url';
 import { verifyTurn, parseUnifiedDiff } from '../capture-verify.js';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { foldStopRows } from './helpers/fold-stop-rows.js';
+import { expectGoldenTurns, trackTestFailures } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -50,6 +52,7 @@ function startFakeApi(): Promise<void> {
         }
       });
     });
+    holdIdleConnections(server);
     server.listen(0, '127.0.0.1', () => {
       apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       resolve();
@@ -142,6 +145,7 @@ async function killJournalWatcher(): Promise<void> {
 }
 
 describe.skipIf(!haveDist)('cursor capture end to end through the built binary', () => {
+  const failures = trackTestFailures();
   let tmp = '';
 
   beforeAll(async () => {
@@ -314,4 +318,13 @@ describe.skipIf(!haveDist)('cursor capture end to end through the built binary',
     // it must never contradict it.
     if (t3.commitSha) expect(t3.commitSha).toBe(sha);
   }, 120_000 * WINDOWS_SLOWDOWN);
+
+  it('golden: the final turn rows match the recorded baseline', () => {
+    const sent = hits
+      .filter((h) => h.method === 'PATCH' && Array.isArray(h.body?.promptChanges))
+      .flatMap((h) => h.body.promptChanges);
+    expectGoldenTurns('cursor-binary', lastRows(), {
+      repo, roots: [tmp], sent, failedBefore: failures(), requests: hits, sessionId: 'e2e-cursor-session-0001',
+    });
+  });
 });

@@ -273,22 +273,27 @@ export interface VerifyCaptureOptions {
 export function parseSince(value: string | undefined, now: number = Date.now()): number | null {
   if (!value) return null;
   const rel = value.trim().match(/^(\d+)d$/i);
-  if (rel) return now - Number(rel[1]) * 24 * 60 * 60 * 1000;
+  if (rel) {
+    const cutoff = now - Number(rel[1]) * 24 * 60 * 60 * 1000;
+    return Number.isFinite(new Date(cutoff).getTime()) ? cutoff : null;
+  }
   const abs = Date.parse(value);
   return Number.isFinite(abs) ? abs : null;
 }
 
 export async function verifyCaptureCommand(opts: VerifyCaptureOptions = {}): Promise<void> {
+  // Exit contract: 1 = contradictions, 2 = incomplete evidence, 3 = invalid
+  // --since. Validate before reading captures; usage errors are never findings.
+  const cutoff = opts.since === undefined ? null : parseSince(opts.since);
+  if (opts.since !== undefined && cutoff === null) {
+    console.error(`--since: cannot read "${opts.since}" — use an ISO date or <N>d (e.g. 7d)`);
+    process.exitCode = 3;
+    return;
+  }
   let sessions = collectSessions();
   if (opts.session) sessions = sessions.filter((s) => s.sessionId.startsWith(opts.session as string));
   if (opts.agent) sessions = sessions.filter((s) => s.agentSlug === opts.agent);
-  if (opts.since) {
-    const cutoff = parseSince(opts.since);
-    if (cutoff === null) {
-      console.error(`--since: cannot read "${opts.since}" — use an ISO date or <N>d (e.g. 7d)`);
-      process.exitCode = 2;
-      return;
-    }
+  if (cutoff !== null) {
     // Two ways into the window, because a session is the wrong unit.
     //
     // Windowing on `startedAt` alone is what made the gate vacuous: with tags

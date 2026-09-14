@@ -1,0 +1,19 @@
+[
+  {
+    "promptIndex": 0,
+    "diffSource": "turn-window",
+    "chatOnly": false,
+    "filesChanged": [
+      "packages/cli/package.json"
+    ],
+    "linesAdded": 1,
+    "linesRemoved": 1,
+    "diff": "diff --git a/packages/cli/package.json b/packages/cli/package.json\nindex <blob>\n--- a/packages/cli/package.json\n+++ b/packages/cli/package.json\n@@ -1,4 +1,4 @@\n {\n   \"name\": \"@origin/cli\",\n-  \"version\": \"0.20260909.2214\"\n+  \"version\": \"0.20260909.2300\"\n }",
+    "uncommittedDiff": "",
+    "editedFiles": [
+      "packages/cli/package.json"
+    ],
+    "contentUnavailableFiles": [],
+    "commits": []
+  }
+]

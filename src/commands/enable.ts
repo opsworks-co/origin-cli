@@ -401,11 +401,27 @@ function cascadeHookEvents(): Record<string, any[]> {
 }
 
 // Codex supports: SessionStart, Stop, UserPromptSubmit (no SessionEnd/BeforeAgent/AfterAgent)
+//
+// Stop gets Codex's own default (600s), not 10. Codex KILLS a hook at its
+// timeout, and Stop is the hook that sends the turn: shadow window, commit
+// patches, final-state hunks, then the PATCH. On this repo that routinely takes
+// 30-80s (Claude Code's Stop, which has no Origin-set timeout, logs `update
+// sent` 76s after `begin`). Codex session f53bd03d (2026-09-13): 17 Stops
+// reached `calling api.updateSession`, 2 reached `promptChanges payload`, and
+// NONE logged `update sent` or `update queued for retry` — every run's last
+// line fell inside 10s of `begin`. Its 22 prompts survived only as the text
+// rows #1618 pre-persists; every turn's capture was lost.
+//
+// The timeout is part of the hook identity Codex hashes for trust, so an
+// install from before this change shows as "Modified" until `origin enable`
+// re-runs and rewrites both the entry and its trusted_hash.
+const CODEX_STOP_HOOK_TIMEOUT_SEC = 600;
+
 function codexHookEvents(): Record<string, any[]> {
   return {
     SessionStart: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex session-start'), timeout: 10 }] }],
     UserPromptSubmit: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex user-prompt-submit'), timeout: 10 }] }],
-    Stop: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex stop'), timeout: 10 }] }],
+    Stop: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex stop'), timeout: CODEX_STOP_HOOK_TIMEOUT_SEC }] }],
   };
 }
 
@@ -479,6 +495,11 @@ export interface HookConfigSpec {
   expected: () => any;
   /** Setups where Origin deliberately installs nothing (so nothing to check). */
   skip?: () => boolean;
+  /**
+   * Runs after a drift repair rewrote this config, for state the agent keeps
+   * ELSEWHERE that must agree with the rewritten entries (Codex's trusted hashes).
+   */
+  afterRepair?: (basePath: string) => void;
 }
 
 const isGlobalBase = (basePath: string) => basePath === os.homedir();
@@ -539,6 +560,7 @@ export const HOOK_CONFIG_SPECS: HookConfigSpec[] = [
     // Windows Codex capture is the rollout watcher; hooks are never installed
     // there (they can't run in Codex's sandbox and surface as red errors).
     skip: () => isWindows(),
+    afterRepair: (b) => refreshCodexHookTrust(b),
   },
   {
     agent: 'antigravity',
@@ -1051,161 +1073,8 @@ export function installCodexHooks(gitRoot: string): void {
       }
     }
 
-    // Pre-approve our hooks so Codex 0.130+ doesn't gate them behind the
-    // interactive `/hooks` review prompt. Each entry in hooks.json gets a
-    // `trusted_hash` stored under `[hooks.state."<key>"]` in config.toml.
-    // The hash is sha256 over canonical-JSON of the normalized hook
-    // identity (event_name + matcher + hooks[]). Match Codex's own
-    // normalization so the hash compares equal to what `/hooks` would
-    // compute — otherwise the entry shows up as "Modified" instead of
-    // "Trusted". See codex-rs/hooks/src/engine/discovery.rs.
-    const eventLabelMap: Record<string, string> = {
-      SessionStart: 'session_start',
-      UserPromptSubmit: 'user_prompt_submit',
-      Stop: 'stop',
-      PreToolUse: 'pre_tool_use',
-      PostToolUse: 'post_tool_use',
-      PermissionRequest: 'permission_request',
-      PreCompact: 'pre_compact',
-      PostCompact: 'post_compact',
-    };
-
-    // A Codex build discovers hooks from up to four sources and "loads all
-    // matching hooks" from every one: ~/.codex/hooks.json, <repo>/.codex/
-    // hooks.json, and inline `[hooks]` in either config.toml. Origin has always
-    // shipped the standalone ~/.codex/hooks.json file. The 2026-07 Codex DESKTOP
-    // self-update (app v26.721.x) stopped discovering that user-global FILE
-    // (openai/codex#27133), so Origin ALSO began registering the hooks INLINE in
-    // ~/.codex/config.toml — a separate discovery source read through a different
-    // code path (load_toml_hooks_from_layer) that survived the file-discovery
-    // regression, is provably read by the updated build (its trusted_hash state
-    // is honored), and dodges the worktree project-root discovery bug too.
-    //
-    // FIX 2: on Windows we now ship config.toml inline as the SINGLE source and
-    // no longer write the standalone hooks.json (stripped above). That removes
-    // the "loading hooks from both … prefer a single representation" warning and
-    // the resulting double-fire on builds that discover BOTH — while STILL
-    // working on the regressed Desktop build (inline is read by every build with
-    // the hooks engine, stable since v0.124.0). macOS/Linux is unchanged: no
-    // inline hooks, hooks.json remains the sole source. The runtime turn_id
-    // dedup in commands/hooks.ts still guards any residual double-fire (e.g. a
-    // stale hooks.json a user restored by hand).
-    const alsoRegisterInlineConfig = isWindows();
-
-    // The trusted_hash is a sha256 over canonical JSON of the NORMALIZED hook
-    // identity (event_name + optional matcher + normalized handler) — it is
-    // independent of WHICH source the hook came from. So the same hash trusts
-    // the hook under every source; only the state KEY's `key_source` prefix
-    // differs (the abs path to the file that declared it: hooks.json for the
-    // standalone file, config.toml for the inline copy).
-    type HashEntry = { eventLabel: string; groupIndex: number; handlerIndex: number; hash: string };
-    const hashEntries: HashEntry[] = [];
-    // Inline-TOML rendering of the same hooks, as `[[hooks.<Event>]]` groups
-    // each holding `[[hooks.<Event>.hooks]]` handler tables.
-    const inlineHookLines: string[] = [];
-    for (const [pascalEvent, groups] of Object.entries(hooks)) {
-      const eventLabel = eventLabelMap[pascalEvent];
-      if (!eventLabel) continue;
-      groups.forEach((group: any, groupIndex: number) => {
-        if (alsoRegisterInlineConfig) {
-          inlineHookLines.push(`\n[[hooks.${pascalEvent}]]`);
-          if (group.matcher !== undefined && group.matcher !== null) {
-            inlineHookLines.push(`matcher = ${tomlLiteralString(String(group.matcher))}`);
-          }
-        }
-        (group.hooks || []).forEach((handler: any, handlerIndex: number) => {
-          // Mirror Codex's HookHandlerConfig::Command normalization:
-          //   timeout defaults to 600, capped to at least 1; async defaults
-          //   to false; command_windows + statusMessage stay absent (None)
-          //   when not present in our hooks.json.
-          const timeoutSec = Math.max(1, typeof handler.timeout === 'number' ? handler.timeout : 600);
-          const normalizedHook: Record<string, unknown> = {
-            type: 'command',
-            command: handler.command,
-            timeout: timeoutSec,
-            async: false,
-          };
-          const identity: Record<string, unknown> = {
-            event_name: eventLabel,
-            hooks: [normalizedHook],
-          };
-          if (group.matcher !== undefined && group.matcher !== null) {
-            identity.matcher = group.matcher;
-          }
-          const canonical = sortObjectKeysDeep(identity);
-          const json = JSON.stringify(canonical);
-          const hash = crypto.createHash('sha256').update(json).digest('hex');
-          hashEntries.push({ eventLabel, groupIndex, handlerIndex, hash });
-          if (alsoRegisterInlineConfig) {
-            inlineHookLines.push(
-              `[[hooks.${pascalEvent}.hooks]]`,
-              `type = "command"`,
-              // TOML literal (single-quoted) string: no escape processing, so
-              // the Windows `"C:\...\node.exe" "...\index.js" …` command — full
-              // of backslashes and double-quotes — survives verbatim.
-              `command = ${tomlLiteralString(String(handler.command))}`,
-              `timeout = ${typeof handler.timeout === 'number' ? handler.timeout : 10}`,
-            );
-          }
-        });
-      });
-    }
-
-    // Emit one [hooks.state."<key>"] entry per (source, event, group, handler).
-    // Single-source policy: on Windows the ONLY source is the inline config.toml
-    // copy (hooks.json is not shipped), so trust just config.toml; off Windows
-    // the sole source is the standalone hooks.json.
-    const trustKeySources = alsoRegisterInlineConfig ? [configTomlPath] : [hooksPath];
-    const trustedHashLines: string[] = [];
-    for (const keySource of trustKeySources) {
-      for (const { eventLabel, groupIndex, handlerIndex, hash } of hashEntries) {
-        const key = `${keySource}:${eventLabel}:${groupIndex}:${handlerIndex}`;
-        // TOML quoted-key with escaped backslashes/quotes inside.
-        const safeKey = key.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        trustedHashLines.push(
-          `\n[hooks.state."${safeKey}"]`,
-          `trusted_hash = "sha256:${hash}"`,
-        );
-      }
-    }
-    // Strip any prior origin-managed blocks so re-running origin enable updates
-    // the hashes/commands in place instead of duplicating them (a TOML
-    // duplicate-key parse failure would brick `codex`).
-    next = next.replace(/\n# origin-trusted-hooks-begin[\s\S]*?# origin-trusted-hooks-end\n?/g, '');
-    next = next.replace(/\n# origin-codex-inline-hooks-begin[\s\S]*?# origin-codex-inline-hooks-end\n?/g, '');
-    // Older CLI versions wrote the [hooks.state."..."] blocks without the
-    // begin/end markers — those won't be caught above. Strip any block whose
-    // TOML key references a source path we're about to re-trust. Fail-closed:
-    // if we're writing trusted_hash entries, we own this slice of the file.
-    for (const keySource of trustKeySources) {
-      const orphanHookStateRe = new RegExp(
-        `\\n\\[hooks\\.state\\."${backslashTolerantPathRe(keySource)}:[^"\\n]*"\\]\\s*\\n\\s*trusted_hash\\s*=\\s*"[^"\\n]*"\\s*`,
-        'g',
-      );
-      next = next.replace(orphanHookStateRe, '\n');
-    }
-    if (inlineHookLines.length > 0) {
-      // The inline hooks MUST precede the [hooks.state.*] trust tables: once a
-      // `[hooks.state."x"]` header opens, subsequent `[[hooks.<Event>]]` arrays
-      // are still valid TOML (distinct sub-keys of `hooks`), but keeping the
-      // array-of-tables definitions together and ahead of the state tables is
-      // the least surprising layout and avoids any header-reopen ambiguity.
-      next = next.trimEnd()
-        + '\n\n# origin-codex-inline-hooks-begin'
-        + '\n# Auto-generated by `origin enable`. Mirrors ~/.codex/hooks.json inline'
-        + '\n# so a Codex build that stopped discovering the standalone hooks.json'
-        + '\n# file still finds Origin\'s hooks here. Duplicate fires are de-duped at'
-        + '\n# runtime by Origin (keyed on Codex\'s turn_id).'
-        + inlineHookLines.join('\n')
-        + '\n# origin-codex-inline-hooks-end\n';
-    }
-    if (trustedHashLines.length > 0) {
-      next = next.trimEnd()
-        + '\n\n# origin-trusted-hooks-begin\n# Auto-generated by `origin enable`. Trusts the hooks above so'
-        + '\n# Codex 0.130+ doesn\'t block them behind `/hooks` review.'
-        + trustedHashLines.join('\n')
-        + '\n# origin-trusted-hooks-end\n';
-    }
+    const trust = applyCodexHookTrust(next, hooks, hooksPath, configTomlPath);
+    next = trust.next;
 
     if (next !== toml) {
       fs.writeFileSync(configTomlPath, next);
@@ -1216,10 +1085,10 @@ export function installCodexHooks(gitRoot: string): void {
       } else {
         console.log(chalk.green('  ✓ Codex hooks feature flag already enabled in ~/.codex/config.toml'));
       }
-      if (trustedHashLines.length > 0) {
+      if (trust.trusted) {
         console.log(chalk.green('  ✓ Auto-trusted Codex hooks (skips `/hooks` review on next launch)'));
       }
-      if (inlineHookLines.length > 0) {
+      if (trust.inline) {
         console.log(chalk.green('  ✓ Registered Codex hooks inline in ~/.codex/config.toml (single source on Windows)'));
       }
     } else {
@@ -1229,6 +1098,195 @@ export function installCodexHooks(gitRoot: string): void {
     // Non-fatal — user can still enable manually
     console.log(chalk.yellow('    ⚠ Could not auto-enable Codex hooks. Run: codex -c features.hooks=true'));
   }
+}
+
+/**
+ * Origin's Codex trust state, applied to a config.toml text. Split out of
+ * installCodexHooks so a drift repair can refresh the trusted hashes without
+ * the rest of `enable`: the handler's command and timeout are part of the
+ * hashed identity, so rewriting hooks.json alone leaves every changed hook
+ * "Modified" instead of "Trusted".
+ */
+function applyCodexHookTrust(
+  toml: string,
+  hooks: Record<string, any[]>,
+  hooksPath: string,
+  configTomlPath: string,
+): { next: string; trusted: boolean; inline: boolean } {
+  let next = toml;
+  // Pre-approve our hooks so Codex 0.130+ doesn't gate them behind the
+  // interactive `/hooks` review prompt. Each entry in hooks.json gets a
+  // `trusted_hash` stored under `[hooks.state."<key>"]` in config.toml.
+  // The hash is sha256 over canonical-JSON of the normalized hook
+  // identity (event_name + matcher + hooks[]). Match Codex's own
+  // normalization so the hash compares equal to what `/hooks` would
+  // compute — otherwise the entry shows up as "Modified" instead of
+  // "Trusted". See codex-rs/hooks/src/engine/discovery.rs.
+  const eventLabelMap: Record<string, string> = {
+    SessionStart: 'session_start',
+    UserPromptSubmit: 'user_prompt_submit',
+    Stop: 'stop',
+    PreToolUse: 'pre_tool_use',
+    PostToolUse: 'post_tool_use',
+    PermissionRequest: 'permission_request',
+    PreCompact: 'pre_compact',
+    PostCompact: 'post_compact',
+  };
+
+  // A Codex build discovers hooks from up to four sources and "loads all
+  // matching hooks" from every one: ~/.codex/hooks.json, <repo>/.codex/
+  // hooks.json, and inline `[hooks]` in either config.toml. Origin has always
+  // shipped the standalone ~/.codex/hooks.json file. The 2026-07 Codex DESKTOP
+  // self-update (app v26.721.x) stopped discovering that user-global FILE
+  // (openai/codex#27133), so Origin ALSO began registering the hooks INLINE in
+  // ~/.codex/config.toml — a separate discovery source read through a different
+  // code path (load_toml_hooks_from_layer) that survived the file-discovery
+  // regression, is provably read by the updated build (its trusted_hash state
+  // is honored), and dodges the worktree project-root discovery bug too.
+  //
+  // FIX 2: on Windows we now ship config.toml inline as the SINGLE source and
+  // no longer write the standalone hooks.json (stripped above). That removes
+  // the "loading hooks from both … prefer a single representation" warning and
+  // the resulting double-fire on builds that discover BOTH — while STILL
+  // working on the regressed Desktop build (inline is read by every build with
+  // the hooks engine, stable since v0.124.0). macOS/Linux is unchanged: no
+  // inline hooks, hooks.json remains the sole source. The runtime turn_id
+  // dedup in commands/hooks.ts still guards any residual double-fire (e.g. a
+  // stale hooks.json a user restored by hand).
+  const alsoRegisterInlineConfig = isWindows();
+
+  // The trusted_hash is a sha256 over canonical JSON of the NORMALIZED hook
+  // identity (event_name + optional matcher + normalized handler) — it is
+  // independent of WHICH source the hook came from. So the same hash trusts
+  // the hook under every source; only the state KEY's `key_source` prefix
+  // differs (the abs path to the file that declared it: hooks.json for the
+  // standalone file, config.toml for the inline copy).
+  type HashEntry = { eventLabel: string; groupIndex: number; handlerIndex: number; hash: string };
+  const hashEntries: HashEntry[] = [];
+  // Inline-TOML rendering of the same hooks, as `[[hooks.<Event>]]` groups
+  // each holding `[[hooks.<Event>.hooks]]` handler tables.
+  const inlineHookLines: string[] = [];
+  for (const [pascalEvent, groups] of Object.entries(hooks)) {
+    const eventLabel = eventLabelMap[pascalEvent];
+    if (!eventLabel) continue;
+    groups.forEach((group: any, groupIndex: number) => {
+      if (alsoRegisterInlineConfig) {
+        inlineHookLines.push(`\n[[hooks.${pascalEvent}]]`);
+        if (group.matcher !== undefined && group.matcher !== null) {
+          inlineHookLines.push(`matcher = ${tomlLiteralString(String(group.matcher))}`);
+        }
+      }
+      (group.hooks || []).forEach((handler: any, handlerIndex: number) => {
+        // Mirror Codex's HookHandlerConfig::Command normalization:
+        //   timeout defaults to 600, capped to at least 1; async defaults
+        //   to false; command_windows + statusMessage stay absent (None)
+        //   when not present in our hooks.json.
+        const timeoutSec = Math.max(1, typeof handler.timeout === 'number' ? handler.timeout : 600);
+        const normalizedHook: Record<string, unknown> = {
+          type: 'command',
+          command: handler.command,
+          timeout: timeoutSec,
+          async: false,
+        };
+        const identity: Record<string, unknown> = {
+          event_name: eventLabel,
+          hooks: [normalizedHook],
+        };
+        if (group.matcher !== undefined && group.matcher !== null) {
+          identity.matcher = group.matcher;
+        }
+        const canonical = sortObjectKeysDeep(identity);
+        const json = JSON.stringify(canonical);
+        const hash = crypto.createHash('sha256').update(json).digest('hex');
+        hashEntries.push({ eventLabel, groupIndex, handlerIndex, hash });
+        if (alsoRegisterInlineConfig) {
+          inlineHookLines.push(
+            `[[hooks.${pascalEvent}.hooks]]`,
+            `type = "command"`,
+            // TOML literal (single-quoted) string: no escape processing, so
+            // the Windows `"C:\...\node.exe" "...\index.js" …` command — full
+            // of backslashes and double-quotes — survives verbatim.
+            `command = ${tomlLiteralString(String(handler.command))}`,
+            `timeout = ${typeof handler.timeout === 'number' ? handler.timeout : 10}`,
+          );
+        }
+      });
+    });
+  }
+
+  // Emit one [hooks.state."<key>"] entry per (source, event, group, handler).
+  // Single-source policy: on Windows the ONLY source is the inline config.toml
+  // copy (hooks.json is not shipped), so trust just config.toml; off Windows
+  // the sole source is the standalone hooks.json.
+  const trustKeySources = alsoRegisterInlineConfig ? [configTomlPath] : [hooksPath];
+  const trustedHashLines: string[] = [];
+  for (const keySource of trustKeySources) {
+    for (const { eventLabel, groupIndex, handlerIndex, hash } of hashEntries) {
+      const key = `${keySource}:${eventLabel}:${groupIndex}:${handlerIndex}`;
+      // TOML quoted-key with escaped backslashes/quotes inside.
+      const safeKey = key.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      trustedHashLines.push(
+        `\n[hooks.state."${safeKey}"]`,
+        `trusted_hash = "sha256:${hash}"`,
+      );
+    }
+  }
+  // Strip any prior origin-managed blocks so re-running origin enable updates
+  // the hashes/commands in place instead of duplicating them (a TOML
+  // duplicate-key parse failure would brick `codex`).
+  next = next.replace(/\n# origin-trusted-hooks-begin[\s\S]*?# origin-trusted-hooks-end\n?/g, '');
+  next = next.replace(/\n# origin-codex-inline-hooks-begin[\s\S]*?# origin-codex-inline-hooks-end\n?/g, '');
+  // Older CLI versions wrote the [hooks.state."..."] blocks without the
+  // begin/end markers — those won't be caught above. Strip any block whose
+  // TOML key references a source path we're about to re-trust. Fail-closed:
+  // if we're writing trusted_hash entries, we own this slice of the file.
+  for (const keySource of trustKeySources) {
+    const orphanHookStateRe = new RegExp(
+      `\\n\\[hooks\\.state\\."${backslashTolerantPathRe(keySource)}:[^"\\n]*"\\]\\s*\\n\\s*trusted_hash\\s*=\\s*"[^"\\n]*"\\s*`,
+      'g',
+    );
+    next = next.replace(orphanHookStateRe, '\n');
+  }
+  if (inlineHookLines.length > 0) {
+    // The inline hooks MUST precede the [hooks.state.*] trust tables: once a
+    // `[hooks.state."x"]` header opens, subsequent `[[hooks.<Event>]]` arrays
+    // are still valid TOML (distinct sub-keys of `hooks`), but keeping the
+    // array-of-tables definitions together and ahead of the state tables is
+    // the least surprising layout and avoids any header-reopen ambiguity.
+    next = next.trimEnd()
+      + '\n\n# origin-codex-inline-hooks-begin'
+      + '\n# Auto-generated by `origin enable`. Mirrors ~/.codex/hooks.json inline'
+      + '\n# so a Codex build that stopped discovering the standalone hooks.json'
+      + '\n# file still finds Origin\'s hooks here. Duplicate fires are de-duped at'
+      + '\n# runtime by Origin (keyed on Codex\'s turn_id).'
+      + inlineHookLines.join('\n')
+      + '\n# origin-codex-inline-hooks-end\n';
+  }
+  if (trustedHashLines.length > 0) {
+    next = next.trimEnd()
+      + '\n\n# origin-trusted-hooks-begin\n# Auto-generated by `origin enable`. Trusts the hooks above so'
+      + '\n# Codex 0.130+ doesn\'t block them behind `/hooks` review.'
+      + trustedHashLines.join('\n')
+      + '\n# origin-trusted-hooks-end\n';
+  }
+
+  return { next, trusted: trustedHashLines.length > 0, inline: inlineHookLines.length > 0 };
+}
+
+/**
+ * Re-trust Origin's Codex hooks at `basePath` after a drift repair rewrote
+ * their hooks.json entries (`origin upgrade`, `doctor --fix`, `repair-hooks`).
+ * Touches only Origin's trust blocks, never the `[features]` flag, so a repair
+ * cannot switch on hooks the user turned off. No config.toml means `enable`
+ * never set Codex up here: nothing to trust.
+ */
+export function refreshCodexHookTrust(basePath: string): void {
+  if (isWindows()) return;
+  const configTomlPath = path.join(os.homedir(), '.codex', 'config.toml');
+  if (!fs.existsSync(configTomlPath)) return;
+  const toml = fs.readFileSync(configTomlPath, 'utf-8');
+  const { next } = applyCodexHookTrust(toml, codexHookEvents(), path.join(basePath, '.codex', 'hooks.json'), configTomlPath);
+  if (next !== toml) fs.writeFileSync(configTomlPath, next);
 }
 
 // Render a string as a TOML literal (single-quoted) string. Literal strings do

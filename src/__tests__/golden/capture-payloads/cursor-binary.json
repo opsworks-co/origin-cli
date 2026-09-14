@@ -1,0 +1,559 @@
+{
+ "note": "Recorded by packages/cli capture-e2e with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api capture-golden-stored-rows.test.ts.",
+ "roots": [
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-cursor-EP4oeF/repo",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-cursor-EP4oeF"
+ ],
+ "commits": {
+  "564b3c164ab1cf1168f32605c6484110cce86c53": "commit: session e2e-curs: cursor-e2e-model — change the greeting",
+  "664c8f059885109d4379267b14f240f7cab8f5b3": "commit: session e2e-curs: cursor-e2e-model — published session",
+  "046b81372313c543bb770f14f453411dc2c6daf5": "commit: session e2e-curs: cursor-e2e-model — change the greeting",
+  "ad569df36d09600fe26871bad380a5e875c931d9": "commit: snapshot: 4d58c65aedf5",
+  "9f8d53482f58b455e34b9118533512f9b153c9e5": "commit: Notes added by 'git notes add'",
+  "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec": "commit: add helper",
+  "5f44bb6d8bba1ac4413791adf97a8190d06feaff": "commit: origin shadow prompt-c0ffee00-e2e 2026-09-14T00:32:13.461Z",
+  "386e166f88a46206ce781950a82056f50dfcfaec": "commit: {\"id\":\"4d58c65aedf5\",\"timestamp\":\"2026-09-14T00:32:12.308Z\",\"sessionTag\":\"c0ffee00-e2e\",\"filesChanged\":[\"app.py\"],\"treeSha\":\"3d79b09f52b8eab322c441db9e160b0b1b1c3db8\",\"branch\":\"origin/shadow/c0ffee00-e2e\",\"prompt\":\"now leave a note\",\"model\":\"cursor-e2e-model\",\"tokensUsed\":36,\"costUsd\":0.0002,\"promptIndex\":1,\"type\":\"auto\",\"commitSha\":\"dd9c8ecfc79d0b7ec073356ecd5116787a3ab48a\"}",
+  "a025c87e06da28f536046de2eb86264666b518b6": "commit: origin shadow c0ffee00-e2e 2026-09-14T00:32:12.158Z",
+  "9a52d98e32127f26aafdf9cdb570a64d8f8b42a2": "commit: session e2e-curs: cursor-e2e-model — change the greeting",
+  "3d6503fe4940593001328a7b630a3d9af578f116": "commit: session e2e-curs: cursor-e2e-model — change the greeting",
+  "dd9c8ecfc79d0b7ec073356ecd5116787a3ab48a": "commit: base"
+ },
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "promptChanges": [
+     {
+      "captureId": "afe_6d7fdfbee7dc40bf",
+      "capturedAt": "2026-09-14T00:32:07.538Z",
+      "promptIndex": 0,
+      "promptText": "change the greeting",
+      "filesChanged": [
+       "app.py"
+      ],
+      "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+      "uncommittedDiff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+      "commitSha": null,
+      "treeSha": null,
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     }
+    ],
+    "status": "RUNNING"
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change the greeting",
+    "agentSlug": "cursor",
+    "model": "cursor-e2e-model",
+    "filesChanged": [
+     "app.py"
+    ],
+    "tokensUsed": 20,
+    "tokensEstimated": true,
+    "inputTokens": 5,
+    "outputTokens": 15,
+    "toolCalls": 1,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 1
+     }
+    ],
+    "durationMs": 3034,
+    "costUsd": 0.0001,
+    "gitCapture": {
+     "headBefore": "dd9c8ecfc79d0b7ec073356ecd5116787a3ab48a",
+     "headAfter": "dd9c8ecfc79d0b7ec073356ecd5116787a3ab48a",
+     "commitShas": [],
+     "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+     "linesAdded": 1,
+     "linesRemoved": 1,
+     "commitDetails": [],
+     "snapshot": true
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change the greeting",
+      "filesChanged": [
+       "app.py"
+      ],
+      "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+      "edits": [
+       {
+        "file": "app.py",
+        "toolName": "Write",
+        "input": {
+         "path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-cursor-EP4oeF/repo/app.py",
+         "contents": "def main():\n    print(\"new\")\n\n\nmain()\n"
+        }
+       }
+      ],
+      "ranCommit": false,
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change the greeting\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"edit_hook\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"}],\"commits\":[],\"finalHunks\":[{\"file\":\"app.py\",\"start\":2,\"lines\":[\"    print(\\\"new\\\")\"]}]}",
+      "turnId": "t_110fb68f1b0b4a82",
+      "captureId": "c_c4b391af404048fd",
+      "capturedAt": 1789345928726
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change the greeting\n\n---\n\nnow leave a note",
+    "agentSlug": "cursor",
+    "model": "cursor-e2e-model",
+    "filesChanged": [
+     "app.py",
+     "notes.md"
+    ],
+    "tokensUsed": 36,
+    "tokensEstimated": true,
+    "inputTokens": 9,
+    "outputTokens": 27,
+    "toolCalls": 2,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 2
+     }
+    ],
+    "durationMs": 6143,
+    "costUsd": 0.0002,
+    "gitCapture": {
+     "headBefore": "dd9c8ecfc79d0b7ec073356ecd5116787a3ab48a",
+     "headAfter": "dd9c8ecfc79d0b7ec073356ecd5116787a3ab48a",
+     "commitShas": [],
+     "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+     "linesAdded": 2,
+     "linesRemoved": 1,
+     "commitDetails": [],
+     "snapshot": true
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change the greeting",
+      "filesChanged": [
+       "app.py"
+      ],
+      "diff": "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\n",
+      "edits": [
+       {
+        "file": "app.py",
+        "toolName": "Write",
+        "input": {
+         "path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-cursor-EP4oeF/repo/app.py",
+         "contents": "def main():\n    print(\"new\")\n\n\nmain()\n"
+        }
+       }
+      ],
+      "ranCommit": false,
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "diffSource": "ledger",
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change the greeting\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"edit_hook\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"}],\"commits\":[],\"finalHunks\":[{\"file\":\"app.py\",\"start\":2,\"lines\":[\"    print(\\\"new\\\")\"]}]}",
+      "turnId": "t_110fb68f1b0b4a82",
+      "captureId": "c_3000f65b31664b8e",
+      "capturedAt": 1789345932009
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "now leave a note",
+      "filesChanged": [
+       "notes.md"
+      ],
+      "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,1 @@\n+remember this\n",
+      "edits": [
+       {
+        "file": "notes.md",
+        "toolName": "Write",
+        "input": {
+         "path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-cursor-EP4oeF/repo/notes.md",
+         "contents": "remember this\n"
+        }
+       }
+      ],
+      "ranCommit": false,
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "diffSource": "ledger",
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now leave a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"edit_hook\",\"oldContent\":\"remember this\\n\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"write\",\"newContent\":\"remember this\\n\",\"source\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"}],\"commits\":[]}",
+      "turnId": "t_6150fb38dc134f13",
+      "captureId": "c_3000f65b31664b8e",
+      "capturedAt": 1789345932009
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change the greeting\n\n---\n\nnow leave a note\n\n---\n\nadd a helper and commit it",
+    "model": "cursor-e2e-model",
+    "filesChanged": [
+     "app.py",
+     "notes.md"
+    ],
+    "tokensUsed": 60,
+    "inputTokens": 15,
+    "outputTokens": 45,
+    "toolCalls": 2,
+    "durationMs": 8608,
+    "costUsd": 0.0003,
+    "status": "RUNNING",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change the greeting",
+      "filesChanged": [
+       "app.py"
+      ],
+      "diffSource": "ledger",
+      "ledgerOwned": true,
+      "diff": "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\n",
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "capturedAt": 1789345933586,
+      "turnId": "t_110fb68f1b0b4a82",
+      "captureId": "c_393ff409a4d54739",
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "now leave a note",
+      "filesChanged": [
+       "notes.md"
+      ],
+      "diffSource": "ledger",
+      "ledgerOwned": true,
+      "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,1 @@\n+remember this\n",
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "capturedAt": 1789345933586,
+      "turnId": "t_6150fb38dc134f13",
+      "captureId": "c_393ff409a4d54739",
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "promptChanges": [
+     {
+      "captureId": "afe_5b236c7880dc4413",
+      "capturedAt": "2026-09-14T00:32:12.188Z",
+      "promptIndex": 0,
+      "promptText": "change the greeting",
+      "filesChanged": [
+       "app.py"
+      ],
+      "diffSource": "ledger",
+      "ledgerOwned": true,
+      "diff": "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\n",
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     },
+     {
+      "captureId": "afe_5b236c7880dc4413",
+      "capturedAt": "2026-09-14T00:32:12.188Z",
+      "promptIndex": 1,
+      "promptText": "now leave a note",
+      "filesChanged": [
+       "notes.md"
+      ],
+      "diffSource": "ledger",
+      "ledgerOwned": true,
+      "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,1 @@\n+remember this\n",
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     },
+     {
+      "captureId": "afe_5b236c7880dc4413",
+      "capturedAt": "2026-09-14T00:32:14.653Z",
+      "promptIndex": 2,
+      "promptText": "add a helper and commit it",
+      "filesChanged": [
+       "lib/helper.py"
+      ],
+      "diff": "diff --git a/lib/helper.py b/lib/helper.py\nnew file mode 100644\nindex 0000000..4c8b581\n--- /dev/null\n+++ b/lib/helper.py\n@@ -0,0 +1,2 @@\n+def helper():\n+    return 1",
+      "uncommittedDiff": "diff --git a/lib/helper.py b/lib/helper.py\nnew file mode 100644\nindex 0000000..4c8b581\n--- /dev/null\n+++ b/lib/helper.py\n@@ -0,0 +1,2 @@\n+def helper():\n+    return 1",
+      "commitSha": null,
+      "treeSha": null,
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     }
+    ],
+    "status": "RUNNING"
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "app.py",
+     "lib/helper.py",
+     "notes.md"
+    ],
+    "branch": "main",
+    "gitCapture": {
+     "headBefore": "dd9c8ecfc79d0b7ec073356ecd5116787a3ab48a",
+     "headAfter": "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec",
+     "commitShas": [
+      "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec"
+     ],
+     "commitDetails": [
+      {
+       "sha": "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec",
+       "message": "add helper",
+       "author": "E2E",
+       "filesChanged": [
+        "app.py",
+        "lib/helper.py",
+        "notes.md"
+       ],
+       "linesAdded": 4,
+       "linesRemoved": 1,
+       "patch": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/lib/helper.py b/lib/helper.py\nnew file mode 100644\nindex 0000000..4c8b581\n--- /dev/null\n+++ b/lib/helper.py\n@@ -0,0 +1,2 @@\n+def helper():\n+    return 1\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 2,
+      "turnId": "t_769cbe767ec14361",
+      "captureId": "c_23d94c62c7b34141",
+      "capturedAt": 1789345935907,
+      "promptText": "add a helper and commit it",
+      "filesChanged": [
+       "lib/helper.py"
+      ],
+      "diff": "diff --git a/lib/helper.py b/lib/helper.py\nnew file mode 100644\nindex 0000000..4c8b581\n--- /dev/null\n+++ b/lib/helper.py\n@@ -0,0 +1,2 @@\n+def helper():\n+    return 1",
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "commitSha": "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec",
+      "commitMessage": "add helper"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "dd9c8ecfc79d0b7ec073356ecd5116787a3ab48a",
+     "headAfter": "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec",
+     "commitShas": [
+      "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec"
+     ],
+     "commitDetails": [
+      {
+       "sha": "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec",
+       "message": "add helper",
+       "author": "E2E",
+       "filesChanged": [
+        "app.py",
+        "lib/helper.py",
+        "notes.md"
+       ],
+       "linesAdded": 4,
+       "linesRemoved": 1,
+       "patch": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/lib/helper.py b/lib/helper.py\nnew file mode 100644\nindex 0000000..4c8b581\n--- /dev/null\n+++ b/lib/helper.py\n@@ -0,0 +1,2 @@\n+def helper():\n+    return 1\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this"
+      }
+     ],
+     "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/lib/helper.py b/lib/helper.py\nnew file mode 100644\nindex 0000000..4c8b581\n--- /dev/null\n+++ b/lib/helper.py\n@@ -0,0 +1,2 @@\n+def helper():\n+    return 1\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+     "diffTruncated": false,
+     "linesAdded": 4,
+     "linesRemoved": 1,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "dd9c8ecfc79d0b7ec073356ecd5116787a3ab48a",
+     "headAfter": "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec",
+     "commitShas": [
+      "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec"
+     ],
+     "commitDetails": [
+      {
+       "sha": "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec",
+       "message": "add helper",
+       "author": "E2E",
+       "filesChanged": [
+        "app.py",
+        "lib/helper.py",
+        "notes.md"
+       ],
+       "linesAdded": 4,
+       "linesRemoved": 1,
+       "patch": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/lib/helper.py b/lib/helper.py\nnew file mode 100644\nindex 0000000..4c8b581\n--- /dev/null\n+++ b/lib/helper.py\n@@ -0,0 +1,2 @@\n+def helper():\n+    return 1\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+       "committedAt": 1789345934000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change the greeting\n\n---\n\nnow leave a note\n\n---\n\nadd a helper and commit it",
+    "agentSlug": "cursor",
+    "model": "cursor-e2e-model",
+    "filesChanged": [
+     "app.py",
+     "lib/helper.py",
+     "notes.md"
+    ],
+    "tokensUsed": 60,
+    "tokensEstimated": true,
+    "inputTokens": 15,
+    "outputTokens": 45,
+    "toolCalls": 3,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 3
+     }
+    ],
+    "durationMs": 12121,
+    "costUsd": 0.0003,
+    "gitCapture": {
+     "headBefore": "dd9c8ecfc79d0b7ec073356ecd5116787a3ab48a",
+     "headAfter": "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec",
+     "commitShas": [
+      "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec"
+     ],
+     "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/lib/helper.py b/lib/helper.py\nnew file mode 100644\nindex 0000000..4c8b581\n--- /dev/null\n+++ b/lib/helper.py\n@@ -0,0 +1,2 @@\n+def helper():\n+    return 1\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+     "linesAdded": 4,
+     "linesRemoved": 1,
+     "commitDetails": [
+      {
+       "sha": "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec",
+       "message": "add helper",
+       "author": "E2E",
+       "filesChanged": [
+        "app.py",
+        "lib/helper.py",
+        "notes.md"
+       ],
+       "linesAdded": 4,
+       "linesRemoved": 1,
+       "patch": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/lib/helper.py b/lib/helper.py\nnew file mode 100644\nindex 0000000..4c8b581\n--- /dev/null\n+++ b/lib/helper.py\n@@ -0,0 +1,2 @@\n+def helper():\n+    return 1\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+       "committedAt": 1789345934000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ],
+     "snapshot": true
+    },
+    "commitTurns": [
+     {
+      "sha": "7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec",
+      "turnId": "t_769cbe767ec14361",
+      "at": "2026-09-14T00:32:15.362Z",
+      "via": "post-commit"
+     }
+    ],
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change the greeting",
+      "filesChanged": [
+       "app.py"
+      ],
+      "diffSource": "ledger",
+      "diff": "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\n",
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "capturedAt": 1789345939354,
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change the greeting\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"edit_hook\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"commitSha\":\"7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"}],\"commits\":[\"7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec\"]}",
+      "turnId": "t_110fb68f1b0b4a82",
+      "captureId": "c_59d4e6b1c68748b8"
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "now leave a note",
+      "filesChanged": [
+       "notes.md"
+      ],
+      "diffSource": "ledger",
+      "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,1 @@\n+remember this\n",
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "capturedAt": 1789345939354,
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now leave a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"edit_hook\",\"oldContent\":\"remember this\\n\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"write\",\"newContent\":\"remember this\\n\",\"source\":\"tool_call\",\"commitSha\":\"7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"}],\"commits\":[\"7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec\"],\"finalHunks\":[{\"file\":\"app.py\",\"start\":2,\"lines\":[\"    print(\\\"new\\\")\"]},{\"file\":\"notes.md\",\"start\":1,\"lines\":[\"remember this\"]}]}",
+      "turnId": "t_6150fb38dc134f13",
+      "captureId": "c_59d4e6b1c68748b8"
+     },
+     {
+      "promptIndex": 2,
+      "promptText": "add a helper and commit it",
+      "filesChanged": [
+       "lib/helper.py"
+      ],
+      "diff": "diff --git a/lib/helper.py b/lib/helper.py\nnew file mode 100644\nindex 0000000..4c8b581\n--- /dev/null\n+++ b/lib/helper.py\n@@ -0,0 +1,2 @@\n+def helper():\n+    return 1",
+      "edits": [
+       {
+        "file": "lib/helper.py",
+        "toolName": "Write",
+        "input": {
+         "path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-cursor-EP4oeF/repo/lib/helper.py",
+         "contents": "def helper():\n    return 1\n"
+        }
+       }
+      ],
+      "ranCommit": false,
+      "uncommittedDiff": "",
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":2,\"promptText\":\"add a helper and commit it\",\"agent\":\"claude\",\"edits\":[{\"file\":\"lib/helper.py\",\"op\":\"create\",\"newContent\":\"def helper():\\n    return 1\\n\",\"source\":\"uncommitted\",\"evidence\":\"edit_hook\",\"oldStart\":1,\"newStart\":1},{\"file\":\"lib/helper.py\",\"op\":\"create\",\"newContent\":\"def helper():\\n    return 1\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"lib/helper.py\",\"op\":\"write\",\"newContent\":\"def helper():\\n    return 1\\n\",\"source\":\"tool_call\",\"commitSha\":\"7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"edit\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"commit\",\"commitSha\":\"7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"commit\",\"commitSha\":\"7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"7dee7b6a6dfb795c7bcfb9fb694e98ba63986cec\"],\"finalHunks\":[{\"file\":\"lib/helper.py\",\"start\":1,\"lines\":[\"def helper():\",\"    return 1\"]}]}",
+      "turnId": "t_769cbe767ec14361",
+      "captureId": "c_59d4e6b1c68748b8",
+      "capturedAt": 1789345939382
+     }
+    ]
+   }
+  }
+ ]
+}

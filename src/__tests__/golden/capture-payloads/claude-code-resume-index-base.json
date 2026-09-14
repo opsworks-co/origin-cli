@@ -1,0 +1,411 @@
+{
+ "note": "Recorded by packages/cli capture-e2e with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api capture-golden-stored-rows.test.ts.",
+ "roots": [
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-resume-AoTM9x/repo",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-resume-AoTM9x"
+ ],
+ "commits": {
+  "eef83240ac784f38d0201bd44b53812774dabbbf": "commit: session e2e-resu: claude — resumed: change the greeting and commit",
+  "3e256a8940e55198de688958707c97f7f6bdd385": "commit: session e2e-resu: claude — resumed: change the greeting and commit",
+  "dd933264a6dad1934880e5aad2ae35d6fa47257b": "commit: session e2e-resu: claude — published session",
+  "353a2ccbe313002aa1405f2d6e9dd56e93f6e066": "commit: session e2e-resu: claude — resumed: change the greeting and commit",
+  "77bc8cb7ccc7023a8bc9fccf566f5e6866c62d5b": "commit: Notes added by 'git notes add'",
+  "566f740ab9db4f37002925dde5d46dd0b359284b": "commit: new greeting",
+  "69ef28daf56cc2aba1dff7eed74991316a44e80e": "commit: origin shadow prompt-e2e-claude-r 2026-09-13T23:07:48.749Z",
+  "d650012980632160a1e59f7d0a77f3a812f41211": "commit: base"
+ },
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "CLAUDE.md",
+     "app.py"
+    ],
+    "branch": "main",
+    "gitCapture": {
+     "headBefore": "d650012980632160a1e59f7d0a77f3a812f41211",
+     "headAfter": "566f740ab9db4f37002925dde5d46dd0b359284b",
+     "commitShas": [
+      "566f740ab9db4f37002925dde5d46dd0b359284b"
+     ],
+     "commitDetails": [
+      {
+       "sha": "566f740ab9db4f37002925dde5d46dd0b359284b",
+       "message": "new greeting",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "app.py"
+       ],
+       "linesAdded": 20,
+       "linesRemoved": 1,
+       "patch": "diff --git a/CLAUDE.md b/CLAUDE.md\nnew file mode 100644\nindex 0000000..d8e075b\n--- /dev/null\n+++ b/CLAUDE.md\n@@ -0,0 +1,19 @@\n+<!-- origin-managed -->\n+Origin: Session tracking active — prompts, files, and tokens will be captured.\n+\n+Origin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\n+\n+REPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\n+\n+  [Origin: Intent] <one sentence on WHY you're making this change>\n+  [Origin: Decision] <choice you made> — <why>\n+  [Origin: Open] <something you didn't finish, or aren't sure about>\n+  [Origin: Verify] <something a human reviewer should check>\n+  [Origin: Closes] <id of an open TODO above that this change finishes>\n+\n+Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\n+\n+[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\n+\n+Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\n+<!-- origin-managed -->\n\\ No newline at end of file\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 21,
+      "turnId": "t_8894671f46354252",
+      "captureId": "c_466a7a13ae534ee0",
+      "capturedAt": 1789340874467,
+      "promptText": "resumed: change the greeting and commit",
+      "filesChanged": [
+       "app.py"
+      ],
+      "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "commitSha": "566f740ab9db4f37002925dde5d46dd0b359284b",
+      "commitMessage": "new greeting"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "d650012980632160a1e59f7d0a77f3a812f41211",
+     "headAfter": "566f740ab9db4f37002925dde5d46dd0b359284b",
+     "commitShas": [
+      "566f740ab9db4f37002925dde5d46dd0b359284b"
+     ],
+     "commitDetails": [
+      {
+       "sha": "566f740ab9db4f37002925dde5d46dd0b359284b",
+       "message": "new greeting",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "app.py"
+       ],
+       "linesAdded": 20,
+       "linesRemoved": 1,
+       "patch": "diff --git a/CLAUDE.md b/CLAUDE.md\nnew file mode 100644\nindex 0000000..d8e075b\n--- /dev/null\n+++ b/CLAUDE.md\n@@ -0,0 +1,19 @@\n+<!-- origin-managed -->\n+Origin: Session tracking active — prompts, files, and tokens will be captured.\n+\n+Origin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\n+\n+REPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\n+\n+  [Origin: Intent] <one sentence on WHY you're making this change>\n+  [Origin: Decision] <choice you made> — <why>\n+  [Origin: Open] <something you didn't finish, or aren't sure about>\n+  [Origin: Verify] <something a human reviewer should check>\n+  [Origin: Closes] <id of an open TODO above that this change finishes>\n+\n+Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\n+\n+[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\n+\n+Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\n+<!-- origin-managed -->\n\\ No newline at end of file\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()"
+      }
+     ],
+     "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+     "diffTruncated": false,
+     "linesAdded": 1,
+     "linesRemoved": 1,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "d650012980632160a1e59f7d0a77f3a812f41211",
+     "headAfter": "566f740ab9db4f37002925dde5d46dd0b359284b",
+     "commitShas": [
+      "566f740ab9db4f37002925dde5d46dd0b359284b"
+     ],
+     "commitDetails": [
+      {
+       "sha": "566f740ab9db4f37002925dde5d46dd0b359284b",
+       "message": "new greeting",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "app.py"
+       ],
+       "linesAdded": 20,
+       "linesRemoved": 1,
+       "patch": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+       "committedAt": 1789340872000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "resumed: change the greeting and commit",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "CLAUDE.md",
+     "app.py"
+    ],
+    "tokensUsed": 40,
+    "tokensEstimated": true,
+    "inputTokens": 10,
+    "outputTokens": 30,
+    "toolCalls": 2,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 1
+     },
+     {
+      "name": "Bash",
+      "count": 1
+     }
+    ],
+    "durationMs": 10965,
+    "costUsd": 0.0008,
+    "gitCapture": {
+     "headBefore": "d650012980632160a1e59f7d0a77f3a812f41211",
+     "headAfter": "566f740ab9db4f37002925dde5d46dd0b359284b",
+     "commitShas": [
+      "566f740ab9db4f37002925dde5d46dd0b359284b"
+     ],
+     "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+     "linesAdded": 1,
+     "linesRemoved": 1,
+     "commitDetails": [
+      {
+       "sha": "566f740ab9db4f37002925dde5d46dd0b359284b",
+       "message": "new greeting",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "app.py"
+       ],
+       "linesAdded": 20,
+       "linesRemoved": 1,
+       "patch": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+       "committedAt": 1789340872000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ],
+     "snapshot": true
+    },
+    "commitTurns": [
+     {
+      "sha": "566f740ab9db4f37002925dde5d46dd0b359284b",
+      "turnId": "t_8894671f46354252",
+      "at": "2026-09-13T23:07:53.849Z",
+      "via": "post-commit"
+     }
+    ],
+    "promptChanges": [
+     {
+      "promptIndex": 21,
+      "promptText": "resumed: change the greeting and commit",
+      "filesChanged": [
+       "app.py"
+      ],
+      "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+      "edits": [
+       {
+        "file": "app.py",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-resume-AoTM9x/repo/app.py",
+         "content": "def main():\n    print(\"new\")\n\n\nmain()\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add -A && git commit -q -m \"new greeting\""
+      ],
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":21,\"promptText\":\"resumed: change the greeting and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"566f740ab9db4f37002925dde5d46dd0b359284b\"],\"finalHunks\":[{\"file\":\"app.py\",\"start\":2,\"lines\":[\"    print(\\\"new\\\")\"]}]}",
+      "turnId": "t_8894671f46354252",
+      "captureId": "c_00f912e5f0754495",
+      "capturedAt": 1789340880686
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "resumed: change the greeting and commit\n\n---\n\nthanks, what did we change?",
+    "filesChanged": [
+     "app.py"
+    ],
+    "tokensUsed": 68,
+    "inputTokens": 17,
+    "outputTokens": 51,
+    "toolCalls": 2,
+    "durationMs": 17665,
+    "costUsd": 0.0014,
+    "status": "RUNNING",
+    "promptChanges": [
+     {
+      "promptIndex": 21,
+      "promptText": "resumed: change the greeting and commit",
+      "filesChanged": [
+       "app.py"
+      ],
+      "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+      "uncommittedDiff": "",
+      "commitSha": "566f740ab9db4f37002925dde5d46dd0b359284b",
+      "treeSha": "cd1b8c3ef86043c13b4668b915acaea2f167db11",
+      "capturedAt": 1789340883851,
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "turnId": "t_8894671f46354252",
+      "captureId": "c_f2e6a2cc91c340be",
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "d650012980632160a1e59f7d0a77f3a812f41211",
+     "headAfter": "566f740ab9db4f37002925dde5d46dd0b359284b",
+     "commitShas": [
+      "566f740ab9db4f37002925dde5d46dd0b359284b"
+     ],
+     "commitDetails": [
+      {
+       "sha": "566f740ab9db4f37002925dde5d46dd0b359284b",
+       "message": "new greeting",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "app.py"
+       ],
+       "linesAdded": 20,
+       "linesRemoved": 1,
+       "patch": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+       "committedAt": 1789340872000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "resumed: change the greeting and commit\n\n---\n\nthanks, what did we change?",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "CLAUDE.md",
+     "app.py"
+    ],
+    "tokensUsed": 68,
+    "tokensEstimated": true,
+    "inputTokens": 17,
+    "outputTokens": 51,
+    "toolCalls": 2,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 1
+     },
+     {
+      "name": "Bash",
+      "count": 1
+     }
+    ],
+    "durationMs": 19617,
+    "costUsd": 0.0014,
+    "gitCapture": {
+     "headBefore": "d650012980632160a1e59f7d0a77f3a812f41211",
+     "headAfter": "566f740ab9db4f37002925dde5d46dd0b359284b",
+     "commitShas": [
+      "566f740ab9db4f37002925dde5d46dd0b359284b"
+     ],
+     "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+     "linesAdded": 1,
+     "linesRemoved": 1,
+     "commitDetails": [
+      {
+       "sha": "566f740ab9db4f37002925dde5d46dd0b359284b",
+       "message": "new greeting",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "app.py"
+       ],
+       "linesAdded": 20,
+       "linesRemoved": 1,
+       "patch": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+       "committedAt": 1789340872000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ],
+     "snapshot": true
+    },
+    "commitTurns": [
+     {
+      "sha": "566f740ab9db4f37002925dde5d46dd0b359284b",
+      "turnId": "t_8894671f46354252",
+      "at": "2026-09-13T23:07:53.849Z",
+      "via": "post-commit"
+     }
+    ],
+    "promptChanges": [
+     {
+      "promptIndex": 21,
+      "promptText": "resumed: change the greeting and commit",
+      "filesChanged": [
+       "app.py"
+      ],
+      "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()",
+      "edits": [
+       {
+        "file": "app.py",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-resume-AoTM9x/repo/app.py",
+         "content": "def main():\n    print(\"new\")\n\n\nmain()\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add -A && git commit -q -m \"new greeting\""
+      ],
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":21,\"promptText\":\"resumed: change the greeting and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"commitSha\":\"566f740ab9db4f37002925dde5d46dd0b359284b\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"}],\"commits\":[\"566f740ab9db4f37002925dde5d46dd0b359284b\"],\"finalHunks\":[{\"file\":\"app.py\",\"start\":2,\"lines\":[\"    print(\\\"new\\\")\"]}]}",
+      "turnId": "t_8894671f46354252",
+      "captureId": "c_1d5da2e4cf80445b",
+      "capturedAt": 1789340889599
+     },
+     {
+      "promptIndex": 22,
+      "promptText": "thanks, what did we change?",
+      "filesChanged": [],
+      "diff": "",
+      "edits": [],
+      "ranCommit": false,
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "chatOnly": true,
+      "contentUnavailableFiles": [],
+      "commitSha": null,
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "diffSource": "turn-window",
+      "editsJson": "{\"promptIndex\":22,\"promptText\":\"thanks, what did we change?\",\"agent\":\"claude\",\"edits\":[],\"commits\":[],\"droppedFailedEdits\":0}",
+      "turnId": "t_79cff66a93504689",
+      "captureId": "c_1d5da2e4cf80445b",
+      "capturedAt": 1789340889599
+     }
+    ]
+   }
+  }
+ ]
+}

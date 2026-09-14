@@ -357,6 +357,81 @@ describe('Codex commit-and-go: no per-turn double-capture', () => {
     }
   });
 
+  it('keeps authored edits on the earlier prompt when the next prompt only commits', () => {
+    const { tmp, shortSha, fullSha } = makeRepo();
+    try {
+      const rp = rollout(tmp, shortSha, true);
+      const lines = fs.readFileSync(rp, 'utf8').split('\n');
+      lines.splice(2, 0, JSON.stringify({ payload: { type: 'message', role: 'user', content: [{ text: 'commit and open a PR' }] } }));
+      fs.writeFileSync(rp, lines.join('\n'));
+      const turns = capturePromptEdits({ agent: 'codex', repoPath: tmp, transcriptPath: rp, sessionCommitShas: [fullSha] });
+      expect(turns).toHaveLength(2);
+      expect(turns[0].edits).toHaveLength(1);
+      expect(turns[0].edits[0].commitSha).toBe(fullSha);
+      expect(turns[1].edits).toEqual([]);
+      expect(turns[1].commits).toEqual([fullSha]);
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  });
+
+  it('preserves a new shell-written file in a commit that also lands earlier edits', () => {
+    const { tmp, git } = makeRepo();
+    try {
+      fs.writeFileSync(path.join(tmp, 'shell.txt'), 'new shell work\n');
+      git(['add', 'shell.txt']);
+      git(['commit', '--amend', '--no-edit', '-q']);
+      const sha = git(['rev-parse', 'HEAD']).trim();
+      const rp = rollout(tmp, sha.slice(0, 7), true);
+      const lines = fs.readFileSync(rp, 'utf8').split('\n');
+      lines.splice(2, 0, JSON.stringify({ payload: { type: 'message', role: 'user', content: [{ text: 'add shell file and commit' }] } }));
+      fs.writeFileSync(rp, lines.join('\n'));
+      const turns = capturePromptEdits({ agent: 'codex', repoPath: tmp, transcriptPath: rp, sessionCommitShas: [sha] });
+      expect(turns[0].edits[0].commitSha).toBe(sha);
+      expect(turns[1].edits.map(e => e.file)).toEqual(['shell.txt']);
+      expect(turns[1].edits[0].source).toBe('commit');
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  });
+
+  it('keeps new tool edits on the committing prompt when both prompts edit the same file', () => {
+    const { tmp, git } = makeRepo();
+    try {
+      fs.appendFileSync(path.join(tmp, 'stavdrica'), 'foxtrot\n');
+      git(['add', 'stavdrica']);
+      git(['commit', '--amend', '--no-edit', '-q']);
+      const sha = git(['rev-parse', 'HEAD']).trim();
+      const rp = rollout(tmp, sha.slice(0, 7), true);
+      const lines = fs.readFileSync(rp, 'utf8').split('\n');
+      lines.splice(2, 0, ...[
+        { payload: { type: 'message', role: 'user', content: [{ text: 'add foxtrot and commit' }] } },
+        { payload: { type: 'custom_tool_call', name: 'apply_patch', input: '*** Begin Patch\n*** Update File: stavdrica\n@@\n echo\n+foxtrot\n*** End Patch' } },
+      ].map(x => JSON.stringify(x)));
+      fs.writeFileSync(rp, lines.join('\n'));
+      const turns = capturePromptEdits({ agent: 'codex', repoPath: tmp, transcriptPath: rp, sessionCommitShas: [sha] });
+      expect(turns.map(t => t.edits.length)).toEqual([1, 1]);
+      expect(turns[0].edits[0].commitSha).toBe(sha);
+      expect(turns[1].edits[0]).toMatchObject({ source: 'tool_call', commitSha: sha, newContent: 'echo\nfoxtrot' });
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  });
+
+  it('does not let an earlier committed edit swallow a later shell edit to the same file', () => {
+    const { tmp, git, shortSha, fullSha } = makeRepo();
+    try {
+      const rp = rollout(tmp, shortSha, true);
+      fs.appendFileSync(path.join(tmp, 'stavdrica'), 'later work\n');
+      git(['add', 'stavdrica']);
+      git(['commit', '-q', '-m', 'later work']);
+      const laterSha = git(['rev-parse', 'HEAD']).trim();
+      fs.appendFileSync(rp, '\n' + [
+        { payload: { type: 'message', role: 'user', content: [{ text: 'add more via shell and commit' }] } },
+        { payload: { type: 'function_call_output', output: `[main ${laterSha.slice(0, 7)}] later work` } },
+      ].map(x => JSON.stringify(x)).join('\n'));
+      const turns = capturePromptEdits({ agent: 'codex', repoPath: tmp, transcriptPath: rp, sessionCommitShas: [fullSha, laterSha] });
+      expect(turns[0].edits[0].commitSha).toBe(fullSha);
+      expect(turns[1].edits).toHaveLength(1);
+      expect(turns[1].edits[0].commitSha).toBe(laterSha);
+      expect(turns[1].edits[0].newContent).toContain('later work');
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  });
+
   it('captures the commit-derived edit even when sessionCommitShas holds the FULL sha', () => {
     // Bug 2 root cause: the `[branch <short>]` marker was compared with
     // `Set(fullShas).has(short)`, which never matches, so once the

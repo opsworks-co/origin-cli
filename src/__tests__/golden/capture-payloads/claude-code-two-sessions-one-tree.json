@@ -1,0 +1,225 @@
+{
+ "note": "Recorded by packages/cli capture-e2e with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api capture-golden-stored-rows.test.ts.",
+ "roots": [
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-two-G0aGcO/repo",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-two-G0aGcO"
+ ],
+ "commits": {
+  "259bbba36fc10352f54bc35aff68bb3c6f18e6d9": "commit: session bbbbbbbb: claude — fix a.ts and commit",
+  "e75fa0d8ced1c84a504a6525e4ee0f642272f58a": "commit: session bbbbbbbb: claude — published session",
+  "cd4d3a30c60a065d6f990a325501b14824814aee": "commit: session bbbbbbbb: claude — fix a.ts and commit",
+  "15553c1f65793bf6a3d4efe246f2adf8141adf84": "commit: Notes added by 'git notes add'",
+  "0bd717190d58200e46ac876d6561c19d932c6b1d": "commit: fix a",
+  "f18c4d44825ba82b122695f97e5b858b2d7c3149": "commit: origin shadow prompt-e2e-claude-w 2026-09-13T23:07:56.256Z",
+  "51fbbfae44a75a37331bd62cef097d135f5af704": "commit: origin shadow start-e2e-claude-w 2026-09-13T23:07:54.668Z",
+  "3c4495b9385ee536d3a49db166cde435ec72b27c": "commit: session aaaaaaaa: gemini — what does this repo do?",
+  "202d3e72d5b33fc8e31fbbe861ce698e33d2abcd": "commit: origin shadow e2e-claude-i 2026-09-13T23:07:52.631Z",
+  "8f304d96fc140e6da201707474f02e05d689593e": "commit: origin shadow prompt-e2e-claude-i 2026-09-13T23:07:48.790Z",
+  "c573df309927f647fc34376d908c385ddd0e0589": "commit: base"
+ },
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "CLAUDE.md",
+     "packages/cli/src/a.ts"
+    ],
+    "branch": "main",
+    "gitCapture": {
+     "headBefore": "c573df309927f647fc34376d908c385ddd0e0589",
+     "headAfter": "0bd717190d58200e46ac876d6561c19d932c6b1d",
+     "commitShas": [
+      "0bd717190d58200e46ac876d6561c19d932c6b1d"
+     ],
+     "commitDetails": [
+      {
+       "sha": "0bd717190d58200e46ac876d6561c19d932c6b1d",
+       "message": "fix a\n\nOrigin-Session: bbbbbbbb-222 | Claude Code | 1 prompt",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "packages/cli/src/a.ts"
+       ],
+       "linesAdded": 20,
+       "linesRemoved": 1,
+       "patch": "diff --git a/CLAUDE.md b/CLAUDE.md\nnew file mode 100644\nindex 0000000..d8e075b\n--- /dev/null\n+++ b/CLAUDE.md\n@@ -0,0 +1,19 @@\n+<!-- origin-managed -->\n+Origin: Session tracking active — prompts, files, and tokens will be captured.\n+\n+Origin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\n+\n+REPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\n+\n+  [Origin: Intent] <one sentence on WHY you're making this change>\n+  [Origin: Decision] <choice you made> — <why>\n+  [Origin: Open] <something you didn't finish, or aren't sure about>\n+  [Origin: Verify] <something a human reviewer should check>\n+  [Origin: Closes] <id of an open TODO above that this change finishes>\n+\n+Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\n+\n+[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\n+\n+Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\n+<!-- origin-managed -->\n\\ No newline at end of file\ndiff --git a/packages/cli/src/a.ts b/packages/cli/src/a.ts\nindex cc798ff..66d48fc 100644\n--- a/packages/cli/src/a.ts\n+++ b/packages/cli/src/a.ts\n@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "turnId": "t_0067e1c6396d47e3",
+      "captureId": "c_f64fe6aabebb48f5",
+      "capturedAt": 1789340882155,
+      "promptText": "fix a.ts and commit",
+      "filesChanged": [
+       "packages/cli/src/a.ts"
+      ],
+      "diff": "diff --git a/packages/cli/src/a.ts b/packages/cli/src/a.ts\nindex cc798ff..66d48fc 100644\n--- a/packages/cli/src/a.ts\n+++ b/packages/cli/src/a.ts\n@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;",
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "commitSha": "0bd717190d58200e46ac876d6561c19d932c6b1d",
+      "commitMessage": "fix a"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "c573df309927f647fc34376d908c385ddd0e0589",
+     "headAfter": "0bd717190d58200e46ac876d6561c19d932c6b1d",
+     "commitShas": [
+      "0bd717190d58200e46ac876d6561c19d932c6b1d"
+     ],
+     "commitDetails": [
+      {
+       "sha": "0bd717190d58200e46ac876d6561c19d932c6b1d",
+       "message": "fix a\n\nOrigin-Session: bbbbbbbb-222 | Claude Code | 1 prompt",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "packages/cli/src/a.ts"
+       ],
+       "linesAdded": 20,
+       "linesRemoved": 1,
+       "patch": "diff --git a/CLAUDE.md b/CLAUDE.md\nnew file mode 100644\nindex 0000000..d8e075b\n--- /dev/null\n+++ b/CLAUDE.md\n@@ -0,0 +1,19 @@\n+<!-- origin-managed -->\n+Origin: Session tracking active — prompts, files, and tokens will be captured.\n+\n+Origin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\n+\n+REPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\n+\n+  [Origin: Intent] <one sentence on WHY you're making this change>\n+  [Origin: Decision] <choice you made> — <why>\n+  [Origin: Open] <something you didn't finish, or aren't sure about>\n+  [Origin: Verify] <something a human reviewer should check>\n+  [Origin: Closes] <id of an open TODO above that this change finishes>\n+\n+Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\n+\n+[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\n+\n+Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\n+<!-- origin-managed -->\n\\ No newline at end of file\ndiff --git a/packages/cli/src/a.ts b/packages/cli/src/a.ts\nindex cc798ff..66d48fc 100644\n--- a/packages/cli/src/a.ts\n+++ b/packages/cli/src/a.ts\n@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;"
+      }
+     ],
+     "diff": "diff --git a/packages/cli/src/a.ts b/packages/cli/src/a.ts\nindex cc798ff..66d48fc 100644\n--- a/packages/cli/src/a.ts\n+++ b/packages/cli/src/a.ts\n@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;",
+     "diffTruncated": false,
+     "linesAdded": 1,
+     "linesRemoved": 1,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "c573df309927f647fc34376d908c385ddd0e0589",
+     "headAfter": "0bd717190d58200e46ac876d6561c19d932c6b1d",
+     "commitShas": [
+      "0bd717190d58200e46ac876d6561c19d932c6b1d"
+     ],
+     "commitDetails": [
+      {
+       "sha": "0bd717190d58200e46ac876d6561c19d932c6b1d",
+       "message": "fix a\n\nOrigin-Session: bbbbbbbb-222 | Claude Code | 1 prompt",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "packages/cli/src/a.ts"
+       ],
+       "linesAdded": 20,
+       "linesRemoved": 1,
+       "patch": "diff --git a/packages/cli/src/a.ts b/packages/cli/src/a.ts\nindex cc798ff..66d48fc 100644\n--- a/packages/cli/src/a.ts\n+++ b/packages/cli/src/a.ts\n@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;",
+       "committedAt": 1789340880000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "fix a.ts and commit",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "packages/cli/src/a.ts"
+    ],
+    "tokensUsed": 20,
+    "tokensEstimated": true,
+    "inputTokens": 5,
+    "outputTokens": 15,
+    "toolCalls": 2,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 1
+     },
+     {
+      "name": "Bash",
+      "count": 1
+     }
+    ],
+    "durationMs": 11293,
+    "costUsd": 0.0004,
+    "gitCapture": {
+     "headBefore": "c573df309927f647fc34376d908c385ddd0e0589",
+     "headAfter": "0bd717190d58200e46ac876d6561c19d932c6b1d",
+     "commitShas": [
+      "0bd717190d58200e46ac876d6561c19d932c6b1d"
+     ],
+     "diff": "diff --git a/packages/cli/src/a.ts b/packages/cli/src/a.ts\nindex cc798ff..66d48fc 100644\n--- a/packages/cli/src/a.ts\n+++ b/packages/cli/src/a.ts\n@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;",
+     "linesAdded": 1,
+     "linesRemoved": 1,
+     "commitDetails": [
+      {
+       "sha": "0bd717190d58200e46ac876d6561c19d932c6b1d",
+       "message": "fix a\n\nOrigin-Session: bbbbbbbb-222 | Claude Code | 1 prompt",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "packages/cli/src/a.ts"
+       ],
+       "linesAdded": 20,
+       "linesRemoved": 1,
+       "patch": "diff --git a/packages/cli/src/a.ts b/packages/cli/src/a.ts\nindex cc798ff..66d48fc 100644\n--- a/packages/cli/src/a.ts\n+++ b/packages/cli/src/a.ts\n@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;",
+       "committedAt": 1789340880000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ],
+     "snapshot": true
+    },
+    "commitTurns": [
+     {
+      "sha": "0bd717190d58200e46ac876d6561c19d932c6b1d",
+      "turnId": "t_0067e1c6396d47e3",
+      "at": "2026-09-13T23:08:01.355Z",
+      "via": "post-commit"
+     }
+    ],
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "fix a.ts and commit",
+      "filesChanged": [
+       "packages/cli/src/a.ts"
+      ],
+      "diff": "diff --git a/packages/cli/src/a.ts b/packages/cli/src/a.ts\nindex cc798ff..66d48fc 100644\n--- a/packages/cli/src/a.ts\n+++ b/packages/cli/src/a.ts\n@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;",
+      "edits": [
+       {
+        "file": "packages/cli/src/a.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-two-G0aGcO/repo/packages/cli/src/a.ts",
+         "content": "export const a = 2;\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "cd .. && git add -A && git commit -q -m \"fix a\""
+      ],
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "contentUnavailableFiles": [],
+      "uncommittedDiff": "",
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"fix a.ts and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"packages/cli/src/a.ts\",\"op\":\"write\",\"newContent\":\"export const a = 2;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"export const a = 1;\\n\"},{\"file\":\"packages/cli/src/a.ts\",\"op\":\"write\",\"oldContent\":\"export const a = 1;\\n\",\"newContent\":\"export const a = 2;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"CLAUDE.md\",\"op\":\"create\",\"oldContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"newContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"source\":\"commit\",\"commitSha\":\"0bd717190d58200e46ac876d6561c19d932c6b1d\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"0bd717190d58200e46ac876d6561c19d932c6b1d\"],\"finalHunks\":[{\"file\":\"packages/cli/src/a.ts\",\"start\":1,\"lines\":[\"export const a = 2;\"]}]}",
+      "turnId": "t_0067e1c6396d47e3",
+      "captureId": "c_8663c4d45e5f4615",
+      "capturedAt": 1789340889782
+     }
+    ]
+   }
+  }
+ ]
+}

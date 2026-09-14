@@ -13,6 +13,7 @@
 //
 // Requires `dist/`. POSIX-only, like the other harnesses.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -20,6 +21,8 @@ import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { foldStopRows } from './helpers/fold-stop-rows.js';
+import { expectGoldenTurns } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -52,6 +55,7 @@ function startFakeApi(): Promise<void> {
         }
       });
     });
+    holdIdleConnections(server);
     server.listen(0, '127.0.0.1', () => {
       apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       resolve();
@@ -179,5 +183,10 @@ describe.skipIf(!haveDist)('cursor: a Stop after the idle end lands on the chat\
     expect(revived.sessionId).toBe(sessionId);
     expect(revived.status).toBe('RUNNING');
     expect(revived.endedAt).toBeUndefined();
+
+    const payloads = patchesTo(sessionId).filter((h) => Array.isArray(h.body?.promptChanges)).map((h) => h.body.promptChanges);
+    expectGoldenTurns('cursor-stop-after-idle-end', foldStopRows(payloads), {
+      repo: wt, roots: [tmp, main], sent: payloads.flat(), requests: hits, sessionId,
+    });
   }, 120_000 * WINDOWS_SLOWDOWN);
 });

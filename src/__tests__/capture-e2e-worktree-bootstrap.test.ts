@@ -12,6 +12,7 @@
 // Same shape as capture-e2e-real-binary.test.ts: real hooks, real git, a
 // fake API. Requires `dist/`. POSIX-only.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -20,6 +21,7 @@ import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { foldStopRows } from './helpers/fold-stop-rows.js';
+import { expectGoldenTurns, trackTestFailures } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -50,6 +52,7 @@ function startFakeApi(): Promise<void> {
         }
       });
     });
+    holdIdleConnections(server);
     server.listen(0, '127.0.0.1', () => {
       apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       resolve();
@@ -74,8 +77,8 @@ function run(cwd: string, sessionId: string, event: string, payload: Record<stri
   child.stdin.end(JSON.stringify({ session_id: sessionId, transcript_path: transcript, cwd, hook_event_name: event, ...payload }));
   return new Promise((resolve) => child.on('close', (code) => resolve({ code, stderr })));
 }
-function gitHook(cwd: string, name: string): Promise<{ code: number | null; stderr: string }> {
-  const child = spawn(process.execPath, [BIN, 'hooks', name], { cwd, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+function gitHook(cwd: string, name: string, args: string[] = []): Promise<{ code: number | null; stderr: string }> {
+  const child = spawn(process.execPath, [BIN, 'hooks', name, ...args], { cwd, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', (c) => { stderr += c; });
   return new Promise((resolve) => child.on('close', (code) => resolve({ code, stderr })));
@@ -124,6 +127,7 @@ const stopPayloads = () => hits
 const lastRows = (): any[] => foldStopRows(stopPayloads());
 
 describe.skipIf(!haveDist)('a main handshake adopted into a worktree that is ahead of main', () => {
+  const failures = trackTestFailures();
   let wtHead = '';
 
   beforeAll(async () => {
@@ -212,8 +216,19 @@ describe.skipIf(!haveDist)('a main handshake adopted into a worktree that is ahe
     const cmd = 'git add -A && git commit -q -m "add a note"';
     await run(wt, WT_SESSION, 'pre-tool-use', { tool_name: 'Bash', tool_input: { command: cmd }, tool_use_id: 'tu-2' });
     git(wt, ['add', '-A']);
-    git(wt, ['commit', '-q', '-m', 'add a note']);
+    // The commit goes through prepare-commit-msg exactly as git runs it for
+    // `commit -m`: the message file in the WORKTREE's own git dir, source
+    // "message", hook cwd the worktree. The adopted session must stamp its
+    // trailer — the handshake was registered from the main checkout, so this
+    // is the lookup most likely to miss it.
+    const msgFile = path.resolve(wt, git(wt, ['rev-parse', '--git-path', 'COMMIT_EDITMSG']));
+    fs.writeFileSync(msgFile, 'add a note\n');
+    const pcm = await gitHook(wt, 'git-prepare-commit-msg', [msgFile, 'message']);
+    expect(pcm.code, pcm.stderr).toBe(0);
+    git(wt, ['commit', '-q', '--cleanup=verbatim', '-F', msgFile]);
     const sha = git(wt, ['rev-parse', 'HEAD']);
+    expect(git(wt, ['log', '-1', '--format=%B', sha]), 'the adopted worktree session did not stamp its commit')
+      .toContain('Origin-Session: e2e-session-');
     const pc = await gitHook(wt, 'git-post-commit');
     expect(pc.code, pc.stderr).toBe(0);
     toolUse('tu-2', 'Bash', { command: cmd });
@@ -255,4 +270,11 @@ describe.skipIf(!haveDist)('a main handshake adopted into a worktree that is ahe
     expect(last.commitShas).toEqual([sha]);
     expect(last.diff).toContain('+remember this');
   }, 120_000 * WINDOWS_SLOWDOWN);
+
+  it('golden: the final turn rows match the recorded baseline', () => {
+    const sent = stopPayloads().flatMap((b) => b.promptChanges);
+    expectGoldenTurns('claude-code-worktree-bootstrap', lastRows(), {
+      repo: wt, roots: [tmp, main], sent, failedBefore: failures(), requests: hits, sessionId: 'e2e-session-wt-0001',
+    });
+  });
 });

@@ -10,6 +10,7 @@
 //
 // Requires `dist/`. POSIX-only, like the other harnesses.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -19,6 +20,7 @@ import { fileURLToPath } from 'url';
 import { journalPathsForTag } from '../write-journal-watch.js';
 import { verifyTurn, parseUnifiedDiff } from '../capture-verify.js';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { expectGoldenTurns, trackTestFailures } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -47,6 +49,7 @@ function startFakeApi(): Promise<void> {
         }
       });
     });
+    holdIdleConnections(server);
     server.listen(0, '127.0.0.1', () => {
       apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       resolve();
@@ -123,6 +126,7 @@ describe('Codex e2e payload selection', () => {
 });
 
 describe.skipIf(!haveDist)('codex capture end to end through the built daemon', () => {
+  const failures = trackTestFailures();
   let tmp = '';
 
   beforeAll(async () => {
@@ -223,4 +227,15 @@ describe.skipIf(!haveDist)('codex capture end to end through the built daemon', 
     expect(parseUnifiedDiff(t1.diff).files[0].isNew).toBe(false);
     expect(verifyTurn({ promptIndex: 0, filesChanged: t1.filesChanged, diff: t1.diff, linesAdded: t1.linesAdded, linesRemoved: t1.linesRemoved })).toEqual([]);
   }, 120_000 * WINDOWS_SLOWDOWN);
+
+  // The daemon keeps polling and may follow the ledger row with an empty
+  // PATCH the server ignores, so the golden takes the same row the assertions
+  // above read rather than folding by last write.
+  it('golden: the ledger row for turn 0 matches the recorded baseline', () => {
+    const t1 = latestSentRow(rowsSent(), (r) => r.promptIndex === 0 && r.diffSource === 'ledger');
+    expectGoldenTurns('codex-daemon', t1 ? [t1] : [], {
+      repo, roots: [tmp], sent: rowsSent().flat(), failedBefore: failures(),
+      requests: hits, sessionId: 'e2e-codex-session-0001',
+    });
+  });
 });

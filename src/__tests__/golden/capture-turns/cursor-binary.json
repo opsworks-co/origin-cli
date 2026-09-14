@@ -1,0 +1,57 @@
+[
+  {
+    "promptIndex": 0,
+    "diffSource": "ledger",
+    "chatOnly": false,
+    "filesChanged": [
+      "app.py"
+    ],
+    "linesAdded": 1,
+    "linesRemoved": 1,
+    "diff": "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\n",
+    "uncommittedDiff": "",
+    "editedFiles": [
+      "app.py"
+    ],
+    "contentUnavailableFiles": [],
+    "commits": []
+  },
+  {
+    "promptIndex": 1,
+    "diffSource": "ledger",
+    "chatOnly": false,
+    "filesChanged": [
+      "notes.md"
+    ],
+    "linesAdded": 1,
+    "linesRemoved": 0,
+    "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,1 @@\n+remember this\n",
+    "uncommittedDiff": "",
+    "editedFiles": [
+      "notes.md"
+    ],
+    "contentUnavailableFiles": [],
+    "commits": []
+  },
+  {
+    "promptIndex": 2,
+    "diffSource": "turn-window",
+    "chatOnly": false,
+    "filesChanged": [
+      "lib/helper.py"
+    ],
+    "linesAdded": 2,
+    "linesRemoved": 0,
+    "diff": "diff --git a/lib/helper.py b/lib/helper.py\nnew file mode 100644\nindex <blob>\n--- /dev/null\n+++ b/lib/helper.py\n@@ -0,0 +1,2 @@\n+def helper():\n+    return 1",
+    "uncommittedDiff": "",
+    "editedFiles": [
+      "app.py",
+      "lib/helper.py",
+      "notes.md"
+    ],
+    "contentUnavailableFiles": [],
+    "commits": [
+      "commit: add helper"
+    ]
+  }
+]

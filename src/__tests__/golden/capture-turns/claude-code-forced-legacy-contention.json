@@ -1,0 +1,19 @@
+[
+  {
+    "promptIndex": 0,
+    "diffSource": null,
+    "chatOnly": false,
+    "filesChanged": [
+      "src/mod.ts"
+    ],
+    "linesAdded": 2,
+    "linesRemoved": 0,
+    "diff": "diff --git a/src/mod.ts b/src/mod.ts\nnew file mode 100644\n--- /dev/null\n+++ b/src/mod.ts\n@@ -0,0 +1,2 @@\n+export const answer = 42;\n+export const also = true;",
+    "uncommittedDiff": "",
+    "editedFiles": [
+      "src/mod.ts"
+    ],
+    "contentUnavailableFiles": [],
+    "commits": []
+  }
+]

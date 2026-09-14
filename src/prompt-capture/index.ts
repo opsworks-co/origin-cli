@@ -1480,7 +1480,7 @@ function extractFromCodexRollout(opts: CaptureInputs): PromptCapture[] {
         if (seenShas.has(sha)) continue;
         seenShas.add(sha);
         turns[currentPromptIdx].commits.push(sha);
-        appendCommitEdits(turns[currentPromptIdx], sha, opts.repoPath, gitOpts);
+        appendCommitEdits(turns[currentPromptIdx], sha, opts.repoPath, gitOpts, turns);
       }
     }
   }
@@ -1751,23 +1751,23 @@ function appendCommitEdits(
   sha: string,
   repoPath: string,
   gitOpts: { cwd: string; encoding: 'utf-8'; stdio: ['pipe', 'pipe', 'pipe']; timeout: number; maxBuffer: number },
+  observedTurns: PromptCapture[],
 ): void {
   // `git diff-tree --root -m` gives per-file before/after via `--patch`,
   // but we want raw file content snapshots so the server can run LCS.
   // Pull each changed file's BEFORE blob via `git show <sha>^:<file>` and
   // AFTER blob via `git show <sha>:<file>`. New files have no `^:` blob;
   // deletions have no `:` blob — handle both.
-  // Files this turn already captured via a precise tool-call edit
-  // (apply_patch). That hunk is the ground truth for the change; adding a
-  // second source:'commit' edit for the same file makes the turn's
-  // editsJson carry the change twice and the per-turn view renders it as
-  // two hunks — the "+20 for a +10 append" double-count on prod session
-  // d3a36b7e. Mirror supplementUncoveredCommittedFiles' covered-set guard:
-  // for a file already covered, just stamp the tool-call edits with this
-  // commit's sha (so they still render as committed) and skip the blob.
-  const covered = new Set(
-    turn.edits.filter((e) => e.source !== 'commit').map((e) => e.file),
-  );
+  // A commit observes work landing, not work being authored. It can land
+  // in a later, commit-only prompt. Prefer pending tool evidence from ALL
+  // observed turns, keeping each edit on the prompt that actually made it.
+  // Already committed edits from earlier prompts do not cover a new commit.
+  // As with same-turn tool evidence, the commit blob is only a fallback for
+  // files with no precise capture; it must not duplicate known authorship.
+  const capturedEdits = observedTurns.flatMap((owner) => owner.edits.filter(
+    (e) => e.source !== 'commit' && (owner === turn || !e.commitSha || e.commitSha === sha),
+  ));
+  const covered = new Set(capturedEdits.map((e) => e.file));
   let names: string;
   try {
     names = execFileSync(
@@ -1783,7 +1783,7 @@ function appendCommitEdits(
     const file = parts.slice(1).join(' '); // handle paths with spaces (rare)
     const repoRelative = makeRepoRelative(file, repoPath);
     if (covered.has(repoRelative)) {
-      for (const e of turn.edits) {
+      for (const e of capturedEdits) {
         if (e.file === repoRelative && e.source !== 'commit' && !e.commitSha) {
           e.commitSha = sha;
         }
