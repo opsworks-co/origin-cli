@@ -75,6 +75,69 @@ describe('sibling branches cut from one base in the same turn', () => {
   });
 });
 
+// Session 936ac5d1 (2026-09-14): `gh pr merge --squash --delete-branch` removed
+// the PR's local branch and left its commit on no branch. Its sibling from the
+// same turn sat on the same parent, and the rescue recorded the PR as amended
+// into it: 48cad5c0 -> 8c608841.
+describe('a sibling that was merged and had its branch deleted', () => {
+  const siblings = () => {
+    const start = git('rev-parse', 'HEAD');
+    git('checkout', '-q', '-b', 'fix/one');
+    write('one.ts', 'export const one = 1;\n'); git('add', '-A'); git('commit', '-qm', 'fix: one');
+    const one = git('rev-parse', 'HEAD');
+    git('checkout', '-q', '-b', 'fix/two', start);
+    write('two.ts', 'export const two = 2;\n'); git('add', '-A'); git('commit', '-qm', 'test: two');
+    const two = git('rev-parse', 'HEAD');
+    const state: any = {
+      sessionCommitShas: [one, two], repoPath: repo, sessionTag: 'test', headShaAtStart: start,
+      commitTurns: [
+        { sha: one, turnId: 't_same', at: '2026-09-14T00:00:00Z', via: 'post-commit' },
+        { sha: two, turnId: 't_same', at: '2026-09-14T00:01:00Z', via: 'post-commit' },
+      ],
+    };
+    return { start, one, two, state };
+  };
+
+  it('keeps it when it was squash-merged upstream and the remote branch is gone', () => {
+    const { start, one, two, state } = siblings();
+    git('checkout', '-q', '--detach', start);
+    git('merge', '-q', '--squash', 'fix/one');
+    git('commit', '-qm', 'fix: one (#1)');
+    git('update-ref', 'refs/remotes/origin/main', git('rev-parse', 'HEAD'));
+    git('checkout', '-q', 'fix/two');
+    git('branch', '-q', '-D', 'fix/one');
+
+    expect(__testRescueCommitShas(repo, state), 'the merged PR was folded into its sibling as if amended').toEqual([one, two]);
+    expect(state.rewrittenCommits || []).toEqual([]);
+  });
+
+  it('keeps it while a remote-tracking branch still holds it', () => {
+    const { one, two, state } = siblings();
+    git('update-ref', 'refs/remotes/origin/fix/one', one);
+    git('checkout', '-q', 'fix/two');
+    git('branch', '-q', '-D', 'fix/one');
+
+    expect(__testRescueCommitShas(repo, state)).toEqual([one, two]);
+  });
+
+  it('still folds a real amend when the remotes hold unrelated history', () => {
+    const start = git('rev-parse', 'HEAD');
+    git('update-ref', 'refs/remotes/origin/main', start);
+    write('a.ts', 'export const a = 1;\n'); git('add', '-A'); git('commit', '-qm', 'feat: a');
+    const original = git('rev-parse', 'HEAD');
+    write('b.ts', 'export const b = 1;\n'); git('add', '-A'); git('commit', '-q', '--amend', '-m', 'feat: a and b');
+    const amended = git('rev-parse', 'HEAD');
+    const state: any = {
+      sessionCommitShas: [original, amended], repoPath: repo, sessionTag: 'test', headShaAtStart: start,
+      commitTurns: [
+        { sha: original, turnId: 't_same', at: '2026-09-14T00:00:00Z', via: 'post-commit' },
+        { sha: amended, turnId: 't_same', at: '2026-09-14T00:01:00Z', via: 'post-commit' },
+      ],
+    };
+    expect(__testRescueCommitShas(repo, state)).toEqual([amended]);
+  });
+});
+
 describe('a transcript proof for a commit that was amended away', () => {
   it('is not re-filed on the turn beside its amendment', () => {
     const original = 'e79941c238139381e9cd337fbe1fd924e9ebd991';

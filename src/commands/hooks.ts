@@ -1,3 +1,4 @@
+import { withClaudeHookLock } from '../claude-hook-lock.js';
 import { loadConfig, saveConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig, isConnectedMode, ensureConfigDir } from '../config.js';
 import { isRepoIgnored, matchIgnoredRepo } from '../ignore-repos.js';
 import { decidePushBlock } from '../push-block.js';
@@ -1029,14 +1030,45 @@ function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
   // kept one commit and its card read +9/-1 beside +866/-179. An amend leaves
   // its original on no branch. Origin's own shadow branches are snapshots that
   // can still hold an amended-away original, so they do not count.
+  //
+  // A MERGED commit is not an amend either. `gh pr merge --squash
+  // --delete-branch` deletes the local branch and moves the worktree to main,
+  // so the commit is on no local branch, and its sibling from the same turn
+  // sits on the same parent. Session 936ac5d1 (2026-09-14) folded 48cad5c0
+  // (the PR, squash-merged as 9e4e650b) into 8c608841 (another branch's
+  // one-file test change): the turn lost its commit, and the rewrite pair told
+  // the server to drop it. Two facts say "merged, not amended": a
+  // remote-tracking branch still holds the commit, or a commit only the
+  // remotes reach carries the same patch (a squash or a rebase-merge keeps it;
+  // an amend changes it).
   const liveMemo = new Map<string, boolean>();
+  let upstreamPatchIds: Set<string> | null = null;
+  const patchLandedUpstream = (sha: string): boolean => {
+    const own = commitPatchId(repoPath, sha);
+    if (!own) return false;
+    if (!upstreamPatchIds) {
+      upstreamPatchIds = new Set();
+      try {
+        // Bounded: the merge lands shortly after the orphan's parent, and this
+        // runs only for an orphan that reached the same-turn rung.
+        const log = execFileSync('git', ['log', '-p', '--no-color', '--no-merges', '-n', '200', '--remotes', '--not', `${sha}^`], { ...gitOpts, maxBuffer: 64 * 1024 * 1024 }).toString();
+        const ids = execFileSync('git', ['patch-id', '--stable'], { ...gitOpts, input: log, maxBuffer: 16 * 1024 * 1024 }).toString();
+        for (const line of ids.split('\n')) {
+          const pid = line.trim().split(/\s+/)[0];
+          if (pid) upstreamPatchIds.add(pid);
+        }
+      } catch { /* no remotes, or git cannot answer — nothing proves a merge */ }
+    }
+    return upstreamPatchIds.has(own);
+  };
   const onLiveBranch = (sha: string): boolean => {
     if (!liveMemo.has(sha)) {
       let live = false;
       try {
-        const refs = execFileSync('git', ['for-each-ref', '--contains', sha, '--format=%(refname)', 'refs/heads'], gitOpts).toString();
-        live = refs.split('\n').map((r) => r.trim()).some((r) => !!r && !/(^|\/)shadow(\/|$)/.test(r));
+        const refs = execFileSync('git', ['for-each-ref', '--contains', sha, '--format=%(refname)', 'refs/heads', 'refs/remotes'], gitOpts).toString();
+        live = refs.split('\n').map((r) => r.trim()).some((r) => !!r && !/(^|\/)shadow(\/|$)/.test(r) && !/\/HEAD$/.test(r));
       } catch { live = false; }
+      if (!live) live = patchLandedUpstream(sha);
       liveMemo.set(sha, live);
     }
     return liveMemo.get(sha)!;
@@ -4373,52 +4405,54 @@ async function runHookEvent(event: string, agentSlug?: string): Promise<void> {
     } catch { /* never break the hook */ }
   }
 
-  switch (event) {
-    case 'session-start':
-      await handleSessionStart(input, agentSlug);
-      break;
-    case 'user-prompt-submit':
-      // Copilot ONLY: it blocks the user's prompt until this hook exits, and the
-      // capture path below takes 6-14s — so run it detached and return instantly
-      // (the child re-enters here with ORIGIN_HOOK_BG=1 and runs it inline). Any
-      // spawn failure falls through to the normal synchronous path. Every other
-      // agent is unaffected.
-      if (agentSlug === 'copilot' && process.env.ORIGIN_HOOK_BG !== '1') {
-        try {
-          // The journal boundary cannot wait for the background process: that
-          // one takes 6-14s to reach its mark, and Copilot starts writing the
-          // moment this hook returns. A write landing before the mark belongs
-          // to the PREVIOUS turn's span. Mint the id and mark it here — cheap,
-          // no network — and the background handler adopts the id it finds.
-          preMarkTurnForBackgroundSubmit(agentSlug, input);
-          spawnBackgroundHook(agentSlug, event, input);
-          debugLog(event, 'copilot: dispatched to background (non-blocking)');
-          break;
-        } catch (err: any) {
-          debugLog(event, 'copilot background dispatch failed — running inline', { message: err?.message });
+  await withClaudeHookLock(agentSlug, event, input.session_id, async () => {
+    switch (event) {
+      case 'session-start':
+        await handleSessionStart(input, agentSlug);
+        break;
+      case 'user-prompt-submit':
+        // Copilot ONLY: it blocks the user's prompt until this hook exits, and the
+        // capture path below takes 6-14s — so run it detached and return instantly
+        // (the child re-enters here with ORIGIN_HOOK_BG=1 and runs it inline). Any
+        // spawn failure falls through to the normal synchronous path. Every other
+        // agent is unaffected.
+        if (agentSlug === 'copilot' && process.env.ORIGIN_HOOK_BG !== '1') {
+          try {
+            // The journal boundary cannot wait for the background process: that
+            // one takes 6-14s to reach its mark, and Copilot starts writing the
+            // moment this hook returns. A write landing before the mark belongs
+            // to the PREVIOUS turn's span. Mint the id and mark it here — cheap,
+            // no network — and the background handler adopts the id it finds.
+            preMarkTurnForBackgroundSubmit(agentSlug, input);
+            spawnBackgroundHook(agentSlug, event, input);
+            debugLog(event, 'copilot: dispatched to background (non-blocking)');
+            break;
+          } catch (err: any) {
+            debugLog(event, 'copilot background dispatch failed — running inline', { message: err?.message });
+          }
         }
-      }
-      await handleUserPromptSubmit(input, agentSlug);
-      break;
-    case 'stop':
-      await handleStop(input, agentSlug);
-      break;
-    case 'session-end':
-      await handleSessionEnd(input, agentSlug);
-      break;
-    case 'pre-tool-use':
-      await handlePreToolUse(input, agentSlug);
-      break;
-    case 'post-tool-use':
-      await handlePostToolUse(input, agentSlug);
-      break;
-    case 'after-file-edit':
-      await handleAfterFileEdit(input, agentSlug);
-      break;
-    default:
-      debugLog(event, 'unknown event');
-      process.stderr.write(`[origin] unknown hook event: ${event}\n`);
-  }
+        await handleUserPromptSubmit(input, agentSlug);
+        break;
+      case 'stop':
+        await handleStop(input, agentSlug);
+        break;
+      case 'session-end':
+        await handleSessionEnd(input, agentSlug);
+        break;
+      case 'pre-tool-use':
+        await handlePreToolUse(input, agentSlug);
+        break;
+      case 'post-tool-use':
+        await handlePostToolUse(input, agentSlug);
+        break;
+      case 'after-file-edit':
+        await handleAfterFileEdit(input, agentSlug);
+        break;
+      default:
+        debugLog(event, 'unknown event');
+        process.stderr.write(`[origin] unknown hook event: ${event}\n`);
+    }
+  });
 
   debugLog(event, '=== HOOK COMPLETE ===');
 }

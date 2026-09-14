@@ -388,13 +388,13 @@ export async function handlePreToolUse(rawInput: Record<string, any>, agentSlug?
     }
   }
 
-  // ── File Attribution Context ─────────────────────────────────────────────
-  // When an agent reads or edits a file, inject per-file attribution so
-  // the agent knows who wrote each part before modifying it.
+  // Full-file blame is available through the explicit attribution commands.
+  // It is enrichment, not capture evidence, and took ~7s before a single
+  // Claude Edit on sessions.ts. Do not run it on the blocking tool path.
   const toolName = (input.tool_name || '').toLowerCase();
   const isReadStyle = ['read', 'view', 'open', 'cat', 'grep', 'glob'].some(t => toolName.includes(t));
   const isWriteStyle = ['edit', 'write', 'patch', 'create', 'insert', 'replace', 'notebook_edit'].some(t => toolName.includes(t));
-  if (isReadStyle || isWriteStyle) {
+  if (agentSlug !== 'claude-code' && (isReadStyle || isWriteStyle)) {
     const toolInput = input.tool_input || {};
     const filePath = toolInput.file_path || toolInput.path || toolInput.filePath || toolInput.filename || '';
     if (filePath && state.repoPath) {
@@ -700,8 +700,10 @@ export async function handlePostToolUse(rawInput: Record<string, any>, agentSlug
   // Resolve the probe first: it closes the pre/post pair opened before this
   // command ran, and its result is EVIDENCE, unlike the window Stop falls back
   // to. Both can be true — a turn that used Edit and a heredoc did both.
+  const probesBefore = state.shellProbes?.length || 0;
   const probed = endShellProbe(state, input);
-  if (recordLiveEdits(state, input, state.repoPath || saveCwd) || probed) {
+  const probeClosed = (state.shellProbes?.length || 0) < probesBefore;
+  if (recordLiveEdits(state, input, state.repoPath || saveCwd) || probed || probeClosed) {
     // The shell-write flag still goes up even when the probe captured
     // something: the window is the backstop for what a probe cannot see (a
     // write outside the probed trees, or a tree too dirty to fingerprint), and

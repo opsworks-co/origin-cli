@@ -15,8 +15,9 @@
 // writes: a header line, `$set` metadata lines, `user` rows, and `gemini` rows
 // that carry `toolCalls`.
 //
-// Requires `dist/` (CI builds before it tests). POSIX-only, like the harness
-// it is modelled on (capture-e2e-real-binary.test.ts).
+// Requires `dist/` (CI builds before it tests). Runs on native Windows too,
+// like the harness it is modelled on (capture-e2e-real-binary.test.ts): see
+// helpers/windows-e2e.ts for the audit that lifted the POSIX-only gate.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 import fs from 'fs';
@@ -196,11 +197,19 @@ const why = () => hooksLog().split('\n')
   .slice(-40).map((l) => l.slice(0, 400)).join('\n');
 
 const endRequests = () => hits.filter((h) => h.method === 'POST' && h.url.startsWith('/api/mcp/session/end'));
+/**
+ * The SessionEnd hook's own end, not whichever end came last. The heartbeat
+ * posts a bare end of its own (sessionId, prompt, durationMs, the saved rows,
+ * no editsJson) once the agent has looked dead for three 30s ticks. On a slow
+ * runner that lands after the hook's, and the golden read its rows: every
+ * turn's editedFiles came back empty. Only the hook sends the transcript.
+ */
+const hookEnd = () => endRequests().filter((h) => typeof h.body?.transcript === 'string').pop();
 
 /** The origin-managed context file session-start writes is bookkeeping, not the session's work. */
 const ownFiles = (row: any) => [...(row?.filesChanged || [])].filter((f: string) => f !== 'GEMINI.md').sort();
 
-describe.skipIf(!haveDist || process.platform === 'win32')('a Gemini session end to end through the built binary', () => {
+describe.skipIf(!haveDist)('a Gemini session end to end through the built binary', () => {
   const failures = trackTestFailures();
   let tmp = '';
 
@@ -286,9 +295,10 @@ describe.skipIf(!haveDist || process.platform === 'win32')('a Gemini session end
     expect(end.code, end.stderr).toBe(0);
     expect(hooksLog(), 'SessionEnd was handed to Stop — this scenario must reach the session-end body').not.toMatch(/fake sessionEnd/);
 
-    const ended = endRequests();
-    expect(ended.length, `no session/end reached the API\n${why()}`).toBeGreaterThan(0);
-    const rows: any[] = ended[ended.length - 1].body?.promptChanges || [];
+    expect(endRequests().length, `no session/end reached the API\n${why()}`).toBeGreaterThan(0);
+    const ended = hookEnd();
+    expect(ended, `no session/end from the SessionEnd hook\n${why()}`).toBeDefined();
+    const rows: any[] = ended!.body?.promptChanges || [];
     const turn = (i: number) => rows.find((r) => r.promptIndex === i);
     expect(ownFiles(turn(0)), `turn 1 at session end\n${why()}`).toEqual(['README.md', 'app.py']);
     expect(turn(0).diff).toContain('+    print("hello")');
@@ -309,8 +319,7 @@ describe.skipIf(!haveDist || process.platform === 'win32')('a Gemini session end
   }, 180_000 * WINDOWS_SLOWDOWN);
 
   it('golden: the turn rows the session ended with match the recorded baseline', () => {
-    const ended = endRequests();
-    const rows: any[] = ended.length ? ended[ended.length - 1].body?.promptChanges || [] : [];
+    const rows: any[] = hookEnd()?.body?.promptChanges || [];
     expectGoldenTurns('gemini-binary', rows, {
       repo, roots: [tmp], sent: hits.flatMap((h) => (Array.isArray(h.body?.promptChanges) ? h.body.promptChanges : [])),
       failedBefore: failures(), requests: hits, sessionId: API_SESSION,
