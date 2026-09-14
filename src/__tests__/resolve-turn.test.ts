@@ -125,4 +125,44 @@ describe('side by side with the passes', () => {
     r.linesAdded = 99;
     expect(observer.observations(0)[0]).toMatchObject({ source: 'reconstruction', files: ['a.ts'], added: 4 });
   });
+
+  describe('a watcher row, whose text is in uncommittedDiff', () => {
+    const watcherRow = (c: TurnContent) => ({
+      promptIndex: 0, filesChanged: c.files, uncommittedDiff: c.diff, linesAdded: c.added, linesRemoved: c.removed,
+    });
+
+    it('the reconstruction keeps the text, so a resolved row would not be sent blank', () => {
+      const observer = createTurnObserver();
+      const c = content('a.ts', 1);
+      observeReconstruction([watcherRow(c)], observer);
+      const r = resolveTurn(observer.observations(0));
+      expect(r).toMatchObject({ kind: 'diff', source: 'reconstruction', diff: c.diff });
+    });
+
+    it('compares the text, not only files and counts', () => {
+      const observer = createTurnObserver();
+      const r = watcherRow(content('a.ts', 1));
+      observeReconstruction([r], observer);
+      r.uncommittedDiff = 'diff --git a/a.ts b/a.ts\n+y\n';
+      const log: Array<[string, Record<string, unknown>]> = [];
+      expect(compareResolverWithPasses([r], observer, (e, d) => log.push([e, d]))).toEqual({ agree: 0, differ: 1, unavailable: 0 });
+      expect(log[0][1]).toMatchObject({ fields: ['diff'] });
+    });
+
+    it('agrees once the ledger replaces the text and clears uncommittedDiff', () => {
+      const observer = createTurnObserver();
+      const r: Record<string, any> = watcherRow(content('a.ts', 1));
+      observeReconstruction([r as any], observer);
+      const l = content('a.ts', 2);
+      observer.observe(0, ledger(l));
+      Object.assign(r, { filesChanged: l.files, diff: l.diff, uncommittedDiff: '', linesAdded: l.added, linesRemoved: l.removed });
+      expect(compareResolverWithPasses([r as any], observer, () => {})).toEqual({ agree: 1, differ: 0, unavailable: 0 });
+    });
+  });
+
+  it('a row with both fields is read by its diff', () => {
+    const c = content('a.ts', 1);
+    const both = { ...row(c), uncommittedDiff: 'diff --git a/other.ts b/other.ts\n+z\n' };
+    expect(compareWithRow(both, resolveTurn([window(c)]))).toEqual({ verdict: 'agree', fields: [] });
+  });
 });

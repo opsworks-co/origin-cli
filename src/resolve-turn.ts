@@ -135,6 +135,7 @@ export interface ResolvableRow {
   promptIndex: number;
   filesChanged?: unknown;
   diff?: string;
+  uncommittedDiff?: string | null;
   linesAdded?: number;
   linesRemoved?: number;
   contentUnavailableFiles?: string[];
@@ -164,7 +165,12 @@ function rowContent(row: ResolvableRow): TurnContent {
     files: Array.isArray(row.filesChanged)
       ? (row.filesChanged as unknown[]).filter((f): f is string => typeof f === 'string' && !!f)
       : [],
-    diff: row.diff || '',
+    // A watcher row carries its text in `uncommittedDiff` and no `diff`. Read
+    // that as the row's content, the rule withDerivedLineCounts uses: without
+    // it a reconstruction snapshot holds no text, so the check compared files
+    // and counts only, and a sender switched to the resolver's row would send
+    // it blank. Every pass clears `uncommittedDiff` when it writes `diff`.
+    diff: (row.diff && row.diff.trim()) ? row.diff : (row.uncommittedDiff || ''),
     added: row.linesAdded ?? 0,
     removed: row.linesRemoved ?? 0,
     contentUnavailable: Array.isArray(row.contentUnavailableFiles) ? [...row.contentUnavailableFiles] : [],

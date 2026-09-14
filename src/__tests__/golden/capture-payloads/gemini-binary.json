@@ -1,0 +1,248 @@
+{
+ "note": "Recorded by packages/cli capture-e2e with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api capture-golden-stored-rows.test.ts.",
+ "roots": [
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-gemini-8N4kjh/repo",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-gemini-8N4kjh"
+ ],
+ "commits": {
+  "dd48a039feee6dbe687eac0a3eccbf3da47cca17": "commit: session e2e-gemi: gemini-2.5-pro — published session",
+  "5c77accdb31fa7fa67d350aa16ba895c350ad4f9": "commit: snapshot: 7b59fe7ef3a7",
+  "6eaff4b037575f42325b13908f97225799f34d7b": "commit: Notes added by 'git notes add'",
+  "b22e02618738da77ff28eda5e05abef6e69a2012": "commit: session e2e-gemi: gemini-2.5-pro — make the greeting say hello",
+  "1d74b32a543414037952bef09885fa863f0b45a1": "commit: session e2e-gemi: gemini-2.5-pro — make the greeting say hello",
+  "7e4c4450712e76629cdb4910ec74e6e42b757ab6": "commit: origin shadow gem-e2e-7c1d 2026-09-14T16:04:29.660Z",
+  "75203f729ef7d7d542aa61f6f297de5b56cd2dd5": "commit: origin shadow prompt-gem-e2e-7c1d 2026-09-14T16:04:25.942Z",
+  "3f3e390e9d42bea2d47d5162ff5471877eddf985": "commit: session e2e-gemi: gemini-2.5-pro — make the greeting say hello",
+  "e149a73848221d7467a05381b53a7cd409f0ffb4": "commit: base"
+ },
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "make the greeting say hello",
+    "agentSlug": "gemini",
+    "model": "gemini-2.5-pro",
+    "tokensUsed": 3840,
+    "tokensEstimated": false,
+    "inputTokens": 3600,
+    "outputTokens": 240,
+    "durationMs": 3452,
+    "costUsd": 0.0069,
+    "gitCapture": {
+     "headBefore": "e149a73848221d7467a05381b53a7cd409f0ffb4",
+     "headAfter": "e149a73848221d7467a05381b53a7cd409f0ffb4",
+     "commitShas": [],
+     "diff": "diff --git a/README.md b/README.md\nindex fc72a5c..d24623a 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+Says hello.\ndiff --git a/app.py b/app.py\nindex 4a03539..10c0edd 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"hello\")\n \n \n main()",
+     "linesAdded": 3,
+     "linesRemoved": 1,
+     "commitDetails": [],
+     "snapshot": true
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "make the greeting say hello",
+      "diff": "diff --git a/README.md b/README.md\nindex fc72a5c..d24623a 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+Says hello.\ndiff --git a/app.py b/app.py\nindex 4a03539..10c0edd 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"hello\")\n \n \n main()",
+      "uncommittedDiff": "",
+      "filesChanged": [
+       "README.md",
+       "app.py"
+      ],
+      "commitSha": null,
+      "treeSha": "64110f6547802c26daf8d31e32aa3f538c26bf6a",
+      "linesAdded": 3,
+      "linesRemoved": 1,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"make the greeting say hello\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"edit\",\"oldContent\":\"print(\\\"old\\\")\",\"newContent\":\"print(\\\"hello\\\")\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":2,\"newStart\":2},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nSays hello.\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"hello\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\",\"newContent\":\"# demo\\n\\nSays hello.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1}],\"commits\":[],\"finalHunks\":[{\"file\":\"app.py\",\"start\":2,\"lines\":[\"    print(\\\"hello\\\")\"]},{\"file\":\"README.md\",\"start\":2,\"lines\":[\"\",\"Says hello.\"]}]}",
+      "turnId": "t_f1434b84f50e4c16",
+      "captureId": "c_959a1cc9f4f44c99",
+      "capturedAt": 1789401864326
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "make the greeting say hello\n\n---\n\nleave a note about it",
+    "model": "gemini-2.5-pro",
+    "tokensUsed": 3840,
+    "inputTokens": 3600,
+    "outputTokens": 240,
+    "durationMs": 6423,
+    "costUsd": 0.0069,
+    "status": "RUNNING",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "make the greeting say hello",
+      "filesChanged": [
+       "README.md",
+       "app.py"
+      ],
+      "diff": "diff --git a/README.md b/README.md\nindex fc72a5c..d24623a 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+Says hello.\ndiff --git a/app.py b/app.py\nindex 4a03539..10c0edd 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"hello\")\n \n \n main()",
+      "uncommittedDiff": "diff --git a/README.md b/README.md\nindex fc72a5c..d24623a 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+Says hello.\ndiff --git a/app.py b/app.py\nindex 4a03539..10c0edd 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"hello\")\n \n \n main()",
+      "commitSha": null,
+      "treeSha": "64110f6547802c26daf8d31e32aa3f538c26bf6a",
+      "capturedAt": 1789401866060,
+      "linesAdded": 3,
+      "linesRemoved": 1,
+      "turnId": "t_f1434b84f50e4c16",
+      "captureId": "c_dc978a9e7fdd4d59",
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "make the greeting say hello\n\n---\n\nleave a note about it",
+    "agentSlug": "gemini",
+    "model": "gemini-2.5-pro",
+    "tokensUsed": 6400,
+    "tokensEstimated": false,
+    "inputTokens": 6000,
+    "outputTokens": 400,
+    "durationMs": 8155,
+    "costUsd": 0.0115,
+    "gitCapture": {
+     "headBefore": "e149a73848221d7467a05381b53a7cd409f0ffb4",
+     "headAfter": "e149a73848221d7467a05381b53a7cd409f0ffb4",
+     "commitShas": [],
+     "diff": "diff --git a/README.md b/README.md\nindex fc72a5c..d24623a 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+Says hello.\ndiff --git a/app.py b/app.py\nindex 4a03539..10c0edd 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"hello\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..e6f38f8\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember the greeting",
+     "linesAdded": 4,
+     "linesRemoved": 1,
+     "commitDetails": [],
+     "snapshot": true
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "make the greeting say hello",
+      "filesChanged": [
+       "README.md",
+       "app.py"
+      ],
+      "diff": "diff --git a/README.md b/README.md\nindex fc72a5c..d24623a 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+Says hello.\ndiff --git a/app.py b/app.py\nindex 4a03539..10c0edd 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"hello\")\n \n \n main()",
+      "uncommittedDiff": "",
+      "commitSha": null,
+      "treeSha": "64110f6547802c26daf8d31e32aa3f538c26bf6a",
+      "capturedAt": 1789401869474,
+      "linesAdded": 3,
+      "linesRemoved": 1,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"make the greeting say hello\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"edit\",\"oldContent\":\"print(\\\"old\\\")\",\"newContent\":\"print(\\\"hello\\\")\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":2,\"newStart\":2},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nSays hello.\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"hello\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\",\"newContent\":\"# demo\\n\\nSays hello.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nSays hello.\\n\",\"source\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"}],\"commits\":[],\"finalHunks\":[{\"file\":\"app.py\",\"start\":2,\"lines\":[\"    print(\\\"hello\\\")\"]},{\"file\":\"README.md\",\"start\":2,\"lines\":[\"\",\"Says hello.\"]}]}",
+      "turnId": "t_f1434b84f50e4c16",
+      "captureId": "c_c32f671912d945d7"
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "leave a note about it",
+      "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..e6f38f8\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember the greeting",
+      "uncommittedDiff": "",
+      "filesChanged": [
+       "notes.md"
+      ],
+      "commitSha": null,
+      "treeSha": "64110f6547802c26daf8d31e32aa3f538c26bf6a",
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"leave a note about it\",\"agent\":\"claude\",\"edits\":[{\"file\":\"notes.md\",\"op\":\"write\",\"newContent\":\"remember the greeting\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember the greeting\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
+      "turnId": "t_0ad70901de2848f5",
+      "captureId": "c_c32f671912d945d7",
+      "capturedAt": 1789401869504
+     }
+    ]
+   }
+  },
+  {
+   "kind": "end",
+   "body": {
+    "sessionId": "e2e-gemini-session-0001",
+    "prompt": "make the greeting say hello\n\n---\n\nleave a note about it",
+    "summary": "Noted.",
+    "model": "gemini-2.5-pro",
+    "tokensUsed": 6400,
+    "tokensEstimated": false,
+    "inputTokens": 6000,
+    "outputTokens": 400,
+    "durationMs": 10935,
+    "costUsd": 0.0115,
+    "gitCapture": {
+     "headBefore": "e149a73848221d7467a05381b53a7cd409f0ffb4",
+     "headAfter": "e149a73848221d7467a05381b53a7cd409f0ffb4",
+     "commitShas": [],
+     "commitDetails": [],
+     "diff": "diff --git a/README.md b/README.md\nindex fc72a5c..d24623a 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+Says hello.\ndiff --git a/app.py b/app.py\nindex 4a03539..10c0edd 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"hello\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..e6f38f8\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember the greeting",
+     "committedDiff": "",
+     "uncommittedDiff": "diff --git a/README.md b/README.md\nindex fc72a5c..d24623a 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+Says hello.\ndiff --git a/app.py b/app.py\nindex 4a03539..10c0edd 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"hello\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..e6f38f8\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember the greeting",
+     "diffTruncated": false,
+     "linesAdded": 4,
+     "linesRemoved": 1,
+     "workingTreeDiff": "diff --git a/README.md b/README.md\nindex fc72a5c..d24623a 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+Says hello.\ndiff --git a/app.py b/app.py\nindex 4a03539..10c0edd 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"hello\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..e6f38f8\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember the greeting",
+     "baselineIsShadow": false
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "make the greeting say hello",
+      "filesChanged": [
+       "README.md",
+       "app.py"
+      ],
+      "contentUnavailableFiles": [],
+      "diffSource": "turn-window",
+      "ledgerOwned": true,
+      "diff": "diff --git a/README.md b/README.md\nindex fc72a5c..d24623a 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+Says hello.\ndiff --git a/app.py b/app.py\nindex 4a03539..10c0edd 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"hello\")\n \n \n main()",
+      "uncommittedDiff": "",
+      "linesAdded": 3,
+      "linesRemoved": 1,
+      "commitSha": null,
+      "treeSha": "64110f6547802c26daf8d31e32aa3f538c26bf6a",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "capturedAt": 1789401871803,
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"make the greeting say hello\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"edit\",\"oldContent\":\"print(\\\"old\\\")\",\"newContent\":\"print(\\\"hello\\\")\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":2,\"newStart\":2},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nSays hello.\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"hello\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\",\"newContent\":\"# demo\\n\\nSays hello.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nSays hello.\\n\",\"source\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"}],\"commits\":[]}",
+      "turnId": "t_f1434b84f50e4c16",
+      "captureId": "c_eeab8942043a4ff0"
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "leave a note about it",
+      "filesChanged": [
+       "notes.md"
+      ],
+      "contentUnavailableFiles": [],
+      "diffSource": "turn-window",
+      "ledgerOwned": true,
+      "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..e6f38f8\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember the greeting",
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "commitSha": null,
+      "treeSha": "64110f6547802c26daf8d31e32aa3f538c26bf6a",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "capturedAt": 1789401871803,
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"leave a note about it\",\"agent\":\"claude\",\"edits\":[{\"file\":\"notes.md\",\"op\":\"write\",\"newContent\":\"remember the greeting\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember the greeting\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
+      "turnId": "t_0ad70901de2848f5",
+      "captureId": "c_eeab8942043a4ff0"
+     }
+    ],
+    "branch": "main"
+   }
+  }
+ ]
+}
