@@ -200,7 +200,9 @@ describe.skipIf(!haveDist)('git commit --amend end to end through the built bina
     const start = await run('session-start', { source: 'startup' });
     expect(start.code, start.stderr).toBe(0);
     say('do some more stuff');
+    const submittedFrom = Date.now();
     const ups = await run('user-prompt-submit', { prompt: 'do some more stuff' });
+    const submittedBy = Date.now();
     expect(ups.code, ups.stderr).toBe(0);
     await sleep(400);
 
@@ -234,6 +236,22 @@ describe.skipIf(!haveDist)('git commit --amend end to end through the built bina
       .filter(Boolean);
     const last = rowsAfterAmend[rowsAfterAmend.length - 1];
     expect(last, 'no row for the committing turn').toBeTruthy();
+
+    // Every row for the turn carries its SUBMIT time, starting with post-commit's,
+    // which creates the row after the commit landed. Without it the server stamps
+    // the row with that later time and moves the commit onto the previous turn
+    // (prod a7740ea3, commit 562618d7).
+    const firstCommitRow = rowsAfterAmend.find((r: any) => r.commitSha === original);
+    expect(firstCommitRow, 'post-commit sent no row for the committing turn').toBeTruthy();
+    const starts = new Set(rowsAfterAmend.map((r: any) => r.createdAt));
+    expect([...starts], `rows for one turn disagree on its start: ${JSON.stringify(
+      rowsAfterAmend.map((r: any) => [r.createdAt ?? null, r.captureId ?? null, r.commitSha?.slice(0, 8) ?? null]),
+    )}`).toHaveLength(1);
+    const startMs = Date.parse(firstCommitRow.createdAt);
+    expect(startMs, 'the row carries no submit time').toBeGreaterThanOrEqual(submittedFrom - 1000);
+    expect(startMs).toBeLessThanOrEqual(submittedBy);
+    const committedMs = Number(git(['log', '-1', '--format=%ct', original])) * 1000;
+    expect(startMs).toBeLessThanOrEqual(committedMs + 1000);
     if (last.commitSha) expect(last.commitSha).toBe(amended);
     expect([...last.filesChanged].sort()).toEqual(['README.md', 'infuse.py', 'shelf.py']);
 
@@ -247,6 +265,13 @@ describe.skipIf(!haveDist)('git commit --amend end to end through the built bina
     expect([last.linesAdded, last.linesRemoved]).toEqual([exact!.linesAdded, exact!.linesRemoved]);
     const log = fs.readFileSync(path.join(os.homedir(), '.origin', 'hooks.log'), 'utf-8');
     expect(log).toContain('ledger diff replaced by the commit patch');
+
+    // Both writers of the commit patch say so on the wire, so the server keeps
+    // it against a later, smaller capture of this turn (prod a7740ea3 turn 10:
+    // Stop's rebuild replaced post-commit's patch).
+    const postCommitRow = rowsAfterAmend.find((r: any) => r.commitSha === original);
+    expect(postCommitRow?.commitPatch, 'post-commit did not mark its row as the commit patch').toBe(true);
+    expect(last.commitPatch, 'Stop did not mark the commit patch it sent').toBe(true);
 
     // And the session's sha list, wherever it was last sent, holds the
     // rewrite and not the orphan.

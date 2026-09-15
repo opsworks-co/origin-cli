@@ -336,6 +336,12 @@ export interface SessionState {
   // PromptChange rows on it, so a later renumbering of the list cannot slide
   // one turn's diff onto another turn's row.
   promptTurnIds?: string[];
+  // When each turn's prompt was submitted (ISO), numbered like promptTurnIds.
+  // Sent as the row's `createdAt`. Without it the server stamps a row with the
+  // time of its FIRST write — post-commit or Stop, after the turn's commit — and
+  // its back-attribution then moves that commit onto the previous turn
+  // (session a7740ea3: commit 562618d7 made in turn 7, stored on turn 6).
+  promptSubmittedAt?: string[];
   completedPromptMappings?: Array<{  // Accumulated per-prompt file change mappings
     promptIndex: number;
     promptText: string;
@@ -2552,6 +2558,24 @@ export function recordPromptShadow(
     capturedAt: (opts?.now ?? (() => new Date().toISOString()))(),
     ...(opts?.completeBaseline !== undefined ? { completeBaseline: opts.completeBaseline } : {}),
   });
+}
+
+/**
+ * Remember when the prompt at LOCAL index `promptIndex` was submitted.
+ * First write wins, like the turn id: only the submit path knows the time, and
+ * a later hook (post-commit, Stop) would record a time after the turn's commit.
+ */
+export function recordPromptSubmittedAt(
+  state: { promptSubmittedAt?: string[] },
+  promptIndex: number,
+  at: number | string | Date = Date.now(),
+): void {
+  if (!Number.isInteger(promptIndex) || promptIndex < 0) return;
+  const ms = at instanceof Date ? at.getTime() : typeof at === 'number' ? at : Date.parse(at);
+  if (!Number.isFinite(ms)) return;
+  if (!state.promptSubmittedAt) state.promptSubmittedAt = [];
+  if (state.promptSubmittedAt[promptIndex]) return;
+  state.promptSubmittedAt[promptIndex] = new Date(ms).toISOString();
 }
 
 /**

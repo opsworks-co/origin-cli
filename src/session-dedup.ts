@@ -31,6 +31,7 @@ export interface DedupCandidate {
   // turn ids the server keys rows on, and the live edit ledger.
   completedPromptMappings?: unknown[];
   promptTurnIds?: string[];
+  promptSubmittedAt?: string[];
   promptResponses?: string[];
   liveEdits?: unknown[];
   lastClosedTurnIndex?: number;
@@ -82,6 +83,10 @@ export function carryForwardTurnState<T extends DedupCandidate>(state: T, dup: D
   }
   if (Array.isArray(dup.promptTurnIds) && dup.promptTurnIds.length > (state.promptTurnIds?.length || 0)) {
     state.promptTurnIds = dup.promptTurnIds;
+  }
+  if (Array.isArray(dup.promptSubmittedAt)
+      && dup.promptSubmittedAt.length > (state.promptSubmittedAt?.length || 0)) {
+    state.promptSubmittedAt = dup.promptSubmittedAt;
   }
   if (Array.isArray(dup.promptResponses) && dup.promptResponses.length > (state.promptResponses?.length || 0)) {
     state.promptResponses = dup.promptResponses;

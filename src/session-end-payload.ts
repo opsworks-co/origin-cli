@@ -1,5 +1,5 @@
 import { newCaptureStamp } from './capture-stamp.js';
-import { serverRowForLocalTurn, turnIdForServerRow } from './turn-index.js';
+import { serverRowForLocalTurn, turnIdForServerRow, turnStartForServerRow } from './turn-index.js';
 
 /**
  * The per-turn rows the heartbeat daemon sends when it ends a session.
@@ -23,6 +23,7 @@ export function promptChangesForSessionEnd(stateData: {
   prompts?: string[];
   completedPromptMappings?: Array<Record<string, unknown> & { promptIndex: number; turnId?: string }>;
   promptTurnIds?: string[];
+  promptSubmittedAt?: string[];
   promptIndexBase?: number | null;
 } | null | undefined): Array<Record<string, unknown>> | null {
   if (!stateData) return null;
@@ -31,9 +32,13 @@ export function promptChangesForSessionEnd(stateData: {
   if (Array.isArray(saved) && saved.length > 0) {
     return saved.map((m) => {
       if (!m || typeof m !== 'object') return m;
-      if (typeof m.turnId === 'string' && m.turnId) return m;
+      // The row's start time travels with it, so this replay cannot leave a
+      // turn's createdAt at the time of its first write (see promptSubmittedAt).
+      const createdAt = m.createdAt ? undefined : turnStartForServerRow(stateData, m.promptIndex);
+      const withStart = createdAt ? { ...m, createdAt } : m;
+      if (typeof m.turnId === 'string' && m.turnId) return withStart;
       const turnId = turnIdForServerRow(stateData, m.promptIndex);
-      return turnId ? { ...m, turnId } : m;
+      return turnId ? { ...withStart, turnId } : withStart;
     });
   }
   if (prompts.length === 0) return null;
@@ -41,6 +46,7 @@ export function promptChangesForSessionEnd(stateData: {
     ...newCaptureStamp('hb'),
     promptIndex: serverRowForLocalTurn(i, stateData.promptIndexBase),
     ...(stateData.promptTurnIds?.[i] ? { turnId: stateData.promptTurnIds[i] } : {}),
+    ...(stateData.promptSubmittedAt?.[i] ? { createdAt: stateData.promptSubmittedAt[i] } : {}),
     promptText: (p || '').slice(0, 1000),
     filesChanged: [],
     diff: '',

@@ -55,7 +55,7 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { localTurnForServerRow, serverRowForLocalTurn, turnIdForServerRow } from '../../turn-index.js';
+import { localTurnForServerRow, serverRowForLocalTurn, turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
 import { applyRewritePairsToState, finalRewriteOf, firstUnanchoredPrompt, markSkippedPromptBaselines, recordPromptShadow } from '../../session-state.js';
 import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
 
@@ -2639,6 +2639,9 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
             )),
             // `pm.promptIndex` is a SERVER row; ids are numbered locally.
             ...(turnIdForServerRow(state, pm.promptIndex) && { turnId: turnIdForServerRow(state, pm.promptIndex) }),
+            // The submit time, so the row's createdAt is the turn's start and
+            // not the time of its first write (see promptSubmittedAt).
+            ...(turnStartForServerRow(state, pm.promptIndex) && { createdAt: turnStartForServerRow(state, pm.promptIndex) }),
             ...captureStamp(),
             // Devin records the prompt at Stop (after the turn's work), so the
             // server's timestamp-based commit attribution sees a commit as
@@ -3481,6 +3484,7 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
       try {
         const earlyPayload = promptHistoryPayload(redactedPrompts, {
           promptTurnIds: state.promptTurnIds,
+          promptSubmittedAt: state.promptSubmittedAt,
           promptIndexBase: Math.max(parsed.promptIndexBase || 0, state.promptIndexBase || 0),
         });
         prePersisted = persistUpdateBeforeWork(state.sessionId, earlyPayload, (e, m, d) => debugLog(e, m, d));

@@ -28,7 +28,7 @@ import { buildRepoBriefContext } from '../../repo-brief.js';
 import { carryForwardTurnState, findDuplicateStateForSession } from '../../session-dedup.js';
 import { isEmptyWorktreeBootstrap, restampWorktreeBootstrap } from '../../worktree-bootstrap.js';
 import { buildDurationBlockMessage, parseSessionLimits } from '../../session-limits.js';
-import { clearSessionState, closeTurn, discoverGitRoot, findPriorStateForConversation, getBranch, getCanonicalRepoPath, getGitCommonDir, getGitRoot, getHeadSha, getStatePath, getWorkingGitRoot, isHeartbeatAlive, isPendingReservation, isProvisionalSessionId, listActiveSessions, loadSessionState, markSkippedPromptBaselines, promptHistoryFromPriorState, recordPromptShadow, resolveSessionBranch, samePromptText, saveSessionState, sessionTagFor, stampCaptured, startHeartbeat } from '../../session-state.js';
+import { clearSessionState, closeTurn, discoverGitRoot, findPriorStateForConversation, getBranch, getCanonicalRepoPath, getGitCommonDir, getGitRoot, getHeadSha, getStatePath, getWorkingGitRoot, isHeartbeatAlive, isPendingReservation, isProvisionalSessionId, listActiveSessions, loadSessionState, markSkippedPromptBaselines, promptHistoryFromPriorState, recordPromptShadow, recordPromptSubmittedAt, resolveSessionBranch, samePromptText, saveSessionState, sessionTagFor, stampCaptured, startHeartbeat } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import { openTurnLiveness } from '../../turn-liveness.js';
 import { samePath, sessionWorkTree } from '../../session-worktree.js';
@@ -42,7 +42,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { turnIdForServerRow } from '../../turn-index.js';
+import { turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
 import { STABLE_SESSION_ID_AGENTS, captureStamp, currentSessionWorkTree, dropForeignCommitsFromCapture, durableUpdate, ensureServerSession, ensureWriteJournal, filterUncommittedDiff, findStateForHook, findStateForHookInput, getWorkingTreeSha, hookLookupSessionId, journalHasMark, normalizeWorkspaceRoot, resolveAutoAgentSessionId, resumeEndedConversationState, serverRowForLocalTurn, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, turnIdFor, uncommittedExcludeUnion } from '../hooks.js';
 
 
@@ -1679,6 +1679,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
     if (!state.promptTurnIds[newTurnIdx]) {
       state.promptTurnIds[newTurnIdx] = `t_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     }
+    recordPromptSubmittedAt(state, newTurnIdx, state.currentTurnStartedAt ?? Date.now());
     // Put the boundary in the JOURNAL too, not just on the state file.
     //
     // Once it is there, a turn's writes are the entries between its mark and
@@ -1961,6 +1962,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
                   linesRemoved: dl.filter((l: string) => l.startsWith('-') && !l.startsWith('---')).length,
                   // Mappings are numbered by SERVER row; ids are local.
                   ...(turnIdForServerRow(state, pm.promptIndex) && { turnId: turnIdForServerRow(state, pm.promptIndex) }),
+                  ...(turnStartForServerRow(state, pm.promptIndex) && { createdAt: turnStartForServerRow(state, pm.promptIndex) }),
                   ...captureStamp(),
                   aiPercentage: 100,
                   checkpointType: 'auto',

@@ -95,6 +95,17 @@ describe('a turn whose work is entirely in its commit', () => {
     // Provenance is untouched: still the turn's observed work.
     expect(mapping.diffSource).toBe('ledger');
     expect(mapping.ledgerOwned).toBe(true);
+    // …and the wire says the diff is the commit patch, so the server keeps it
+    // against a later, smaller capture of this turn.
+    expect((mapping as { commitPatch?: boolean }).commitPatch).toBe(true);
+  });
+
+  it('clears the flag when a later run no longer applies the patch', () => {
+    const { state, mapping } = committedTurn();
+    (mapping as { commitPatch?: boolean }).commitPatch = true;
+    fs.appendFileSync(path.join(repo, 'vodka.py'), '# after the commit\n');
+    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo)).toBe(0);
+    expect((mapping as { commitPatch?: boolean }).commitPatch).toBeUndefined();
   });
 
   it('counts what the badge counts — the numbers the page compares', () => {
@@ -125,6 +136,7 @@ describe('the ledger keeps the turn when it knows more than the commit', () => {
     expect(preferCommitPatchForCommittedTurns(state, [mapping], repo)).toBe(0);
     expect(mapping.diff).toBe(LEDGER_DIFF);
     expect([mapping.linesAdded, mapping.linesRemoved]).toEqual([3, 3]);
+    expect((mapping as { commitPatch?: boolean }).commitPatch).toBeUndefined();
   });
 
   it('a file the turn wrote that the commit does not carry', () => {

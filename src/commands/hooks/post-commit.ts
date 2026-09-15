@@ -33,7 +33,7 @@ import { condenseSnapshot, listSnapshots } from '../snapshot.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { serverRowForLocalTurn, turnIdForServerRow } from '../../turn-index.js';
+import { serverRowForLocalTurn, turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
 import { applyLedgerCaptures, buildMemoryEntry, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitTrailerBelongsToSession, durableUpdate, isInsideRepo, ownedRangeCommitShas, rewrittenCommitsPayload, sameDir, scheduleMemoryBriefRefresh, scopedCommitForTurn, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, trailerNamesAKnownSession, turnIdFor, withDerivedLineCounts } from '../hooks.js';
 
 
@@ -1232,6 +1232,7 @@ export async function pinCodexCommitToProducer(state: SessionState, hookCwd: str
         diff: capDiff(pm.diff, MAX_PROMPT_DIFF_LEN),
         // `completedPromptMappings` is numbered by SERVER row; ids are local.
         ...(turnIdForServerRow(state, pm.promptIndex) && { turnId: turnIdForServerRow(state, pm.promptIndex) }),
+        ...(turnStartForServerRow(state, pm.promptIndex) && { createdAt: turnStartForServerRow(state, pm.promptIndex) }),
         ...captureStamp(),
       })),
     });
@@ -2172,6 +2173,11 @@ export async function handlePostCommit(): Promise<void> {
           // between two PATCHes landed a commit's diff on a neighbour's turn
           // with nothing to correct it.
           ...(turnIdFor(s, latestPromptIdx) && { turnId: turnIdFor(s, latestPromptIdx) }),
+          // This PATCH usually CREATES the committing turn's row. Without the
+          // submit time the row is stamped now, after the commit, and the
+          // gitCapture-only PATCH that follows moves the commit to the turn
+          // before (session a7740ea3, commit 562618d7).
+          ...(turnStartForServerRow(s, latestPromptRow) && { createdAt: turnStartForServerRow(s, latestPromptRow) }),
           ...captureStamp(),
           promptText: latestPromptText.slice(0, 1000),
           // Files, diff and line counts all come from commitTurnContentUnit, so
@@ -2182,6 +2188,10 @@ export async function handlePostCommit(): Promise<void> {
           // dropped is named below so the row does not claim a file its own
           // diff no longer contains.
           diff: budgetedCommitDiff.diff,
+          // The content is the commit patch whenever scoping succeeded, so the
+          // server keeps it against the Stop that is often already building a
+          // smaller answer for this turn (session a7740ea3, turn 10).
+          ...(scoped ? { commitPatch: true } : {}),
           ...(budgetedCommitDiff.omittedFiles.length > 0
             ? { contentUnavailableFiles: budgetedCommitDiff.omittedFiles }
             : {}),

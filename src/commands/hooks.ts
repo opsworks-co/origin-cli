@@ -42,6 +42,7 @@ import {
   currentTurnIndex,
   closeTurn,
   recordPromptShadow,
+  recordPromptSubmittedAt,
   turnBaseline,
   applyRewritePairsToState,
 } from '../session-state.js';
@@ -2087,6 +2088,8 @@ export function preMarkTurnForBackgroundSubmit(agentSlug: string, input: Record<
     if (!state.promptTurnIds[idx]) {
       state.promptTurnIds[idx] = `t_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     }
+    // This IS the submit moment; the background capture arrives seconds later.
+    recordPromptSubmittedAt(state, idx);
     ensureWriteJournal(state, agentSlug);
     if (!state.writeJournalPath) return false;
     if (!journalHasMark(state.writeJournalPath, state.promptTurnIds[idx])) {

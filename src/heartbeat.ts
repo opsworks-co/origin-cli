@@ -805,6 +805,11 @@ async function pushInflightDiff(): Promise<void> {
             // promptTurnIds — read, never minted, so both writers name the
             // same turn the same way.
             ...(state.promptTurnIds?.[promptIndex] ? { turnId: state.promptTurnIds[promptIndex] } : {}),
+            // The turn's submit time, recorded by the hook path, so a row this
+            // tick creates is not stamped with the tick's own time.
+            ...((state as { promptSubmittedAt?: string[] }).promptSubmittedAt?.[promptIndex]
+              ? { createdAt: (state as { promptSubmittedAt?: string[] }).promptSubmittedAt![promptIndex] }
+              : {}),
             promptText,
             // Content comes from `hbMapping`, which is either what was
             // reconstructed above or the ledger's replacement of it — never a
@@ -819,6 +824,7 @@ async function pushInflightDiff(): Promise<void> {
             linesAdded: hbMapping.linesAdded,
             linesRemoved: hbMapping.linesRemoved,
             ...(hbMapping.diffSource ? { diffSource: hbMapping.diffSource } : {}),
+            ...((hbMapping as { commitPatch?: boolean }).commitPatch ? { commitPatch: true } : {}),
             ...(hbMapping.contentUnavailableFiles
               ? { contentUnavailableFiles: hbMapping.contentUnavailableFiles }
               : {}),

@@ -61,6 +61,21 @@ export function localTurnForServerRow(
 }
 
 /**
+ * When the turn at a SERVER row was submitted, read from the local-numbered
+ * `promptSubmittedAt`. Undefined when this launch never saw the prompt arrive;
+ * the row then keeps whatever time the server already has.
+ */
+export function turnStartForServerRow(
+  state: { promptSubmittedAt?: string[]; promptIndexBase?: number | null },
+  serverIndex: number,
+): string | undefined {
+  const local = localTurnForServerRow(serverIndex, state.promptIndexBase);
+  if (local === null) return undefined;
+  const at = state.promptSubmittedAt?.[local];
+  return typeof at === 'string' && Number.isFinite(Date.parse(at)) ? at : undefined;
+}
+
+/**
  * The stable id for the turn at a SERVER row, read from the local-numbered
  * `promptTurnIds`. Undefined for a row this launch has no id for — one that
  * predates the launch, or a session from before ids existed; those keep the

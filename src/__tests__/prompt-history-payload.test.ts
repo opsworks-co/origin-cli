@@ -18,6 +18,16 @@ describe('write-ahead prompt timeline', () => {
     ]);
   });
 
+  it('carries each turn\'s submit time, so a replay that creates a row does not stamp it late', () => {
+    const at = '2026-09-15T20:24:03.557Z';
+    expect(promptHistoryPayload(['resumed', 'next'], {
+      promptIndexBase: 21, promptTurnIds: ['t_21', 't_22'], promptSubmittedAt: [at],
+    }).promptChanges).toEqual([
+      { promptIndex: 21, promptText: 'resumed', turnId: 't_21', createdAt: at },
+      { promptIndex: 22, promptText: 'next', turnId: 't_22' },
+    ]);
+  });
+
   it('caps individual row text while preserving the already-redacted prompt list', () => {
     const text = 'x'.repeat(1200);
     const payload = promptHistoryPayload([text], {});

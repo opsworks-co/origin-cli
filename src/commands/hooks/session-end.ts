@@ -59,7 +59,7 @@ import { execFileSync, spawn } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { localTurnForServerRow, rebaseToServerRows, turnIdForServerRow } from '../../turn-index.js';
+import { localTurnForServerRow, rebaseToServerRows, turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
 import { applyAuthoredTotals, currentSessionWorkTree, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFilesForTurn, windowInheritsCommitsForTurn, filterUncommittedDiff, findStateForHookInput, liveCaptureEnabled, normalizeWorkspaceRoot, recordShellWindowEdits, sessionAuthoredSnapshot, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
 import { compareResolverWithPasses, createTurnObserver, observeReconstruction, type TurnObservation } from '../../resolve-turn.js';
 
@@ -393,6 +393,9 @@ export function buildSessionWriteData(opts: {
       // tell an observed diff from a reconstructed one.
       ...((m as { contentAuthoritative?: boolean }).contentAuthoritative ? { contentAuthoritative: true } : {}),
       ...((m as { diffSource?: 'ledger' | 'turn-window' }).diffSource ? { diffSource: (m as { diffSource?: 'ledger' | 'turn-window' }).diffSource } : {}),
+      // Only while the diff is still the one the commit-patch pass set: a
+      // rebuild from `git show` above is the whole commit, not the turn's patch.
+      ...((m as { commitPatch?: boolean }).commitPatch && diff === m.diff ? { commitPatch: true } : {}),
     };
   });
 
@@ -1369,6 +1372,7 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
               )),
               // `pm.promptIndex` is a SERVER row; ids are numbered locally.
               ...(turnIdForServerRow(state, pm.promptIndex) && { turnId: turnIdForServerRow(state, pm.promptIndex) }),
+              ...(turnStartForServerRow(state, pm.promptIndex) && { createdAt: turnStartForServerRow(state, pm.promptIndex) }),
               ...captureStamp(),
               // Real Devin submission time (see handleStop) — fixes commit
               // attribution when a turn's prompt was recorded after its commit.

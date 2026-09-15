@@ -95,6 +95,13 @@ export interface CommittedTurnMapping {
   linesRemoved?: number;
   /** Files of the turn whose content the diff does not carry. */
   contentUnavailableFiles?: string[];
+  /**
+   * The diff IS the turn's commit patch. Sent on the wire so the server keeps
+   * it against a later, smaller capture of the same turn. Set only by this
+   * pass, and cleared at the start of it, so it always describes the content
+   * the mapping carries now.
+   */
+  commitPatch?: boolean;
 }
 
 export interface PreferCommitPatchDeps {
@@ -312,6 +319,7 @@ function patchAcrossBranches(
   const inText = new Set(pathsInDiff(diff));
   pm.contentUnavailableFiles = diffTruncated ? named.filter((f) => !inText.has(f)) : [];
   pm.uncommittedDiff = '';
+  pm.commitPatch = true;
   applied(deps, pm);
   deps.log?.('ledger diff replaced by the commit patches of several branches', {
     promptIndex: pm.promptIndex, turnId, branches: parts.length, stranded, commits: tips,
@@ -339,6 +347,8 @@ export function preferCommitPatchForCommittedTurns(
   }
   let replaced = 0;
   for (const pm of mappings) {
+    // Earlier passes may have replaced the content a previous Stop flagged.
+    delete pm.commitPatch;
     // The mapping is a SERVER row; ids and shadows are numbered by this
     // launch (see turn-index.ts). A row from before the launch has neither.
     const local = localTurnForServerRow(pm.promptIndex, state.promptIndexBase);
@@ -512,6 +522,7 @@ export function preferCommitPatchForCommittedTurns(
     // uncommitted diff beside it would count the same lines twice. Empty
     // string, not undefined — see applyLedgerCaptures.
     pm.uncommittedDiff = '';
+    pm.commitPatch = true;
     replaced++;
     applied(deps, pm);
     deps.log?.('ledger diff replaced by the commit patch', {
