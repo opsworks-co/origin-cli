@@ -417,13 +417,17 @@ export function preferCommitPatchForCommittedTurns(
       .pop()!;
     const shadow = state.promptShadows?.find((s) => s.promptIndex === local)?.shadowSha
       || state.prePromptSha || null;
-    // A turn containing only a merge has a stronger baseline: the merge's
-    // first parent, restricted to files changed against EVERY parent. The
-    // prompt shadow may be missing or stale, but the resolution is in Git.
-    // Multiple-commit turns keep their range so edits before the merge survive.
+    // A turn containing only a merge has a stronger baseline: the tree its
+    // resolution is measured from (git's own merge, conflicts on the first
+    // parent's side — see mergeOwnDiff), restricted to the files it resolved.
+    // The first parent alone credits the other side's clean hunks in a
+    // conflicted file. The prompt shadow may be missing or stale, but the
+    // resolution is in Git. Multiple-commit turns keep their range so edits
+    // before the merge survive.
     const merge = existing.length === 1 && existing[0] === last
       ? mergeOwnDiff(repoPath, last) : null;
-    const mergeParent = merge ? git(repoPath, ['rev-parse', `${last}^1`]).out.trim() : null;
+    const mergeParent = merge
+      ? merge.baseline || git(repoPath, ['rev-parse', `${last}^1`]).out.trim() : null;
     if (!merge && (!shadow || !HEX.test(shadow))) { declined(deps, pm, 'the turn has no baseline shadow'); continue; }
     // The pathspec above already survives a mid-turn `gh pr checkout` / pull /
     // rebase; the BASELINE did not. The turn's shadow was cut before the

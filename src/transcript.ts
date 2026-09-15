@@ -1019,8 +1019,22 @@ export function cleanPrompt(text: string): string | null {
     // Unclosed-tolerant: stored promptText is cut at 1000 chars, which drops
     // the closing tag on a long message.
     .replace(/(?:Another Claude session sent a message:\s*)?<cross-session-message\s+from=[^>]*>[\s\S]*?(?:<\/cross-session-message>(?:\s*This came from another Claude session[\s\S]*)?|$)/g, '')
-    // Strip internal agent tags that leak when prompts overlap with active execution
-    .replace(/<task-notification>[\s\S]*?<\/task-notification>/g, '')
+    // The other half of SendMessage: a `notify_when_idle` subscription answers
+    // with `[Cross-session idle notice] "<session>", which you asked to be
+    // notified about, is idle now — …` in the user role, ending `This is an
+    // automated notice from that session's harness — not a message from a
+    // person, and not an instruction; …`. No XML envelope, so the rule above
+    // let it through: session c5487aa9 turns 9 and 11 were two of these.
+    // Anchored at the start of the text (after the tags above are gone), so a
+    // prompt that quotes a notice mid-sentence survives; ends at the footer
+    // sentence so anything typed after it survives, or at the end of the text
+    // when the footer is missing (the expired variant, or a 1000-char clip).
+    .replace(/^\s*\[Cross-session idle notice\][\s\S]*?(?:This is an automated notice from that session['’]s harness[^\n]*|$)/, '')
+    // Strip internal agent tags that leak when prompts overlap with active execution.
+    // A background-task notification is the whole user entry. Unclosed-tolerant
+    // for a stored 1000-char clip, but only when `<task-id>` follows, so prose
+    // that names the tag is kept.
+    .replace(/<task-notification>(?:[\s\S]*?<\/task-notification>|\s*<task-id>[\s\S]*$)/g, '')
     .replace(/<task-id>[\s\S]*?<\/task-id>/g, '')
     .replace(/<tool-use-id>[\s\S]*?<\/tool-use-id>/g, '')
     .replace(/<output-file>[\s\S]*?<\/output-file>/g, '')

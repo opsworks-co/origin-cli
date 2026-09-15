@@ -24,7 +24,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { combineApplyableTurnDiff } from './applyable-turn-diff.js';
 import { git, gitDetailed, gitOrNull } from './utils/exec.js';
-import { mergeTreeOf } from './git-capture.js';
+import { isUnsafeGitShowPath, mergeTreeOf, tmpIndexPath } from './git-capture.js';
 
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
 
@@ -312,12 +312,16 @@ export function commitParents(cwd: string, sha: string): string[] {
  * already understands. On the merge above that is `package.json` +
  * `package-lock.json`, 6 lines — the version bump the turn actually made.
  *
+ * Even inside a resolved file, only the resolved LINES are the merge's: the
+ * diff is taken from `baseline` (mergeResolutionBaseline), not the first
+ * parent, so the other side's clean hunks in the same file stay theirs.
+ *
  * Returns null when `sha` is not a merge, so callers keep their normal path.
  */
 export function mergeOwnDiff(
   cwd: string,
   sha: string,
-): { diff: string; filesChanged: string[] } | null {
+): { diff: string; filesChanged: string[]; baseline?: string } | null {
   const parents = commitParents(cwd, sha);
   if (parents.length < 2) return null;
   const changedAgainst = (p: string): Set<string> => {
@@ -335,23 +339,142 @@ export function mergeOwnDiff(
   // #1640 and #1642 had each added an import to stop.ts and session-end.ts;
   // the merge was credited with both. What the merge commit authored is where
   // it differs from git's own merge of its parents.
+  let baseline: string | null = null;
   if (resolved.size > 0 && parents.length === 2) {
     const auto = mergeTreeOf(cwd, parents[0], parents[1])?.tree;
     if (auto) {
       const edited = changedAgainst(auto);
       resolved = new Set([...resolved].filter((f) => edited.has(f)));
+      if (resolved.size > 0) baseline = mergeResolutionBaseline(cwd, sha, parents[0], auto, [...resolved]);
     }
   }
-  const filesChanged = [...resolved];
+  let filesChanged = [...resolved];
   // A clean merge resolves nothing and therefore authored nothing. Empty is
   // the honest answer — NOT a licence to fall back to the unrestricted diff,
   // which is how the whole other branch got credited in the first place.
   if (filesChanged.length === 0) return { diff: '', filesChanged: [] };
+  // A conflict resolved to the first parent's own side changed no line of it.
+  if (baseline) {
+    const named = gitOrNull(['diff', '--name-only', baseline, sha, '--', ...filesChanged], { cwd });
+    if (named !== null) filesChanged = named.split('\n').filter(Boolean);
+    if (filesChanged.length === 0) return { diff: '', filesChanged: [] };
+  }
+  const from = baseline || parents[0];
   const diff = gitOrNull(
-    ['diff', '--no-color', parents[0], sha, '--', ...filesChanged],
+    ['diff', '--no-color', from, sha, '--', ...filesChanged],
     { cwd },
   )?.trim() || '';
-  return { diff, filesChanged };
+  return { diff, filesChanged, baseline: from };
+}
+
+/**
+ * The tree a merge's resolution is measured from: the merge's own tree, with
+ * each of `files` replaced by git's merge of it (`auto`, the merge-tree
+ * result) and every conflict region in that replaced by the FIRST parent's
+ * side.
+ *
+ * The first parent itself is the wrong baseline for a file with a conflict.
+ * Everything the other side changed in that file outside the conflict came in
+ * with it, and diffing from the first parent credits all of it to the merge.
+ * Session c5487aa9's merge c5bd9889c conflicted only on stop.ts's import lines,
+ * and the turn read stop.ts +20/-2: #1649's import and its 17-line native-commit
+ * recovery block, which git had merged on its own.
+ *
+ * From this tree the merge commit's diff is, per file: the conflict regions as
+ * resolved against the side the merger stood on, plus any line the merger
+ * changed that git's merge had not (an evil merge) — and nothing git merged.
+ *
+ * A file git's merge has no version of is measured from the first parent's, as
+ * before. Null when the tree cannot be built; callers keep the first parent.
+ */
+function mergeResolutionBaseline(
+  cwd: string,
+  sha: string,
+  firstParent: string,
+  auto: string,
+  files: string[],
+): string | null {
+  // Tree paths are repo-root relative; update-index resolves against cwd.
+  const top = gitOrNull(['rev-parse', '--show-toplevel'], { cwd });
+  if (!top) return null;
+  const rootOpts = { cwd: top, timeoutMs: 15_000, maxBuffer: 10 * 1024 * 1024 };
+  const tmpIndex = tmpIndexPath('origin-merge-resolution');
+  const indexOpts = { ...rootOpts, env: { GIT_INDEX_FILE: tmpIndex } };
+  const entryAt = (rev: string, file: string): { mode: string; blob: string } | 'absent' | null => {
+    const entry = git(['ls-tree', '--full-tree', '-z', rev, '--', file], rootOpts);
+    if (!entry.trim()) return 'absent';
+    const m = entry.match(/^(\d{6}) blob ([a-fA-F0-9]+)\t/);
+    return m ? { mode: m[1], blob: m[2] } : null;
+  };
+  try {
+    git(['read-tree', sha], indexOpts);
+    for (const file of files) {
+      if (isUnsafeGitShowPath(file)) return null;
+      let entry = entryAt(auto, file);
+      if (entry === null) return null;
+      if (entry !== 'absent') {
+        // latin1 round-trips every byte; the markers themselves are ASCII.
+        const text = git(['cat-file', 'blob', entry.blob], { ...rootOpts, encoding: 'latin1' });
+        const ours = text.includes('\0') ? text : oursSideOfConflicts(text);
+        if (ours === null) entry = entryAt(firstParent, file);
+        else if (ours !== text) {
+          const written = gitDetailed(['hash-object', '-w', '--no-filters', '--stdin'], {
+            ...rootOpts, input: Buffer.from(ours, 'latin1'),
+          });
+          const blob = written.stdout.trim();
+          if (written.status !== 0 || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(blob)) return null;
+          entry = { mode: entry.mode, blob };
+        }
+      } else {
+        entry = entryAt(firstParent, file);
+      }
+      if (entry === null) return null;
+      if (entry === 'absent') git(['update-index', '--force-remove', '--', file], indexOpts);
+      else git(['update-index', '--add', '--cacheinfo', `${entry.mode},${entry.blob},${file}`], indexOpts);
+    }
+    const tree = git(['write-tree'], indexOpts).trim();
+    return /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(tree) ? tree : null;
+  } catch {
+    return null;
+  } finally {
+    try { fs.unlinkSync(tmpIndex); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * `text` — a file as git's merge wrote it — with every conflict region
+ * replaced by its first side (`<<<<<<<` up to `|||||||` or `=======`). Text
+ * without markers comes back unchanged; null when a region never closes, since
+ * then the markers cannot be told from content.
+ *
+ * The marker length is read from each opening line, so a longer marker (a
+ * `conflict-marker-size` attribute, or the recursive strategy's inner merges)
+ * is matched only by its own separator and closer. Covers the merge, diff3 and
+ * zdiff3 conflict styles.
+ */
+export function oursSideOfConflicts(text: string): string | null {
+  const out: string[] = [];
+  let size = 0;
+  let section: 'ours' | 'base' | 'theirs' | null = null;
+  const isMarker = (line: string, ch: string): boolean =>
+    line === ch.repeat(size) || line.startsWith(`${ch.repeat(size)} `);
+  for (const line of text.split('\n')) {
+    const bare = line.endsWith('\r') ? line.slice(0, -1) : line;
+    if (section === null) {
+      const open = /^(<{7,})(?: |$)/.exec(bare);
+      if (open) { size = open[1].length; section = 'ours'; continue; }
+      out.push(line);
+    } else if (section !== 'theirs' && bare === '='.repeat(size)) {
+      section = 'theirs';
+    } else if (section === 'ours' && isMarker(bare, '|')) {
+      section = 'base';
+    } else if (section === 'theirs' && isMarker(bare, '>')) {
+      section = null;
+    } else if (section === 'ours') {
+      out.push(line);
+    }
+  }
+  return section === null ? out.join('\n') : null;
 }
 
 /**

@@ -3675,11 +3675,21 @@ export function recordShellWindowEdits(
     // commit of +120/-12). Same fact, same producer — not a third rule.
     const inherited = inheritedBaselineForTurn(repoPath, state, baselineSha, promptIndex);
     const windowBaseline = inherited || baselineSha;
+    // Re-baselining only ever NARROWS the window: it gives a file the turn
+    // changed the before-state the checkout left, and it must never name a
+    // file the turn's own shadow shows unchanged. Session c5487aa9 turn 10
+    // checked out main's squash of its own PR (c04e7809, the same tree as the
+    // branch it left). The squash carries this session's trailer, so the
+    // inherited rule re-baselined to the squash's parent — main before the PR
+    // — and the window credited the turn with the PR's 7 files, already
+    // counted on the turn that wrote them. shadow → worktree was empty.
+    const shadowChanged = inherited ? new Set(filesChangedSinceShadow(repoPath, baselineSha)) : null;
     if (inherited) {
       debugLog('stop', 'shell window using inherited checkout baseline', {
         promptIndex,
         shadow: String(baselineSha).slice(0, 12),
         inherited: inherited.slice(0, 12),
+        shadowChanged: shadowChanged?.size ?? 0,
       });
     }
 
@@ -3728,7 +3738,7 @@ export function recordShellWindowEdits(
     const { edits, skipped } = shellWindowEdits(
       {
         listChangedFiles: (sha) => filesChangedSinceShadow(repoPath, sha)
-          .filter((f) => !absorbed.has(f)),
+          .filter((f) => !absorbed.has(f) && (!shadowChanged || shadowChanged.has(f))),
         readAtRev: (sha, file) => readFileAtRev(repoPath, sha, file),
         readWorking: (file) => {
           try {

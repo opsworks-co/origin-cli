@@ -1,8 +1,15 @@
 import { defineConfig } from 'vitest/config';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { RUN_ID_ENV, runIdForMainProcess } from './src/__tests__/setup/test-home.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// One id per vitest run, minted here in the main process. It lands in
+// process.env for global-teardown.ts (same process) and in test.env for every
+// worker's isolate-home.ts, so all of this run's HOMEs sit under one run dir
+// that no concurrent run on the machine shares or deletes.
+const RUN_ID = runIdForMainProcess();
 
 export default defineConfig({
   test: {
@@ -20,12 +27,12 @@ export default defineConfig({
     // usual churn. Generous on purpose: this bounds a hang, it is not a budget.
     testTimeout: 30_000,
     hookTimeout: 30_000,
-    // Redirect HOME to a throwaway per-worker temp dir so tests that touch
+    // Redirect HOME to a throwaway per-run, per-worker temp dir so tests that touch
     // ~/.origin (config/agent, heartbeat pids, and the sessions/ GLOBAL MIRROR
     // saveSessionState writes) never pollute the real home. Without this, on a
     // machine that also runs Origin, fixture sessions leaked into
     // ~/.origin/sessions/ and showed up in `origin status --global` forever.
-    // globalSetup removes the scratch homes after the run.
+    // globalSetup removes this run's scratch homes (only this run's) after it.
     setupFiles: ['./src/__tests__/setup/isolate-home.ts'],
     globalSetup: ['./src/__tests__/setup/global-teardown.ts'],
     // Isolate every test (and every git subprocess tests spawn) from the
@@ -39,6 +46,7 @@ export default defineConfig({
     // config is dropped entirely. Fixtures still set their own
     // user.name/email.
     env: {
+      [RUN_ID_ENV]: RUN_ID,
       GIT_CONFIG_GLOBAL: path.resolve(__dirname, 'test-fixtures/gitconfig'),
       GIT_CONFIG_SYSTEM: '/dev/null',
     },

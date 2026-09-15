@@ -15,7 +15,7 @@ const HEX = /^[a-fA-F0-9]+$/;
 // parallel. The counter makes it collision-free within a process, the pid across
 // processes.
 let tmpIndexSeq = 0;
-function tmpIndexPath(prefix: string): string {
+export function tmpIndexPath(prefix: string): string {
   tmpIndexSeq += 1;
   return path
     .join(os.tmpdir(), `${prefix}-${process.pid}-${Date.now()}-${tmpIndexSeq}.idx`)
