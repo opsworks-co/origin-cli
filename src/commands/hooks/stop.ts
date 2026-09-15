@@ -9,8 +9,12 @@ import { isSpecificModel, sessionMatchesAgent } from '../../agents/registry.js';
 import { api } from '../../api.js';
 import { preferCommitPatchForCommittedTurns } from '../../commit-patch-for-committed-turn.js';
 import { preferShadowRangeForTurns } from '../../prefer-shadow-range.js';
+import { WATCHED_ONLY_EVIDENCE, trimWatchedEditsForTurns } from '../../trim-watched-edits.js';
+import { dropInheritedFilesFromTurns } from '../../drop-inherited-files.js';
+import { commitAuthoredDelta } from '../../history-backfill.js';
 import { recoverCommittedTurnProofs, rehomeGitOnlyCommitStamp } from '../../rehome-git-only-commit-stamp.js';
 import { backfillCodexPromptMappings } from '../../codex-prompt-mapping.js';
+import { codexNativeCommits, nativeCommitOwners } from '../../codex-native-commits.js';
 import { isConnectedMode, loadAgentConfig, loadConfig } from '../../config.js';
 import { debugLog } from '../../debug-log.js';
 import { queueDevinBackfill } from '../../devin-backfill.js';
@@ -52,8 +56,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { localTurnForServerRow, serverRowForLocalTurn, turnIdForServerRow } from '../../turn-index.js';
-import { finalRewriteOf, firstUnanchoredPrompt, markSkippedPromptBaselines, recordPromptShadow } from '../../session-state.js';
-import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, windowInheritsCommitsForTurn, applyLiveLedger, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesNamedInDiff, filterUncommittedDiff, findStateForHook, getWorkingTreeSha, hookLookupSessionId, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
+import { applyRewritePairsToState, finalRewriteOf, firstUnanchoredPrompt, markSkippedPromptBaselines, recordPromptShadow } from '../../session-state.js';
+import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
 
 
 // ─── Debug Logger ─────────────────────────────────────────────────────────
@@ -343,12 +347,15 @@ export function ownedRangeCommitShas(repoPath: string, state: SessionState): str
  * the signature no longer allows it.
  */
 export function filesOwnedByTurn(
-  state: { liveEdits?: Array<{ promptIndex: number; edits?: Array<{ file: string }> }> },
+  state: { liveEdits?: Array<{ promptIndex: number; edits?: Array<{ file: string; evidence?: string }> }> },
   promptMappings: Array<{ promptIndex: number; filesChanged?: string[] }> | null | undefined,
   // Server space — the turn's native position in the transcript.
   serverIndex: number,
   // Local space — the turn's position in `state.prompts`.
   localIndex: number,
+  // Leave out ledger edits the turn only WATCHED (the write journal, a shell
+  // probe, the turn window). See foreignCommitFilesForTurn.
+  opts?: { authoredOnly?: boolean },
 ): string[] {
   const out = new Set<string>();
   for (const pm of promptMappings || []) {
@@ -357,7 +364,11 @@ export function filesOwnedByTurn(
   }
   for (const entry of state.liveEdits || []) {
     if (entry.promptIndex !== localIndex) continue;
-    for (const e of entry.edits || []) if (e?.file) out.add(e.file);
+    for (const e of entry.edits || []) {
+      if (!e?.file) continue;
+      if (opts?.authoredOnly && typeof e.evidence === 'string' && WATCHED_ONLY_EVIDENCE.has(e.evidence)) continue;
+      out.add(e.file);
+    }
   }
   return [...out];
 }
@@ -427,6 +438,90 @@ export function dropForeignCommitsFromCapture(
     files: foreignFiles.size,
   });
   return Array.from(foreignFiles);
+}
+
+/**
+ * The files a commit this session did not make brought into the turn's window,
+ * which every diff the turn stores must leave out.
+ *
+ * A file the turn owns is exempt: a concurrent commit to a file we really
+ * touched does not erase our work. But ownership has two strengths. A tool
+ * call, an edit hook, a command naming the file or the transcript is
+ * authorship. A write the turn only WATCHED — the write journal, a shell probe,
+ * the turn window — is also exactly what a `git checkout` looks like, so it
+ * exempts a file only when the file no longer holds what the foreign commit
+ * left (filesLeftByForeignCommits).
+ *
+ * Session c5487aa9 turn 3 ran `git checkout --detach origin/main`, which wrote
+ * #1642's 12 files. Its first Stop dropped them and stored a chat-only turn,
+ * then recorded the journal's view of the turn as `write_journal` ledger edits
+ * on five of them. The re-Stop read that ledger as ownership, exempted the
+ * five, and the safety net rebuilt the row: 5 files, +35/-4, written by nobody
+ * in the session.
+ */
+export function foreignCommitFilesForTurn(
+  repoPath: string,
+  state: SessionState,
+  capture: { commitShas: string[]; commitDetails: Array<{ sha: string; filesChanged: string[] }> },
+  promptMappings: Array<{ promptIndex: number; filesChanged?: string[] }> | null | undefined,
+  serverIndex: number,
+  localIndex: number,
+  baselineSha: string | null | undefined,
+): string[] {
+  const dropped = dropForeignCommitsFromCapture(repoPath, state, capture);
+  if (dropped.length === 0) return [];
+  const same = (a: string, b: string) => a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
+  const owned = filesOwnedByTurn(state, promptMappings, serverIndex, localIndex);
+  const authored = filesOwnedByTurn(state, promptMappings, serverIndex, localIndex, { authoredOnly: true });
+  const watchedOnly = dropped.filter((f) => owned.some((o) => same(o, f)) && !authored.some((o) => same(o, f)));
+  const leftAsCommitted = watchedOnly.length > 0
+    ? filesLeftByForeignCommits(repoPath, state, baselineSha)
+    : new Set<string>();
+  const refused = watchedOnly.filter((f) => leftAsCommitted.has(f));
+  if (refused.length > 0) {
+    debugLog('stop', 'watched-only writes do not exempt files a foreign commit left unchanged', {
+      files: refused.slice(0, 20), count: refused.length,
+    });
+  }
+  return dropped.filter((f) => {
+    if (authored.some((o) => same(o, f))) return false;
+    if (!owned.some((o) => same(o, f))) return true;
+    return leftAsCommitted.has(f);
+  });
+}
+
+/**
+ * Files a turn shows it WROTE, for dropInheritedFilesFromTurns: its live
+ * ledger and editsJson edits carrying authoring evidence (a tool call, an edit
+ * hook, a command naming the file, or no evidence recorded), and what the
+ * commits attributed to it authored — a merge's resolution, not the branch it
+ * absorbed.
+ */
+export function authoredFilesForTurn(
+  state: SessionState,
+  localTurn: number,
+  serverRow: number,
+  editsJson?: string,
+): Set<string> {
+  const out = new Set(filesOwnedByTurn(state, null, serverRow, localTurn, { authoredOnly: true }));
+  if (editsJson) {
+    try {
+      const cap = JSON.parse(editsJson);
+      for (const e of Array.isArray(cap?.edits) ? cap.edits : []) {
+        if (!e || typeof e.file !== 'string' || !e.file) continue;
+        if (typeof e.evidence === 'string' && WATCHED_ONLY_EVIDENCE.has(e.evidence)) continue;
+        out.add(e.file);
+      }
+    } catch { /* an unreadable capture claims nothing */ }
+  }
+  const turnId = (state.promptTurnIds || [])[localTurn];
+  for (const ct of (state as { commitTurns?: Array<{ sha?: string; turnId?: string }> }).commitTurns || []) {
+    if (!turnId || ct?.turnId !== turnId || !ct.sha) continue;
+    try {
+      for (const f of commitAuthoredDelta(state.repoPath, ct.sha).filesChanged) out.add(f);
+    } catch { /* a commit a rebase removed */ }
+  }
+  return out;
 }
 
 // (Cursor model detection moved to ../agents/cursor.ts)
@@ -766,10 +861,12 @@ export function resolveAutoAgentSessionId(
   agentSlug: string | undefined,
   conversationId: unknown,
   sessionId: unknown,
+  turnId?: unknown,
 ): string | undefined {
   const conv = typeof conversationId === 'string' && conversationId ? conversationId : undefined;
   const sess = typeof sessionId === 'string' && sessionId ? sessionId : undefined;
   if (agentSlug === 'cursor') return conv || sess;
+  if (hasNativeCodexIdentity(agentSlug, { session_id: sessionId, turn_id: turnId })) return sess;
   if (STABLE_SESSION_ID_AGENTS.includes(agentSlug || '')) return sess;
   return undefined;
 }
@@ -1788,6 +1885,23 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
     // matches `git show <sha>`; this becomes an explicit turn attestation on
     // the wire, not a normal Stop HEAD stamp. It also repairs a clean mapping
     // polluted by a divergent branch baseline before it is sent again.
+    // Native command events retain the executed cwd, exit code and turn id
+    // even when a sandboxed commit could not run Origin's post-commit hook.
+    // Unlike the singular commitSha on a row, this sees every sibling PR and
+    // the original plus replacement of an amend.
+    try {
+      if (sessionMatchesAgent(state, 'codex')) {
+        const rolloutPath = findCodexRolloutPath(state.repoPath, state.agentSessionId || state.claudeSessionId || undefined);
+        if (rolloutPath) {
+          const native = codexNativeCommits(fs.readFileSync(rolloutPath, 'utf8'), state.repoPath);
+          applyRewritePairsToState(state, native.flatMap(c => c.replaces ? [{ from: c.replaces, to: c.sha }] : []));
+          const nativeDetails = fillMissingCommitPatches(state.repoPath, [], native.map(c => c.sha));
+          recordTranscriptCommitProofs(state, nativeCommitOwners(native, promptMappings, nativeDetails, samePromptText));
+        }
+      }
+    } catch (error) {
+      debugLog('stop', 'native commit recovery unavailable', { error: String(error) });
+    }
     const mappedShas = promptMappings
       .map((pm: any) => typeof pm.commitSha === 'string' ? pm.commitSha : '')
       .filter((sha) => !!sha && !state.commitTurns?.some((ct) => sameSha(ct.sha, sha)));
@@ -2376,6 +2490,18 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
         count: fromShadows, of: promptMappings.length,
       });
     }
+    // Earlier turns go out from the rows earlier Stops saved. Re-check each
+    // closed turn against its own window, so a row saved with another
+    // commit's files does not keep going out — see drop-inherited-files.ts.
+    dropInheritedFilesFromTurns(state, promptMappings as any, {
+      inheritedFiles: (fromShadow, toShadow, localTurn) => inheritedFilesForTurn(
+        state.repoPath || hookCwd, state as any, fromShadow, toShadow, localTurn,
+      ),
+      authoredFiles: (localTurn, serverRow) => authoredFilesForTurn(
+        state, localTurn, serverRow, promptEditsByIndex?.get(serverRow),
+      ),
+      log: (event, data) => debugLog('stop', event, data),
+    });
     // A turn whose work is entirely in its commits sends the commit's patch —
     // the diff the badge, the commit detail and blame already read. Post-commit
     // already sent that; every later Stop (including Cursor's fake sessionEnd)
@@ -2401,6 +2527,13 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
     try {
       compareResolverWithPasses(promptMappings as any, observer, (event, data) => debugLog('stop', event, data));
     } catch { /* logging only */ }
+    // The passes scoped each row; editsJson still carries every write the
+    // journal saw, a mid-turn checkout's rewrites included. Keep only the
+    // watched writes the row names — see trim-watched-edits.ts.
+    trimWatchedEditsForTurns(
+      promptEditsByIndex, promptMappings as any,
+      (event, data) => debugLog('stop', event, data),
+    );
 
     // The server can HARD-DELETE this row out from under us between the
     // session's creation and this PATCH (see isSessionGoneError). The payload
@@ -2478,8 +2611,9 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
           .map((pm) => withLegacyWritesRendered(pm as any, promptEditsByIndex?.get(pm.promptIndex)))
           .map(withDerivedLineCounts).map((pm, _i, all) => ({
             ...pm,
-            // Internal marker — `diffSource` is what travels.
+            // Internal markers — `diffSource` is what travels.
             ledgerOwned: undefined,
+            inheritedFiles: undefined,
             promptText: (pm.promptText || '').slice(0, 1000),
             // The wire cap drops whole files; each one is named so the row
             // can say "diff covers N of M" instead of shrinking to N.
@@ -2944,7 +3078,7 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
       hookCwd = wsRoot;
     }
   }
-  let found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug, input.conversation_id), agentSlug);
+  let found = findStateForHookInput(hookCwd, input, agentSlug);
   let state = found?.state || null;
   // Recover from archive if .git state file is missing (Cursor/Codex sessions)
   if (!state) {
@@ -2994,7 +3128,7 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
           if (age < bestAge) { bestCandidate = s; bestAge = age; }
         } catch { /* skip */ }
       }
-      bestCandidate = exactMatch || bestCandidate;
+      bestCandidate = exactMatch || (hasNativeCodexIdentity(agentSlug, input) ? null : bestCandidate);
       if (bestCandidate) {
         const wasEnded = bestCandidate.status === 'ENDED' || !!(bestCandidate as { endedAt?: string }).endedAt;
         debugLog('stop', wasEnded ? 'resuming ended session from archive (same chat)' : 'recovered session from archive', {
@@ -3415,18 +3549,21 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     // `state.promptIndexBase` is refreshed from `parsed` further down, so read
     // the authoritative parse here and take the larger of the two: the base
     // only ever grows, and a base that shrank would aim this back at row 0.
+    // A write the turn only watched exempts a file only when the file no
+    // longer holds what the foreign commit left: see foreignCommitFilesForTurn.
     const localTurnIdx = Math.max((state.prompts?.length || 0) - 1, 0);
-    const ownFilesThisTurn = filesOwnedByTurn(
+    const foreignCommitFiles = foreignCommitFilesForTurn(
+      state.repoPath,
       state,
+      gitCapture,
       promptMappings,
       serverRowForLocalTurn(
         localTurnIdx,
         Math.max(parsed.promptIndexBase || 0, state.promptIndexBase || 0),
       ),
       localTurnIdx,
+      promptBaseline,
     );
-    const foreignCommitFiles = dropForeignCommitsFromCapture(state.repoPath, state, gitCapture)
-      .filter((f) => !ownFilesThisTurn.some((own) => own === f || own.endsWith(`/${f}`) || f.endsWith(`/${own}`)));
     // Every diff this turn stores is filtered through this list: pre-existing
     // dirt, other live sessions' files, and now the files a concurrent commit
     // moved under us.

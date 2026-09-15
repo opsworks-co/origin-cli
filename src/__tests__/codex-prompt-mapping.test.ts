@@ -206,3 +206,23 @@ describe('mapCommitsToPromptsFromRollout — turn-scoped commit attribution', ()
     expect(mapCommitsToPromptsFromRollout('not json\n{also bad}')).toEqual(new Map());
   });
 });
+
+
+describe('Codex exec output envelopes', () => {
+  const user = (text: string) => ({ payload: { type: 'message', role: 'user', content: text } });
+  const output = (value: unknown) => ({ payload: { type: 'custom_tool_call_output', output: value } });
+  it('recovers both sibling-branch commits from nested exec results', () => {
+    const rollout = [user('open first PR'), output([
+      { type: 'input_text', text: 'Script completed' },
+      { type: 'input_text', text: JSON.stringify({ exit_code: 0, output: '[codex/first e182da064] fix share\n' }) },
+    ]), user('open second PR'), output([
+      { type: 'input_text', text: JSON.stringify({ exit_code: 0, output: '[codex/second 9d9603522] fix stats\n' }) },
+    ])].map((row) => JSON.stringify(row)).join('\n');
+    expect([...mapCommitsToPromptsFromRollout(rollout)]).toEqual([['e182da064', 0], ['9d9603522', 1]]);
+  });
+  it('does not claim commits mentioned in prose or envelope metadata', () => {
+    const rollout = [user('inspect'), output({ command: '[main aaaaaaa] quoted', output: 'Reading commit bbbbbbb' })]
+      .map((row) => JSON.stringify(row)).join('\n');
+    expect(mapCommitsToPromptsFromRollout(rollout).size).toBe(0);
+  });
+});

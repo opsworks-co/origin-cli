@@ -17,6 +17,8 @@ import path from 'path';
 import { preferCommitPatchForCommittedTurns, pathsInDiff } from '../commit-patch-for-committed-turn.js';
 import { createShadowCommit, commitDiffScopedToPrompt } from '../git-capture.js';
 import type { TurnObservation } from '../resolve-turn.js';
+import { codexNativeCommits, nativeCommitOwners } from '../codex-native-commits.js';
+import { pathToFileURL } from 'url';
 
 let repo: string;
 const git = (...args: string[]) =>
@@ -71,6 +73,85 @@ function twoBranchTurn() {
 }
 
 describe('a turn whose commits sit on several branches', () => {
+  it('keeps commits on the authoring row and refuses ambiguous prompt matches', () => {
+    const c = { sha: 'abcdef123456', nativeTurnId: 'native', promptText: 'open PR' };
+    const author = { promptIndex: 4, promptText: 'fix it', filesChanged: ['a.ts'], diff: 'authored patch' };
+    const commit = { promptIndex: 5, promptText: 'open PR', filesChanged: [], diff: '' };
+    const details = [{ sha: c.sha, filesChanged: ['a.ts'] }];
+    expect(nativeCommitOwners([c], [author, commit], details)).toEqual([{ sha: c.sha, promptIndex: 4 }]);
+    expect(nativeCommitOwners([c], [commit, { ...commit, promptIndex: 6 }], details)).toEqual([]);
+    expect(nativeCommitOwners([c], [{ ...author, commitSha: c.sha }, commit], details)).toEqual([{ sha: c.sha, promptIndex: 4 }]);
+    // Partial file overlap cannot transfer a commit to an unrelated prior row.
+    expect(nativeCommitOwners([c], [author, commit], [{ sha: c.sha, filesChanged: ['a.ts', 'b.ts'] }]))
+      .toEqual([{ sha: c.sha, promptIndex: 5 }]);
+  });
+
+  it('reduces unchanged context so every branch fits the per-turn upload limit', () => {
+    const contents = Array.from({ length: 12000 }, (_, i) => `unchanged source line ${i}\n`).join('');
+    write('large.ts', contents); commitAll('large baseline');
+    git('checkout', '-qb', 'large-fix');
+    write('large.ts', contents.replace('source line 6000', 'changed line 6000'));
+    const first = commitAll('fix large file');
+    git('checkout', '-qb', 'small-fix', 'main');
+    write('b.ts', 'b1\nb2\n'); const second = commitAll('fix small file');
+    const mapping = { promptIndex: 0, filesChanged: [] as string[], diff: '', linesAdded: 0, linesRemoved: 0 };
+    const state = { promptTurnIds: ['t_0'], commitTurns: [first, second].map(sha => ({ sha, turnId: 't_0' })) };
+    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo)).toBe(1);
+    expect(mapping.diff.length).toBeLessThanOrEqual(200000);
+    expect(pathsInDiff(mapping.diff).sort()).toEqual(['b.ts', 'large.ts']);
+    expect([mapping.linesAdded, mapping.linesRemoved]).toEqual([2, 1]);
+    const numstat = execFileSync('git', ['apply', '--numstat'], { cwd: repo, encoding: 'utf8', input: mapping.diff });
+    expect(numstat).toContain('1\t1\tlarge.ts');
+    expect(numstat).toContain('1\t0\tb.ts');
+  });
+
+  it('recovers every native commit and its amend, ignoring failed, quoted and foreign commands', () => {
+    const { a1, a2, b1, state, mapping } = twoBranchTurn();
+    write('b.ts', 'b1\nb2\nb3\nb4\n');
+    git('add', 'b.ts'); git('commit', '--amend', '--no-edit', '-q');
+    const replacement = git('rev-parse', 'HEAD');
+    const event = (sha: string, branch: string, command = 'git commit -m fix', overrides = {}) => ({
+      type: 'event_msg', payload: { type: 'item_completed', turn_id: 'native', item: {
+        type: 'CommandExecution', cwd: pathToFileURL(repo).href,
+        command: ['/bin/zsh', '-lc', command], exit_code: 0,
+        stdout: `[${branch} ${sha.slice(0, 9)}] fix\n`, ...overrides,
+      } },
+    });
+    const records = [
+      { type: 'turn_context', payload: { turn_id: 'native' } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'fix and open PRs' }] } },
+      event(a1, 'fix-a', 'git log -1'),
+      event(a1, 'fix-a', 'git commit -m fix', { exit_code: 1 }),
+      event(a1, 'fix-a', 'git commit -m fix', { cwd: pathToFileURL(os.tmpdir()).href }),
+      event(a1, 'fix-a', 'printf "git commit"'),
+      event(a1, 'fix-a', 'git add a.ts\ngit commit -m fix'),
+      event(a2, 'fix-a'), event(b1, 'fix-b'),
+      event(replacement, 'fix-b', 'git commit --amend --no-edit'),
+      event(replacement, 'fix-b', 'git commit --amend --no-edit'),
+    ];
+    const native = codexNativeCommits(records.map(e => JSON.stringify(e)).join('\n'), repo);
+    expect(native.map(c => c.sha)).toEqual([a1, a2, b1, replacement]);
+    expect(native[3]).toMatchObject({ replaces: b1, nativeTurnId: 'native', promptText: 'fix and open PRs' });
+    const recovered = { ...state, commitTurns: native.map(c => ({ sha: c.sha, turnId: 't_0' })),
+      rewrittenCommits: native.flatMap(c => c.replaces ? [{ from: c.replaces, to: c.sha }] : []) };
+    expect(preferCommitPatchForCommittedTurns(recovered, [mapping], repo)).toBe(1);
+    expect([mapping.linesAdded, mapping.linesRemoved]).toEqual([7, 2]);
+    expect(sectionsFor(mapping.diff, 'b.ts')).toBe(1);
+  });
+
+  it('counts only the replacement of an amended commit on a sibling branch', () => {
+    const { b1, state, mapping } = twoBranchTurn();
+    write('b.ts', 'b1\nb2\nb3\nb4\n');
+    git('add', 'b.ts');
+    git('commit', '--amend', '--no-edit', '-q');
+    const replacement = git('rev-parse', 'HEAD');
+    state.commitTurns.push({ sha: replacement, turnId: 't_0' });
+    const repairedState = { ...state, rewrittenCommits: [{ from: b1, to: replacement }] };
+    expect(preferCommitPatchForCommittedTurns(repairedState, [mapping], repo)).toBe(1);
+    expect([mapping.linesAdded, mapping.linesRemoved]).toEqual([7, 2]);
+    expect(sectionsFor(mapping.diff, 'b.ts')).toBe(1);
+  });
+
   it('counts every branch, not only the one HEAD is on', () => {
     const { main, a2, b1, state, mapping } = twoBranchTurn();
     const log: Array<[string, Record<string, unknown>]> = [];

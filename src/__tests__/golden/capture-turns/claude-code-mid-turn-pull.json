@@ -11,9 +11,7 @@
     "diff": "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\n",
     "uncommittedDiff": "",
     "editedFiles": [
-      "app.py",
-      "upstream_a.py",
-      "upstream_b.py"
+      "app.py"
     ],
     "contentUnavailableFiles": [],
     "commits": []

@@ -27,7 +27,7 @@ vi.mock('../config.js', async (orig) => ({
   isConnectedMode: vi.fn(() => false),
 }));
 
-import { findStateForHook, resumeEndedConversationState } from '../commands/hooks.js';
+import { findStateForHook, findStateForHookInput, hookLookupSessionId, resolveAutoAgentSessionId, resumeEndedConversationState } from '../commands/hooks.js';
 import { hooksSource } from './helpers/hooks-source.js';
 
 const CONV = '3939c84e-80da-409e-b4bb-8fc3a4d1481c';
@@ -112,5 +112,36 @@ describe('the resume is wired where the abort was', () => {
     const autoCreate = src.indexOf("'no session state — attempting auto-create'");
     expect(ups).toBeGreaterThan(-1);
     expect(ups).toBeLessThan(autoCreate);
+  });
+});
+
+
+describe('native Codex resume identity', () => {
+  const native = { session_id: CONV, turn_id: 'new-turn' };
+  it('resumes its ended mirror even with another active Codex chat in the same repository', () => {
+    const original = endedState({claudeSessionId:'',agentSessionId:CONV,agentSlug:'codex',model:'gpt-6-astra',startedAt:'2025-01-01T00:00:00Z'});
+    fs.writeFileSync(path.join(TEST_HOME,'.origin','sessions','original.json'),JSON.stringify(original));
+    const sibling = endedState({sessionId:'sibling',sessionTag:'sibling',claudeSessionId:'',agentSessionId:'other-native',agentSlug:'codex',model:'gpt-6-astra',status:'RUNNING',endedAt:undefined});
+    fs.writeFileSync(stateFile('sibling'),JSON.stringify(sibling));
+    const before = fs.readFileSync(stateFile('sibling'),'utf8');
+    const found = findStateForHookInput(repo,native,'codex');
+    expect(found?.state.sessionId).toBe(original.sessionId);
+    expect(found?.state.status).toBe('RUNNING');
+    expect(found?.state.endedAt).toBeUndefined();
+    expect(found?.state.prompts).toEqual(original.prompts);
+    expect(fs.readFileSync(stateFile('sibling'),'utf8')).toBe(before);
+  });
+  it('refuses sibling fallback and never reopens a server-terminal original', () => {
+    fs.writeFileSync(stateFile('sibling'),JSON.stringify(endedState({sessionId:'sibling',sessionTag:'sibling',claudeSessionId:'other',agentSessionId:'other',agentSlug:'codex',status:'RUNNING',endedAt:undefined})));
+    expect(findStateForHookInput(repo,native,'codex')).toBeNull();
+    fs.writeFileSync(stateFile('original'),JSON.stringify(endedState({claudeSessionId:'',agentSessionId:CONV,agentSlug:'codex',serverTerminal:true})));
+    expect(findStateForHookInput(repo,native,'codex')).toBeNull();
+  });
+  it('keeps old rotating payload semantics and persists modern identity on auto-create', () => {
+    expect(hookLookupSessionId(CONV,'codex')).toBeUndefined();
+    expect(hookLookupSessionId(CONV,'codex',undefined,'')).toBeUndefined();
+    expect(hookLookupSessionId(CONV,'codex',undefined,'turn')).toBe(CONV);
+    expect(resolveAutoAgentSessionId('codex',undefined,CONV)).toBeUndefined();
+    expect(resolveAutoAgentSessionId('codex',undefined,CONV,'turn')).toBe(CONV);
   });
 });

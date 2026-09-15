@@ -1097,6 +1097,101 @@ export function createShadowCommit(repoPath: string, tag: string): string | null
   }
 }
 
+/**
+ * A commit whose tree is every one of `tips` merged — the tree a turn started
+ * from when it inherited more than one line (checked a branch out, then merged
+ * main into it). See `widenToEveryInheritedLine`.
+ *
+ * Deterministic: fixed identity, the newest tip's date, parents in the given
+ * order — so each Stop that asks gets the same sha back rather than a new
+ * object. Conflicted paths take `conflictSide`'s version (see
+ * `lineTheTurnStoodOn`). Null when a conflict has no side to take, or git is
+ * too old for `merge-tree --write-tree` (2.38); callers keep their
+ * single-commit answer.
+ */
+export function commitCombiningTips(repoPath: string, tips: string[], conflictSide: string | null = null): string | null {
+  if (tips.length < 2 || !tips.every((t) => HEX.test(t))) return null;
+  const gitOpts = { cwd: repoPath, timeoutMs: 10_000, maxBuffer: 10 * 1024 * 1024 };
+  try {
+    const newest = Math.max(...(gitOrNull(['show', '-s', '--format=%ct', ...tips], gitOpts) || '')
+      .split('\n').map((l) => Number(l.trim())).filter((n) => Number.isFinite(n) && n > 0));
+    if (!Number.isFinite(newest)) return null;
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Origin', GIT_AUTHOR_EMAIL: SHADOW_IDENTITY_EMAIL,
+      GIT_COMMITTER_NAME: 'Origin', GIT_COMMITTER_EMAIL: SHADOW_IDENTITY_EMAIL,
+      GIT_AUTHOR_DATE: `${newest} +0000`, GIT_COMMITTER_DATE: `${newest} +0000`,
+    };
+    let acc = tips[0];
+    for (const next of tips.slice(1)) {
+      const merged = mergeTreeOf(repoPath, acc, next, gitOpts);
+      if (!merged) return null;
+      let tree = merged.tree;
+      if (!merged.clean) {
+        // A conflict is resolved to the side the turn stood on: the turn's own
+        // merge authored the resolution, measured against that side.
+        if (!conflictSide || !HEX.test(conflictSide)) return null;
+        if (merged.conflicted.length === 0) return null;
+        const resolved = treeWithInheritedFiles(tree, new Map(merged.conflicted.map((f) => [f, conflictSide])), gitOpts);
+        if (!resolved) return null;
+        tree = resolved;
+      }
+      const commit = gitDetailed(
+        ['commit-tree', '--no-gpg-sign', tree, '-p', acc, '-p', next, '-m', 'origin inherited lines'],
+        { ...gitOpts, env },
+      );
+      const sha = (commit.stdout || '').trim();
+      if (commit.status !== 0 || !HEX.test(sha)) return null;
+      acc = sha;
+    }
+    return acc;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The tree git itself produces merging `a` and `b`, without touching the
+ * working tree, index or refs — conflict markers included — and the paths it
+ * could not merge.
+ *
+ * The one place Origin asks git "what would this merge be":
+ *   - mergeOwnDiff (history-backfill.ts) credits a merge only where it differs
+ *     from this tree; a file both branches changed in different places was
+ *     merged by git, not resolved by whoever ran the merge.
+ *   - commitCombiningTips names the tree a turn inherited from several lines,
+ *     and replaces the `conflicted` paths with the side the turn stood on.
+ *
+ * A conflict exits 1 and still writes the tree, so `clean: false` is an answer,
+ * not a failure. Null when git cannot say — a git older than 2.38 has no
+ * `merge-tree --write-tree` — so callers keep their previous answer.
+ */
+export function mergeTreeOf(
+  repoPath: string,
+  a: string,
+  b: string,
+  gitOpts: { cwd?: string; timeoutMs?: number; maxBuffer?: number } = {},
+): { tree: string; clean: boolean; conflicted: string[] } | null {
+  try {
+    // -z: tree NUL, each conflicted path NUL, then an empty field.
+    const out = gitDetailed(
+      ['merge-tree', '--write-tree', '--name-only', '-z', '--no-messages', a, b],
+      { ...gitOpts, cwd: repoPath },
+    );
+    if (out.status !== 0 && out.status !== 1) return null;
+    const fields = (out.stdout || '').split('\0');
+    const tree = (fields[0] || '').trim();
+    if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(tree)) return null;
+    const conflicted: string[] = [];
+    if (out.status === 1) {
+      for (const f of fields.slice(1)) { if (!f) break; conflicted.push(f); }
+    }
+    return { tree, clean: out.status === 0, conflicted };
+  } catch {
+    return null;
+  }
+}
+
 export interface AgyDiffResult {
   diff: string;            // unified diff of agy's work since the baseline
   filesChanged: string[];  // files agy actually touched (pre-existing dirt excluded)
@@ -1393,6 +1488,13 @@ export function commitDiffScopedToPrompt(
   baselineSha: string | null | undefined,
   commitSha: string,
   files: string[],
+  maxDiffSize = MAX_DIFF_SIZE,
+  /**
+   * file → the inherited commit whose version of it the turn started from
+   * (`inheritedFileSources`). Those files are measured from that commit instead
+   * of the baseline: a file a checkout brought in is not the turn's creation.
+   */
+  inheritedFrom?: Map<string, string> | null,
 ): { diff: string; linesAdded: number; linesRemoved: number; files: string[]; diffTruncated: boolean } | null {
   if (!baselineSha || !HEX.test(baselineSha) || !HEX.test(commitSha)) return null;
   if (baselineSha === commitSha) return null;
@@ -1407,9 +1509,13 @@ export function commitDiffScopedToPrompt(
   const parentCount = (gitOrNull(['rev-list', '--parents', '-n', '1', commitSha], gitOpts)
     || '').trim().split(/\s+/).length - 1;
   if (parentCount > 1 && files.length === 0) return null;
-  const baseTree = gitOrNull(['rev-parse', `${baselineSha}^{tree}`], gitOpts);
+  let baseTree = gitOrNull(['rev-parse', `${baselineSha}^{tree}`], gitOpts);
   const commitTree = gitOrNull(['rev-parse', `${commitSha}^{tree}`], gitOpts);
   if (!baseTree || !commitTree || !HEX.test(baseTree) || !HEX.test(commitTree)) return null;
+  // An unbuildable tree keeps the baseline — today's answer, not a worse one.
+  if (inheritedFrom && inheritedFrom.size > 0) {
+    baseTree = treeWithInheritedFiles(baseTree, inheritedFrom, gitOpts) || baseTree;
+  }
   // Tree object ids, not paths — raw identity is the question. // path-compare-ok
   if (baseTree === commitTree) return { diff: '', linesAdded: 0, linesRemoved: 0, files: [], diffTruncated: false }; // path-compare-ok
   try {
@@ -1426,10 +1532,10 @@ export function commitDiffScopedToPrompt(
     let diffTruncated = false;
     for (const u of CONTEXT_LADDER) {
       diff = stripIgnoredSectionsFromDiff(git(['diff', `--unified=${u}`, baseTree, commitTree, ...pathspec], gitOpts));
-      if (diff.length <= MAX_DIFF_SIZE) break;
+      if (diff.length <= maxDiffSize) break;
     }
-    if (diff.length > MAX_DIFF_SIZE) {
-      diff = truncateToWholeSections(diff, MAX_DIFF_SIZE);
+    if (diff.length > maxDiffSize) {
+      diff = truncateToWholeSections(diff, maxDiffSize);
       diffTruncated = true;
     }
     let linesAdded = 0;
@@ -1446,6 +1552,41 @@ export function commitDiffScopedToPrompt(
     return { diff, linesAdded, linesRemoved, files: named, diffTruncated };
   } catch {
     return null;
+  }
+}
+
+/**
+ * `baseTree` with each named file replaced by its version at the given commit
+ * (removed when absent there), written through a private temp index — never
+ * .git/index. Null when any entry cannot be placed.
+ */
+function treeWithInheritedFiles(
+  baseTree: string,
+  sources: Map<string, string>,
+  gitOpts: { cwd: string; timeoutMs: number; maxBuffer: number },
+): string | null {
+  // Tree paths are repo-root relative; update-index resolves against cwd.
+  const top = gitOrNull(['rev-parse', '--show-toplevel'], gitOpts);
+  if (!top) return null;
+  const rootOpts = { ...gitOpts, cwd: top };
+  const tmpIndex = tmpIndexPath('origin-inherited-tree');
+  const indexOpts = { ...rootOpts, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } };
+  try {
+    git(['read-tree', baseTree], indexOpts);
+    for (const [file, rev] of sources) {
+      if (isUnsafeGitShowPath(file) || !HEX.test(rev)) return null;
+      const entry = git(['ls-tree', '--full-tree', '-z', rev, '--', file], rootOpts);
+      const m = entry.match(/^(\d{6}) blob ([a-fA-F0-9]+)\t/);
+      if (m) git(['update-index', '--add', '--cacheinfo', `${m[1]},${m[2]},${file}`], indexOpts);
+      else if (!entry.trim()) git(['update-index', '--force-remove', '--', file], indexOpts);
+      else return null;
+    }
+    const tree = git(['write-tree'], indexOpts).trim();
+    return HEX.test(tree) ? tree : null;
+  } catch {
+    return null;
+  } finally {
+    try { fs.unlinkSync(tmpIndex); } catch { /* ignore */ }
   }
 }
 

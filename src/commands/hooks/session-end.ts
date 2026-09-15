@@ -12,6 +12,9 @@ import { applyLedgerToMappings } from '../../capture-from-ledger.js';
 import { stateLedgerIsContended } from '../../ledger-producer.js';
 import { preferCommitPatchForCommittedTurns } from '../../commit-patch-for-committed-turn.js';
 import { preferShadowRangeForTurns } from '../../prefer-shadow-range.js';
+import { dropInheritedFilesFromTurns } from '../../drop-inherited-files.js';
+import { authoredFilesForTurn } from './stop.js';
+import { trimWatchedEditsForTurns } from '../../trim-watched-edits.js';
 import { isConnectedMode, loadAgentConfig, loadConfig } from '../../config.js';
 import { debugLog } from '../../debug-log.js';
 import { queueDevinBackfill } from '../../devin-backfill.js';
@@ -57,7 +60,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { localTurnForServerRow, rebaseToServerRows, turnIdForServerRow } from '../../turn-index.js';
-import { applyAuthoredTotals, currentSessionWorkTree, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, windowInheritsCommitsForTurn, filterUncommittedDiff, findStateForHook, hookLookupSessionId, liveCaptureEnabled, normalizeWorkspaceRoot, recordShellWindowEdits, sessionAuthoredSnapshot, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
+import { applyAuthoredTotals, currentSessionWorkTree, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFilesForTurn, windowInheritsCommitsForTurn, filterUncommittedDiff, findStateForHookInput, liveCaptureEnabled, normalizeWorkspaceRoot, recordShellWindowEdits, sessionAuthoredSnapshot, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
 import { compareResolverWithPasses, createTurnObserver, observeReconstruction, type TurnObservation } from '../../resolve-turn.js';
 
 
@@ -750,7 +753,7 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
     // transcript. That session cannot resume, so end it here instead of leaving
     // a Running ghost behind its heartbeat.
     const ghost = agentSlug === 'claude-code'
-      ? findStateForHook(input.cwd || process.cwd(), hookLookupSessionId(input.session_id, agentSlug, input.conversation_id), agentSlug)?.state
+      ? findStateForHookInput(input.cwd || process.cwd(), input, agentSlug)?.state
       : null;
     const ghostTranscript = (typeof input.transcript_path === 'string' && input.transcript_path) || ghost?.transcriptPath || null;
     const neverStarted = !!ghost && sessionNeverStarted({
@@ -777,7 +780,7 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
       hookCwd = wsRoot;
     }
   }
-  const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug, input.conversation_id), agentSlug);
+  const found = findStateForHookInput(hookCwd, input, agentSlug);
   const state = found?.state || null;
   if (!state) {
     debugLog('session-end', 'ABORT: missing state', { hasConfig: !!config, hasState: !!state });
@@ -1139,6 +1142,19 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
       }
     } catch { /* never block the end of a session */ }
 
+    // Same re-check Stop runs on earlier turns' saved rows — see
+    // drop-inherited-files.ts. editsJson is not built yet here; the ledger and
+    // the turn's own commits are its authorship evidence.
+    try {
+      dropInheritedFilesFromTurns(state, promptMappings as any, {
+        inheritedFiles: (fromShadow, toShadow, localTurn) => inheritedFilesForTurn(
+          state.repoPath || '', state, fromShadow, toShadow, localTurn,
+        ),
+        authoredFiles: (localTurn, serverRow) => authoredFilesForTurn(state, localTurn, serverRow),
+        log: (event, data) => debugLog('session-end', event, data),
+      });
+    } catch { /* never block the end of a session */ }
+
     // Same pass Stop runs. Agents that actually terminate here (Gemini, a
     // killed process) never get a later Stop to put the commit patch back;
     // without this, session-end re-sends baseline..HEAD with the newest stamp.
@@ -1275,6 +1291,12 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
             }
             promptEditsByIndex.set(cap.promptIndex, JSON.stringify(cap));
           }
+          // The git passes above already scoped each row; the edits still
+          // carry every write the journal saw. Same trim as Stop.
+          trimWatchedEditsForTurns(
+            promptEditsByIndex, promptMappings as any,
+            (event, data) => debugLog('session-end', event, data),
+          );
           debugLog('session-end', 'capturePromptEdits ok', {
             agent: captureAgent,
             captured: captures.length,

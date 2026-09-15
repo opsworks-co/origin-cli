@@ -24,6 +24,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { combineApplyableTurnDiff } from './applyable-turn-diff.js';
 import { git, gitDetailed, gitOrNull } from './utils/exec.js';
+import { mergeTreeOf } from './git-capture.js';
 
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
 
@@ -327,6 +328,19 @@ export function mergeOwnDiff(
   for (const p of parents.slice(1)) {
     const other = changedAgainst(p);
     resolved = new Set([...resolved].filter((f) => other.has(f)));
+  }
+  // Differing from both parents is not enough: a file BOTH branches changed,
+  // in different places, differs from each and was merged by git without
+  // anyone resolving anything. Session c5487aa9 merged main into #1642, where
+  // #1640 and #1642 had each added an import to stop.ts and session-end.ts;
+  // the merge was credited with both. What the merge commit authored is where
+  // it differs from git's own merge of its parents.
+  if (resolved.size > 0 && parents.length === 2) {
+    const auto = mergeTreeOf(cwd, parents[0], parents[1])?.tree;
+    if (auto) {
+      const edited = changedAgainst(auto);
+      resolved = new Set([...resolved].filter((f) => edited.has(f)));
+    }
   }
   const filesChanged = [...resolved];
   // A clean merge resolves nothing and therefore authored nothing. Empty is

@@ -45,7 +45,7 @@ import {
   turnBaseline,
   applyRewritePairsToState,
 } from '../session-state.js';
-import { capCommitMessage, captureGitState, captureAgyDiff, getDirtyFiles, createShadowCommit, commitDiffScopedToPrompt, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, sameSha, MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
+import { capCommitMessage, captureGitState, captureAgyDiff, getDirtyFiles, createShadowCommit, commitCombiningTips, commitDiffScopedToPrompt, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, sameSha, MAX_DIFF_SIZE, MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
 import { capDiff, fitDiffToBudget } from '../diff-budget.js';
 import { finalHunksForCaptures } from '../final-state-blame.js';
 import { parseAntigravityTranscript, estimateAntigravityUsage, agyArgs } from '../antigravity-transcript.js';
@@ -200,7 +200,7 @@ import {
 import { createSnapshot, condenseSnapshot, listSnapshots, condenseAndCleanupSession, cleanupSessionShadowBranch, type SnapshotMeta } from './snapshot.js';
 import { execFileSync, spawn } from 'child_process';
 import { toRepoRelative } from '../transcript-watch.js';
-import { inheritedBaseline, inheritedBeforeStates, type InheritedWindowDeps } from '../inherited-window-baseline.js';
+import { inheritedBaseline, inheritedBeforeStates, inheritedFileSources, type InheritedWindowDeps } from '../inherited-window-baseline.js';
 import { countDiffLines } from '../transcript-adapters.js';
 import fs from 'fs';
 import path from 'path';
@@ -2079,7 +2079,7 @@ export function journalHasMark(journalPath: string, turnId: string | undefined):
 export function preMarkTurnForBackgroundSubmit(agentSlug: string, input: Record<string, any>): boolean {
   try {
     const hookCwd = normalizeWorkspaceRoot(input.cwd) || process.cwd();
-    const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug, input.conversation_id), agentSlug);
+    const found = findStateForHookInput(hookCwd, input, agentSlug);
     if (!found?.state) return false;
     const state = found.state;
     const idx = state.prompts?.length || 0;
@@ -2449,12 +2449,29 @@ export function hookLookupSessionId(
   sessionId: string | undefined,
   agentSlug?: string,
   conversationId?: string,
+  turnId?: string,
 ): string | undefined {
   if ((agentSlug || '').toLowerCase() === 'cursor') {
     const conv = typeof conversationId === 'string' ? conversationId.trim() : '';
     return conv || undefined;
   }
+  if (hasNativeCodexIdentity(agentSlug, { session_id: sessionId, turn_id: turnId })) return sessionId;
   return STABLE_SESSION_ID_AGENTS.includes(agentSlug || '') ? sessionId : undefined;
+}
+
+/** Older Codex hooks rotated session_id. Native hooks separate session and turn. */
+export function hasNativeCodexIdentity(agentSlug: string | undefined, input: Record<string, any>): boolean {
+  return agentSlug === 'codex' && typeof input.session_id === 'string' && !!input.session_id.trim()
+    && typeof input.turn_id === 'string' && !!input.turn_id.trim();
+}
+
+/** Native identities must never fall through to a sibling's active session. */
+export function findStateForHookInput(hookCwd: string, input: Record<string, any>, agentSlug?: string): { state: SessionState; saveCwd: string } | null {
+  const native = hasNativeCodexIdentity(agentSlug, input);
+  const id = hookLookupSessionId(input.session_id, agentSlug, input.conversation_id, input.turn_id);
+  const found = findStateForHook(hookCwd, id, agentSlug, native);
+  if (found || !native) return found;
+  return resumeEndedConversationState(hookCwd, id, agentSlug, 'codex-native-resume', true);
 }
 
 function sessionMatchesLookupId(s: SessionState, id: string): boolean {
@@ -2488,6 +2505,7 @@ export function resumeEndedConversationState(
   conversationId: string | undefined,
   agentSlug: string | undefined,
   scope: string,
+  nativeCodex = false,
 ): { state: SessionState; saveCwd: string } | null {
   if (!conversationId) return null;
   const repoPath = discoverGitRoot(hookCwd) || hookCwd;
@@ -2498,10 +2516,10 @@ export function resumeEndedConversationState(
     if (!s || typeof s !== 'object' || !s.sessionId) return;
     if (String(s.status || '').toUpperCase() !== 'ENDED') return;
     if (s.serverTerminal === true) return;
-    if (s.claudeSessionId !== conversationId) return;
+    if (nativeCodex ? s.agentSessionId !== conversationId : s.claudeSessionId !== conversationId) return;
     if (agentSlug && !sessionMatchesAgent(s, agentSlug)) return;
     const started = s.startedAt ? Date.parse(s.startedAt) : NaN;
-    if (!Number.isFinite(started) || Date.now() - started > MAX_AGE_MS) return;
+    if (!nativeCodex && (!Number.isFinite(started) || Date.now() - started > MAX_AGE_MS)) return;
     if (!s.sessionTag && tagFromName) s.sessionTag = tagFromName;
     candidates.push(s);
   };
@@ -2589,7 +2607,7 @@ export function sameDir(a?: string | null, b?: string | null): boolean {
 // Exported for tests only (same reason as hookLookupSessionId): every hook that
 // captures work routes through here, and its failure mode is silent — an ABORT
 // in the log and a turn that never reaches the dashboard.
-export function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?: string): { state: SessionState; saveCwd: string } | null {
+export function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?: string, strictIdentity = false): { state: SessionState; saveCwd: string } | null {
   const repoPath = discoverGitRoot(hookCwd) || hookCwd;
 
   // Scan ONCE and reuse. This used to call listActiveSessions twice purely to
@@ -2701,7 +2719,7 @@ export function findStateForHook(hookCwd: string, claudeSessionId?: string, agen
       debugLog('findStateForHook', 'exact match', { claudeSessionId, sessionId: found.sessionId, tag: found.sessionTag });
       return { state: found, saveCwd: found.repoPath || repoPath };
     }
-    if (agentSlug === 'codex' || (agentSlug || '').toLowerCase() === 'cursor') {
+    if (!strictIdentity && (agentSlug === 'codex' || (agentSlug || '').toLowerCase() === 'cursor')) {
       // Codex: stdin session_id is per-turn. Cursor: conversation_id is stable
       // per chat, but older auto-create rows stored the rotating session_id
       // (or nothing) on claudeSessionId / agentSessionId, so a lookup keyed
@@ -3388,6 +3406,44 @@ export function inheritedBeforeStatesForTurn(
 }
 
 /**
+ * post-commit's view of a commit as one turn's work: `baseline → commit`,
+ * restricted to the commit's files, with each file the turn INHERITED measured
+ * from the commit it came from rather than from the turn's shadow.
+ *
+ * Session c5487aa9 turn 2 checked out another session's PR branch (which
+ * created a test file), merged origin/main, and committed +2/-1 to that file.
+ * The shadow was cut before the checkout, so the file read as created: the
+ * turn was sent +64/-0. See `inheritedFileSources` for why this is asked per
+ * file and not through `inheritedBaseline`.
+ */
+export function scopedCommitForTurn(
+  repoPath: string,
+  state: SessionState & { commitTurns?: Array<{ sha?: string; turnId?: string }>; promptTurnIds?: string[] },
+  promptIndex: number,
+  baselineSha: string | null | undefined,
+  commitSha: string,
+  files: string[],
+): (NonNullable<ReturnType<typeof commitDiffScopedToPrompt>> & { inheritedFiles: string[] }) | null {
+  let inherited = new Map<string, string>();
+  if (baselineSha && files.length > 0) {
+    try {
+      const opts = { ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8' as const };
+      inherited = inheritedFileSources(baselineSha, files, {
+        ...inheritedWindowDeps(repoPath, state, promptIndex),
+        // The window this commit closes, whichever turn is open now.
+        head: () => commitSha,
+        listWindowTouching: (sha, paths) => execFileSync('git', ['rev-list', `${sha}..${commitSha}`, '--', ...paths], opts)
+          .split('\n').map((s) => s.trim()).filter(Boolean),
+        isMerge: (sha) => execFileSync('git', ['rev-list', '--parents', '-n', '1', sha], opts)
+          .trim().split(/\s+/).length > 2,
+      });
+    } catch { inherited = new Map(); }
+  }
+  const scoped = commitDiffScopedToPrompt(repoPath, baselineSha, commitSha, files, MAX_DIFF_SIZE, inherited);
+  return scoped ? { ...scoped, inheritedFiles: [...inherited.keys()] } : null;
+}
+
+/**
  * Did commits this turn did not make land between two of its shadows?
  *
  * The shadow-window pass replaces a turn's row with `shadow → next shadow`
@@ -3423,6 +3479,54 @@ export function windowInheritsCommitsForTurn(
     return shas.some((sha) => !deps.isOwnWork(sha));
   } catch {
     return false;
+  }
+}
+
+/**
+ * Files commits a turn did not make changed between two of its shadows and
+ * left exactly as they wrote them at the window's end — what a checkout, pull
+ * or merge inside the turn put on disk, as opposed to what the turn wrote.
+ *
+ * Same window and ownership rules as `windowInheritsCommitsForTurn`, compared
+ * by content like `filesLeftByForeignCommits`, but against the END shadow's
+ * tree rather than the live worktree, so it answers for a turn that has
+ * closed. A backward or divergent checkout names no commit to compare with, so
+ * it answers nothing. Any failure answers nothing — today's behaviour.
+ */
+export function inheritedFilesForTurn(
+  repoPath: string,
+  state: SessionState & { commitTurns?: Array<{ sha?: string; turnId?: string }>; promptTurnIds?: string[] },
+  fromShadow: string,
+  toShadow: string,
+  promptIndex: number,
+): Set<string> {
+  const out = new Set<string>();
+  try {
+    const deps = inheritedWindowDeps(repoPath, state, promptIndex);
+    const start = deps.baselineCommit!(fromShadow);
+    const end = deps.baselineCommit!(toShadow);
+    const hex = /^[a-fA-F0-9]{7,40}$/;
+    if (!hex.test(start) || !hex.test(end) || start === end) return out;
+    if (!deps.isAncestor(start, end)) return out;
+    const shas = execFileSync('git', ['rev-list', `${start}..${end}`], {
+      ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+    }).split('\n').map((s) => s.trim()).filter(Boolean);
+    let budget = FOREIGN_WINDOW_FILE_BUDGET;
+    const seen = new Set<string>();
+    // Newest first: the last commit to touch a file is the one whose bytes the
+    // end of the window can still hold.
+    for (const sha of shas) {
+      if (deps.isOwnWork(sha)) continue;
+      for (const file of deps.changedFiles(sha)) {
+        if (seen.has(file)) continue;
+        seen.add(file);
+        if (budget-- <= 0) return out;
+        if (deps.readAtRev(sha, file) === deps.readAtRev(toShadow, file)) out.add(file);
+      }
+    }
+    return out;
+  } catch {
+    return new Set();
   }
 }
 
@@ -3482,6 +3586,15 @@ function inheritedWindowDeps(
       return commitBelongsToSession(repoPath, sha, state, localEmail);
     },
     changedFiles: (sha) => commitChangedFiles(repoPath, sha),
+    // A turn that inherited more than one line (checkout, then merge main)
+    // started from all of them merged, not from whichever is newest by date.
+    ancestryInWindow: (baseline, sha) => execFileSync('git', ['rev-list', `${baseline}..${sha}`], {
+      ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+    }).split('\n').map((s) => s.trim()).filter(Boolean),
+    independent: (shas) => execFileSync('git', ['merge-base', '--independent', ...shas], {
+      ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+    }).split('\n').map((s) => s.trim()).filter(Boolean),
+    combineTips: (tips, side) => commitCombiningTips(repoPath, tips, side),
     readAtRev: (sha, file) => readFileAtRev(repoPath, sha, file),
     isAncestor: (a, b) => {
       try {

@@ -52,7 +52,7 @@
  */
 import { mergeOwnDiff } from './history-backfill.js';
 import { execFileSync } from 'child_process';
-import { commitDiffScopedToPrompt, MAX_DIFF_SIZE } from './git-capture.js';
+import { commitDiffScopedToPrompt, MAX_DIFF_SIZE, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
 import { localTurnForServerRow } from './turn-index.js';
 import type { TurnObservation } from './resolve-turn.js';
 
@@ -270,7 +270,10 @@ function patchAcrossBranches(
   const parts: Array<NonNullable<ReturnType<typeof commitDiffScopedToPrompt>>> = [];
   for (const { chain, files } of perChain) {
     const parent = git(repoPath, ['rev-parse', '--verify', '-q', `${chain.first}^1`]).out.trim();
-    const scoped = commitDiffScopedToPrompt(repoPath, HEX.test(parent) ? parent : EMPTY_TREE, chain.tip, files);
+    // Step down context before upload, using the per-turn wire budget rather
+    // than the much larger session budget. Reserve room for every branch.
+    const scoped = commitDiffScopedToPrompt(repoPath, HEX.test(parent) ? parent : EMPTY_TREE, chain.tip, files,
+      Math.floor(MAX_PROMPT_DIFF_LEN / perChain.length));
     // A branch that cannot be diffed would leave its work out, which is the
     // undercount this exists to fix. Keep the ledger instead.
     if (!scoped) {
@@ -376,9 +379,23 @@ export function preferCommitPatchForCommittedTurns(
     // commits HEAD neither reaches nor carries the content of is work one
     // range off HEAD cannot describe.
     if (existing.length > 0) {
-      const chains = chainsOf(repoPath, existing);
-      const stranded = chains.filter((c) => strandedOnBranch(repoPath, c, shas, rewrites)).length;
+      const originalChains = chainsOf(repoPath, existing);
+      const stranded = originalChains.filter((c) => strandedOnBranch(repoPath, c, shas, rewrites)).length;
       if (stranded > 0) {
+        // An amend leaves the old object in Git. It must not become another
+        // branch patch alongside its replacement merely because a different
+        // sibling branch is stranded. Keep the original only when none of its
+        // recorded replacements with the same parents is locally available.
+        // A squash can replace an entire chain; leave that chain intact for
+        // the existing squash handling instead of substituting only its tip.
+        const surviving = [...new Set(existing.map((sha) =>
+          rewritesOf(sha, rewrites).reverse().find((replacement) =>
+            git(repoPath, ['cat-file', '-e', `${replacement}^{commit}`]).ok
+            && git(repoPath, ['show', '-s', '--format=%P', replacement]).out.trim()
+              === git(repoPath, ['show', '-s', '--format=%P', sha]).out.trim(),
+          ) || sha,
+        ))];
+        const chains = chainsOf(repoPath, surviving);
         if (patchAcrossBranches(repoPath, pm, turnId, chains, stranded, deps)) replaced++;
         continue;
       }

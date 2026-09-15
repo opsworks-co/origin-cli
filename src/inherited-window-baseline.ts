@@ -62,6 +62,21 @@ export interface InheritedWindowDeps {
   ownCommits?: string[];
   firstParent?: (sha: string) => string;
   changedFilesBetween?: (from: string, to: string) => string[];
+  /** `git rev-list <baseline>..<end> -- <files>` — the window, limited to
+   *  commits that touched these files. Falls back to `listWindow`. */
+  listWindowTouching?: (baselineSha: string, files: string[]) => string[];
+  /** `git rev-list <baseline>..<sha>` — the window commits behind `sha`. */
+  ancestryInWindow?: (baselineSha: string, sha: string) => string[];
+  /** `git merge-base --independent` — the commits no other one descends from. */
+  independent?: (shas: string[]) => string[];
+  /**
+   * A commit whose tree is all of `tips` merged. Where they conflict, the
+   * conflicted paths take `conflictSide`'s version; null when there is no side
+   * to take or the merge cannot be computed.
+   */
+  combineTips?: (tips: string[], conflictSide: string | null) => string | null;
+  /** Has this commit more than one parent? */
+  isMerge?: (sha: string) => boolean;
   /** Ceiling on file reads, mirroring FOREIGN_WINDOW_FILE_BUDGET in hooks.ts. */
   fileBudget?: number;
 }
@@ -100,15 +115,17 @@ export function inheritedBaseline(
   // picks one off the other branch, re-baselining onto a tree the turn's own
   // work is not in. The commit the turn started from is the newest one that is
   // behind everything the turn wrote.
-  for (const sha of window) {
-    if (ours.has(sha)) continue;
-    let behindOurs = true;
+  const behindAllOurs = (sha: string): boolean => {
     for (const own of ours) {
       let ok: boolean;
       try { ok = deps.isAncestor(sha, own); } catch { ok = false; }
-      if (!ok) { behindOurs = false; break; }
+      if (!ok) return false;
     }
-    if (behindOurs) return sha;
+    return true;
+  };
+  for (const sha of window) {
+    if (ours.has(sha)) continue;
+    if (behindAllOurs(sha)) return widenToEveryInheritedLine(baselineSha, sha, window, ours, behindAllOurs, deps);
   }
   // A backward/divergent checkout can add NO foreign commits to baseline..HEAD.
   // In that case the destination is HEAD, or the parent before this turn's
@@ -128,6 +145,167 @@ export function inheritedBaseline(
         && !deps.isAncestor(start, destination)) return destination;
     } catch { /* No proven checkout boundary: retain the original baseline. */ }
   }
+  return null;
+}
+
+/**
+ * The newest inherited commit is only the whole story when the turn inherited
+ * ONE line. A turn that checks out a branch and then merges main inherits two,
+ * and "newest" is then decided by commit date — session c5487aa9 turn 2 got
+ * main's commit (00:25Z) over pr-1642's (00:09Z), a tree without the file the
+ * PR created, and every producer measured that file as the turn's creation.
+ *
+ * So: every inherited line that is not already behind `first` is found, and
+ * when there is more than one, `combineTips` names a commit whose tree holds
+ * them all — the tree the turn's own merge started from. Anything that cannot
+ * be answered returns `first`, today's behaviour.
+ */
+function widenToEveryInheritedLine(
+  baselineSha: string,
+  first: string,
+  window: string[],
+  ours: Set<string>,
+  behindAllOurs: (sha: string) => boolean,
+  deps: InheritedWindowDeps,
+): string {
+  if (!deps.ancestryInWindow || !deps.independent || !deps.combineTips) return first;
+  try {
+    const behindFirst = new Set(deps.ancestryInWindow(baselineSha, first));
+    const others = window.filter((sha) => sha !== first && !ours.has(sha) && !behindFirst.has(sha));
+    if (others.length === 0) return first;
+    // One argv per sha: a merge of main can bring in hundreds.
+    if (others.length > (deps.fileBudget ?? DEFAULT_FILE_BUDGET)) return first;
+    const tips = deps.independent(others).filter((sha) => behindAllOurs(sha));
+    if (tips.length === 0) return first;
+    // Where two lines conflict, the turn's merge resolved them — its own work,
+    // measured against the side it stood on, as mergeOwnDiff measures a merge.
+    const side = lineTheTurnStoodOn(baselineSha, (sha) => ours.has(sha), window.length, deps);
+    const all = [first, ...tips];
+    const ordered = side ? [...all.filter((t) => t === side), ...all.filter((t) => t !== side)] : all;
+    return deps.combineTips(ordered, side) || first;
+  } catch {
+    return first;
+  }
+}
+
+/**
+ * For each of `files`, the ONE inherited commit whose version of it the turn
+ * started from.
+ *
+ * `inheritedBaseline` names one commit for the whole tree, and a merge makes
+ * that a coin toss. Session c5487aa9 turn 2 checked out pr-1642 (ced61af0c,
+ * another session's, which CREATED a test file), merged origin/main
+ * (acd0c65bd, which never touched it), then committed +2/-1 to the file. Both
+ * foreign commits are behind all of the turn's own; main's was the newer, so
+ * newest-first names a tree without the file, and post-commit sent +64/-0.
+ *
+ * Asked per file, the order stops mattering: only commits that touched the file
+ * are candidates. A file is left out — its caller keeps the turn's own
+ * baseline, today's behaviour — when the answer is not a single commit:
+ *   - no inherited commit touched it;
+ *   - an inherited commit touched it AFTER the turn's own work on it (a pull
+ *     between two of its commits), where neither tree is where the turn began;
+ *   - two parallel inherited lines both touched it;
+ *   - a MERGE of the turn's touched it — its resolution mixed both sides.
+ */
+export function inheritedFileSources(
+  baselineSha: string | null | undefined,
+  files: string[],
+  deps: InheritedWindowDeps,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!baselineSha || !HEX.test(baselineSha) || files.length === 0) return out;
+  const budget = deps.fileBudget ?? DEFAULT_FILE_BUDGET;
+  if (files.length > budget) return out;
+  let window: string[];
+  try {
+    window = deps.listWindowTouching ? deps.listWindowTouching(baselineSha, files) : deps.listWindow(baselineSha);
+  } catch { return out; }
+  if (!Array.isArray(window) || window.length === 0 || window.length > budget) return out;
+
+  const wanted = new Set(files);
+  const touching = new Map<string, Array<{ sha: string; own: boolean }>>();
+  for (const sha of window) {
+    let changed: string[];
+    try { changed = deps.changedFiles(sha); } catch { return new Map(); }
+    const hits = changed.filter((f) => wanted.has(f));
+    if (hits.length === 0) continue;
+    // Unanswerable counts as the turn's own, as in inheritedBaseline.
+    let own: boolean;
+    try { own = deps.isOwnWork(sha); } catch { own = true; }
+    for (const file of hits) {
+      const list = touching.get(file) || [];
+      list.push({ sha, own });
+      touching.set(file, list);
+    }
+  }
+
+  const ancestor = (a: string, b: string): boolean => {
+    try { return deps.isAncestor(a, b); } catch { return false; }
+  };
+  const ownCache = new Map<string, boolean>();
+  for (const list of touching.values()) for (const c of list) ownCache.set(c.sha, c.own);
+  const isOwn = (sha: string): boolean => {
+    const known = ownCache.get(sha);
+    if (known !== undefined) return known;
+    let own: boolean;
+    try { own = deps.isOwnWork(sha); } catch { own = true; }
+    ownCache.set(sha, own);
+    return own;
+  };
+  // Computed once, and only when some file needs it.
+  let stoodOn: string | null | undefined;
+  const side = () => (stoodOn === undefined
+    ? (stoodOn = lineTheTurnStoodOn(baselineSha, isOwn, budget, deps))
+    : stoodOn);
+
+  for (const [file, commits] of touching) {
+    const foreign = commits.filter((c) => !c.own).map((c) => c.sha);
+    if (foreign.length === 0) continue;
+    const own = commits.filter((c) => c.own).map((c) => c.sha);
+    if (!foreign.every((f) => own.every((o) => ancestor(f, o)))) continue;
+    const tips = foreign.filter((f) => !foreign.some((g) => g !== f && ancestor(f, g)));
+    const resolvedByOurMerge = !!deps.isMerge
+      && own.some((sha) => { try { return deps.isMerge!(sha); } catch { return true; } });
+    // One line, taken in whole: that line's version.
+    if (tips.length === 1 && !resolvedByOurMerge) { out.set(file, tips[0]); continue; }
+    // Parallel lines, or a merge of the turn's that resolved this file: the
+    // resolution is the turn's work, measured against the side it stood on.
+    // A side behind the baseline is the turn's own start — no inherited source.
+    const stood = side();
+    if (!stood) continue;
+    const onSide = tips.filter((t) => t === stood || ancestor(t, stood));
+    if (onSide.length === 1) out.set(file, onSide[0]);
+  }
+  return out;
+}
+
+/**
+ * The commit the turn stood on when it took in other lines: the first commit
+ * that is not the turn's own, walking FIRST parents back from the window's end.
+ *
+ * A merge's first parent is the branch it was run on, so this is the side a
+ * conflict's resolution is measured against — the same convention mergeOwnDiff
+ * uses for a merge's own contribution. Null when it cannot be walked.
+ */
+function lineTheTurnStoodOn(
+  baselineSha: string,
+  isOwn: (sha: string) => boolean,
+  limit: number,
+  deps: InheritedWindowDeps,
+): string | null {
+  if (!deps.head || !deps.firstParent) return null;
+  try {
+    const start = deps.baselineCommit ? deps.baselineCommit(baselineSha) : null;
+    let cur = deps.head();
+    for (let i = 0; i <= limit; i++) {
+      if (!HEX.test(cur)) return null;
+      // Behind the baseline is where the turn began, whoever wrote it.
+      if (start && (cur === start || deps.isAncestor(cur, start))) return cur;
+      if (!isOwn(cur)) return cur;
+      cur = deps.firstParent(cur);
+    }
+  } catch { /* unwalkable: no side */ }
   return null;
 }
 

@@ -1,36 +1,36 @@
 {
  "note": "Recorded by packages/cli capture-e2e with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api capture-golden-stored-rows.test.ts.",
  "roots": [
-  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-rfsFi5/repo",
-  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-rfsFi5"
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-hr2Kvu/repo",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-hr2Kvu"
  ],
  "commits": {
-  "b9f6ec7887c9732ebe035a70d365cfb874dffb8f": "commit: session e2e-sess: claude — change the greeting and leave a note",
-  "1cbe493c4d14831598f3d417bc9859f2e5bf1e74": "commit: session e2e-sess: claude — change the greeting and leave a note",
-  "480c3235215a5219f7af956bc858b6dde6febb79": "commit: session e2e-sess: claude — published session",
-  "4c59fdaae97ac7b0b7635227115aaeb5f65fb8b8": "commit: session e2e-sess: claude — change the greeting and leave a note",
-  "ecd944c2497f51fbc0dad9bc110aa4b774f41d95": "commit: snapshot: becbc6b00eb4",
-  "caf30169b73c8d2c975a044237f00f09beccf0b2": "commit: Notes added by 'git notes add'",
-  "e577c6de74bdbb017541997e414eb1b1338c08ce": "commit: merge theirs",
-  "65471bda4e10a6c4f724bb4fd563c611a68e268c": "commit: session e2e-sess: claude — change the greeting and leave a note",
-  "2a411cf9108634125be9a8da795331ba8a077930": "commit: session e2e-sess: claude — published session",
-  "df279a50e805fbcdba8fd60768814ff2c60e5aae": "commit: session e2e-sess: claude — change the greeting and leave a note",
-  "78581771f7a504aba9d26197ad735f5b1a19ac9c": "commit: snapshot: becbc6b00eb4",
-  "f4ee4cd51e3214885fb5e72f960682166a7b1789": "commit: Notes added by 'git notes add'",
-  "cdb2a190327500b8cb988dbba432d7eadb73b8ed": "commit: more notes",
-  "52ba637bea305b9f1480f0b606fcff5c9ad6865c": "commit: session e2e-sess: claude — change the greeting and leave a note",
-  "ba9786859c08dc2ab964ee51b9d0a00dd8dbe2f9": "commit: session e2e-sess: claude — change the greeting and leave a note",
-  "8bdd1ae7c4d3c91e015f78edf82f83f066262dc7": "commit: session e2e-sess: claude — published session",
-  "7626151588dc6e5f97b53be486fcb963ded57651": "commit: session e2e-sess: claude — change the greeting and leave a note",
-  "7e38d835fbf400fd46efe3a85598678f72761609": "commit: snapshot: becbc6b00eb4",
-  "16e318d9295551cade31293abb2eb2df101f5da2": "commit: Notes added by 'git notes add'",
-  "785c461fbbce1257c03cd2c52e01a3b41d201cbb": "commit: tidy the readme",
-  "e73388f6a921e54f21cb3269227b4bc707c2b1fd": "commit: origin shadow prompt-e2e-claude-s 2026-09-13T23:54:34.007Z",
-  "27f61d971be1a5bcf7cce44e9a18f049a57ffeda": "commit: {\"id\":\"becbc6b00eb4\",\"timestamp\":\"2026-09-13T23:54:33.037Z\",\"sessionTag\":\"e2e-claude-s\",\"filesChanged\":[\"app.py\"],\"treeSha\":\"ac3865c0acabca893398f28d5d1e36e073de05d2\",\"branch\":\"origin/shadow/e2e-claude-s\",\"prompt\":\"change the greeting and leave a note\",\"model\":\"claude\",\"tokensUsed\":36,\"costUsd\":0.0007,\"promptIndex\":0,\"type\":\"auto\",\"commitSha\":\"6b8b03279ab3f0cff73135c894e9029a089f9b22\",\"attribution\":{\"linesAdded\":2,\"linesRemoved\":1,\"aiLinesAdded\":2,\"humanLinesAdded\":0,\"aiPercentage\":100}}",
-  "aaab5d9a41e8c0ec80d19ac660bf2a671cc7c188": "commit: session e2e-sess: claude — change the greeting and leave a note",
-  "070a00654e3ee4384ff844fbf39e4bb352099d37": "commit: origin shadow e2e-claude-s 2026-09-13T23:54:32.919Z",
-  "6b8b03279ab3f0cff73135c894e9029a089f9b22": "commit: base",
-  "407bdf229cc7272e8ca71b41cc53044ef3ec8130": "commit: their PR"
+  "e7657215df6ad9443228123932aad0844948f1d8": "commit: session e2e-sess: claude — change the greeting and leave a note",
+  "fa7f5fdd3822f0f4f02435c0ca62fa2b85f5ea2f": "commit: session e2e-sess: claude — change the greeting and leave a note",
+  "69efc6137ce7b898e87604f6e37b6f97f2ece331": "commit: session e2e-sess: claude — published session",
+  "5ddddf7df8a78e7983476477f1d67bc7c5d8e39c": "commit: session e2e-sess: claude — change the greeting and leave a note",
+  "944cf6e7b0340f63eb6bd5413040977e8909f189": "commit: snapshot: 9c7552dffbd4",
+  "7c2caa9cc3da023aa5000e68deeda7438a346750": "commit: Notes added by 'git notes add'",
+  "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff": "commit: merge theirs",
+  "fdf2e699dabbc21818d0a3b74bd21bde054e7149": "commit: session e2e-sess: claude — change the greeting and leave a note",
+  "1ad3df4240b2860dffd7d52f2059f5772f207444": "commit: session e2e-sess: claude — published session",
+  "8e9d68e3307c33c288ee31ac3ac3ffc909d57f45": "commit: session e2e-sess: claude — change the greeting and leave a note",
+  "28d964f965facf726215957de9368fa686832383": "commit: snapshot: 9c7552dffbd4",
+  "30eb919fdc77ba0dd6fc56c37fbda3fbaac82f67": "commit: Notes added by 'git notes add'",
+  "6812b5cf85dd23933ad1efcda365520301686d0b": "commit: more notes",
+  "255e6ed230eac2a56f24089f1a576590e4796316": "commit: session e2e-sess: claude — change the greeting and leave a note",
+  "97fa8fbc532fa02d08c3e55f2b839c10bfc1321d": "commit: session e2e-sess: claude — change the greeting and leave a note",
+  "dc22edaa5e2a17c17cadc71a308510bd32d6f3f8": "commit: session e2e-sess: claude — published session",
+  "697816255512cc6228874a9169f31f9464ccfc40": "commit: session e2e-sess: claude — change the greeting and leave a note",
+  "161bad4f1d02c1e458eb468b491e194b5efdec90": "commit: snapshot: 9c7552dffbd4",
+  "79485996a32c5fde54b70a1d017e96831942f99f": "commit: Notes added by 'git notes add'",
+  "5123f0c7c2f5213d010f9a1c586640bc62ee5d00": "commit: tidy the readme",
+  "589605e8d25c7b4fece041bd34906acec86101f3": "commit: origin shadow prompt-e2e-claude-s 2026-09-14T22:50:05.877Z",
+  "8525448a61a8d5f9f4d241fd23ebe1ace63d436c": "commit: session e2e-sess: claude — change the greeting and leave a note",
+  "be108e14ba7571b484268bf768f0c2bdd888a577": "commit: {\"id\":\"9c7552dffbd4\",\"timestamp\":\"2026-09-14T22:50:04.848Z\",\"sessionTag\":\"e2e-claude-s\",\"filesChanged\":[\"app.py\"],\"treeSha\":\"ac3865c0acabca893398f28d5d1e36e073de05d2\",\"branch\":\"origin/shadow/e2e-claude-s\",\"prompt\":\"change the greeting and leave a note\",\"model\":\"claude\",\"tokensUsed\":36,\"costUsd\":0.0007,\"promptIndex\":0,\"type\":\"auto\",\"commitSha\":\"8df5b35030ffbb74427ac79c1c258d748e49bbcb\",\"attribution\":{\"linesAdded\":2,\"linesRemoved\":1,\"aiLinesAdded\":2,\"humanLinesAdded\":0,\"aiPercentage\":100}}",
+  "038907a951216569fb24a33d8c75a51822b49ea0": "commit: origin shadow e2e-claude-s 2026-09-14T22:50:04.715Z",
+  "8df5b35030ffbb74427ac79c1c258d748e49bbcb": "commit: base",
+  "0d34b78f52a478caeda7d0d256f808f2fb1e3025": "commit: their PR"
  },
  "requests": [
   {
@@ -56,11 +56,11 @@
       "count": 1
      }
     ],
-    "durationMs": 2960,
+    "durationMs": 3063,
     "costUsd": 0.0007,
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
      "commitShas": [],
      "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
      "linesAdded": 2,
@@ -82,7 +82,7 @@
         "file": "app.py",
         "toolName": "Write",
         "input": {
-         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-rfsFi5/repo/app.py",
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-hr2Kvu/repo/app.py",
          "content": "def main():\n    print(\"new\")\n\n\nmain()\n"
         }
        }
@@ -97,9 +97,9 @@
       "contentAuthoritative": true,
       "contentUnavailableFiles": [],
       "editsJson": "{\"promptIndex\":0,\"promptText\":\"change the greeting and leave a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"command_probe\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1}],\"commits\":[],\"finalHunks\":[{\"file\":\"app.py\",\"start\":2,\"lines\":[\"    print(\\\"new\\\")\"]}]}",
-      "turnId": "t_154d14b3536e4dfa",
-      "captureId": "c_5f1a09b7cc8a4cc5",
-      "capturedAt": 1789343672808
+      "turnId": "t_755655b8c605465b",
+      "captureId": "c_587b6161ed4f4a0c",
+      "capturedAt": 1789426204603
      }
     ]
    }
@@ -115,7 +115,7 @@
     "inputTokens": 17,
     "outputTokens": 51,
     "toolCalls": 2,
-    "durationMs": 5253,
+    "durationMs": 5606,
     "costUsd": 0.0014,
     "status": "RUNNING",
     "promptChanges": [
@@ -130,11 +130,11 @@
       "uncommittedDiff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
       "commitSha": null,
       "treeSha": "ac3865c0acabca893398f28d5d1e36e073de05d2",
-      "capturedAt": 1789343674110,
+      "capturedAt": 1789426205980,
       "linesAdded": 2,
       "linesRemoved": 1,
-      "turnId": "t_154d14b3536e4dfa",
-      "captureId": "c_1f0bf0bded044b34",
+      "turnId": "t_755655b8c605465b",
+      "captureId": "c_8cf67b349a784231",
       "aiPercentage": 100,
       "checkpointType": "auto"
      }
@@ -152,14 +152,14 @@
     ],
     "branch": "main",
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
      "commitShas": [
-      "785c461fbbce1257c03cd2c52e01a3b41d201cbb"
+      "5123f0c7c2f5213d010f9a1c586640bc62ee5d00"
      ],
      "commitDetails": [
       {
-       "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+       "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
        "message": "tidy the readme",
        "author": "E2E",
        "filesChanged": [
@@ -177,9 +177,9 @@
     "promptChanges": [
      {
       "promptIndex": 1,
-      "turnId": "t_88bff5163b714a7c",
-      "captureId": "c_ce873ecb7676471d",
-      "capturedAt": 1789343676099,
+      "turnId": "t_f37125293c7344dd",
+      "captureId": "c_19088a51e5b14d22",
+      "capturedAt": 1789426208068,
       "promptText": "now tidy the readme and commit",
       "filesChanged": [
        "README.md"
@@ -187,7 +187,7 @@
       "diff": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.",
       "linesAdded": 2,
       "linesRemoved": 0,
-      "commitSha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+      "commitSha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
       "commitMessage": "tidy the readme"
      }
     ]
@@ -197,14 +197,14 @@
    "kind": "patch",
    "body": {
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
      "commitShas": [
-      "785c461fbbce1257c03cd2c52e01a3b41d201cbb"
+      "5123f0c7c2f5213d010f9a1c586640bc62ee5d00"
      ],
      "commitDetails": [
       {
-       "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+       "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
        "message": "tidy the readme",
        "author": "E2E",
        "filesChanged": [
@@ -229,15 +229,33 @@
   {
    "kind": "patch",
    "body": {
+    "prompt": "change the greeting and leave a note\n\n---\n\nnow tidy the readme and commit",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change the greeting and leave a note",
+      "turnId": "t_755655b8c605465b"
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "now tidy the readme and commit",
+      "turnId": "t_f37125293c7344dd"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
      "commitShas": [
-      "785c461fbbce1257c03cd2c52e01a3b41d201cbb"
+      "5123f0c7c2f5213d010f9a1c586640bc62ee5d00"
      ],
      "commitDetails": [
       {
-       "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+       "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
        "message": "tidy the readme",
        "author": "E2E",
        "filesChanged": [
@@ -249,7 +267,7 @@
        "linesAdded": 23,
        "linesRemoved": 1,
        "patch": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
-       "committedAt": 1789343675000,
+       "committedAt": 1789426207000,
        "preSessionLinesAdded": 0,
        "preSessionLinesRemoved": 0
       }
@@ -283,20 +301,20 @@
       "count": 2
      }
     ],
-    "durationMs": 8498,
+    "durationMs": 8972,
     "costUsd": 0.0014,
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
      "commitShas": [
-      "785c461fbbce1257c03cd2c52e01a3b41d201cbb"
+      "5123f0c7c2f5213d010f9a1c586640bc62ee5d00"
      ],
      "diff": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
      "linesAdded": 4,
      "linesRemoved": 1,
      "commitDetails": [
       {
-       "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+       "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
        "message": "tidy the readme",
        "author": "E2E",
        "filesChanged": [
@@ -308,7 +326,7 @@
        "linesAdded": 23,
        "linesRemoved": 1,
        "patch": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
-       "committedAt": 1789343675000,
+       "committedAt": 1789426207000,
        "preSessionLinesAdded": 0,
        "preSessionLinesRemoved": 0
       }
@@ -317,9 +335,9 @@
     },
     "commitTurns": [
      {
-      "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
-      "turnId": "t_88bff5163b714a7c",
-      "at": "2026-09-13T23:54:35.620Z",
+      "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
+      "turnId": "t_f37125293c7344dd",
+      "at": "2026-09-14T22:50:07.559Z",
       "via": "post-commit"
      }
     ],
@@ -337,7 +355,7 @@
         "file": "app.py",
         "toolName": "Write",
         "input": {
-         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-rfsFi5/repo/app.py",
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-hr2Kvu/repo/app.py",
          "content": "def main():\n    print(\"new\")\n\n\nmain()\n"
         }
        }
@@ -351,10 +369,10 @@
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
       "contentUnavailableFiles": [],
-      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change the greeting and leave a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"}],\"commits\":[\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\"]}",
-      "turnId": "t_154d14b3536e4dfa",
-      "captureId": "c_e69eec628e374496",
-      "capturedAt": 1789343679291
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change the greeting and leave a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"}],\"commits\":[\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\"]}",
+      "turnId": "t_755655b8c605465b",
+      "captureId": "c_d266ee34f5184ed3",
+      "capturedAt": 1789426211473
      },
      {
       "promptIndex": 1,
@@ -368,7 +386,7 @@
         "file": "README.md",
         "toolName": "Write",
         "input": {
-         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-rfsFi5/repo/README.md",
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-hr2Kvu/repo/README.md",
          "content": "# demo\n\nA tidy readme.\n"
         }
        }
@@ -384,10 +402,10 @@
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
       "contentUnavailableFiles": [],
-      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now tidy the readme and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"command_probe\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"CLAUDE.md\",\"op\":\"create\",\"oldContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"newContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"source\":\"commit\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"edit\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"commit\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\"]}",
-      "turnId": "t_88bff5163b714a7c",
-      "captureId": "c_e69eec628e374496",
-      "capturedAt": 1789343679314
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now tidy the readme and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"CLAUDE.md\",\"op\":\"create\",\"oldContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"newContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"source\":\"commit\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"edit\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"commit\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\"]}",
+      "turnId": "t_f37125293c7344dd",
+      "captureId": "c_d266ee34f5184ed3",
+      "capturedAt": 1789426211499
      }
     ]
    }
@@ -404,7 +422,7 @@
     "inputTokens": 22,
     "outputTokens": 66,
     "toolCalls": 4,
-    "durationMs": 11630,
+    "durationMs": 12367,
     "costUsd": 0.0018,
     "status": "RUNNING",
     "promptChanges": [
@@ -424,9 +442,9 @@
       "linesRemoved": 1,
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
-      "capturedAt": 1789343680485,
-      "turnId": "t_154d14b3536e4dfa",
-      "captureId": "c_bc0b14ae6aba4cdb",
+      "capturedAt": 1789426212742,
+      "turnId": "t_755655b8c605465b",
+      "captureId": "c_b350df7dd3744cee",
       "aiPercentage": 100,
       "checkpointType": "auto"
      },
@@ -438,13 +456,13 @@
       ],
       "diff": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.",
       "uncommittedDiff": "",
-      "commitSha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+      "commitSha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
       "treeSha": "42adf2e97d5bd1e656cae287fb207027f2f402df",
-      "capturedAt": 1789343680485,
+      "capturedAt": 1789426212742,
       "linesAdded": 2,
       "linesRemoved": 0,
-      "turnId": "t_88bff5163b714a7c",
-      "captureId": "c_bc0b14ae6aba4cdb",
+      "turnId": "t_f37125293c7344dd",
+      "captureId": "c_b350df7dd3744cee",
       "aiPercentage": 100,
       "checkpointType": "auto"
      }
@@ -454,15 +472,38 @@
   {
    "kind": "patch",
    "body": {
+    "prompt": "change the greeting and leave a note\n\n---\n\nnow tidy the readme and commit\n\n---\n\nthanks, what did we do?",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change the greeting and leave a note",
+      "turnId": "t_755655b8c605465b"
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "now tidy the readme and commit",
+      "turnId": "t_f37125293c7344dd"
+     },
+     {
+      "promptIndex": 2,
+      "promptText": "thanks, what did we do?",
+      "turnId": "t_1485dbdd1ca246ad"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
      "commitShas": [
-      "785c461fbbce1257c03cd2c52e01a3b41d201cbb"
+      "5123f0c7c2f5213d010f9a1c586640bc62ee5d00"
      ],
      "commitDetails": [
       {
-       "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+       "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
        "message": "tidy the readme",
        "author": "E2E",
        "filesChanged": [
@@ -474,7 +515,7 @@
        "linesAdded": 23,
        "linesRemoved": 1,
        "patch": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
-       "committedAt": 1789343675000,
+       "committedAt": 1789426207000,
        "preSessionLinesAdded": 0,
        "preSessionLinesRemoved": 0
       }
@@ -508,20 +549,20 @@
       "count": 2
      }
     ],
-    "durationMs": 12135,
+    "durationMs": 12903,
     "costUsd": 0.0018,
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
      "commitShas": [
-      "785c461fbbce1257c03cd2c52e01a3b41d201cbb"
+      "5123f0c7c2f5213d010f9a1c586640bc62ee5d00"
      ],
      "diff": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
      "linesAdded": 4,
      "linesRemoved": 1,
      "commitDetails": [
       {
-       "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+       "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
        "message": "tidy the readme",
        "author": "E2E",
        "filesChanged": [
@@ -533,7 +574,7 @@
        "linesAdded": 23,
        "linesRemoved": 1,
        "patch": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
-       "committedAt": 1789343675000,
+       "committedAt": 1789426207000,
        "preSessionLinesAdded": 0,
        "preSessionLinesRemoved": 0
       }
@@ -542,9 +583,9 @@
     },
     "commitTurns": [
      {
-      "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
-      "turnId": "t_88bff5163b714a7c",
-      "at": "2026-09-13T23:54:35.620Z",
+      "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
+      "turnId": "t_f37125293c7344dd",
+      "at": "2026-09-14T22:50:07.559Z",
       "via": "post-commit"
      }
     ],
@@ -562,7 +603,7 @@
         "file": "app.py",
         "toolName": "Write",
         "input": {
-         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-rfsFi5/repo/app.py",
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-hr2Kvu/repo/app.py",
          "content": "def main():\n    print(\"new\")\n\n\nmain()\n"
         }
        }
@@ -576,10 +617,10 @@
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
       "contentUnavailableFiles": [],
-      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change the greeting and leave a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"command_probe\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"}],\"commits\":[\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\"]}",
-      "turnId": "t_154d14b3536e4dfa",
-      "captureId": "c_c47d421a998d47d0",
-      "capturedAt": 1789343682740
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change the greeting and leave a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"command_probe\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"}],\"commits\":[\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\"]}",
+      "turnId": "t_755655b8c605465b",
+      "captureId": "c_54888cb0535546bc",
+      "capturedAt": 1789426215414
      },
      {
       "promptIndex": 1,
@@ -593,7 +634,7 @@
         "file": "README.md",
         "toolName": "Write",
         "input": {
-         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-rfsFi5/repo/README.md",
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-hr2Kvu/repo/README.md",
          "content": "# demo\n\nA tidy readme.\n"
         }
        }
@@ -609,10 +650,10 @@
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
       "contentUnavailableFiles": [],
-      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now tidy the readme and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"CLAUDE.md\",\"op\":\"create\",\"oldContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"newContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"source\":\"commit\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"edit\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"commit\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"commit\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\"]}",
-      "turnId": "t_88bff5163b714a7c",
-      "captureId": "c_c47d421a998d47d0",
-      "capturedAt": 1789343682740
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now tidy the readme and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"CLAUDE.md\",\"op\":\"create\",\"oldContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"newContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"source\":\"commit\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"edit\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"commit\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"commit\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\"]}",
+      "turnId": "t_f37125293c7344dd",
+      "captureId": "c_54888cb0535546bc",
+      "capturedAt": 1789426215414
      },
      {
       "promptIndex": 2,
@@ -631,9 +672,9 @@
       "contentAuthoritative": true,
       "diffSource": "turn-window",
       "editsJson": "{\"promptIndex\":2,\"promptText\":\"thanks, what did we do?\",\"agent\":\"claude\",\"edits\":[],\"commits\":[],\"droppedFailedEdits\":0}",
-      "turnId": "t_067d19b4881a4c3a",
-      "captureId": "c_c47d421a998d47d0",
-      "capturedAt": 1789343682740
+      "turnId": "t_1485dbdd1ca246ad",
+      "captureId": "c_54888cb0535546bc",
+      "capturedAt": 1789426215414
      }
     ]
    }
@@ -650,7 +691,7 @@
     "inputTokens": 30,
     "outputTokens": 90,
     "toolCalls": 4,
-    "durationMs": 14656,
+    "durationMs": 16019,
     "costUsd": 0.0024,
     "status": "RUNNING",
     "promptChanges": [
@@ -670,9 +711,9 @@
       "linesRemoved": 1,
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
-      "capturedAt": 1789343683512,
-      "turnId": "t_154d14b3536e4dfa",
-      "captureId": "c_645800db7eb34528",
+      "capturedAt": 1789426216397,
+      "turnId": "t_755655b8c605465b",
+      "captureId": "c_9b67fbb30b74444c",
       "aiPercentage": 100,
       "checkpointType": "auto"
      },
@@ -691,9 +732,9 @@
       "linesRemoved": 0,
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
-      "capturedAt": 1789343683512,
-      "turnId": "t_88bff5163b714a7c",
-      "captureId": "c_645800db7eb34528",
+      "capturedAt": 1789426216397,
+      "turnId": "t_f37125293c7344dd",
+      "captureId": "c_9b67fbb30b74444c",
       "aiPercentage": 100,
       "checkpointType": "auto"
      },
@@ -711,9 +752,9 @@
       "chatOnly": true,
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
-      "capturedAt": 1789343683512,
-      "turnId": "t_067d19b4881a4c3a",
-      "captureId": "c_645800db7eb34528",
+      "capturedAt": 1789426216397,
+      "turnId": "t_1485dbdd1ca246ad",
+      "captureId": "c_9b67fbb30b74444c",
       "aiPercentage": 100,
       "checkpointType": "auto"
      }
@@ -728,14 +769,14 @@
     ],
     "branch": "main",
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "6812b5cf85dd23933ad1efcda365520301686d0b",
      "commitShas": [
-      "cdb2a190327500b8cb988dbba432d7eadb73b8ed"
+      "6812b5cf85dd23933ad1efcda365520301686d0b"
      ],
      "commitDetails": [
       {
-       "sha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
+       "sha": "6812b5cf85dd23933ad1efcda365520301686d0b",
        "message": "more notes",
        "author": "E2E",
        "filesChanged": [
@@ -750,9 +791,9 @@
     "promptChanges": [
      {
       "promptIndex": 3,
-      "turnId": "t_c710001729e14b0f",
-      "captureId": "c_50416ab0eb064ca5",
-      "capturedAt": 1789343685508,
+      "turnId": "t_905741649ba84373",
+      "captureId": "c_5ab36acd816b449e",
+      "capturedAt": 1789426218763,
       "promptText": "now change the note and commit",
       "filesChanged": [
        "notes.md"
@@ -760,7 +801,7 @@
       "diff": "diff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
       "linesAdded": 1,
       "linesRemoved": 0,
-      "commitSha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
+      "commitSha": "6812b5cf85dd23933ad1efcda365520301686d0b",
       "commitMessage": "more notes"
      }
     ]
@@ -770,14 +811,14 @@
    "kind": "patch",
    "body": {
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "6812b5cf85dd23933ad1efcda365520301686d0b",
      "commitShas": [
-      "cdb2a190327500b8cb988dbba432d7eadb73b8ed"
+      "6812b5cf85dd23933ad1efcda365520301686d0b"
      ],
      "commitDetails": [
       {
-       "sha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
+       "sha": "6812b5cf85dd23933ad1efcda365520301686d0b",
        "message": "more notes",
        "author": "E2E",
        "filesChanged": [
@@ -799,16 +840,44 @@
   {
    "kind": "patch",
    "body": {
+    "prompt": "change the greeting and leave a note\n\n---\n\nnow tidy the readme and commit\n\n---\n\nthanks, what did we do?\n\n---\n\nnow change the note and commit",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change the greeting and leave a note",
+      "turnId": "t_755655b8c605465b"
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "now tidy the readme and commit",
+      "turnId": "t_f37125293c7344dd"
+     },
+     {
+      "promptIndex": 2,
+      "promptText": "thanks, what did we do?",
+      "turnId": "t_1485dbdd1ca246ad"
+     },
+     {
+      "promptIndex": 3,
+      "promptText": "now change the note and commit",
+      "turnId": "t_905741649ba84373"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "6812b5cf85dd23933ad1efcda365520301686d0b",
      "commitShas": [
-      "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
-      "cdb2a190327500b8cb988dbba432d7eadb73b8ed"
+      "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
+      "6812b5cf85dd23933ad1efcda365520301686d0b"
      ],
      "commitDetails": [
       {
-       "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+       "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
        "message": "tidy the readme",
        "author": "E2E",
        "filesChanged": [
@@ -820,12 +889,12 @@
        "linesAdded": 23,
        "linesRemoved": 1,
        "patch": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
-       "committedAt": 1789343675000,
+       "committedAt": 1789426207000,
        "preSessionLinesAdded": 0,
        "preSessionLinesRemoved": 0
       },
       {
-       "sha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
+       "sha": "6812b5cf85dd23933ad1efcda365520301686d0b",
        "message": "more notes",
        "author": "E2E",
        "filesChanged": [
@@ -834,7 +903,7 @@
        "linesAdded": 1,
        "linesRemoved": 0,
        "patch": "diff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
-       "committedAt": 1789343684000
+       "committedAt": 1789426217000
       }
      ]
     }
@@ -866,21 +935,21 @@
       "count": 2
      }
     ],
-    "durationMs": 17993,
+    "durationMs": 19870,
     "costUsd": 0.0024,
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "6812b5cf85dd23933ad1efcda365520301686d0b",
      "commitShas": [
-      "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
-      "cdb2a190327500b8cb988dbba432d7eadb73b8ed"
+      "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
+      "6812b5cf85dd23933ad1efcda365520301686d0b"
      ],
      "diff": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
      "linesAdded": 4,
      "linesRemoved": 1,
      "commitDetails": [
       {
-       "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+       "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
        "message": "tidy the readme",
        "author": "E2E",
        "filesChanged": [
@@ -892,12 +961,12 @@
        "linesAdded": 23,
        "linesRemoved": 1,
        "patch": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
-       "committedAt": 1789343675000,
+       "committedAt": 1789426207000,
        "preSessionLinesAdded": 0,
        "preSessionLinesRemoved": 0
       },
       {
-       "sha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
+       "sha": "6812b5cf85dd23933ad1efcda365520301686d0b",
        "message": "more notes",
        "author": "E2E",
        "filesChanged": [
@@ -906,22 +975,22 @@
        "linesAdded": 1,
        "linesRemoved": 0,
        "patch": "diff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
-       "committedAt": 1789343684000
+       "committedAt": 1789426217000
       }
      ],
      "snapshot": true
     },
     "commitTurns": [
      {
-      "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
-      "turnId": "t_88bff5163b714a7c",
-      "at": "2026-09-13T23:54:35.620Z",
+      "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
+      "turnId": "t_f37125293c7344dd",
+      "at": "2026-09-14T22:50:07.559Z",
       "via": "post-commit"
      },
      {
-      "sha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
-      "turnId": "t_c710001729e14b0f",
-      "at": "2026-09-13T23:54:45.010Z",
+      "sha": "6812b5cf85dd23933ad1efcda365520301686d0b",
+      "turnId": "t_905741649ba84373",
+      "at": "2026-09-14T22:50:18.201Z",
       "via": "post-commit"
      }
     ],
@@ -939,7 +1008,7 @@
         "file": "app.py",
         "toolName": "Write",
         "input": {
-         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-rfsFi5/repo/app.py",
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-hr2Kvu/repo/app.py",
          "content": "def main():\n    print(\"new\")\n\n\nmain()\n"
         }
        }
@@ -953,10 +1022,10 @@
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
       "contentUnavailableFiles": [],
-      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change the greeting and leave a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"command_probe\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"}],\"commits\":[\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\"]}",
-      "turnId": "t_154d14b3536e4dfa",
-      "captureId": "c_e04885a19c694ce9",
-      "capturedAt": 1789343689602
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change the greeting and leave a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"command_probe\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"}],\"commits\":[\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\"]}",
+      "turnId": "t_755655b8c605465b",
+      "captureId": "c_84a02084b09a45ed",
+      "capturedAt": 1789426223546
      },
      {
       "promptIndex": 1,
@@ -970,7 +1039,7 @@
         "file": "README.md",
         "toolName": "Write",
         "input": {
-         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-rfsFi5/repo/README.md",
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-hr2Kvu/repo/README.md",
          "content": "# demo\n\nA tidy readme.\n"
         }
        }
@@ -986,10 +1055,10 @@
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
       "contentUnavailableFiles": [],
-      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now tidy the readme and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"CLAUDE.md\",\"op\":\"create\",\"oldContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"newContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"source\":\"commit\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"edit\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"commit\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"commit\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\"]}",
-      "turnId": "t_88bff5163b714a7c",
-      "captureId": "c_e04885a19c694ce9",
-      "capturedAt": 1789343689602
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now tidy the readme and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"CLAUDE.md\",\"op\":\"create\",\"oldContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"newContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"source\":\"commit\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"edit\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"commit\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"commit\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\"]}",
+      "turnId": "t_f37125293c7344dd",
+      "captureId": "c_84a02084b09a45ed",
+      "capturedAt": 1789426223546
      },
      {
       "promptIndex": 2,
@@ -1008,9 +1077,9 @@
       "contentAuthoritative": true,
       "diffSource": "turn-window",
       "editsJson": "{\"promptIndex\":2,\"promptText\":\"thanks, what did we do?\",\"agent\":\"claude\",\"edits\":[],\"commits\":[],\"droppedFailedEdits\":0}",
-      "turnId": "t_067d19b4881a4c3a",
-      "captureId": "c_e04885a19c694ce9",
-      "capturedAt": 1789343689602
+      "turnId": "t_1485dbdd1ca246ad",
+      "captureId": "c_84a02084b09a45ed",
+      "capturedAt": 1789426223546
      },
      {
       "promptIndex": 3,
@@ -1020,7 +1089,7 @@
       "filesChanged": [
        "notes.md"
       ],
-      "commitSha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
+      "commitSha": "6812b5cf85dd23933ad1efcda365520301686d0b",
       "treeSha": "64e8ba5a871ed10e46d388a9d5b513e88b905427",
       "linesAdded": 1,
       "linesRemoved": 0,
@@ -1029,9 +1098,9 @@
       "contentAuthoritative": true,
       "contentUnavailableFiles": [],
       "editsJson": "{\"promptIndex\":3,\"promptText\":\"now change the note and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"notes.md\",\"op\":\"write\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\nand this\\n\",\"source\":\"uncommitted\",\"evidence\":\"command_probe\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"write\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\nand this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"edit\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\nand this\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
-      "turnId": "t_c710001729e14b0f",
-      "captureId": "c_e04885a19c694ce9",
-      "capturedAt": 1789343689626
+      "turnId": "t_905741649ba84373",
+      "captureId": "c_84a02084b09a45ed",
+      "capturedAt": 1789426223572
      }
     ]
    }
@@ -1048,7 +1117,7 @@
     "inputTokens": 41,
     "outputTokens": 123,
     "toolCalls": 6,
-    "durationMs": 21922,
+    "durationMs": 24354,
     "costUsd": 0.0033,
     "status": "RUNNING",
     "promptChanges": [
@@ -1068,9 +1137,9 @@
       "linesRemoved": 1,
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
-      "capturedAt": 1789343690778,
-      "turnId": "t_154d14b3536e4dfa",
-      "captureId": "c_8fee9b958329438c",
+      "capturedAt": 1789426224729,
+      "turnId": "t_755655b8c605465b",
+      "captureId": "c_da0700c8c5a849c7",
       "aiPercentage": 100,
       "checkpointType": "auto"
      },
@@ -1089,9 +1158,9 @@
       "linesRemoved": 0,
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
-      "capturedAt": 1789343690778,
-      "turnId": "t_88bff5163b714a7c",
-      "captureId": "c_8fee9b958329438c",
+      "capturedAt": 1789426224729,
+      "turnId": "t_f37125293c7344dd",
+      "captureId": "c_da0700c8c5a849c7",
       "aiPercentage": 100,
       "checkpointType": "auto"
      },
@@ -1109,9 +1178,9 @@
       "chatOnly": true,
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
-      "capturedAt": 1789343690778,
-      "turnId": "t_067d19b4881a4c3a",
-      "captureId": "c_8fee9b958329438c",
+      "capturedAt": 1789426224729,
+      "turnId": "t_1485dbdd1ca246ad",
+      "captureId": "c_da0700c8c5a849c7",
       "aiPercentage": 100,
       "checkpointType": "auto"
      },
@@ -1123,13 +1192,13 @@
       ],
       "diff": "diff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
       "uncommittedDiff": "",
-      "commitSha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
+      "commitSha": "6812b5cf85dd23933ad1efcda365520301686d0b",
       "treeSha": "64e8ba5a871ed10e46d388a9d5b513e88b905427",
-      "capturedAt": 1789343690778,
+      "capturedAt": 1789426224729,
       "linesAdded": 1,
       "linesRemoved": 0,
-      "turnId": "t_c710001729e14b0f",
-      "captureId": "c_8fee9b958329438c",
+      "turnId": "t_905741649ba84373",
+      "captureId": "c_da0700c8c5a849c7",
       "aiPercentage": 100,
       "checkpointType": "auto"
      }
@@ -1144,14 +1213,14 @@
     ],
     "branch": "main",
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "e577c6de74bdbb017541997e414eb1b1338c08ce",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
      "commitShas": [
-      "e577c6de74bdbb017541997e414eb1b1338c08ce"
+      "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff"
      ],
      "commitDetails": [
       {
-       "sha": "e577c6de74bdbb017541997e414eb1b1338c08ce",
+       "sha": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
        "message": "merge theirs",
        "author": "E2E",
        "filesChanged": [
@@ -1166,9 +1235,9 @@
     "promptChanges": [
      {
       "promptIndex": 4,
-      "turnId": "t_ae8ebb3f33f24d6b",
-      "captureId": "c_8de307e2231d4b34",
-      "capturedAt": 1789343692396,
+      "turnId": "t_36a587216e694331",
+      "captureId": "c_b9d49e54d9a74598",
+      "capturedAt": 1789426226364,
       "promptText": "merge the theirs branch and resolve the readme",
       "filesChanged": [
        "README.md"
@@ -1176,7 +1245,7 @@
       "diff": "diff --git a/README.md b/README.md\nindex 425ae53..12b3765 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # demo\n \n-A tidy readme.\n+A tidy readme, merged.",
       "linesAdded": 1,
       "linesRemoved": 1,
-      "commitSha": "e577c6de74bdbb017541997e414eb1b1338c08ce",
+      "commitSha": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
       "commitMessage": "merge theirs"
      }
     ]
@@ -1186,14 +1255,14 @@
    "kind": "patch",
    "body": {
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "e577c6de74bdbb017541997e414eb1b1338c08ce",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
      "commitShas": [
-      "e577c6de74bdbb017541997e414eb1b1338c08ce"
+      "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff"
      ],
      "commitDetails": [
       {
-       "sha": "e577c6de74bdbb017541997e414eb1b1338c08ce",
+       "sha": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
        "message": "merge theirs",
        "author": "E2E",
        "filesChanged": [
@@ -1215,286 +1284,32 @@
   {
    "kind": "patch",
    "body": {
-    "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "e577c6de74bdbb017541997e414eb1b1338c08ce",
-     "commitShas": [
-      "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
-      "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
-      "e577c6de74bdbb017541997e414eb1b1338c08ce"
-     ],
-     "commitDetails": [
-      {
-       "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
-       "message": "tidy the readme",
-       "author": "E2E",
-       "filesChanged": [
-        "CLAUDE.md",
-        "README.md",
-        "app.py",
-        "notes.md"
-       ],
-       "linesAdded": 23,
-       "linesRemoved": 1,
-       "patch": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
-       "committedAt": 1789343675000,
-       "preSessionLinesAdded": 0,
-       "preSessionLinesRemoved": 0
-      },
-      {
-       "sha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
-       "message": "more notes",
-       "author": "E2E",
-       "filesChanged": [
-        "notes.md"
-       ],
-       "linesAdded": 1,
-       "linesRemoved": 0,
-       "patch": "diff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
-       "committedAt": 1789343684000
-      },
-      {
-       "sha": "e577c6de74bdbb017541997e414eb1b1338c08ce",
-       "message": "merge theirs",
-       "author": "E2E",
-       "filesChanged": [],
-       "linesAdded": 0,
-       "linesRemoved": 0,
-       "patch": "diff --git a/README.md b/README.md\nindex 425ae53..12b3765 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # demo\n \n-A tidy readme.\n+A tidy readme, merged.\ndiff --git a/their_feature.py b/their_feature.py\nnew file mode 100644\nindex 0000000..d905bf0\n--- /dev/null\n+++ b/their_feature.py\n@@ -0,0 +1,40 @@\n+THEIRS_0 = 0\n+THEIRS_1 = 1\n+THEIRS_2 = 2\n+THEIRS_3 = 3\n+THEIRS_4 = 4\n+THEIRS_5 = 5\n+THEIRS_6 = 6\n+THEIRS_7 = 7\n+THEIRS_8 = 8\n+THEIRS_9 = 9\n+THEIRS_10 = 10\n+THEIRS_11 = 11\n+THEIRS_12 = 12\n+THEIRS_13 = 13\n+THEIRS_14 = 14\n+THEIRS_15 = 15\n+THEIRS_16 = 16\n+THEIRS_17 = 17\n+THEIRS_18 = 18\n+THEIRS_19 = 19\n+THEIRS_20 = 20\n+THEIRS_21 = 21\n+THEIRS_22 = 22\n+THEIRS_23 = 23\n+THEIRS_24 = 24\n+THEIRS_25 = 25\n+THEIRS_26 = 26\n+THEIRS_27 = 27\n+THEIRS_28 = 28\n+THEIRS_29 = 29\n+THEIRS_30 = 30\n+THEIRS_31 = 31\n+THEIRS_32 = 32\n+THEIRS_33 = 33\n+THEIRS_34 = 34\n+THEIRS_35 = 35\n+THEIRS_36 = 36\n+THEIRS_37 = 37\n+THEIRS_38 = 38\n+THEIRS_39 = 39",
-       "committedAt": 1789343691000
-      }
-     ]
-    }
-   }
-  },
-  {
-   "kind": "patch",
-   "body": {
     "prompt": "change the greeting and leave a note\n\n---\n\nnow tidy the readme and commit\n\n---\n\nthanks, what did we do?\n\n---\n\nnow change the note and commit\n\n---\n\nmerge the theirs branch and resolve the readme",
-    "agentSlug": "claude-code",
-    "filesChanged": [
-     "CLAUDE.md",
-     "README.md",
-     "app.py",
-     "notes.md"
-    ],
-    "tokensUsed": 164,
-    "tokensEstimated": true,
-    "inputTokens": 41,
-    "outputTokens": 123,
-    "toolCalls": 7,
-    "toolBreakdown": [
-     {
-      "name": "Bash",
-      "count": 5
-     },
-     {
-      "name": "Write",
-      "count": 2
-     }
-    ],
-    "durationMs": 25197,
-    "costUsd": 0.0033,
-    "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "e577c6de74bdbb017541997e414eb1b1338c08ce",
-     "commitShas": [
-      "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
-      "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
-      "e577c6de74bdbb017541997e414eb1b1338c08ce"
-     ],
-     "diff": "diff --git a/README.md b/README.md\nindex 425ae53..12b3765 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # demo\n \n-A tidy readme.\n+A tidy readme, merged.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
-     "linesAdded": 3,
-     "linesRemoved": 2,
-     "commitDetails": [
-      {
-       "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
-       "message": "tidy the readme",
-       "author": "E2E",
-       "filesChanged": [
-        "CLAUDE.md",
-        "README.md",
-        "app.py",
-        "notes.md"
-       ],
-       "linesAdded": 23,
-       "linesRemoved": 1,
-       "patch": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
-       "committedAt": 1789343675000,
-       "preSessionLinesAdded": 0,
-       "preSessionLinesRemoved": 0
-      },
-      {
-       "sha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
-       "message": "more notes",
-       "author": "E2E",
-       "filesChanged": [
-        "notes.md"
-       ],
-       "linesAdded": 1,
-       "linesRemoved": 0,
-       "patch": "diff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
-       "committedAt": 1789343684000
-      },
-      {
-       "sha": "e577c6de74bdbb017541997e414eb1b1338c08ce",
-       "message": "merge theirs",
-       "author": "E2E",
-       "filesChanged": [],
-       "linesAdded": 0,
-       "linesRemoved": 0,
-       "patch": "diff --git a/README.md b/README.md\nindex 425ae53..12b3765 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # demo\n \n-A tidy readme.\n+A tidy readme, merged.\ndiff --git a/their_feature.py b/their_feature.py\nnew file mode 100644\nindex 0000000..d905bf0\n--- /dev/null\n+++ b/their_feature.py\n@@ -0,0 +1,40 @@\n+THEIRS_0 = 0\n+THEIRS_1 = 1\n+THEIRS_2 = 2\n+THEIRS_3 = 3\n+THEIRS_4 = 4\n+THEIRS_5 = 5\n+THEIRS_6 = 6\n+THEIRS_7 = 7\n+THEIRS_8 = 8\n+THEIRS_9 = 9\n+THEIRS_10 = 10\n+THEIRS_11 = 11\n+THEIRS_12 = 12\n+THEIRS_13 = 13\n+THEIRS_14 = 14\n+THEIRS_15 = 15\n+THEIRS_16 = 16\n+THEIRS_17 = 17\n+THEIRS_18 = 18\n+THEIRS_19 = 19\n+THEIRS_20 = 20\n+THEIRS_21 = 21\n+THEIRS_22 = 22\n+THEIRS_23 = 23\n+THEIRS_24 = 24\n+THEIRS_25 = 25\n+THEIRS_26 = 26\n+THEIRS_27 = 27\n+THEIRS_28 = 28\n+THEIRS_29 = 29\n+THEIRS_30 = 30\n+THEIRS_31 = 31\n+THEIRS_32 = 32\n+THEIRS_33 = 33\n+THEIRS_34 = 34\n+THEIRS_35 = 35\n+THEIRS_36 = 36\n+THEIRS_37 = 37\n+THEIRS_38 = 38\n+THEIRS_39 = 39",
-       "committedAt": 1789343691000
-      }
-     ],
-     "snapshot": true
-    },
-    "commitTurns": [
-     {
-      "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
-      "turnId": "t_88bff5163b714a7c",
-      "at": "2026-09-13T23:54:35.620Z",
-      "via": "post-commit"
-     },
-     {
-      "sha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
-      "turnId": "t_c710001729e14b0f",
-      "at": "2026-09-13T23:54:45.010Z",
-      "via": "post-commit"
-     },
-     {
-      "sha": "e577c6de74bdbb017541997e414eb1b1338c08ce",
-      "turnId": "t_ae8ebb3f33f24d6b",
-      "at": "2026-09-13T23:54:51.881Z",
-      "via": "post-commit"
-     }
-    ],
     "promptChanges": [
      {
       "promptIndex": 0,
       "promptText": "change the greeting and leave a note",
-      "filesChanged": [
-       "app.py",
-       "notes.md"
-      ],
-      "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
-      "edits": [
-       {
-        "file": "app.py",
-        "toolName": "Write",
-        "input": {
-         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-rfsFi5/repo/app.py",
-         "content": "def main():\n    print(\"new\")\n\n\nmain()\n"
-        }
-       }
-      ],
-      "ranCommit": false,
-      "wroteViaShell": true,
-      "uncommittedDiff": "",
-      "linesAdded": 2,
-      "linesRemoved": 1,
-      "diffSource": "turn-window",
-      "turnWindowCaptured": true,
-      "contentAuthoritative": true,
-      "contentUnavailableFiles": [],
-      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change the greeting and leave a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"command_probe\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"}],\"commits\":[\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\"]}",
-      "turnId": "t_154d14b3536e4dfa",
-      "captureId": "c_a447a597c3c44e5f",
-      "capturedAt": 1789343698371
+      "turnId": "t_755655b8c605465b"
      },
      {
       "promptIndex": 1,
       "promptText": "now tidy the readme and commit",
-      "filesChanged": [
-       "README.md"
-      ],
-      "diff": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.",
-      "edits": [
-       {
-        "file": "README.md",
-        "toolName": "Write",
-        "input": {
-         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-rfsFi5/repo/README.md",
-         "content": "# demo\n\nA tidy readme.\n"
-        }
-       }
-      ],
-      "ranCommit": true,
-      "commitCommands": [
-       "git add -A && git commit -q -m \"tidy the readme\""
-      ],
-      "uncommittedDiff": "",
-      "linesAdded": 2,
-      "linesRemoved": 0,
-      "diffSource": "turn-window",
-      "turnWindowCaptured": true,
-      "contentAuthoritative": true,
-      "contentUnavailableFiles": [],
-      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now tidy the readme and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"CLAUDE.md\",\"op\":\"create\",\"oldContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"newContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"source\":\"commit\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"edit\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"commit\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"commit\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\"]}",
-      "turnId": "t_88bff5163b714a7c",
-      "captureId": "c_a447a597c3c44e5f",
-      "capturedAt": 1789343698371
+      "turnId": "t_f37125293c7344dd"
      },
      {
       "promptIndex": 2,
       "promptText": "thanks, what did we do?",
-      "filesChanged": [],
-      "diff": "",
-      "edits": [],
-      "ranCommit": false,
-      "uncommittedDiff": "",
-      "linesAdded": 0,
-      "linesRemoved": 0,
-      "chatOnly": true,
-      "contentUnavailableFiles": [],
-      "commitSha": null,
-      "turnWindowCaptured": true,
-      "contentAuthoritative": true,
-      "diffSource": "turn-window",
-      "editsJson": "{\"promptIndex\":2,\"promptText\":\"thanks, what did we do?\",\"agent\":\"claude\",\"edits\":[],\"commits\":[],\"droppedFailedEdits\":0}",
-      "turnId": "t_067d19b4881a4c3a",
-      "captureId": "c_a447a597c3c44e5f",
-      "capturedAt": 1789343698371
+      "turnId": "t_1485dbdd1ca246ad"
      },
      {
       "promptIndex": 3,
       "promptText": "now change the note and commit",
-      "filesChanged": [
-       "notes.md"
-      ],
-      "diff": "diff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
-      "uncommittedDiff": "",
-      "commitSha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
-      "treeSha": "64e8ba5a871ed10e46d388a9d5b513e88b905427",
-      "capturedAt": 1789343698371,
-      "linesAdded": 1,
-      "linesRemoved": 0,
-      "diffSource": "turn-window",
-      "turnWindowCaptured": true,
-      "contentAuthoritative": true,
-      "contentUnavailableFiles": [],
-      "editsJson": "{\"promptIndex\":3,\"promptText\":\"now change the note and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"notes.md\",\"op\":\"write\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\nand this\\n\",\"source\":\"uncommitted\",\"evidence\":\"command_probe\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"write\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\nand this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"edit\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\nand this\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
-      "turnId": "t_c710001729e14b0f",
-      "captureId": "c_a447a597c3c44e5f"
+      "turnId": "t_905741649ba84373"
      },
      {
       "promptIndex": 4,
       "promptText": "merge the theirs branch and resolve the readme",
-      "diff": "diff --git a/README.md b/README.md\nindex 425ae53..12b3765 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # demo\n \n-A tidy readme.\n+A tidy readme, merged.",
-      "uncommittedDiff": "",
-      "filesChanged": [
-       "README.md"
-      ],
-      "commitSha": "e577c6de74bdbb017541997e414eb1b1338c08ce",
-      "treeSha": "593c2f313a3ccbc749bf89d284e8102e639d8a53",
-      "linesAdded": 1,
-      "linesRemoved": 1,
-      "diffSource": "ledger",
-      "contentUnavailableFiles": [],
-      "editsJson": "{\"promptIndex\":4,\"promptText\":\"merge the theirs branch and resolve the readme\",\"agent\":\"claude\",\"edits\":[{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\\nA tidy readme.\\n\",\"newContent\":\"# demo\\n\\nA tidy readme, merged.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"their_feature.py\",\"op\":\"create\",\"newContent\":\"THEIRS_0 = 0\\nTHEIRS_1 = 1\\nTHEIRS_2 = 2\\nTHEIRS_3 = 3\\nTHEIRS_4 = 4\\nTHEIRS_5 = 5\\nTHEIRS_6 = 6\\nTHEIRS_7 = 7\\nTHEIRS_8 = 8\\nTHEIRS_9 = 9\\nTHEIRS_10 = 10\\nTHEIRS_11 = 11\\nTHEIRS_12 = 12\\nTHEIRS_13 = 13\\nTHEIRS_14 = 14\\nTHEIRS_15 = 15\\nTHEIRS_16 = 16\\nTHEIRS_17 = 17\\nTHEIRS_18 = 18\\nTHEIRS_19 = 19\\nTHEIRS_20 = 20\\nTHEIRS_21 = 21\\nTHEIRS_22 = 22\\nTHEIRS_23 = 23\\nTHEIRS_24 = 24\\nTHEIRS_25 = 25\\nTHEIRS_26 = 26\\nTHEIRS_27 = 27\\nTHEIRS_28 = 28\\nTHEIRS_29 = 29\\nTHEIRS_30 = 30\\nTHEIRS_31 = 31\\nTHEIRS_32 = 32\\nTHEIRS_33 = 33\\nTHEIRS_34 = 34\\nTHEIRS_35 = 35\\nTHEIRS_36 = 36\\nTHEIRS_37 = 37\\nTHEIRS_38 = 38\\nTHEIRS_39 = 39\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"edit\",\"oldContent\":\"# demo\\n\\nA tidy readme.\\n\",\"newContent\":\"# demo\\n\\nA tidy readme, merged.\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
-      "turnId": "t_ae8ebb3f33f24d6b",
-      "captureId": "c_a447a597c3c44e5f",
-      "capturedAt": 1789343698395
+      "turnId": "t_36a587216e694331"
      }
     ]
    }
@@ -1503,16 +1318,16 @@
    "kind": "patch",
    "body": {
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "e577c6de74bdbb017541997e414eb1b1338c08ce",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
      "commitShas": [
-      "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
-      "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
-      "e577c6de74bdbb017541997e414eb1b1338c08ce"
+      "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
+      "6812b5cf85dd23933ad1efcda365520301686d0b",
+      "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff"
      ],
      "commitDetails": [
       {
-       "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+       "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
        "message": "tidy the readme",
        "author": "E2E",
        "filesChanged": [
@@ -1524,12 +1339,12 @@
        "linesAdded": 23,
        "linesRemoved": 1,
        "patch": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
-       "committedAt": 1789343675000,
+       "committedAt": 1789426207000,
        "preSessionLinesAdded": 0,
        "preSessionLinesRemoved": 0
       },
       {
-       "sha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
+       "sha": "6812b5cf85dd23933ad1efcda365520301686d0b",
        "message": "more notes",
        "author": "E2E",
        "filesChanged": [
@@ -1538,17 +1353,363 @@
        "linesAdded": 1,
        "linesRemoved": 0,
        "patch": "diff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
-       "committedAt": 1789343684000
+       "committedAt": 1789426217000
       },
       {
-       "sha": "e577c6de74bdbb017541997e414eb1b1338c08ce",
+       "sha": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
        "message": "merge theirs",
        "author": "E2E",
        "filesChanged": [],
        "linesAdded": 0,
        "linesRemoved": 0,
        "patch": "diff --git a/README.md b/README.md\nindex 425ae53..12b3765 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # demo\n \n-A tidy readme.\n+A tidy readme, merged.\ndiff --git a/their_feature.py b/their_feature.py\nnew file mode 100644\nindex 0000000..d905bf0\n--- /dev/null\n+++ b/their_feature.py\n@@ -0,0 +1,40 @@\n+THEIRS_0 = 0\n+THEIRS_1 = 1\n+THEIRS_2 = 2\n+THEIRS_3 = 3\n+THEIRS_4 = 4\n+THEIRS_5 = 5\n+THEIRS_6 = 6\n+THEIRS_7 = 7\n+THEIRS_8 = 8\n+THEIRS_9 = 9\n+THEIRS_10 = 10\n+THEIRS_11 = 11\n+THEIRS_12 = 12\n+THEIRS_13 = 13\n+THEIRS_14 = 14\n+THEIRS_15 = 15\n+THEIRS_16 = 16\n+THEIRS_17 = 17\n+THEIRS_18 = 18\n+THEIRS_19 = 19\n+THEIRS_20 = 20\n+THEIRS_21 = 21\n+THEIRS_22 = 22\n+THEIRS_23 = 23\n+THEIRS_24 = 24\n+THEIRS_25 = 25\n+THEIRS_26 = 26\n+THEIRS_27 = 27\n+THEIRS_28 = 28\n+THEIRS_29 = 29\n+THEIRS_30 = 30\n+THEIRS_31 = 31\n+THEIRS_32 = 32\n+THEIRS_33 = 33\n+THEIRS_34 = 34\n+THEIRS_35 = 35\n+THEIRS_36 = 36\n+THEIRS_37 = 37\n+THEIRS_38 = 38\n+THEIRS_39 = 39",
-       "committedAt": 1789343691000
+       "committedAt": 1789426225000
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "promptChanges": [
+     {
+      "captureId": "hb_00746236affb4ea0",
+      "capturedAt": 1789426230532,
+      "promptIndex": 4,
+      "turnId": "t_36a587216e694331",
+      "promptText": "merge the theirs branch and resolve the readme",
+      "filesChanged": [
+       "README.md"
+      ],
+      "diff": "diff --git a/README.md b/README.md\nindex 425ae53..12b3765 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # demo\n \n-A tidy readme.\n+A tidy readme, merged.",
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "diffSource": "ledger",
+      "contentUnavailableFiles": [],
+      "checkpointType": "auto",
+      "commitSha": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
+      "treeSha": "593c2f313a3ccbc749bf89d284e8102e639d8a53"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change the greeting and leave a note\n\n---\n\nnow tidy the readme and commit\n\n---\n\nthanks, what did we do?\n\n---\n\nnow change the note and commit\n\n---\n\nmerge the theirs branch and resolve the readme",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "CLAUDE.md",
+     "README.md",
+     "app.py",
+     "notes.md"
+    ],
+    "tokensUsed": 164,
+    "tokensEstimated": true,
+    "inputTokens": 41,
+    "outputTokens": 123,
+    "toolCalls": 7,
+    "toolBreakdown": [
+     {
+      "name": "Bash",
+      "count": 5
+     },
+     {
+      "name": "Write",
+      "count": 2
+     }
+    ],
+    "durationMs": 27601,
+    "costUsd": 0.0033,
+    "gitCapture": {
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
+     "commitShas": [
+      "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
+      "6812b5cf85dd23933ad1efcda365520301686d0b",
+      "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff"
+     ],
+     "diff": "diff --git a/README.md b/README.md\nindex 425ae53..12b3765 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # demo\n \n-A tidy readme.\n+A tidy readme, merged.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
+     "linesAdded": 3,
+     "linesRemoved": 2,
+     "commitDetails": [
+      {
+       "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
+       "message": "tidy the readme",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "README.md",
+        "app.py",
+        "notes.md"
+       ],
+       "linesAdded": 23,
+       "linesRemoved": 1,
+       "patch": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+       "committedAt": 1789426207000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      },
+      {
+       "sha": "6812b5cf85dd23933ad1efcda365520301686d0b",
+       "message": "more notes",
+       "author": "E2E",
+       "filesChanged": [
+        "notes.md"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
+       "committedAt": 1789426217000
+      },
+      {
+       "sha": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
+       "message": "merge theirs",
+       "author": "E2E",
+       "filesChanged": [],
+       "linesAdded": 0,
+       "linesRemoved": 0,
+       "patch": "diff --git a/README.md b/README.md\nindex 425ae53..12b3765 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # demo\n \n-A tidy readme.\n+A tidy readme, merged.\ndiff --git a/their_feature.py b/their_feature.py\nnew file mode 100644\nindex 0000000..d905bf0\n--- /dev/null\n+++ b/their_feature.py\n@@ -0,0 +1,40 @@\n+THEIRS_0 = 0\n+THEIRS_1 = 1\n+THEIRS_2 = 2\n+THEIRS_3 = 3\n+THEIRS_4 = 4\n+THEIRS_5 = 5\n+THEIRS_6 = 6\n+THEIRS_7 = 7\n+THEIRS_8 = 8\n+THEIRS_9 = 9\n+THEIRS_10 = 10\n+THEIRS_11 = 11\n+THEIRS_12 = 12\n+THEIRS_13 = 13\n+THEIRS_14 = 14\n+THEIRS_15 = 15\n+THEIRS_16 = 16\n+THEIRS_17 = 17\n+THEIRS_18 = 18\n+THEIRS_19 = 19\n+THEIRS_20 = 20\n+THEIRS_21 = 21\n+THEIRS_22 = 22\n+THEIRS_23 = 23\n+THEIRS_24 = 24\n+THEIRS_25 = 25\n+THEIRS_26 = 26\n+THEIRS_27 = 27\n+THEIRS_28 = 28\n+THEIRS_29 = 29\n+THEIRS_30 = 30\n+THEIRS_31 = 31\n+THEIRS_32 = 32\n+THEIRS_33 = 33\n+THEIRS_34 = 34\n+THEIRS_35 = 35\n+THEIRS_36 = 36\n+THEIRS_37 = 37\n+THEIRS_38 = 38\n+THEIRS_39 = 39",
+       "committedAt": 1789426225000
+      }
+     ],
+     "snapshot": true
+    },
+    "commitTurns": [
+     {
+      "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
+      "turnId": "t_f37125293c7344dd",
+      "at": "2026-09-14T22:50:07.559Z",
+      "via": "post-commit"
+     },
+     {
+      "sha": "6812b5cf85dd23933ad1efcda365520301686d0b",
+      "turnId": "t_905741649ba84373",
+      "at": "2026-09-14T22:50:18.201Z",
+      "via": "post-commit"
+     },
+     {
+      "sha": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
+      "turnId": "t_36a587216e694331",
+      "at": "2026-09-14T22:50:25.845Z",
+      "via": "post-commit"
+     }
+    ],
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change the greeting and leave a note",
+      "filesChanged": [
+       "app.py",
+       "notes.md"
+      ],
+      "diff": "diff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+      "edits": [
+       {
+        "file": "app.py",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-hr2Kvu/repo/app.py",
+         "content": "def main():\n    print(\"new\")\n\n\nmain()\n"
+        }
+       }
+      ],
+      "ranCommit": false,
+      "wroteViaShell": true,
+      "uncommittedDiff": "",
+      "linesAdded": 2,
+      "linesRemoved": 1,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change the greeting and leave a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"command_probe\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"}],\"commits\":[\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\"]}",
+      "turnId": "t_755655b8c605465b",
+      "captureId": "c_0df7ccc3e24d45ff",
+      "capturedAt": 1789426232835
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "now tidy the readme and commit",
+      "filesChanged": [
+       "README.md"
+      ],
+      "diff": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.",
+      "edits": [
+       {
+        "file": "README.md",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-hr2Kvu/repo/README.md",
+         "content": "# demo\n\nA tidy readme.\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add -A && git commit -q -m \"tidy the readme\""
+      ],
+      "uncommittedDiff": "",
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now tidy the readme and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"CLAUDE.md\",\"op\":\"create\",\"oldContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"newContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"source\":\"commit\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"edit\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"commit\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"commit\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\"]}",
+      "turnId": "t_f37125293c7344dd",
+      "captureId": "c_0df7ccc3e24d45ff",
+      "capturedAt": 1789426232836
+     },
+     {
+      "promptIndex": 2,
+      "promptText": "thanks, what did we do?",
+      "filesChanged": [],
+      "diff": "",
+      "edits": [],
+      "ranCommit": false,
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "chatOnly": true,
+      "contentUnavailableFiles": [],
+      "commitSha": null,
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "diffSource": "turn-window",
+      "editsJson": "{\"promptIndex\":2,\"promptText\":\"thanks, what did we do?\",\"agent\":\"claude\",\"edits\":[],\"commits\":[],\"droppedFailedEdits\":0}",
+      "turnId": "t_1485dbdd1ca246ad",
+      "captureId": "c_0df7ccc3e24d45ff",
+      "capturedAt": 1789426232836
+     },
+     {
+      "promptIndex": 3,
+      "promptText": "now change the note and commit",
+      "filesChanged": [
+       "notes.md"
+      ],
+      "diff": "diff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
+      "uncommittedDiff": "",
+      "commitSha": "6812b5cf85dd23933ad1efcda365520301686d0b",
+      "treeSha": "64e8ba5a871ed10e46d388a9d5b513e88b905427",
+      "capturedAt": 1789426232836,
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":3,\"promptText\":\"now change the note and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"notes.md\",\"op\":\"write\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\nand this\\n\",\"source\":\"uncommitted\",\"evidence\":\"command_probe\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"write\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\nand this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"edit\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\nand this\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
+      "turnId": "t_905741649ba84373",
+      "captureId": "c_0df7ccc3e24d45ff"
+     },
+     {
+      "promptIndex": 4,
+      "promptText": "merge the theirs branch and resolve the readme",
+      "diff": "diff --git a/README.md b/README.md\nindex 425ae53..12b3765 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # demo\n \n-A tidy readme.\n+A tidy readme, merged.",
+      "uncommittedDiff": "",
+      "filesChanged": [
+       "README.md"
+      ],
+      "commitSha": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
+      "treeSha": "593c2f313a3ccbc749bf89d284e8102e639d8a53",
+      "linesAdded": 1,
+      "linesRemoved": 1,
+      "diffSource": "ledger",
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":4,\"promptText\":\"merge the theirs branch and resolve the readme\",\"agent\":\"claude\",\"edits\":[{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\\nA tidy readme.\\n\",\"newContent\":\"# demo\\n\\nA tidy readme, merged.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"edit\",\"oldContent\":\"# demo\\n\\nTheir readme.\\n\",\"newContent\":\"# demo\\n\\nA tidy readme, merged.\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
+      "turnId": "t_36a587216e694331",
+      "captureId": "c_0df7ccc3e24d45ff",
+      "capturedAt": 1789426232861
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change the greeting and leave a note\n\n---\n\nnow tidy the readme and commit\n\n---\n\nthanks, what did we do?\n\n---\n\nnow change the note and commit\n\n---\n\nmerge the theirs branch and resolve the readme",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change the greeting and leave a note",
+      "turnId": "t_755655b8c605465b"
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "now tidy the readme and commit",
+      "turnId": "t_f37125293c7344dd"
+     },
+     {
+      "promptIndex": 2,
+      "promptText": "thanks, what did we do?",
+      "turnId": "t_1485dbdd1ca246ad"
+     },
+     {
+      "promptIndex": 3,
+      "promptText": "now change the note and commit",
+      "turnId": "t_905741649ba84373"
+     },
+     {
+      "promptIndex": 4,
+      "promptText": "merge the theirs branch and resolve the readme",
+      "turnId": "t_36a587216e694331"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
+     "commitShas": [
+      "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
+      "6812b5cf85dd23933ad1efcda365520301686d0b",
+      "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff"
+     ],
+     "commitDetails": [
+      {
+       "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
+       "message": "tidy the readme",
+       "author": "E2E",
+       "filesChanged": [
+        "CLAUDE.md",
+        "README.md",
+        "app.py",
+        "notes.md"
+       ],
+       "linesAdded": 23,
+       "linesRemoved": 1,
+       "patch": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
+       "committedAt": 1789426207000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      },
+      {
+       "sha": "6812b5cf85dd23933ad1efcda365520301686d0b",
+       "message": "more notes",
+       "author": "E2E",
+       "filesChanged": [
+        "notes.md"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
+       "committedAt": 1789426217000
+      },
+      {
+       "sha": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
+       "message": "merge theirs",
+       "author": "E2E",
+       "filesChanged": [],
+       "linesAdded": 0,
+       "linesRemoved": 0,
+       "patch": "diff --git a/README.md b/README.md\nindex 425ae53..12b3765 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # demo\n \n-A tidy readme.\n+A tidy readme, merged.\ndiff --git a/their_feature.py b/their_feature.py\nnew file mode 100644\nindex 0000000..d905bf0\n--- /dev/null\n+++ b/their_feature.py\n@@ -0,0 +1,40 @@\n+THEIRS_0 = 0\n+THEIRS_1 = 1\n+THEIRS_2 = 2\n+THEIRS_3 = 3\n+THEIRS_4 = 4\n+THEIRS_5 = 5\n+THEIRS_6 = 6\n+THEIRS_7 = 7\n+THEIRS_8 = 8\n+THEIRS_9 = 9\n+THEIRS_10 = 10\n+THEIRS_11 = 11\n+THEIRS_12 = 12\n+THEIRS_13 = 13\n+THEIRS_14 = 14\n+THEIRS_15 = 15\n+THEIRS_16 = 16\n+THEIRS_17 = 17\n+THEIRS_18 = 18\n+THEIRS_19 = 19\n+THEIRS_20 = 20\n+THEIRS_21 = 21\n+THEIRS_22 = 22\n+THEIRS_23 = 23\n+THEIRS_24 = 24\n+THEIRS_25 = 25\n+THEIRS_26 = 26\n+THEIRS_27 = 27\n+THEIRS_28 = 28\n+THEIRS_29 = 29\n+THEIRS_30 = 30\n+THEIRS_31 = 31\n+THEIRS_32 = 32\n+THEIRS_33 = 33\n+THEIRS_34 = 34\n+THEIRS_35 = 35\n+THEIRS_36 = 36\n+THEIRS_37 = 37\n+THEIRS_38 = 38\n+THEIRS_39 = 39",
+       "committedAt": 1789426225000
       }
      ]
     }
@@ -1580,22 +1741,22 @@
       "count": 2
      }
     ],
-    "durationMs": 30122,
+    "durationMs": 33144,
     "costUsd": 0.0033,
     "gitCapture": {
-     "headBefore": "6b8b03279ab3f0cff73135c894e9029a089f9b22",
-     "headAfter": "e577c6de74bdbb017541997e414eb1b1338c08ce",
+     "headBefore": "8df5b35030ffbb74427ac79c1c258d748e49bbcb",
+     "headAfter": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
      "commitShas": [
-      "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
-      "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
-      "e577c6de74bdbb017541997e414eb1b1338c08ce"
+      "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
+      "6812b5cf85dd23933ad1efcda365520301686d0b",
+      "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff"
      ],
      "diff": "diff --git a/README.md b/README.md\nindex 425ae53..12b3765 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # demo\n \n-A tidy readme.\n+A tidy readme, merged.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
      "linesAdded": 3,
      "linesRemoved": 2,
      "commitDetails": [
       {
-       "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
+       "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
        "message": "tidy the readme",
        "author": "E2E",
        "filesChanged": [
@@ -1607,12 +1768,12 @@
        "linesAdded": 23,
        "linesRemoved": 1,
        "patch": "diff --git a/README.md b/README.md\nindex fc72a5c..425ae53 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n # demo\n+\n+A tidy readme.\ndiff --git a/app.py b/app.py\nindex 4a03539..f718131 100644\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"old\")\n+    print(\"new\")\n \n \n main()\ndiff --git a/notes.md b/notes.md\nnew file mode 100644\nindex 0000000..9aedcce\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
-       "committedAt": 1789343675000,
+       "committedAt": 1789426207000,
        "preSessionLinesAdded": 0,
        "preSessionLinesRemoved": 0
       },
       {
-       "sha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
+       "sha": "6812b5cf85dd23933ad1efcda365520301686d0b",
        "message": "more notes",
        "author": "E2E",
        "filesChanged": [
@@ -1621,38 +1782,38 @@
        "linesAdded": 1,
        "linesRemoved": 0,
        "patch": "diff --git a/notes.md b/notes.md\nindex 9aedcce..95b7475 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1,2 @@\n remember this\n+and this",
-       "committedAt": 1789343684000
+       "committedAt": 1789426217000
       },
       {
-       "sha": "e577c6de74bdbb017541997e414eb1b1338c08ce",
+       "sha": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
        "message": "merge theirs",
        "author": "E2E",
        "filesChanged": [],
        "linesAdded": 0,
        "linesRemoved": 0,
        "patch": "diff --git a/README.md b/README.md\nindex 425ae53..12b3765 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # demo\n \n-A tidy readme.\n+A tidy readme, merged.\ndiff --git a/their_feature.py b/their_feature.py\nnew file mode 100644\nindex 0000000..d905bf0\n--- /dev/null\n+++ b/their_feature.py\n@@ -0,0 +1,40 @@\n+THEIRS_0 = 0\n+THEIRS_1 = 1\n+THEIRS_2 = 2\n+THEIRS_3 = 3\n+THEIRS_4 = 4\n+THEIRS_5 = 5\n+THEIRS_6 = 6\n+THEIRS_7 = 7\n+THEIRS_8 = 8\n+THEIRS_9 = 9\n+THEIRS_10 = 10\n+THEIRS_11 = 11\n+THEIRS_12 = 12\n+THEIRS_13 = 13\n+THEIRS_14 = 14\n+THEIRS_15 = 15\n+THEIRS_16 = 16\n+THEIRS_17 = 17\n+THEIRS_18 = 18\n+THEIRS_19 = 19\n+THEIRS_20 = 20\n+THEIRS_21 = 21\n+THEIRS_22 = 22\n+THEIRS_23 = 23\n+THEIRS_24 = 24\n+THEIRS_25 = 25\n+THEIRS_26 = 26\n+THEIRS_27 = 27\n+THEIRS_28 = 28\n+THEIRS_29 = 29\n+THEIRS_30 = 30\n+THEIRS_31 = 31\n+THEIRS_32 = 32\n+THEIRS_33 = 33\n+THEIRS_34 = 34\n+THEIRS_35 = 35\n+THEIRS_36 = 36\n+THEIRS_37 = 37\n+THEIRS_38 = 38\n+THEIRS_39 = 39",
-       "committedAt": 1789343691000
+       "committedAt": 1789426225000
       }
      ],
      "snapshot": true
     },
     "commitTurns": [
      {
-      "sha": "785c461fbbce1257c03cd2c52e01a3b41d201cbb",
-      "turnId": "t_88bff5163b714a7c",
-      "at": "2026-09-13T23:54:35.620Z",
+      "sha": "5123f0c7c2f5213d010f9a1c586640bc62ee5d00",
+      "turnId": "t_f37125293c7344dd",
+      "at": "2026-09-14T22:50:07.559Z",
       "via": "post-commit"
      },
      {
-      "sha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
-      "turnId": "t_c710001729e14b0f",
-      "at": "2026-09-13T23:54:45.010Z",
+      "sha": "6812b5cf85dd23933ad1efcda365520301686d0b",
+      "turnId": "t_905741649ba84373",
+      "at": "2026-09-14T22:50:18.201Z",
       "via": "post-commit"
      },
      {
-      "sha": "e577c6de74bdbb017541997e414eb1b1338c08ce",
-      "turnId": "t_ae8ebb3f33f24d6b",
-      "at": "2026-09-13T23:54:51.881Z",
+      "sha": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
+      "turnId": "t_36a587216e694331",
+      "at": "2026-09-14T22:50:25.845Z",
       "via": "post-commit"
      }
     ],
@@ -1670,7 +1831,7 @@
         "file": "app.py",
         "toolName": "Write",
         "input": {
-         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-rfsFi5/repo/app.py",
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-hr2Kvu/repo/app.py",
          "content": "def main():\n    print(\"new\")\n\n\nmain()\n"
         }
        }
@@ -1684,10 +1845,10 @@
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
       "contentUnavailableFiles": [],
-      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change the greeting and leave a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"command_probe\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"}],\"commits\":[\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\"]}",
-      "turnId": "t_154d14b3536e4dfa",
-      "captureId": "c_0922d61b98e54f30",
-      "capturedAt": 1789343703151
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change the greeting and leave a note\",\"agent\":\"claude\",\"edits\":[{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"command_probe\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"app.py\",\"op\":\"write\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"remember this\\n\"},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"write\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"tool_call\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\"}],\"commits\":[\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\"]}",
+      "turnId": "t_755655b8c605465b",
+      "captureId": "c_7f88ec68e12343b2",
+      "capturedAt": 1789426238193
      },
      {
       "promptIndex": 1,
@@ -1701,7 +1862,7 @@
         "file": "README.md",
         "toolName": "Write",
         "input": {
-         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-rfsFi5/repo/README.md",
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-hr2Kvu/repo/README.md",
          "content": "# demo\n\nA tidy readme.\n"
         }
        }
@@ -1717,10 +1878,10 @@
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
       "contentUnavailableFiles": [],
-      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now tidy the readme and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"CLAUDE.md\",\"op\":\"create\",\"oldContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"newContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"source\":\"commit\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"edit\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"commit\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"commit\",\"commitSha\":\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"785c461fbbce1257c03cd2c52e01a3b41d201cbb\"]}",
-      "turnId": "t_88bff5163b714a7c",
-      "captureId": "c_0922d61b98e54f30",
-      "capturedAt": 1789343703151
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now tidy the readme and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"write\",\"newContent\":\"# demo\\n\\nA tidy readme.\\n\",\"source\":\"tool_call\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1,\"oldContent\":\"# demo\\n\"},{\"file\":\"CLAUDE.md\",\"op\":\"create\",\"oldContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"newContent\":\"<!-- origin-managed -->\\nOrigin: Session tracking active — prompts, files, and tokens will be captured.\\n\\nOrigin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don't force one per turn; skip a marker entirely if you have nothing real for it.\\n\\nREPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.\\n\\n  [Origin: Intent] <one sentence on WHY you're making this change>\\n  [Origin: Decision] <choice you made> — <why>\\n  [Origin: Open] <something you didn't finish, or aren't sure about>\\n  [Origin: Verify] <something a human reviewer should check>\\n  [Origin: Closes] <id of an open TODO above that this change finishes>\\n\\nFilled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.\\n\\n[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.\\n\\nMarkers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn't do. These appear on the PR review surface alongside Origin's server-synthesized summary; agent-emitted markers take precedence.\\n<!-- origin-managed -->\",\"source\":\"commit\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1},{\"file\":\"app.py\",\"op\":\"edit\",\"oldContent\":\"def main():\\n    print(\\\"old\\\")\\n\\n\\nmain()\\n\",\"newContent\":\"def main():\\n    print(\\\"new\\\")\\n\\n\\nmain()\\n\",\"source\":\"commit\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"create\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\n\",\"source\":\"commit\",\"commitSha\":\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"5123f0c7c2f5213d010f9a1c586640bc62ee5d00\"]}",
+      "turnId": "t_f37125293c7344dd",
+      "captureId": "c_7f88ec68e12343b2",
+      "capturedAt": 1789426238193
      },
      {
       "promptIndex": 2,
@@ -1739,9 +1900,9 @@
       "contentAuthoritative": true,
       "diffSource": "turn-window",
       "editsJson": "{\"promptIndex\":2,\"promptText\":\"thanks, what did we do?\",\"agent\":\"claude\",\"edits\":[],\"commits\":[],\"droppedFailedEdits\":0}",
-      "turnId": "t_067d19b4881a4c3a",
-      "captureId": "c_0922d61b98e54f30",
-      "capturedAt": 1789343703151
+      "turnId": "t_1485dbdd1ca246ad",
+      "captureId": "c_7f88ec68e12343b2",
+      "capturedAt": 1789426238193
      },
      {
       "promptIndex": 3,
@@ -1755,14 +1916,14 @@
       "uncommittedDiff": "",
       "linesAdded": 1,
       "linesRemoved": 0,
-      "commitSha": "cdb2a190327500b8cb988dbba432d7eadb73b8ed",
+      "commitSha": "6812b5cf85dd23933ad1efcda365520301686d0b",
       "treeSha": "64e8ba5a871ed10e46d388a9d5b513e88b905427",
       "turnWindowCaptured": true,
       "contentAuthoritative": true,
-      "capturedAt": 1789343703151,
+      "capturedAt": 1789426238193,
       "editsJson": "{\"promptIndex\":3,\"promptText\":\"now change the note and commit\",\"agent\":\"claude\",\"edits\":[{\"file\":\"notes.md\",\"op\":\"write\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\nand this\\n\",\"source\":\"uncommitted\",\"evidence\":\"command_probe\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"write\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\nand this\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"notes.md\",\"op\":\"edit\",\"oldContent\":\"remember this\\n\",\"newContent\":\"remember this\\nand this\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
-      "turnId": "t_c710001729e14b0f",
-      "captureId": "c_0922d61b98e54f30"
+      "turnId": "t_905741649ba84373",
+      "captureId": "c_7f88ec68e12343b2"
      },
      {
       "promptIndex": 4,
@@ -1776,12 +1937,12 @@
       "uncommittedDiff": "",
       "linesAdded": 1,
       "linesRemoved": 1,
-      "commitSha": "e577c6de74bdbb017541997e414eb1b1338c08ce",
+      "commitSha": "33a66c7fc75c63c6a855baadd4f6a823adbfc0ff",
       "treeSha": "593c2f313a3ccbc749bf89d284e8102e639d8a53",
-      "capturedAt": 1789343703151,
-      "editsJson": "{\"promptIndex\":4,\"promptText\":\"merge the theirs branch and resolve the readme\",\"agent\":\"claude\",\"edits\":[{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\\nA tidy readme, merged.\\n\",\"newContent\":\"# demo\\n\\nA tidy readme, merged.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"their_feature.py\",\"op\":\"write\",\"oldContent\":\"THEIRS_0 = 0\\nTHEIRS_1 = 1\\nTHEIRS_2 = 2\\nTHEIRS_3 = 3\\nTHEIRS_4 = 4\\nTHEIRS_5 = 5\\nTHEIRS_6 = 6\\nTHEIRS_7 = 7\\nTHEIRS_8 = 8\\nTHEIRS_9 = 9\\nTHEIRS_10 = 10\\nTHEIRS_11 = 11\\nTHEIRS_12 = 12\\nTHEIRS_13 = 13\\nTHEIRS_14 = 14\\nTHEIRS_15 = 15\\nTHEIRS_16 = 16\\nTHEIRS_17 = 17\\nTHEIRS_18 = 18\\nTHEIRS_19 = 19\\nTHEIRS_20 = 20\\nTHEIRS_21 = 21\\nTHEIRS_22 = 22\\nTHEIRS_23 = 23\\nTHEIRS_24 = 24\\nTHEIRS_25 = 25\\nTHEIRS_26 = 26\\nTHEIRS_27 = 27\\nTHEIRS_28 = 28\\nTHEIRS_29 = 29\\nTHEIRS_30 = 30\\nTHEIRS_31 = 31\\nTHEIRS_32 = 32\\nTHEIRS_33 = 33\\nTHEIRS_34 = 34\\nTHEIRS_35 = 35\\nTHEIRS_36 = 36\\nTHEIRS_37 = 37\\nTHEIRS_38 = 38\\nTHEIRS_39 = 39\\n\",\"newContent\":\"THEIRS_0 = 0\\nTHEIRS_1 = 1\\nTHEIRS_2 = 2\\nTHEIRS_3 = 3\\nTHEIRS_4 = 4\\nTHEIRS_5 = 5\\nTHEIRS_6 = 6\\nTHEIRS_7 = 7\\nTHEIRS_8 = 8\\nTHEIRS_9 = 9\\nTHEIRS_10 = 10\\nTHEIRS_11 = 11\\nTHEIRS_12 = 12\\nTHEIRS_13 = 13\\nTHEIRS_14 = 14\\nTHEIRS_15 = 15\\nTHEIRS_16 = 16\\nTHEIRS_17 = 17\\nTHEIRS_18 = 18\\nTHEIRS_19 = 19\\nTHEIRS_20 = 20\\nTHEIRS_21 = 21\\nTHEIRS_22 = 22\\nTHEIRS_23 = 23\\nTHEIRS_24 = 24\\nTHEIRS_25 = 25\\nTHEIRS_26 = 26\\nTHEIRS_27 = 27\\nTHEIRS_28 = 28\\nTHEIRS_29 = 29\\nTHEIRS_30 = 30\\nTHEIRS_31 = 31\\nTHEIRS_32 = 32\\nTHEIRS_33 = 33\\nTHEIRS_34 = 34\\nTHEIRS_35 = 35\\nTHEIRS_36 = 36\\nTHEIRS_37 = 37\\nTHEIRS_38 = 38\\nTHEIRS_39 = 39\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"edit\",\"oldContent\":\"# demo\\n\\nA tidy readme.\\n\",\"newContent\":\"# demo\\n\\nA tidy readme, merged.\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
-      "turnId": "t_ae8ebb3f33f24d6b",
-      "captureId": "c_0922d61b98e54f30"
+      "capturedAt": 1789426238193,
+      "editsJson": "{\"promptIndex\":4,\"promptText\":\"merge the theirs branch and resolve the readme\",\"agent\":\"claude\",\"edits\":[{\"file\":\"README.md\",\"op\":\"write\",\"oldContent\":\"# demo\\n\\nA tidy readme, merged.\\n\",\"newContent\":\"# demo\\n\\nA tidy readme, merged.\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"README.md\",\"op\":\"edit\",\"oldContent\":\"# demo\\n\\nTheir readme.\\n\",\"newContent\":\"# demo\\n\\nA tidy readme, merged.\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
+      "turnId": "t_36a587216e694331",
+      "captureId": "c_7f88ec68e12343b2"
      }
     ]
    }

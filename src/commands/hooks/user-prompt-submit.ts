@@ -43,7 +43,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { turnIdForServerRow } from '../../turn-index.js';
-import { STABLE_SESSION_ID_AGENTS, captureStamp, currentSessionWorkTree, dropForeignCommitsFromCapture, durableUpdate, ensureServerSession, ensureWriteJournal, filterUncommittedDiff, findStateForHook, getWorkingTreeSha, hookLookupSessionId, journalHasMark, normalizeWorkspaceRoot, resolveAutoAgentSessionId, resumeEndedConversationState, serverRowForLocalTurn, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, turnIdFor, uncommittedExcludeUnion } from '../hooks.js';
+import { STABLE_SESSION_ID_AGENTS, captureStamp, currentSessionWorkTree, dropForeignCommitsFromCapture, durableUpdate, ensureServerSession, ensureWriteJournal, filterUncommittedDiff, findStateForHook, findStateForHookInput, getWorkingTreeSha, hookLookupSessionId, journalHasMark, normalizeWorkspaceRoot, resolveAutoAgentSessionId, resumeEndedConversationState, serverRowForLocalTurn, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, turnIdFor, uncommittedExcludeUnion } from '../hooks.js';
 
 
 export function retroactiveTurnFiles(
@@ -585,13 +585,13 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
   }
 
   // ── Find session state using concurrent-aware lookup ────────────────────────
-  // For agents with unstable session_id (Cursor, Codex), don't use it for lookup
+  // Use native identity when available; legacy rotating session IDs are not lookup keys.
   const stableAgents = STABLE_SESSION_ID_AGENTS;
-  const lookupSessionId = hookLookupSessionId(input.session_id, agentSlug, input.conversation_id);
+  const lookupSessionId = hookLookupSessionId(input.session_id, agentSlug, input.conversation_id, input.turn_id);
   // Reassigned when a concurrent session-start publishes its reservation while
   // this hook is doing its slow pre-mint work — see the re-check before
   // auto-create below, which needs `saveCwd` to follow the adopted session.
-  let found = findStateForHook(hookCwd, lookupSessionId, agentSlug);
+  let found = findStateForHookInput(hookCwd, input, agentSlug);
   let state = found?.state || null;
   // True when THIS turn had to mint the session because no sessionStart hook
   // ever fired. Such a turn IS the session's start, so the context injection at
@@ -867,7 +867,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
       // — including the one the detach guard above just rejected. Adopting that
       // files this prompt, and the turn's whole diff, onto the previous chat's
       // session. Re-apply the same chat-id rule before adopting.
-      const racedCandidate = findStateForHook(hookCwd, lookupSessionId, agentSlug);
+      const racedCandidate = findStateForHookInput(hookCwd, input, agentSlug);
       const racedIncomingWorking = getWorkingGitRoot(hookCwd) || hookCwd;
       const racedIncomingCanonical = getCanonicalRepoPath(racedIncomingWorking);
       const racedIsBootstrap = !!(racedCandidate && isEmptyWorktreeBootstrap({
@@ -939,7 +939,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
       // Declared OUTSIDE the try below, not inside it: the catch builds the
       // local fallback session from both of these, and a `const` in a `try` is
       // not in scope in its `catch`. Inside, the fallback did not compile.
-      const autoAgentSessionId = resolveAutoAgentSessionId(agentSlug, input.conversation_id, input.session_id);
+      const autoAgentSessionId = resolveAutoAgentSessionId(agentSlug, input.conversation_id, input.session_id, input.turn_id);
       const autoTag = sessionTagFor(
         '', conversationAnchorId(agentSlug, input.conversation_id, input.session_id),
       );

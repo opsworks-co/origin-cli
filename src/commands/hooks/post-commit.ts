@@ -15,7 +15,7 @@ import { readDevinDesktopSessions, selectDevinSessionForRepo } from '../../devin
 import type { DevinDesktopSession } from '../../devin-desktop.js';
 import { capDiff, fitDiffToBudget } from '../../diff-budget.js';
 import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
-import { MAX_PROMPT_DIFF_LEN, capCommitMessage, captureGitState, commitDiffScopedToPrompt, commitLineCounts } from '../../git-capture.js';
+import { MAX_PROMPT_DIFF_LEN, capCommitMessage, captureGitState, commitLineCounts } from '../../git-capture.js';
 import { writeGitNotes } from '../../git-notes.js';
 import { BACKFILL_TIMEOUT_MS, COMMIT_INGEST_TIMEOUT_MS, RECENT_SHAS_LIMIT, acquireBackfillLock, backfillUnknownCommits, commitAuthoredDelta, extractCommitDiff, listRecentShas, releaseBackfillLock, shouldAdvertiseHistory, writeSyncMarker } from '../../history-backfill.js';
 import { pushSessionBranch, writeSessionFiles } from '../../local-entrypoint.js';
@@ -34,7 +34,7 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { serverRowForLocalTurn, turnIdForServerRow } from '../../turn-index.js';
-import { applyLedgerCaptures, buildMemoryEntry, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitTrailerBelongsToSession, durableUpdate, isInsideRepo, ownedRangeCommitShas, rewrittenCommitsPayload, sameDir, scheduleMemoryBriefRefresh, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, trailerNamesAKnownSession, turnIdFor, withDerivedLineCounts } from '../hooks.js';
+import { applyLedgerCaptures, buildMemoryEntry, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitTrailerBelongsToSession, durableUpdate, isInsideRepo, ownedRangeCommitShas, rewrittenCommitsPayload, sameDir, scheduleMemoryBriefRefresh, scopedCommitForTurn, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, trailerNamesAKnownSession, turnIdFor, withDerivedLineCounts } from '../hooks.js';
 
 
 /**
@@ -2110,15 +2110,18 @@ export async function handlePostCommit(): Promise<void> {
           || s.prePromptSha;
         // A merge is already scoped to what it resolved; re-diffing it from
         // the baseline tree would put the absorbed branch straight back in.
+        // A file the turn inherited (a checkout, a pull) is measured from the
+        // commit it came from, not from a baseline cut before it arrived.
         const scoped = mergeOwn
           ? null
-          : commitDiffScopedToPrompt(hookCwd, promptBaseline, commitSha, turnFiles);
+          : scopedCommitForTurn(hookCwd, s, latestPromptIdx, promptBaseline, commitSha, turnFiles);
         if (scoped) {
           debugLog('post-commit', 'scoped commit to prompt baseline', {
             sessionId: s.sessionId, promptIndex: latestPromptIdx,
             baseline: String(promptBaseline).slice(0, 12),
             commitLines: `+${linesAdded}/-${linesRemoved}`,
             promptLines: `+${scoped.linesAdded}/-${scoped.linesRemoved}`,
+            ...(scoped.inheritedFiles.length ? { inheritedFiles: scoped.inheritedFiles.length } : {}),
           });
         }
         // ── One answer per run ───────────────────────────────────────────

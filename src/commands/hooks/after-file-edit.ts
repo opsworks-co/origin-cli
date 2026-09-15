@@ -19,7 +19,7 @@ import { execFileSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { ensureWriteJournal, filterUncommittedDiff, findStateForHook, hookLookupSessionId, normalizeWorkspaceRoot, recordProbedShellEdits, sessionRepoRoots, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
+import { ensureWriteJournal, filterUncommittedDiff, findStateForHook, findStateForHookInput, normalizeWorkspaceRoot, recordProbedShellEdits, sessionRepoRoots, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
 import { newCaptureStamp } from '../../capture-stamp.js';
 
 
@@ -272,7 +272,7 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
   debugLog('after-file-edit', 'begin', { cwd: input.cwd, file: input.file_path || input.path });
 
   const hookCwd = resolveAfterFileEditCwd(input);
-  const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug, input.conversation_id), agentSlug);
+  const found = findStateForHookInput(hookCwd, input, agentSlug);
   if (!found) {
     debugLog('after-file-edit', 'ABORT: no session state', { hookCwd });
     return;

@@ -244,7 +244,7 @@ export function mapCommitsToPromptsFromRollout(
         const text = extractMessageText(payload.content);
         if (isRealUserText(text)) currentPromptIdx++;
       }
-    } else if (payloadType === 'function_call_output' || payloadType === 'local_shell_call_output') {
+    } else if (payloadType === 'function_call_output' || payloadType === 'local_shell_call_output' || payloadType === 'custom_tool_call_output') {
       if (currentPromptIdx < 0) continue; // outputs before any user turn — skip
       const output = stringifyOutput(payload?.output);
       for (const sha of extractShasFromOutput(output)) {
@@ -292,15 +292,21 @@ function extractMessageText(content: any): string {
     .join('');
 }
 
-function stringifyOutput(out: any): string {
-  if (out == null) return '';
-  if (typeof out === 'string') return out;
-  if (typeof out === 'object') {
-    if (typeof out.content === 'string') return out.content;
-    if (typeof out.stdout === 'string') return out.stdout;
-    try { return JSON.stringify(out); } catch { return ''; }
+function stringifyOutput(out: any, depth = 0): string {
+  if (out == null || depth > 8) return '';
+  if (typeof out === 'string') {
+    // exec returns JSON envelopes inside text blocks. Decode the envelope
+    // before looking for git's line-anchored commit banner.
+    try { return stringifyOutput(JSON.parse(out), depth + 1); }
+    catch { return out; }
   }
-  return String(out);
+  if (Array.isArray(out)) return out.map((part) => stringifyOutput(part, depth + 1)).join('\n');
+  if (typeof out === 'object') {
+    for (const key of ['output', 'stdout', 'text', 'content']) {
+      if (out[key] !== undefined) return stringifyOutput(out[key], depth + 1);
+    }
+  }
+  return '';
 }
 
 function isRealUserText(text: string): boolean {

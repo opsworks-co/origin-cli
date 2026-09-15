@@ -382,8 +382,8 @@ export function getCodexPromptsTimeline(repoPath: string, threadId?: string): Pr
     try {
       const event = JSON.parse(line);
       const eventType = event?.type || event?.event || '';
-      if (eventType !== 'item.created' && eventType !== 'message') continue;
-      const item = event?.data || event?.item || event;
+      if (eventType !== 'item.created' && eventType !== 'message' && eventType !== 'response_item') continue;
+      const item = eventType === 'response_item' ? event?.payload : event?.data || event?.item || event;
       const role = item?.role || item?.type;
       if (role !== 'user' && role !== 'human') continue;
       const content_ = item?.content || item?.text || item?.message;
@@ -393,17 +393,10 @@ export function getCodexPromptsTimeline(repoPath: string, threadId?: string): Pr
           ? content_.map((c: any) => c?.text || c?.content || '').join('')
           : '';
       if (!text || !text.trim()) continue;
-      // Drop the AGENTS.md / origin-managed echo: Codex reads AGENTS.md
-      // natively and replays it as the first user-role message in the
-      // rollout. The user-prompt-submit hook already filters this for
-      // the live `prompt` capture path; we apply the same filter here
-      // so the dashboard's session view doesn't show Origin's own
-      // system block as turn 1.
-      if (text.includes('<!-- origin-managed -->')) continue;
-      if (/^#\s+AGENTS\.md instructions for /m.test(text)) continue;
-      // Codex also wraps the AGENTS.md content in <INSTRUCTIONS>...</INSTRUCTIONS>
-      // — if that's everything in the message, drop it.
-      const stripped = text.replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '').trim();
+      // Use the same injected-context filter as transcript capture. Only
+      // message records are authoritative here; event_msg echoes would
+      // duplicate a prompt already present as a response_item.
+      const stripped = codexUserPromptText(text);
       if (!stripped) continue;
       // Codex events carry an ISO-ish timestamp on most variants.
       const tsRaw = event?.timestamp || event?.ts || event?.time || event?.created_at || item?.timestamp;
@@ -1276,6 +1269,53 @@ function stringifyCodexToolOutput(out: any): string {
   return String(out);
 }
 
+// Keep command outcomes separate from exec-wrapper text. A wrapper can poll
+// failing tests and start a clean typecheck in the same call; its combined
+// output is not the result of either command alone.
+function withCommandExecutions(turns: Array<{ role: string; content: string }>, lines: string[]) {
+  const users = turns.filter((t) => t.role === 'user' || t.role === 'human');
+  const nativeTurns = new Map<string, number>();
+  const commands = new Map<number, Map<string, { command: string; exitCode: number | null }>>();
+  let turn = -1;
+  let contextTurnId = '';
+  for (const line of lines) {
+    let event: any;
+    try { event = JSON.parse(line); } catch { continue; }
+    const p = event?.payload;
+    if (!p) continue;
+    if (event.type === 'turn_context') contextTurnId = p.turn_id || '';
+    if (p.type === 'message' && (p.role === 'user' || p.role === 'human')) {
+      const text = typeof p.content === 'string' ? p.content
+        : (Array.isArray(p.content) ? p.content.map((b: any) => b?.type === 'input_image' || b?.type === 'image' ? IMAGE_PLACEHOLDER : b?.text || '').join('') : '');
+      if (codexUserPromptText(text)) {
+        turn++;
+        const id = p.internal_chat_message_metadata_passthrough?.turn_id || contextTurnId;
+        if (id) nativeTurns.set(id, turn);
+      }
+    }
+    const item = p.item;
+    if (!['item_started', 'item_completed'].includes(p.type) || item?.type !== 'CommandExecution') continue;
+    const owner = p.turn_id ? nativeTurns.get(p.turn_id) : turn;
+    if (owner === undefined || owner < 0 || !users[owner]) continue;
+    const argv = item.command;
+    // Shell invocations carry the command after -c/-lc; other argv forms
+    // stay readable to the API's existing command classifier.
+    const command = typeof argv === 'string' ? argv : Array.isArray(argv)
+      ? (argv.length === 3 && /^-[a-z]*c$/.test(argv[1]) ? argv[2] : argv.join(' ')) : '';
+    if (!command || !item.id) continue;
+    let byId = commands.get(owner);
+    if (!byId) { byId = new Map(); commands.set(owner, byId); }
+    byId.set(item.id, {
+      command,
+      exitCode: p.type === 'item_completed' && Number.isInteger(item.exit_code) ? item.exit_code : null,
+    });
+  }
+  for (const [index, byId] of commands) {
+    Object.assign(users[index], { commandExecutions: [...byId.values()] });
+  }
+  return turns;
+}
+
 // Lean, live-heartbeat variant of parseCodexRollout used by the CLI heartbeat
 // (pushInflightCodexState). It runs every ~30s on the in-flight rollout to keep
 // the dashboard's transcript/tokens/prompts fresh WHILE the agent is working,
@@ -1510,7 +1550,7 @@ export function parseCodexRolloutLive(rolloutFile: string): {
       // Drop the withdrawn (rejected) patches.
       promptPatches: promptPatches.map((list) => list.filter(Boolean)),
       promptDeletedFiles,
-      transcript: JSON.stringify(turns),
+      transcript: JSON.stringify(withCommandExecutions(turns, lines)),
       tokensUsed: liveNonCachedInput + maxOutputTokens,
       inputTokens: liveNonCachedInput,
       outputTokens: maxOutputTokens,
@@ -1809,7 +1849,7 @@ export function parseCodexRollout(
       model,
       turnCount,
       toolCalls,
-      transcript: turns.length > 0 ? JSON.stringify(turns) : undefined,
+      transcript: turns.length > 0 ? JSON.stringify(withCommandExecutions(turns, lines)) : undefined,
       userPrompts: userPrompts.length > 0 ? userPrompts : undefined,
     };
   } catch (err) {
