@@ -817,7 +817,9 @@ async function pushInflightDiff(): Promise<void> {
             // turn CLEARS the stale working-tree diff a previous tick stored;
             // the server distinguishes "field absent" from "field empty".
             ...((hbMapping as any).turnWindowCaptured
-              ? { turnWindowCaptured: true, contentAuthoritative: true } : {}),
+              ? { turnWindowCaptured: true, contentAuthoritative: true }
+              // A clean merge's cleared row (commit-patch pass) must claim it too.
+              : (hbMapping as any).contentAuthoritative ? { contentAuthoritative: true } : {}),
             filesChanged: hbMapping.filesChanged,
             diff: hbMapping.diff,
             uncommittedDiff: hbMapping.uncommittedDiff ?? '',

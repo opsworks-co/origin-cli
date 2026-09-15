@@ -102,6 +102,8 @@ export interface CommittedTurnMapping {
    * the mapping carries now.
    */
   commitPatch?: boolean;
+  /** The row's content, even when empty, replaces what is stored. */
+  contentAuthoritative?: boolean;
 }
 
 export interface PreferCommitPatchDeps {
@@ -471,6 +473,43 @@ export function preferCommitPatchForCommittedTurns(
         seenCommit.add(f);
         commitFiles.push(f);
       }
+    }
+    // A CLEAN merge — one that resolved nothing — authored nothing. Declining
+    // here kept whatever the earlier passes measured, and they read the merge
+    // as a rewrite of every file the other side changed. Session a7740ea3 turn
+    // 15 merged main into its PR branch, kept its own side of one version line,
+    // and stored #1659's +284/-9 under a merge whose resolution was empty.
+    // Clear the row — unless the turn also left work uncommitted, which the
+    // other passes still own.
+    if (merge && merge.filesChanged.length === 0) {
+      if (ledgerFiles.length > 0) {
+        if (!git(repoPath, ['diff', '--quiet', 'HEAD', '--', ...ledgerFiles]).ok) {
+          declined(deps, pm, 'a file of the turn is dirty against its commit');
+          continue;
+        }
+        const untracked = git(repoPath, ['ls-files', '--others', '--exclude-standard', '--', ...ledgerFiles]);
+        if (!untracked.ok || untracked.out.trim()) {
+          declined(deps, pm, 'a file of the turn is untracked');
+          continue;
+        }
+      }
+      const before = { files: ledgerFiles.length, linesAdded: pm.linesAdded, linesRemoved: pm.linesRemoved };
+      pm.diff = '';
+      pm.filesChanged = [];
+      pm.linesAdded = 0;
+      pm.linesRemoved = 0;
+      pm.uncommittedDiff = '';
+      pm.contentUnavailableFiles = [];
+      // An empty replacement only lands on the server when it claims the row.
+      pm.contentAuthoritative = true;
+      pm.commitPatch = true;
+      replaced++;
+      applied(deps, pm);
+      deps.log?.('clean merge authored nothing — row cleared', {
+        promptIndex: pm.promptIndex, turnId, commit: last.slice(0, 8),
+        was: `${before.files} files +${before.linesAdded ?? '?'}/-${before.linesRemoved ?? '?'}`,
+      });
+      continue;
     }
     if (commitFiles.length === 0) { declined(deps, pm, 'the turn\'s commits name no files'); continue; }
     const watch = [...new Set([...ledgerFiles, ...commitFiles])];

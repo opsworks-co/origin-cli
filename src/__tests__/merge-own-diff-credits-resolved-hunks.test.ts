@@ -134,6 +134,39 @@ describe('a turn whose only commit is that merge', () => {
     expect(added(mapping.diff)).toEqual(['+import ours, theirs']);
     expect(removed(mapping.diff)).toEqual(['-import ours']);
   });
+
+  // Session a7740ea3 turn 15: `git merge origin/main` into a PR branch, the one
+  // conflict kept on the branch's own side. The resolution is empty, the pass
+  // declined, and the row kept the shadow window's +284/-9 — the other side.
+  it('a clean merge authored nothing: the other side\'s lines are cleared from the row', () => {
+    const sha = mergeResolvedAs(source({ 2: 'import ours', 17: 'recovery block from theirs' }));
+    const state = { promptTurnIds: ['t_0'], commitTurns: [{ sha, turnId: 't_0' }], promptShadows: [], prePromptSha: null };
+    const mapping: Record<string, any> = {
+      promptIndex: 0, filesChanged: ['stop.ts'], diff: 'diff --git a/stop.ts b/stop.ts\n+recovery block from theirs\n',
+      uncommittedDiff: '', linesAdded: 1, linesRemoved: 0, commitSha: sha,
+    };
+
+    expect(preferCommitPatchForCommittedTurns(state, [mapping as any], repo)).toBe(1);
+    expect(mapping.diff).toBe('');
+    expect(mapping.filesChanged).toEqual([]);
+    expect([mapping.linesAdded, mapping.linesRemoved]).toEqual([0, 0]);
+    expect(mapping.commitSha).toBe(sha);
+    // Both flags, so the server accepts an EMPTY row over the stored one.
+    expect(mapping.contentAuthoritative).toBe(true);
+    expect(mapping.commitPatch).toBe(true);
+  });
+
+  it('keeps the row when the turn also left an edit uncommitted after the clean merge', () => {
+    const sha = mergeResolvedAs(source({ 2: 'import ours', 17: 'recovery block from theirs' }));
+    fs.appendFileSync(path.join(repo, 'stop.ts'), 'edited after the merge\n');
+    const state = { promptTurnIds: ['t_0'], commitTurns: [{ sha, turnId: 't_0' }], promptShadows: [], prePromptSha: null };
+    const diff = 'diff --git a/stop.ts b/stop.ts\n+edited after the merge\n';
+    const mapping: Record<string, any> = { promptIndex: 0, filesChanged: ['stop.ts'], diff, uncommittedDiff: '', linesAdded: 1, linesRemoved: 0 };
+
+    expect(preferCommitPatchForCommittedTurns(state, [mapping as any], repo)).toBe(0);
+    expect(mapping.diff).toBe(diff);
+    expect(mapping.commitPatch).toBeUndefined();
+  });
 });
 
 describe('oursSideOfConflicts', () => {
