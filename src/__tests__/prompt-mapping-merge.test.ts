@@ -33,6 +33,15 @@ describe('promptMappingHasContent', () => {
 });
 
 describe('mergePromptMappings', () => {
+  it('coalesces saved backfill and an empty closing copy of the same turn', () => {
+    const captured = { ...m(4, ['a.ts'], 'patch'), commitSha: 'abc1234' };
+    const saved = [m(1, ['earlier.ts']), captured, m(4)];
+    const out = mergePromptMappings(saved, []);
+    expect(out.map(row => row.promptIndex)).toEqual([1, 4]);
+    expect(out[1]).toEqual(captured);
+    expect(mergePromptMappings([], saved)).toEqual(out);
+  });
+
   it('THE REGRESSION: empty transcript mappings no longer evict real git ones', () => {
     const saved = [m(0), m(1, ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts']), m(2, Array.from({ length: 10 }, (_, i) => `f${i}.ts`)), m(3), m(4)];
     const transcript = [m(0), m(1), m(2), m(3), m(4), m(5)];

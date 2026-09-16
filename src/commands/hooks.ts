@@ -1853,6 +1853,9 @@ export function commitBelongsToSession(
   // The commit's facts when the caller already read them in a batch; null
   // means the read failed. Omitted, the commit is read here.
   facts?: CommitOwnershipFacts | null,
+  // The repo's git common dir, for a caller asking about many commits — see
+  // `gitCommonDirOnce`. Omitted, each commit that needs it spawns the lookup.
+  commonDir?: () => string | null,
 ): boolean {
   const read = facts === undefined ? readCommitOwnershipFacts(repoPath, sha) : facts;
   if (!read) return true; // unreadable — keep it rather than guess work away
@@ -1889,7 +1892,7 @@ export function commitBelongsToSession(
     // above (GitHub committed those), or a sibling still live in this tree
     // whose own commit we would take over the moment it landed.
     if (localEmail && committerEmail && committerEmail !== localEmail) return false;
-    return !trailerNamesAKnownSession(repoPath, body, state);
+    return !trailerNamesAKnownSession(repoPath, body, state, commonDir);
   }
 
   const recorded = (state.sessionCommitShas || []).map((c) => c.toLowerCase());
@@ -1910,7 +1913,7 @@ export function commitBelongsToSession(
   //     under a prompt that had made no commit at all.
   if (ownership === 'other') {
     if (!weRecordedIt) return false;
-    return !trailerNamesAKnownSession(repoPath, body, state);
+    return !trailerNamesAKnownSession(repoPath, body, state, commonDir);
   }
   // No trailer at all. Our own record does NOT settle it, and used to:
   // `if (weRecordedIt) return true;` stood here and short-circuited both
@@ -1932,9 +1935,27 @@ export function commitBelongsToSession(
   // Nothing is lost for a commit we really made: a hook-missed local commit
   // (sandboxed Codex, a shell `git commit`) carries no trailer but IS
   // committed by the local identity, so it still returns true below.
-  if (anotherSessionRecordedCommit(repoPath, sha, state)) return false;
+  if (anotherSessionRecordedCommit(repoPath, sha, state, commonDir)) return false;
   if (!localEmail || !committerEmail) return true;
   return committerEmail === localEmail;
+}
+
+/**
+ * `getGitCommonDir(repoPath)`, looked up on first use and then remembered.
+ *
+ * For a caller that asks `commitBelongsToSession` about a whole window: every
+ * untrailered commit reads the sibling session states, and each read spawned
+ * `git rev-parse --git-common-dir` — 300 spawns for a 300-commit window, all
+ * with the same answer. Scope one to the loop, not the process: a repo can be
+ * created or moved between hooks.
+ */
+export function gitCommonDirOnce(repoPath: string): () => string | null {
+  let looked = false;
+  let dir: string | null = null;
+  return () => {
+    if (!looked) { dir = getGitCommonDir(repoPath); looked = true; }
+    return dir;
+  };
 }
 
 /**
@@ -1950,12 +1971,14 @@ export function commitBelongsToSession(
  * is by prefix in both directions. Best-effort: if nothing can be read, we
  * report "not known", which keeps the previous record-wins behaviour.
  */
-export function trailerNamesAKnownSession(repoPath: string, commitBody: string, state: SessionState): boolean {
+export function trailerNamesAKnownSession(
+  repoPath: string, commitBody: string, state: SessionState, commonDir?: () => string | null,
+): boolean {
   const m = commitBody.match(/^Origin-Session:\s*([^\s|]+)/mi);
   const id = (m?.[1] || '').toLowerCase();
   if (!id) return false;
   try {
-    for (const other of allSessionStatesForRepo(repoPath)) {
+    for (const other of allSessionStatesForRepo(repoPath, commonDir)) {
       if (!other?.sessionId) continue;
       const oid = String(other.sessionId).toLowerCase();
       const tag = String(other.sessionTag || '').toLowerCase();
@@ -1975,10 +1998,10 @@ export function trailerNamesAKnownSession(repoPath: string, commitBody: string, 
  * and wrong for "who owns this commit" — a session that has since finished
  * still owns what it committed.
  */
-function allSessionStatesForRepo(repoPath: string): SessionState[] {
+function allSessionStatesForRepo(repoPath: string, commonDir?: () => string | null): SessionState[] {
   const out: SessionState[] = [];
   try {
-    const gitDir = getGitCommonDir(repoPath);
+    const gitDir = commonDir ? commonDir() : getGitCommonDir(repoPath);
     if (!gitDir) return out;
     for (const entry of fs.readdirSync(gitDir)) {
       if (!entry.startsWith('origin-session') || !entry.endsWith('.json')) continue;
@@ -2010,14 +2033,16 @@ function allSessionStatesForRepo(repoPath: string): SessionState[] {
  * never adds one, so a failed read or a missing state file leaves the previous
  * behaviour untouched.
  */
-function anotherSessionRecordedCommit(repoPath: string, sha: string, state: SessionState): boolean {
+function anotherSessionRecordedCommit(
+  repoPath: string, sha: string, state: SessionState, commonDir?: () => string | null,
+): boolean {
   const target = (sha || '').toLowerCase();
   if (!target) return false;
   try {
     // listActiveSessions skips ENDED sessions, so a commit whose owner has
     // already finished is not caught here — the trailer check above is what
     // covers that case, and it is the decisive one.
-    for (const other of listActiveSessions(repoPath)) {
+    for (const other of listActiveSessions(repoPath, commonDir?.())) {
       if (!other || other.sessionId === state.sessionId) continue;
       const shas = (other.sessionCommitShas || []).map((c) => String(c).toLowerCase());
       if (shas.some((c) => c === target || (c.length >= 7 && target.startsWith(c)) || target.length >= 7 && c.startsWith(target))) {
@@ -3334,10 +3359,11 @@ export function filesLeftByForeignCommits(
   if (inWindow.length === 0) return pulled;
   let localEmail = '';
   try { localEmail = localCommitterEmail(repoPath); } catch { localEmail = ''; }
+  const commonDir = gitCommonDirOnce(repoPath);
   let budget = FOREIGN_WINDOW_FILE_BUDGET;
   for (const sha of inWindow) {
     if (budget <= 0) break;
-    if (commitBelongsToSession(repoPath, sha, state, localEmail)) continue;
+    if (commitBelongsToSession(repoPath, sha, state, localEmail, undefined, commonDir)) continue;
     for (const file of commitChangedFiles(repoPath, sha)) {
       if (budget-- <= 0) break;
       if (pulled.has(file)) continue;
@@ -3689,6 +3715,7 @@ function inheritedWindowDeps(
     if (missing.length < 2) return;
     for (const [sha, facts] of readCommitOwnershipFactsBatch(repoPath, missing)) ownershipFacts.set(sha, facts);
   };
+  const commonDir = gitCommonDirOnce(repoPath);
   const factsFor = (sha: string): CommitOwnershipFacts | null => {
     const key = sha.toLowerCase();
     if (!ownershipFacts.has(key)) ownershipFacts.set(key, readCommitOwnershipFacts(repoPath, sha));
@@ -3757,7 +3784,7 @@ function inheritedWindowDeps(
       // rest of this file shares, and generous is the right direction here.
       // Re-baselining PAST work the turn authored would erase it from the
       // record; declining to re-baseline only leaves today's behaviour.
-      return commitBelongsToSession(repoPath, sha, state, localEmail, facts);
+      return commitBelongsToSession(repoPath, sha, state, localEmail, facts, commonDir);
     },
     changedFiles: (sha) => commitChangedFiles(repoPath, sha),
     // A turn that inherited more than one line (checkout, then merge main)

@@ -57,7 +57,7 @@ import os from 'os';
 import path from 'path';
 import { localTurnForServerRow, serverRowForLocalTurn, turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
 import { applyRewritePairsToState, finalRewriteOf, firstUnanchoredPrompt, markSkippedPromptBaselines, recordPromptShadow } from '../../session-state.js';
-import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
+import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, gitCommonDirOnce, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
 
 
 // ─── Debug Logger ─────────────────────────────────────────────────────────
@@ -301,7 +301,8 @@ export function ownedRangeCommitShas(repoPath: string, state: SessionState): str
     list = out ? out.split('\n').map(s => s.trim()).filter(s => /^[a-fA-F0-9]{7,40}$/.test(s)) : [];
   } catch { return []; }
   const localEmail = localCommitterEmail(repoPath);
-  return list.filter((sha) => commitBelongsToSession(repoPath, sha, state, localEmail));
+  const commonDir = gitCommonDirOnce(repoPath);
+  return list.filter((sha) => commitBelongsToSession(repoPath, sha, state, localEmail, undefined, commonDir));
 }
 
 /**
@@ -422,11 +423,12 @@ export function dropForeignCommitsFromCapture(
   const details = capture.commitDetails || [];
   if (details.length === 0) return [];
   const localEmail = localCommitterEmail(repoPath);
+  const commonDir = gitCommonDirOnce(repoPath);
   const foreignFiles = new Set<string>();
   const foreignShas = new Set<string>();
   for (const d of details) {
     const sha = (d.sha || '').trim();
-    if (!sha || commitBelongsToSession(repoPath, sha, state, localEmail)) continue;
+    if (!sha || commitBelongsToSession(repoPath, sha, state, localEmail, undefined, commonDir)) continue;
     foreignShas.add(sha);
     for (const f of d.filesChanged || []) foreignFiles.add(f);
   }
@@ -814,15 +816,16 @@ export function dropAdjacentCursorDiffReplays<
  * A legacy row's whole-file Writes, rendered from the before-state Stop
  * backfilled instead of as creations. See legacy-write-diff.ts.
  *
- * Only a row NO observed capture owns: a `diffSource` row's diff came from the
- * ledger or a shadow window and is already measured from a real before-state.
+ * Only a row NO observed capture owns: a `diffSource` or `commitPatch` row
+ * is already measured from a real before-state. Re-rendering a commit patch
+ * can erase a new file using a later write's before-state from the transcript.
  * Counts are cleared when the diff changes, so `withDerivedLineCounts` derives
  * them from the rendering that is actually sent.
  */
 export function withLegacyWritesRendered<T extends {
-  promptIndex: number; diff?: string; diffSource?: string; linesAdded?: number; linesRemoved?: number;
+  promptIndex: number; diff?: string; diffSource?: string; commitPatch?: boolean; linesAdded?: number; linesRemoved?: number;
 }>(pm: T, editsJson: string | undefined): T {
-  if (pm.diffSource || !pm.diff) return pm;
+  if (pm.diffSource || pm.commitPatch || !pm.diff) return pm;
   const { diff, changed } = reRenderCreatedWrites(pm.diff, editsJson);
   if (changed.length === 0) return pm;
   debugLog('stop', 'legacy whole-file writes rendered from their backfilled before-state', {
@@ -1955,6 +1958,10 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
     promptMappings as any, prompts,
     Math.max(parsed.promptIndexBase || 0, state.promptIndexBase || 0),
   ) as any;
+  // Codex backfill may already hold the closing turn before the fallback
+  // above appends it again. Send one row per turn, or a trailing empty copy
+  // can overwrite its committed capture within the very same PATCH.
+  promptMappings = mergePromptMappings([], promptMappings);
   return { promptMappings };
 }
 function sessionFilesAcrossRepos({ state, sessionFilesChanged, promptBaseline, parsed }: { state: SessionState; sessionFilesChanged: string[]; promptBaseline: string | null | undefined; parsed: ParsedTranscript }): { sessionFilesChanged: string[] } {
@@ -3847,7 +3854,13 @@ export function recordTranscriptCommitProofs(
   for (const proof of proofs) {
     if (finalRewriteOf(proof.sha, (state as any).rewrittenCommits) !== proof.sha) continue;
     const turnId = turnIdForServerRow(state, proof.promptIndex);
-    if (!turnId || state.commitTurns.some((ct) => sameSha(ct.sha, proof.sha))) continue;
+    if (!turnId) continue;
+    // A branch switch can leave the session list holding only the newest
+    // branch's commit. Transcript proof still names the earlier work, even
+    // when its turn attestation was already recorded on a previous Stop.
+    state.sessionCommitShas ||= [];
+    if (!state.sessionCommitShas.some((sha) => sameSha(sha, proof.sha))) state.sessionCommitShas.push(proof.sha);
+    if (state.commitTurns.some((ct) => sameSha(ct.sha, proof.sha))) continue;
     state.commitTurns.push({ sha: proof.sha, turnId, at: new Date().toISOString(), via: 'transcript' });
   }
 }

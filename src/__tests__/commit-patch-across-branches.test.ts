@@ -73,6 +73,34 @@ function twoBranchTurn() {
 }
 
 describe('a turn whose commits sit on several branches', () => {
+  it('attests ordinary command lists but rejects pipelines, quoted commands and substitutions', () => {
+    const { a1 } = twoBranchTurn();
+    const read = (command: string) => codexNativeCommits([
+      { type: 'turn_context', payload: { turn_id: 'native' } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: 'fix capture' } },
+      { type: 'event_msg', payload: { type: 'item_completed', turn_id: 'native', item: {
+        type: 'CommandExecution', cwd: pathToFileURL(repo).href,
+        command: ['/bin/zsh', '-lc', command], exit_code: 0,
+        stdout: `[fix-a ${a1.slice(0, 9)}] fix\n`,
+      } } },
+    ].map(e => JSON.stringify(e)).join('\n'), repo);
+    for (const command of [
+      'git add a.ts; git commit -m fix',
+      'git add a.ts && git commit -m fix',
+      'git add a.ts\ngit commit -m fix',
+      'git add a.ts; git commit -m "fix; capture && attribution"',
+    ]) expect(read(command), command).toMatchObject([{ sha: a1, promptText: 'fix capture' }]);
+    for (const command of [
+      'echo "git add a.ts; git commit -m fix"',
+      'git add a.ts | git commit -m fix',
+      'git add a.ts & git commit -m fix',
+      'git add a.ts || git commit -m fix',
+      'git commit -m "$(cat message)"',
+      'git add a.ts; cd elsewhere; git commit -m fix',
+      'git commit -m "unterminated',
+    ]) expect(read(command), command).toEqual([]);
+  });
+
   it('keeps commits on the authoring row and refuses ambiguous prompt matches', () => {
     const c = { sha: 'abcdef123456', nativeTurnId: 'native', promptText: 'open PR' };
     const author = { promptIndex: 4, promptText: 'fix it', filesChanged: ['a.ts'], diff: 'authored patch' };
@@ -197,13 +225,14 @@ describe('a turn whose commits sit on several branches', () => {
     expect([...(mapping.filesChanged as string[])].sort()).toEqual(['a.ts', 'b.ts', 'package.json']);
   });
 
-  it('an empty row whose commits HEAD holds stays empty', () => {
+  it('recovers an empty row whose commits HEAD holds, just like a stranded branch', () => {
     const { a1, a2, state, mapping } = twoBranchTurn();
     git('checkout', '-q', 'fix-a');
     state.commitTurns = [{ sha: a1, turnId: 't_0' }, { sha: a2, turnId: 't_0' }];
     Object.assign(mapping, { filesChanged: [], diff: '', linesAdded: 0, linesRemoved: 0 });
-    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo)).toBe(0);
-    expect(mapping.diff).toBe('');
+    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo)).toBe(1);
+    expect(pathsInDiff(mapping.diff).sort()).toEqual(['a.ts', 'package.json']);
+    expect([mapping.linesAdded, mapping.linesRemoved]).toEqual([3, 1]);
   });
 
   it('reports the content it applied to the resolver', () => {

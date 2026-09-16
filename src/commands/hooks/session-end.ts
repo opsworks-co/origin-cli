@@ -1966,8 +1966,9 @@ export function mergePromptMappings<T extends { promptIndex: number; filesChange
   fromTranscript: T[],
 ): T[] {
   const byIndex = new Map<number, T>();
-  for (const m of saved) byIndex.set(m.promptIndex, m);
-  for (const m of fromTranscript) {
+  // Saved state can already contain the backfill and closing capture of the
+  // same turn. Apply the same content rule to those copies too.
+  for (const m of [...saved, ...fromTranscript]) {
     const prev = byIndex.get(m.promptIndex);
     // Transcript wins unless it is empty and the saved mapping is not.
     if (prev && !promptMappingHasContent(m) && promptMappingHasContent(prev)) continue;

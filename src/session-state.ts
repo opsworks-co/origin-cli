@@ -2039,7 +2039,13 @@ export function markSessionEnded(state: SessionState): boolean {
  * List all active sessions in a git repo (or cwd).
  * Scans for all origin-session*.json files.
  */
-export function listActiveSessions(cwd?: string): SessionState[] {
+export function listActiveSessions(
+  cwd?: string,
+  // `getGitCommonDir(cwd)` when the caller already looked it up — a loop over a
+  // turn window asks this once per commit and the answer cannot change inside
+  // it. Omitted, it is looked up here.
+  gitCommonDir?: string | null,
+): SessionState[] {
   const sessions: SessionState[] = [];
   // A session whose own state file says ENDED is not active. This function
   // did NO filtering at all, so `origin status` listed sessions that had
@@ -2050,7 +2056,7 @@ export function listActiveSessions(cwd?: string): SessionState[] {
 
   // Check git dir (COMMON dir — matches getStatePath, so a lookup from a
   // worktree and one from the main checkout read the same directory)
-  const gitDir = getGitCommonDir(cwd) || getGitDir(cwd);
+  const gitDir = (gitCommonDir === undefined ? getGitCommonDir(cwd) : gitCommonDir) || getGitDir(cwd);
   if (gitDir) {
     const resolvedGitDir = path.isAbsolute(gitDir) ? gitDir : path.resolve(cwd || process.cwd(), gitDir);
     try {

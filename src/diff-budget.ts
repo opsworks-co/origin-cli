@@ -40,7 +40,7 @@ export interface BudgetedDiff {
   omittedFiles: string[];
   /** Files kept only in part — some hunks dropped. */
   partialFiles: string[];
-  /** True when anything at all was dropped. */
+  /** True when file sections or changed hunks were dropped (not just context). */
   truncated: boolean;
   /** Size of the input, so a caller can report how much was lost. */
   originalBytes: number;
@@ -105,18 +105,68 @@ function byteLen(s: string): number {
   return Buffer.byteLength(s, 'utf-8');
 }
 
+/** Keep every change, reducing only unchanged context to Git's usual ±3 rows. */
+function compactHunk(hunk: string): string {
+  const lines = hunk.split('\n');
+  if (lines[lines.length - 1] === '') lines.pop();
+  const m = lines[0]?.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/);
+  if (!m) return hunk;
+  const oldStart = Number(m[1]), newStart = Number(m[3]);
+  const oldSize = m[2] === undefined ? 1 : Number(m[2]);
+  const newSize = m[4] === undefined ? 1 : Number(m[4]);
+  const rows: Array<{ text: string; old: number; next: number; oldNo: number; newNo: number }> = [];
+  let oldNo = oldStart, newNo = newStart;
+  for (const line of lines.slice(1)) {
+    if (line.startsWith('\\ No newline at end of file')) {
+      if (!rows.length) return hunk;
+      rows[rows.length - 1].text += line + '\n';
+      continue;
+    }
+    const op = line[0];
+    // Unknown or malformed hunks must remain untouched, not be "repaired"
+    // into a smaller patch that silently loses content.
+    if (op !== ' ' && op !== '+' && op !== '-') return hunk;
+    const old = op === '+' ? 0 : 1, next = op === '-' ? 0 : 1;
+    rows.push({ text: line + '\n', old, next, oldNo, newNo });
+    oldNo += old;
+    newNo += next;
+  }
+  if (oldNo - oldStart !== oldSize || newNo - newStart !== newSize) return hunk;
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].old && rows[i].next) continue;
+    const start = Math.max(0, i - 3), end = Math.min(rows.length, i + 4);
+    const last = ranges[ranges.length - 1];
+    if (last && start <= last.end) last.end = end;
+    else ranges.push({ start, end });
+  }
+  if (!ranges.length || (ranges.length === 1 && ranges[0].start === 0 && ranges[0].end === rows.length)) return hunk;
+  return ranges.map(({ start, end }) => {
+    const kept = rows.slice(start, end);
+    const oldCount = kept.reduce((n, row) => n + row.old, 0);
+    const newCount = kept.reduce((n, row) => n + row.next, 0);
+    // Zero-length ranges point to the line BEFORE an insertion/deletion.
+    // An originally empty side already has that anchor in its header.
+    const oldAt = kept[0].oldNo - (oldCount === 0 && oldSize > 0 ? 1 : 0);
+    const newAt = kept[0].newNo - (newCount === 0 && newSize > 0 ? 1 : 0);
+    return `@@ -${oldAt},${oldCount} +${newAt},${newCount} @@${m[5]}\n`
+      + kept.map(row => row.text).join('');
+  }).join('');
+}
+
 /**
  * Reduce a diff to fit `maxBytes`, cutting only at format boundaries.
  *
  * Order of preference, each strictly better than the next:
  *   1. Everything fits — returned unchanged, byte for byte.
- *   2. Whole file sections are kept until the budget runs out; the rest are
+ *   2. Remove excess unchanged context before omitting any changed hunks.
+ *   3. Whole file sections are kept until the budget runs out; the rest are
  *      named in `omittedFiles`.
- *   3. A section that will not fit whole is kept as its header plus as many
+ *   4. A section that will not fit whole is kept as its header plus as many
  *      WHOLE hunks as remain affordable, and named in `partialFiles`. A header
  *      with no hunks is a valid diff section (git emits one for a mode-only
  *      change), so this never produces something unparseable.
- *   4. When even a header does not fit, the file is omitted entirely.
+ *   5. When even a header does not fit, the file is omitted entirely.
  *
  * Sections are considered in their original order rather than smallest-first.
  * Reordering would be a better packing and a worse diff: a reviewer reads a
@@ -124,13 +174,22 @@ function byteLen(s: string): number {
  * arbitrary subset is not.
  */
 export function fitDiffToBudget(diff: string, maxBytes: number): BudgetedDiff {
-  const text = diff || '';
+  let text = diff || '';
   const originalBytes = byteLen(text);
   if (!text.trim() || originalBytes <= maxBytes) {
     return { diff: text, omittedFiles: [], partialFiles: [], truncated: false, originalBytes };
   }
 
-  const sections = splitDiffSections(text);
+  // Full-file context can spend the entire budget on unchanged lines. In
+  // session 805c1429 a +225/-5 turn became +218/-5 even though its changes
+  // fit comfortably: one 224KB file crowded out its own later hunk and the
+  // last file. Shrink context across ALL files before choosing any omissions.
+  let sections = splitDiffSections(text);
+  text = sections.map(s => s.header + s.hunks.map(compactHunk).join('')).join('');
+  if (sections.length > 0 && byteLen(text) <= maxBytes) {
+    return { diff: text, omittedFiles: [], partialFiles: [], truncated: false, originalBytes };
+  }
+  sections = splitDiffSections(text);
   // No recognisable sections (not a git-style diff): keeping a prefix would be
   // the mid-cut this module exists to prevent, so keep nothing and say so.
   if (sections.length === 0) {

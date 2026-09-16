@@ -9,6 +9,31 @@ export interface NativeCommitEvidence {
   replaces?: string;
 }
 
+/** Split a simple command list without treating separators in quotes as shell
+ * syntax. Pipelines, substitutions and background execution are not proof. */
+function simpleCommandList(command: string): string[] | null {
+  if (/[`<>]|\$\(/.test(command)) return null;
+  const parts: string[] = [];
+  let start = 0;
+  let quote = '';
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (c === '\\' && quote !== "'") { i++; continue; }
+    if (quote) { if (c === quote) quote = ''; continue; }
+    if (c === "'" || c === '"') { quote = c; continue; }
+    if (c === '|') return null;
+    if (c === '&' && command[i + 1] !== '&') return null;
+    if (c === ';' || c === '\n' || c === '&') {
+      parts.push(command.slice(start, i).trim());
+      if (c === '&') i++;
+      start = i + 1;
+    }
+  }
+  if (quote) return null;
+  parts.push(command.slice(start).trim());
+  return parts.filter(Boolean);
+}
+
 export function nativeCommitOwners(
   native: NativeCommitEvidence[],
   mappings: Array<{ promptIndex: number; promptText: string; commitSha?: string | null; diff?: string | null; filesChanged: string[] }>,
@@ -68,9 +93,9 @@ export function codexNativeCommits(rollout: string, repoPath: string): NativeCom
       if (fs.realpathSync(cwd) !== fs.realpathSync(repoPath)) continue;
     } catch { continue; }
     const command = item.command.at(-1);
-    if (typeof command !== 'string' || /[;&|`<>]|\$\(/.test(command)) continue;
-    const lines = command.split('\n').map((l: string) => l.trim()).filter(Boolean);
-    if (!lines.length || !lines.every((l: string) => /^git (?:add|diff|commit)\b/.test(l))) continue;
+    if (typeof command !== 'string') continue;
+    const lines = simpleCommandList(command);
+    if (!lines?.length || !lines.every((l: string) => /^git (?:add|diff|commit)\b/.test(l))) continue;
     const commits = lines.filter((l: string) => /^git commit\b/.test(l));
     if (commits.length !== 1) continue;
     const match = typeof item.stdout === 'string' && item.stdout.match(/^\[([^\]\n]+) ([a-f0-9]{7,40})\] /m);

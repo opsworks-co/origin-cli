@@ -139,6 +139,20 @@ describe('a sibling that was merged and had its branch deleted', () => {
 });
 
 describe('a transcript proof for a commit that was amended away', () => {
+  it('restores earlier-branch ownership even when the turn proof is already saved', () => {
+    const first = 'a'.repeat(40), second = 'b'.repeat(40);
+    const state: any = {
+      promptTurnIds: ['t_first', 't_second'],
+      sessionCommitShas: [second],
+      commitTurns: [{ sha: first, turnId: 't_first', via: 'transcript' }],
+    };
+    const proofs = [{ promptIndex: 0, sha: first }, { promptIndex: 1, sha: second }];
+    recordTranscriptCommitProofs(state, proofs);
+    recordTranscriptCommitProofs(state, proofs);
+    expect(state.sessionCommitShas).toEqual([second, first]);
+    expect(state.commitTurns.map((c: any) => [c.sha, c.turnId])).toEqual([[first, 't_first'], [second, 't_second']]);
+  });
+
   it('is not re-filed on the turn beside its amendment', () => {
     const original = 'e79941c238139381e9cd337fbe1fd924e9ebd991';
     const amended = 'e6ccbb7fa5e1d4e660db4204251a8107ecc35874';
@@ -155,5 +169,6 @@ describe('a transcript proof for a commit that was amended away', () => {
     const shas = state.commitTurns.map((c: any) => c.sha);
     expect(shas, 'the amended-away original came back via the transcript').not.toContain(original);
     expect(shas).toEqual([amended, unrelated]);
+    expect(state.sessionCommitShas).not.toContain(original);
   });
 });

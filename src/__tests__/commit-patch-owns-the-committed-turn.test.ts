@@ -80,6 +80,29 @@ function committedTurn() {
 }
 
 describe('a turn whose work is entirely in its commit', () => {
+  it('recovers an empty ledger row from the attested commit without another prompt', () => {
+    const { shadowSha, sha, state, mapping } = committedTurn();
+    Object.assign(mapping, { diff: '', filesChanged: [], linesAdded: 0, linesRemoved: 0 });
+    const expected = commitDiffScopedToPrompt(repo, shadowSha, sha, ['vodka.py'])!;
+    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo)).toBe(1);
+    expect(mapping.diff).toBe(expected.diff);
+    expect([mapping.linesAdded, mapping.linesRemoved]).toEqual([expected.linesAdded, expected.linesRemoved]);
+    expect((mapping as { commitPatch?: boolean }).commitPatch).toBe(true);
+    expect((mapping as { commitSha?: string }).commitSha).toBe(sha);
+  });
+
+  it('ignores Origin context refreshes when checking whether committed work is dirty', () => {
+    write('AGENTS.md', '<!-- origin-managed -->\nold memory\n');
+    git('add', 'AGENTS.md'); git('commit', '-qm', 'context baseline');
+    const { state, mapping, sha } = committedTurn();
+    write('AGENTS.md', '<!-- origin-managed -->\nnew memory\n');
+    mapping.filesChanged.push('AGENTS.md');
+    Object.assign(mapping, { commitSha: 'f'.repeat(40) });
+    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo)).toBe(1);
+    expect(mapping.filesChanged).toEqual(['vodka.py']);
+    expect((mapping as { commitSha?: string }).commitSha).toBe(sha);
+  });
+
   it('sends the commit patch, with git\'s line counts', () => {
     const { shadowSha, sha, state, mapping } = committedTurn();
     const expected = commitDiffScopedToPrompt(repo, shadowSha, sha, ['vodka.py'])!;

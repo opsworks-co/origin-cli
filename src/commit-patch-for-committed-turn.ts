@@ -52,6 +52,7 @@
  */
 import { mergeOwnDiff } from './history-backfill.js';
 import { execFileSync } from 'child_process';
+import { isOriginAutoManagedPath } from './ignore-patterns.js';
 import { commitDiffScopedToPrompt, MAX_DIFF_SIZE, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
 import { localTurnForServerRow } from './turn-index.js';
 import type { TurnObservation } from './resolve-turn.js';
@@ -88,6 +89,7 @@ function rewritesOf(sha: string, rewrites: Array<{ from: string; to: string }>):
 
 export interface CommittedTurnMapping {
   promptIndex: number;
+  commitSha?: string | null;
   filesChanged?: unknown;
   diff?: string;
   uncommittedDiff?: string | null;
@@ -269,7 +271,7 @@ function patchAcrossBranches(
   // Same stand-downs as the single range: uncommitted work of the turn stays
   // with the ledger. Against HEAD — a file only another branch holds is simply
   // absent here, which is not dirty.
-  const watch = [...new Set([...ledgerFilesOf(pm), ...commitFiles])];
+  const watch = [...new Set([...ledgerFilesOf(pm), ...commitFiles])].filter(f => !isOriginAutoManagedPath(f));
   if (!git(repoPath, ['diff', '--quiet', 'HEAD', '--', ...watch]).ok) {
     declined(deps, pm, 'a file of the turn is dirty against its commit');
     deps.log?.('commit patch declined: a file of the turn is dirty against its commit', { promptIndex: pm.promptIndex, commits: tips });
@@ -328,6 +330,10 @@ function patchAcrossBranches(
   pm.contentUnavailableFiles = diffTruncated ? named.filter((f) => !inText.has(f)) : [];
   pm.uncommittedDiff = '';
   pm.commitPatch = true;
+  // The same attestation that supplied the patch supplies its primary SHA.
+  // A stale HEAD stamp may name an unrelated commit from a branch checkout.
+  pm.commitSha = perChain.find(x => x.chain.members.includes(pm.commitSha || ''))?.chain.tip
+    || perChain[perChain.length - 1].chain.tip;
   applied(deps, pm);
   deps.log?.('ledger diff replaced by the commit patches of several branches', {
     promptIndex: pm.promptIndex, turnId, branches: parts.length, stranded, commits: tips,
@@ -368,7 +374,6 @@ export function preferCommitPatchForCommittedTurns(
     // work sits entirely on branches the tree has left has nothing off HEAD,
     // so every pass before this one leaves its row empty — and Stop then sent
     // that empty row over post-commit's correct ones.
-    const hasDiff = !!(pm.diff || '').trim();
     const own = turns.filter((c) => c && c.turnId === turnId && typeof c.sha === 'string' && HEX.test(c.sha));
     if (own.length === 0) { declined(deps, pm, 'the turn made no commit'); continue; }
     // Every commit of the turn that still exists as an object names the
@@ -419,9 +424,10 @@ export function preferCommitPatchForCommittedTurns(
         continue;
       }
     }
-    // The single range only re-renders a row that has content; it was never
-    // asked to fill an empty one, and still is not.
-    if (!hasDiff) { declined(deps, pm, 'the row is empty and HEAD holds the turn\'s commits'); continue; }
+    // Earlier passes can empty a committed turn after a checkout. Its
+    // attested commit and baseline still prove what it authored; recovering
+    // that patch must not depend on the reconstruction retaining some bytes.
+    // The dirty-file and empty scoped-patch guards below still apply.
     if (shas.length === 0) {
       declined(deps, pm, 'no commit of the turn, nor a rewrite of one, is reachable from HEAD');
       deps.log?.('commit patch declined: no commit of the turn, nor a rewrite of one, is reachable from HEAD', {
@@ -522,7 +528,9 @@ export function preferCommitPatchForCommittedTurns(
       continue;
     }
     if (commitFiles.length === 0) { declined(deps, pm, 'the turn\'s commits name no files'); continue; }
-    const watch = [...new Set([...ledgerFiles, ...commitFiles])];
+    // Origin refreshes its context files during capture. That bookkeeping
+    // must not make an otherwise committed turn look dirty and block repair.
+    const watch = [...new Set([...ledgerFiles, ...commitFiles])].filter(f => !isOriginAutoManagedPath(f));
 
     // Everything the turn touched must be committed — no tracked change
     // against HEAD, nothing untracked among them. Otherwise the ledger holds
@@ -599,6 +607,7 @@ export function preferCommitPatchForCommittedTurns(
     // string, not undefined — see applyLedgerCaptures.
     pm.uncommittedDiff = '';
     pm.commitPatch = true;
+    pm.commitSha = last;
     replaced++;
     applied(deps, pm);
     deps.log?.('ledger diff replaced by the commit patch', {

@@ -223,6 +223,7 @@ export function numstatByFile(
   args: string[],
   gitOpts: Parameters<typeof git>[1],
   customPatterns?: string[],
+  includeIgnored = false,
 ): FileLineTotals[] | null {
   let out: string;
   try {
@@ -236,7 +237,7 @@ export function numstatByFile(
     if (parts.length < 3) continue;
     // Renames print as "old => new" or "{a => b}/x"; the new path decides.
     const file = parts.slice(2).join('\t').replace(/^.*=> /, '').replace(/[{}]/g, '');
-    if (shouldIgnoreFile(file, customPatterns)) continue;
+    if (!includeIgnored && shouldIgnoreFile(file, customPatterns)) continue;
     const a = Number(parts[0]);
     const r = Number(parts[1]);
     rows.push({ file, added: Number.isFinite(a) ? a : 0, removed: Number.isFinite(r) ? r : 0 });
@@ -261,7 +262,10 @@ export function numstatByFile(
  */
 export function commitLineCounts(repoPath: string, sha: string): LineTotals | null {
   const gitOpts = { cwd: repoPath, timeoutMs: 15_000, maxBuffer: 16 * 1024 * 1024 };
-  const rows = numstatByFile(['diff-tree', '--no-commit-id', '--numstat', '-r', '--root', sha], gitOpts);
+  // Commit metadata describes everything Git recorded, including lockfiles
+  // and generated files. Authored-diff filtering belongs to numstatTotals and
+  // the patch layer, not the timeline's "commit total".
+  const rows = numstatByFile(['diff-tree', '--no-commit-id', '--numstat', '-r', '--root', sha], gitOpts, undefined, true);
   if (!rows) return null;
   if (rows.length > 0) return sumLineTotals(rows);
   // Silent: a merge, or a commit that changed nothing. Ask which.

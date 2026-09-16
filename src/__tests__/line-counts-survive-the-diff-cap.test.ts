@@ -38,11 +38,14 @@ describe('commitLineCounts', () => {
     expect(commitLineCounts(repo, git('rev-parse', 'HEAD'))).toEqual({ added: 30_001, removed: 0 });
   });
 
-  it('skips the files the diff layer strips (a lockfile), like the text count did', () => {
+  it('counts lockfiles in commit totals while authored totals still filter them', () => {
     write('package-lock.json', Array.from({ length: 500 }, (_, i) => `"dep${i}": "1.0.0",`).join('\n') + '\n');
     write('app.ts', 'a\nb\n');
     git('add', '-A'); git('commit', '-qm', 'lock');
-    expect(commitLineCounts(repo, git('rev-parse', 'HEAD'))).toEqual({ added: 2, removed: 0 });
+    const sha = git('rev-parse', 'HEAD');
+    expect(commitLineCounts(repo, sha)).toEqual({ added: 502, removed: 0 });
+    expect(numstatTotals(['diff-tree', '--no-commit-id', '--numstat', '-r', sha], { cwd: repo }))
+      .toEqual({ added: 2, removed: 0 });
   });
 
   it('counts a merge by its resolution, not zero and not the absorbed branch', () => {
