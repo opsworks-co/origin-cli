@@ -119,4 +119,14 @@ describe('worktree path scoping', () => {
     expect(sessionRepoRoots({ repoPath: main })).toContain(main);
     expect(sessionRepoRoots({})).toEqual([]);
   });
+
+  it('scopes transcript files through a worktree discovered earlier in the session', () => {
+    const roots = sessionRepoRoots({
+      repoPath: main,
+      lastCwd: main,
+      discoveredWorkTrees: [{ path: worktree }],
+    });
+    expect(scopeCapturedPath(roots, path.join(worktree, 'packages/cli/src/x.ts')))
+      .toBe('packages/cli/src/x.ts');
+  });
 });

@@ -28,7 +28,7 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { inheritedBaselineForTurn, inheritedBeforeStatesForTurn, scopedCommitForTurn } from '../commands/hooks.js';
+import { inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFileSourcesForTurn, scopedCommitForTurn } from '../commands/hooks.js';
 import { preferCommitPatchForCommittedTurns } from '../commit-patch-for-committed-turn.js';
 
 const SESSION = 'c5487aa9-8594-4af0-9bc3-42aafd775cc7';
@@ -197,6 +197,7 @@ describe('post-commit scopes a commit from the tree the turn inherited, per file
 
       preferCommitPatchForCommittedTurns(state, [pm], repo, {
         inheritedBaseline: (shadowSha, localTurn) => inheritedBaselineForTurn(repo, state, shadowSha, localTurn),
+        inheritedFiles: (shadowSha, localTurn, files, endSha) => inheritedFileSourcesForTurn(repo, state, shadowSha, localTurn, files, endSha),
       });
 
       expect({ added: pm.linesAdded, removed: pm.linesRemoved }).toEqual({ added: 2, removed: 1 });
@@ -255,6 +256,7 @@ describe('post-commit scopes a commit from the tree the turn inherited, per file
       const pm: any = { promptIndex: 1, filesChanged: ['shared.ts'], linesAdded: 12, linesRemoved: 0, diff: 'diff --git a/shared.ts b/shared.ts\n' };
       preferCommitPatchForCommittedTurns(state, [pm], repo, {
         inheritedBaseline: (shadowSha, localTurn) => inheritedBaselineForTurn(repo, state, shadowSha, localTurn),
+        inheritedFiles: (shadowSha, localTurn, files, endSha) => inheritedFileSourcesForTurn(repo, state, shadowSha, localTurn, files, endSha),
       });
       // The resolution line and the tail — nothing of either branch.
       expect({ added: pm.linesAdded, removed: pm.linesRemoved }).toEqual({ added: 2, removed: 0 });
@@ -269,6 +271,107 @@ describe('post-commit scopes a commit from the tree the turn inherited, per file
       expect({ added: scoped!.linesAdded, removed: scoped!.linesRemoved }).toEqual({ added: 2, removed: 0 });
     });
   }
+
+  /** Stop's commit-patch pass, wired exactly as stop.ts wires it. */
+  function commitPatchAsStopSendsIt(state: any, pm: any) {
+    preferCommitPatchForCommittedTurns(state, [pm], repo, {
+      inheritedBaseline: (shadowSha, localTurn) => inheritedBaselineForTurn(repo, state, shadowSha, localTurn),
+      inheritedFiles: (shadowSha, localTurn, files, endSha) =>
+        inheritedFileSourcesForTurn(repo, state, shadowSha, localTurn, files, endSha),
+    });
+  }
+
+  /**
+   * ONE inherited line, and the turn's OWN merge resolved the file. The turn
+   * stood on main, merged pr-1642, and the two conflicted on one line of
+   * shared.ts; it kept its own side and added a line. Post-commit measures
+   * that against the side the turn stood on (`isMerge` routes the file there),
+   * so the resolution is +1 and nothing of the PR.
+   *
+   * Stop used to ask the same resolver without `isMerge`. With one tip, the
+   * single-line branch fired and pinned shared.ts to the PR's version, so the
+   * turn was also credited with putting its own side back: +1/-1 it never
+   * wrote, and Stop's row disagreed with post-commit's for the same commit.
+   */
+  it('Stop agrees with post-commit about a file the turn\'s own merge resolved', () => {
+    const body = (fifth: string) =>
+      Array.from({ length: 10 }, (_, i) => `const line${i} = ${i === 5 ? JSON.stringify(fifth) : i};`).join('\n') + '\n';
+    write('shared.ts', body('base'));
+    git(['add', '-A']); git(['commit', '-q', '-m', 'shared'], at('2026-09-14T13:00:00Z'));
+    const base = git(['rev-parse', 'HEAD']);
+
+    git(['checkout', '-q', '-b', 'pr-1642']);
+    write('shared.ts', body('pr'));
+    const pr = foreignCommit('the PR changes line 5', 'f53bd03d-2fd', '2026-09-15T00:09:52Z');
+
+    git(['checkout', '-q', 'main']);
+    write('shared.ts', body('mine'));
+    git(['add', '-A']); git(['commit', '-q', '-m', 'main changes line 5'], at('2026-09-14T14:00:00Z'));
+    expect(git(['rev-parse', 'HEAD^'])).toBe(base);
+
+    // ── the turn ──
+    const shadow = shadowOf('main');
+    expect(() => git(['merge', '-q', '--no-edit', pr])).toThrow();
+    write('shared.ts', body('mine') + 'const resolved = 1;\n');
+    git(['add', '-A']);
+    git(['commit', '-q', '-m', `Merge pr-1642\n\nOrigin-Session: ${SESSION.slice(0, 12)} | Claude Code | 2 prompts`],
+      at('2026-09-15T00:56:00Z'));
+    const merge = git(['rev-parse', 'HEAD']);
+    fs.appendFileSync(path.join(repo, 'shared.ts'), 'const tail = 1;\n');
+    git(['add', '-A']);
+    git(['commit', '-q', '-m', 'ours'], at('2026-09-15T00:57:00Z'));
+    const ours = git(['rev-parse', 'HEAD']);
+    const state = stateFor(shadow, [merge, ours]);
+
+    const postCommit = scopedCommitForTurn(repo, state, 1, shadow, ours, ['shared.ts']);
+    expect({ added: postCommit!.linesAdded, removed: postCommit!.linesRemoved }).toEqual({ added: 2, removed: 0 });
+
+    const pm: any = { promptIndex: 1, filesChanged: ['shared.ts'], linesAdded: 9, linesRemoved: 9, diff: 'diff --git a/shared.ts b/shared.ts\n' };
+    commitPatchAsStopSendsIt(state, pm);
+
+    expect({ added: pm.linesAdded, removed: pm.linesRemoved }).toEqual({ added: 2, removed: 0 });
+    expect(pm.diff).not.toMatch(/^-const line5 = "pr";/m);
+  });
+
+  /**
+   * A file the per-file question cannot prove still needs a base, and the
+   * turn's pre-checkout shadow is the wrong one.
+   *
+   * `inheritedFileSources` answers nothing at all for a commit of more files
+   * than the budget (300) — the ordinary shape of a regenerated lockfile or a
+   * codegen run. The turn checked out pr-1642 (which created src/pr.ts), added
+   * one line to that file and committed it together with 300 generated ones.
+   * Measured from the shadow, src/pr.ts was the turn's CREATION: the PR's
+   * twenty lines landed on the turn. Measured from the tree the checkout left,
+   * it is the one line the turn wrote.
+   */
+  it('Stop measures a file the per-file map leaves out from the inherited tree, not the shadow', () => {
+    const shadow = shadowOf('main');
+    git(['checkout', '-q', '-b', 'pr-1642']);
+    write('src/pr.ts', lines(20, 'pr'));
+    const pr = foreignCommit('the PR creates src/pr.ts', 'f53bd03d-2fd', '2026-09-15T00:09:52Z');
+
+    // ── the turn: checked out the PR, then one big commit ──
+    fs.appendFileSync(path.join(repo, 'src/pr.ts'), 'const mine = 1;\n');
+    for (let i = 0; i < 300; i++) write(`gen/f${i}.ts`, `export const f${i} = ${i};\n`);
+    git(['add', '-A']);
+    git(['commit', '-q', '-m', `chore: regenerate\n\nOrigin-Session: ${SESSION.slice(0, 12)} | Claude Code | 2 prompts`],
+      at('2026-09-15T00:56:00Z'));
+    const ours = git(['rev-parse', 'HEAD']);
+    const state = stateFor(shadow, [ours]);
+    const files = git(['show', '--name-only', '--format=', ours]).split('\n').filter(Boolean);
+    expect(files.length).toBe(301);
+    // The precondition this case is about: the per-file resolver gives up.
+    expect(inheritedFileSourcesForTurn(repo, state, shadow, 1, files, ours)).toBeNull();
+    expect(inheritedBaselineForTurn(repo, state, shadow, 1)).toBe(pr);
+
+    const pm: any = { promptIndex: 1, filesChanged: files, linesAdded: 321, linesRemoved: 0, diff: 'diff --git a/src/pr.ts b/src/pr.ts\n' };
+    commitPatchAsStopSendsIt(state, pm);
+
+    // 300 generated lines and the one the turn added to the PR's file.
+    expect({ added: pm.linesAdded, removed: pm.linesRemoved }).toEqual({ added: 301, removed: 0 });
+    expect(pm.diff).not.toMatch(/^\+const pr0 = 0;/m);
+  });
 
   it('still scopes from the shadow when nothing was inherited (dirty baseline, the +15 → +5 case)', () => {
     write('ten-lines.txt', lines(10, 'line'));

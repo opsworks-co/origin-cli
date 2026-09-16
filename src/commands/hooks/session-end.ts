@@ -60,7 +60,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { localTurnForServerRow, rebaseToServerRows, turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
-import { applyAuthoredTotals, currentSessionWorkTree, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFilesForTurn, windowInheritsCommitsForTurn, filterUncommittedDiff, findStateForHookInput, liveCaptureEnabled, normalizeWorkspaceRoot, recordShellWindowEdits, sessionAuthoredSnapshot, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
+import { applyAuthoredTotals, currentSessionWorkTree, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFileSourcesForTurn, inheritedFilesForTurn, windowInheritsCommitsForTurn, filterUncommittedDiff, findStateForHookInput, liveCaptureEnabled, normalizeWorkspaceRoot, recordShellWindowEdits, sessionAuthoredSnapshot, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
 import { compareResolverWithPasses, createTurnObserver, observeReconstruction, type TurnObservation } from '../../resolve-turn.js';
 
 
@@ -480,9 +480,13 @@ export function buildSessionWriteData(opts: {
  * old behaviour rather than throw.
  */
 export function sessionRepoRoots(
-  state: { repoPath?: string; repoPaths?: string[]; lastCwd?: string },
+  state: { repoPath?: string; repoPaths?: string[]; lastCwd?: string; discoveredWorkTrees?: Array<{ path?: string }> },
 ): string[] {
   const roots = new Set<string>();
+  // Explicit linked trees precede the main checkout: managed worktrees may be
+  // nested under it (`.claude/worktrees/...`), and scoping takes the first
+  // containing root.
+  for (const wt of state.discoveredWorkTrees || []) if (wt?.path) roots.add(wt.path);
   try {
     const wt = sessionWorkTree(state.repoPath, state.lastCwd, {
       gitRoot: getWorkingGitRoot,
@@ -1167,6 +1171,9 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
         {
           inheritedBaseline: (shadowSha, localTurn) => inheritedBaselineForTurn(
             state.repoPath || '', state, shadowSha, localTurn,
+          ),
+          inheritedFiles: (shadowSha, localTurn, files, endSha) => inheritedFileSourcesForTurn(
+            state.repoPath || '', state, shadowSha, localTurn, files, endSha,
           ),
           log: (event, data) => debugLog('session-end', event, data),
           observe: observer.observe,

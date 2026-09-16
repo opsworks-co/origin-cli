@@ -29,7 +29,7 @@ import { capDiff } from './diff-budget.js';
 import { applyLedgerToMappings } from './capture-from-ledger.js';
 import { preferCommitPatchForCommittedTurns } from './commit-patch-for-committed-turn.js';
 import { preferShadowRangeForTurns } from './prefer-shadow-range.js';
-import { inheritedBaselineForTurn, inheritedBeforeStatesForTurn, windowInheritsCommitsForTurn } from './commands/hooks.js';
+import { inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn } from './commands/hooks.js';
 import { readJournalEntries, journalPathsForTag } from './write-journal-watch.js';
 import { ensureInProcessJournal, stateLedgerIsContended } from './ledger-producer.js';
 import { stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
@@ -772,6 +772,9 @@ async function pushInflightDiff(): Promise<void> {
       observe: observer.observe,
       inheritedBaseline: (shadowSha, localTurn) => inheritedBaselineForTurn(
         repoPath, state as any, shadowSha, localTurn,
+      ),
+      inheritedFiles: (shadowSha, localTurn, files, endSha) => inheritedFileSourcesForTurn(
+        repoPath, state as any, shadowSha, localTurn, files, endSha,
       ),
     });
     try {

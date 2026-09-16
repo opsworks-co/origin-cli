@@ -1151,6 +1151,51 @@ export function commitCombiningTips(repoPath: string, tips: string[], conflictSi
 }
 
 /**
+ * A commit whose tree is `base` with each named file taken from the commit it
+ * came from — the tree a turn started from when its inherited lines could not
+ * be MERGED (see `widenToEveryInheritedLine`), assembled file by file instead.
+ *
+ * `commitCombiningTips` asks git to merge whole lines, and git says no on a
+ * conflict with no side to take, and on any git older than
+ * `merge-tree --write-tree` (2.38). The answer per file (`inheritedFileSources`)
+ * needs neither: every file it proves has one source, so placing each one is
+ * an index write, not a merge.
+ *
+ * Deterministic like `commitCombiningTips` — fixed identity, the newest
+ * source's date, parent `base` — so each Stop that asks gets the same sha.
+ * Null when a file cannot be placed; callers keep their single-commit answer.
+ */
+export function commitWithInheritedFiles(repoPath: string, base: string, sources: Map<string, string>): string | null {
+  if (!HEX.test(base) || sources.size === 0) return null;
+  const gitOpts = { cwd: repoPath, timeoutMs: 10_000, maxBuffer: 10 * 1024 * 1024 };
+  try {
+    const revs = [...new Set(sources.values())];
+    if (!revs.every((r) => HEX.test(r))) return null;
+    const newest = Math.max(...(gitOrNull(['show', '-s', '--format=%ct', ...revs], gitOpts) || '')
+      .split('\n').map((l) => Number(l.trim())).filter((n) => Number.isFinite(n) && n > 0));
+    if (!Number.isFinite(newest)) return null;
+    const baseTree = gitOrNull(['rev-parse', `${base}^{tree}`], gitOpts);
+    if (!baseTree || !HEX.test(baseTree.trim())) return null;
+    const tree = treeWithInheritedFiles(baseTree.trim(), sources, gitOpts);
+    if (!tree) return null;
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Origin', GIT_AUTHOR_EMAIL: SHADOW_IDENTITY_EMAIL,
+      GIT_COMMITTER_NAME: 'Origin', GIT_COMMITTER_EMAIL: SHADOW_IDENTITY_EMAIL,
+      GIT_AUTHOR_DATE: `${newest} +0000`, GIT_COMMITTER_DATE: `${newest} +0000`,
+    };
+    const commit = gitDetailed(
+      ['commit-tree', '--no-gpg-sign', tree, '-p', base, '-m', 'origin inherited files'],
+      { ...gitOpts, env },
+    );
+    const sha = (commit.stdout || '').trim();
+    return commit.status === 0 && HEX.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The tree git itself produces merging `a` and `b`, without touching the
  * working tree, index or refs — conflict markers included — and the paths it
  * could not merge.
@@ -1495,6 +1540,12 @@ export function commitDiffScopedToPrompt(
    * of the baseline: a file a checkout brought in is not the turn's creation.
    */
   inheritedFrom?: Map<string, string> | null,
+  /**
+   * The size context steps down to fit, when smaller than `maxDiffSize`. Only
+   * context: whole files are still cut at `maxDiffSize`, so a patch that cannot
+   * fit even at the narrowest context keeps every section it did before.
+   */
+  contextBudget = maxDiffSize,
 ): { diff: string; linesAdded: number; linesRemoved: number; files: string[]; diffTruncated: boolean } | null {
   if (!baselineSha || !HEX.test(baselineSha) || !HEX.test(commitSha)) return null;
   if (baselineSha === commitSha) return null;
@@ -1532,7 +1583,7 @@ export function commitDiffScopedToPrompt(
     let diffTruncated = false;
     for (const u of CONTEXT_LADDER) {
       diff = stripIgnoredSectionsFromDiff(git(['diff', `--unified=${u}`, baseTree, commitTree, ...pathspec], gitOpts));
-      if (diff.length <= maxDiffSize) break;
+      if (diff.length <= Math.min(maxDiffSize, contextBudget)) break;
     }
     if (diff.length > maxDiffSize) {
       diff = truncateToWholeSections(diff, maxDiffSize);

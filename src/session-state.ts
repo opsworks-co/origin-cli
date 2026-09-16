@@ -13,6 +13,7 @@ import { samePath } from './paths.js';
 import type { PromptEdit } from './prompt-capture/types.js';
 import { ensureOwnerStamp } from './session-owner.js';
 import { debugLog } from './debug-log.js';
+import { isManuallyEnded } from './manual-session-end.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -181,6 +182,10 @@ export interface SessionState {
   // command ran). Covers the agent that does `cd <worktree> && …` inside one
   // Bash call, which never moves lastCwd. See session-worktree.ts.
   discoveredWorkTrees?: Array<{ path: string; sha: string; promptIndex: number }>;
+  // Absolute paths a shell command named that did not exist when pre-tool-use
+  // probed, per tool call. post-tool-use re-probes only these — the command may
+  // have just created a worktree there — and drops the entry.
+  pendingWorktreeTargets?: Array<{ toolCallId?: string; promptIndex: number; paths: string[] }>;
   // Fingerprints of each probed tree's dirty files, taken by pre-tool-use just
   // BEFORE a write-shaped shell command runs. post-tool-use re-probes and the
   // difference is what that command actually wrote — evidence, as opposed to
@@ -359,6 +364,9 @@ export interface SessionState {
     diffSource?: 'ledger' | 'turn-window';
     turnWindowCaptured?: boolean;
     contentAuthoritative?: boolean;
+    // The diff is the turn's commit patch (preferCommitPatchForCommittedTurns).
+    // Travels with every re-send, or the server treats the row as a rebuild.
+    commitPatch?: boolean;
     ledgerOwned?: boolean;
     linesAdded?: number;
     linesRemoved?: number;
@@ -1405,6 +1413,7 @@ export function dropRenumberedDuplicateMappings(state: {
 }
 
 export function saveSessionState(state: SessionState, cwd?: string, sessionTag?: string): void {
+  if (isManuallyEnded(state.sessionId)) return;
   // First-write-wins ownership stamp so a later account switch can't pull this
   // session into a different account (see session-owner.ts).
   ensureOwnerStamp(state);
@@ -1693,7 +1702,10 @@ export function listMirroredSessionsForTree(tree: string): SessionState[] {
     if (!st || !st.sessionId) continue;
     if ((st as any).status === 'ENDED' || st.endedAt) continue;
     // samePath, never raw identity — see paths.ts and the comparison guard.
-    const claims = [st.repoPath, (st as any).lastCwd, (st as any).canonicalRepoPath]
+    const claims = [
+      st.repoPath, (st as any).lastCwd, (st as any).canonicalRepoPath,
+      ...((st.discoveredWorkTrees || []).map((w) => w?.path)),
+    ]
       .filter((p): p is string => typeof p === 'string' && p.length > 0);
     if (!claims.some((c) => samePath(c, tree))) continue;
     // Attach the file we loaded from, exactly as listActiveSessions does.

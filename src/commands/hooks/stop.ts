@@ -57,7 +57,7 @@ import os from 'os';
 import path from 'path';
 import { localTurnForServerRow, serverRowForLocalTurn, turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
 import { applyRewritePairsToState, finalRewriteOf, firstUnanchoredPrompt, markSkippedPromptBaselines, recordPromptShadow } from '../../session-state.js';
-import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
+import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
 
 
 // ─── Debug Logger ─────────────────────────────────────────────────────────
@@ -2515,6 +2515,9 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
         inheritedBaseline: (shadowSha, localTurn) => inheritedBaselineForTurn(
           state.repoPath || hookCwd, state, shadowSha, localTurn,
         ),
+        inheritedFiles: (shadowSha, localTurn, files, endSha) => inheritedFileSourcesForTurn(
+          state.repoPath || hookCwd, state, shadowSha, localTurn, files, endSha,
+        ),
         log: (event, data) => debugLog('stop', event, data),
         observe: observer.observe,
       },
@@ -2928,6 +2931,16 @@ export function persistCompletedMappings({ promptMappings, state }: { promptMapp
         ...('treeSha' in pm ? { treeSha: pm.treeSha ?? null } : {}),
         ...(pm.chatOnly ? { chatOnly: true } : {}),
         ...(pm.turnWindowCaptured ? { turnWindowCaptured: true, contentAuthoritative: true } : {}),
+      // …and so does the commit-patch flag. Dropped here, the next prompt's
+      // submit re-sent the commit patch as an unlabelled rebuild and the page
+      // fell back to the turn's Edit calls (prod e33b6ee1 turn 6). The merge
+      // pass's empty replacement also claims the row, so its authority travels.
+        ...((pm as { commitPatch?: boolean }).commitPatch
+          ? {
+            commitPatch: true,
+            ...((pm as { contentAuthoritative?: boolean }).contentAuthoritative ? { contentAuthoritative: true } : {}),
+          }
+          : {}),
         ...((pm as { fileSetOnly?: boolean }).fileSetOnly ? { fileSetOnly: true } : {}),
       }, capturedNow);
     });

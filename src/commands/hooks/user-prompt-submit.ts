@@ -66,6 +66,36 @@ export function retroactiveTurnFiles(
 }
 
 /**
+ * Why the retroactive capture of the previous prompt must NOT replace the
+ * mapping Stop saved for it, or null when it may.
+ */
+export function previousMappingKept(
+  existing: { diff?: string; uncommittedDiff?: string; chatOnly?: boolean; commitPatch?: boolean },
+  incoming: { diff?: string; uncommittedDiff?: string },
+): 'commit patch' | 'chat-only' | 'new diff was empty' | null {
+  // Stop already replaced this turn with its commit patch: git's own record,
+  // shell writes included. The rebuild from the session's commits says the same
+  // thing less precisely and without the flag, so the server took it for a
+  // rebuild and the page fell back to the turn's Edit calls (prod e33b6ee1 turn
+  // 7 lost hooks.ts, a file it changed only through the shell). Work left
+  // uncommitted after the commit is new, and still replaces it.
+  if (existing.commitPatch === true && !incoming.uncommittedDiff) return 'commit patch';
+  // Stop already marked this prompt as chat-only (no commits + no transcript
+  // edits). Don't let the retroactive capture re-attribute pre-existing dirty
+  // working-tree state to a turn the agent didn't actually touch code on.
+  if (existing.chatOnly === true) return 'chat-only';
+  // Don't overwrite a non-empty existing diff with an empty one — that happens
+  // when STOP already captured the previous prompt's work and then set
+  // prePromptDirtyFiles to those files, which causes filterUncommittedDiff to
+  // strip everything back out, leaving an empty diff that would clobber the
+  // good mapping STOP saved a second earlier.
+  const newHasDiff = !!(incoming.diff || incoming.uncommittedDiff);
+  const existingHasDiff = !!(existing.diff || existing.uncommittedDiff);
+  if (!newHasDiff && existingHasDiff) return 'new diff was empty';
+  return null;
+}
+
+/**
  * A UserPromptSubmit hook runs after arbitrary shell activity, including a
  * checkout. `HEAD` alone therefore says nothing about the turn we are
  * closing: using it as a commit stamp made a branch's pre-existing tip appear
@@ -1528,33 +1558,18 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
             treeSha: prevTreeSha,
           };
           if (!state.completedPromptMappings) state.completedPromptMappings = [];
-          // Replace if same promptIndex exists, else append.
-          // BUT: don't overwrite a non-empty existing diff with an empty
-          // one — that happens when STOP already captured the previous
-          // prompt's work and then set prePromptDirtyFiles to those files,
-          // which causes filterUncommittedDiff here to strip everything
-          // back out, leaving us with prevMapping.diff="" that would clobber
-          // the good mapping STOP saved a second earlier.
+          // Replace if same promptIndex exists — unless Stop's mapping must
+          // stand (previousMappingKept) — else append.
           const existingIdx = state.completedPromptMappings.findIndex(m => m.promptIndex === prevPromptIdx);
           if (existingIdx >= 0) {
             const existing = state.completedPromptMappings[existingIdx];
-            const newHasDiff = !!(prevMapping.diff || prevMapping.uncommittedDiff);
-            const existingHasDiff = !!(existing.diff || (existing as any).uncommittedDiff);
-            // Stop already marked this prompt as chat-only (no commits + no
-            // transcript edits). Don't let the retroactive capture re-attribute
-            // pre-existing dirty working-tree state to a turn the agent didn't
-            // actually touch code on.
-            const existingIsChatOnly = (existing as any).chatOnly === true;
-            if (existingIsChatOnly) {
-              debugLog('user-prompt-submit', 'kept existing chat-only mapping', {
+            const keep = previousMappingKept(existing, prevMapping);
+            if (keep) {
+              debugLog('user-prompt-submit', `kept existing previous-prompt mapping (${keep})`, {
                 promptIndex: prevPromptIdx,
               });
-            } else if (newHasDiff || !existingHasDiff) {
-              state.completedPromptMappings[existingIdx] = stampCaptured(prevMapping);
             } else {
-              debugLog('user-prompt-submit', 'kept existing previous-prompt mapping (new diff was empty)', {
-                promptIndex: prevPromptIdx,
-              });
+              state.completedPromptMappings[existingIdx] = stampCaptured(prevMapping);
             }
           } else {
             state.completedPromptMappings.push(stampCaptured(prevMapping));

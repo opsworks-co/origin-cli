@@ -110,8 +110,10 @@ describe('the shell window does not author the squash of its own PR', () => {
     git(['checkout', '-q', '--detach', squash]);
     const state = stateFor(pr);
 
-    // The rule that misfired: the squash reads as this turn's own commit.
-    expect(inheritedBaselineForTurn(repo, state, shadow, 1)).toBeTruthy();
+    // The rule that misfired read the squash as this turn's own commit and
+    // re-baselined to its PARENT — main before the PR. The turn inherited the
+    // squash, so the squash is where it began.
+    expect(inheritedBaselineForTurn(repo, state, shadow, 1)).toBe(squash);
 
     recordShellWindowEdits(state, repo, 1, shadow);
 

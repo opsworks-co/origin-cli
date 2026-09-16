@@ -46,7 +46,7 @@ import {
   turnBaseline,
   applyRewritePairsToState,
 } from '../session-state.js';
-import { capCommitMessage, captureGitState, captureAgyDiff, getDirtyFiles, createShadowCommit, commitCombiningTips, commitDiffScopedToPrompt, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, sameSha, MAX_DIFF_SIZE, MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
+import { capCommitMessage, captureGitState, captureAgyDiff, getDirtyFiles, createShadowCommit, commitCombiningTips, commitWithInheritedFiles, mergeTreeOf, commitDiffScopedToPrompt, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, sameSha, MAX_DIFF_SIZE, MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
 import { capDiff, fitDiffToBudget } from '../diff-budget.js';
 import { finalHunksForCaptures } from '../final-state-blame.js';
 import { parseAntigravityTranscript, estimateAntigravityUsage, agyArgs } from '../antigravity-transcript.js';
@@ -176,6 +176,7 @@ import {
 } from '../shell-write-capture.js';
 import { isOriginAutoManagedPath, shouldIgnoreFile, stripIgnoredSectionsFromDiff } from '../ignore-patterns.js';
 import { normalizeToolHookPayload } from '../hook-payload.js';
+import { skipManuallyEndedHook } from '../manual-session-end.js';
 import {
   listMirroredSessionsForTree,
   preferRegisteredSessionId,
@@ -1760,6 +1761,63 @@ export function localCommitterEmail(repoPath: string): string {
   } catch { return ''; }
 }
 
+/** The three facts `commitBelongsToSession` weighs for one commit. */
+export interface CommitOwnershipFacts {
+  /** Committer email, trimmed and lowercased. */
+  committerEmail: string;
+  /** Committer date in ms (NaN when unparseable). */
+  committedAtMs: number;
+  /** Raw commit message. */
+  body: string;
+}
+
+/** One commit's ownership facts; null when it cannot be read. */
+export function readCommitOwnershipFacts(repoPath: string, sha: string): CommitOwnershipFacts | null {
+  try {
+    // The body is last because it is the only multi-line field.
+    const raw = execFileSync('git', ['show', '-s', '--format=%ce%n%ct%n%B', sha], { ...GIT_READ_OPTS, cwd: repoPath }).toString();
+    const [emailLine = '', ctLine = '', ...bodyLines] = raw.split('\n');
+    return {
+      committerEmail: emailLine.trim().toLowerCase(),
+      committedAtMs: Number(ctLine.trim()) * 1000,
+      body: bodyLines.join('\n'),
+    };
+  } catch { return null; }
+}
+
+/**
+ * Ownership facts for many commits in ONE git process, keyed by lowercased
+ * full sha. A commit git could not name is simply absent, and a failed read
+ * returns an empty map — callers fall back to `readCommitOwnershipFacts`.
+ *
+ * A turn that merged a busy main holds hundreds of commits in its window, and
+ * reading each with its own `git show` (twice, once for the committer rule and
+ * once inside `commitBelongsToSession`) cost ~4.6s for 300 commits inside
+ * hooks that run on a timeout.
+ */
+export function readCommitOwnershipFactsBatch(repoPath: string, shas: string[]): Map<string, CommitOwnershipFacts> {
+  const out = new Map<string, CommitOwnershipFacts>();
+  const wanted = [...new Set(shas.filter((s) => /^[a-fA-F0-9]{7,40}$/.test(s)))];
+  if (wanted.length === 0) return out;
+  try {
+    // --stdin: a window can hold thousands of shas, more than an argv should.
+    const raw = execFileSync('git', ['log', '--no-walk=unsorted', '--stdin', '--format=%H%x00%ce%x00%ct%x00%B%x1e'], {
+      ...GIT_READ_OPTS, cwd: repoPath, input: wanted.join('\n') + '\n', maxBuffer: 256 * 1024 * 1024,
+    }).toString();
+    for (const record of raw.split('\x1e')) {
+      const [shaField = '', email = '', ct = '', ...rest] = record.replace(/^\n/, '').split('\0');
+      const full = shaField.trim().toLowerCase();
+      if (!/^[a-f0-9]{40,64}$/.test(full)) continue;
+      out.set(full, {
+        committerEmail: email.trim().toLowerCase(),
+        committedAtMs: Number(ct.trim()) * 1000,
+        body: rest.join('\0'),
+      });
+    }
+  } catch { return new Map(); }
+  return out;
+}
+
 /**
  * Does this commit belong to THIS session? The single ownership predicate —
  * both the per-turn capture and the session-level range use it, because they
@@ -1792,19 +1850,13 @@ export function commitBelongsToSession(
   sha: string,
   state: SessionState,
   localEmail: string,
+  // The commit's facts when the caller already read them in a batch; null
+  // means the read failed. Omitted, the commit is read here.
+  facts?: CommitOwnershipFacts | null,
 ): boolean {
-  let body = '';
-  let committerEmail = '';
-  let committedAtMs = NaN;
-  try {
-    // One read for the three facts this predicate weighs. The body is last
-    // because it is the only multi-line field.
-    const raw = execFileSync('git', ['show', '-s', '--format=%ce%n%ct%n%B', sha], { ...GIT_READ_OPTS, cwd: repoPath }).toString();
-    const [emailLine = '', ctLine = '', ...bodyLines] = raw.split('\n');
-    committerEmail = emailLine.trim().toLowerCase();
-    committedAtMs = Number(ctLine.trim()) * 1000;
-    body = bodyLines.join('\n');
-  } catch { return true; } // unreadable — keep it rather than guess work away
+  const read = facts === undefined ? readCommitOwnershipFacts(repoPath, sha) : facts;
+  if (!read) return true; // unreadable — keep it rather than guess work away
+  const { body, committerEmail, committedAtMs } = read;
 
   // A trailer naming THIS session is decisive — including a squash-merge of
   // our own PR that GitHub committed and a pull brought back; supersession
@@ -3409,6 +3461,62 @@ export function inheritedBeforeStatesForTurn(
 }
 
 /**
+ * `inheritedFileSources` for a turn, with the SAME reads post-commit gives it
+ * (`scopedCommitForTurn`) — which is the whole point of sharing the resolver.
+ *
+ * The three overrides are not incidental:
+ *
+ *   • `listWindowTouching` narrows the window by pathspec. Without it the walk
+ *     is every commit between the shadow and the window's end, with a
+ *     `git show --name-only` for each, once per committed turn in the payload
+ *     — hundreds of spawns inside a Stop hook that is already on a timeout.
+ *     It is also a correctness gate, not only a cost one: `inheritedFileSources`
+ *     abandons a window longer than the file budget and returns NOTHING, so a
+ *     turn that merged a busy main got no per-file answer at all.
+ *   • `isMerge` is what makes a file the turn's OWN merge resolved take the
+ *     side the turn stood on (#1650, #1655) instead of being handed to one
+ *     inherited line. Without it that branch can never fire, and Stop
+ *     contradicts post-commit about the same file on the same turn.
+ *   • `head` bounds the window at what the turn actually produced. The default
+ *     is the NEXT turn's shadow, so a later turn's commits sit inside this
+ *     turn's walk and can move the side a conflict resolves to.
+ *
+ * `endSha` is the turn's own last commit where the caller knows it (the
+ * commit-patch pass); omitted, the window keeps its default end.
+ *
+ * NULL, not an empty map, when the resolver gave up (over budget, or a read
+ * failed): the caller then has no per-file answer at all and must not treat
+ * the silence as "every file was measured from the turn's shadow".
+ */
+export function inheritedFileSourcesForTurn(
+  repoPath: string,
+  state: SessionState & { commitTurns?: Array<{ sha?: string; turnId?: string }>; promptTurnIds?: string[] },
+  baselineSha: string | null | undefined,
+  promptIndex: number,
+  files: string[],
+  endSha?: string | null,
+): Map<string, string> | null {
+  try {
+    const opts = { ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8' as const };
+    const base = inheritedWindowDeps(repoPath, state, promptIndex);
+    const end = endSha && /^[a-fA-F0-9]{7,40}$/.test(endSha) ? endSha : null;
+    let gaveUp = false;
+    const sources = inheritedFileSources(baselineSha, files, {
+      ...base,
+      ...(end ? { head: () => end } : {}),
+      listWindowTouching: (sha, paths) => execFileSync(
+        'git', ['rev-list', `${sha}..${end || base.head!()}`, '--', ...paths], opts,
+      ).split('\n').map((s) => s.trim()).filter(Boolean),
+      isMerge: (sha) => execFileSync('git', ['rev-list', '--parents', '-n', '1', sha], opts)
+        .trim().split(/\s+/).length > 2,
+    }, () => { gaveUp = true; });
+    return gaveUp ? null : sources;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * post-commit's view of a commit as one turn's work: `baseline → commit`,
  * restricted to the commit's files, with each file the turn INHERITED measured
  * from the commit it came from rather than from the turn's shadow.
@@ -3431,12 +3539,17 @@ export function scopedCommitForTurn(
   if (baselineSha && files.length > 0) {
     try {
       const opts = { ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8' as const };
+      const deps = inheritedWindowDeps(repoPath, state, promptIndex);
       inherited = inheritedFileSources(baselineSha, files, {
-        ...inheritedWindowDeps(repoPath, state, promptIndex),
+        ...deps,
         // The window this commit closes, whichever turn is open now.
         head: () => commitSha,
-        listWindowTouching: (sha, paths) => execFileSync('git', ['rev-list', `${sha}..${commitSha}`, '--', ...paths], opts)
-          .split('\n').map((s) => s.trim()).filter(Boolean),
+        listWindowTouching: (sha, paths) => {
+          const window = execFileSync('git', ['rev-list', `${sha}..${commitSha}`, '--', ...paths], opts)
+            .split('\n').map((s) => s.trim()).filter(Boolean);
+          deps.primeOwnership(window);
+          return window;
+        },
         isMerge: (sha) => execFileSync('git', ['rev-list', '--parents', '-n', '1', sha], opts)
           .trim().split(/\s+/).length > 2,
       });
@@ -3479,6 +3592,7 @@ export function windowInheritsCommitsForTurn(
     const shas = execFileSync('git', ['rev-list', `${start}..${end}`], {
       ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
     }).split('\n').map((s) => s.trim()).filter(Boolean);
+    deps.primeOwnership(shas);
     return shas.some((sha) => !deps.isOwnWork(sha));
   } catch {
     return false;
@@ -3514,6 +3628,7 @@ export function inheritedFilesForTurn(
     const shas = execFileSync('git', ['rev-list', `${start}..${end}`], {
       ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
     }).split('\n').map((s) => s.trim()).filter(Boolean);
+    deps.primeOwnership(shas);
     let budget = FOREIGN_WINDOW_FILE_BUDGET;
     const seen = new Set<string>();
     // Newest first: the last commit to touch a file is the one whose bytes the
@@ -3533,12 +3648,14 @@ export function inheritedFilesForTurn(
   }
 }
 
-/** The reads both resolvers above share, bound to one repo and one turn. */
+/** The reads both resolvers above share, bound to one repo and one turn.
+ *  `primeOwnership` batch-reads the facts `isOwnWork` needs for a list of
+ *  commits, so a window of hundreds costs one git process, not two each. */
 function inheritedWindowDeps(
   repoPath: string,
   state: SessionState & { commitTurns?: Array<{ sha?: string; turnId?: string }>; promptTurnIds?: string[] },
   promptIndex: number,
-): InheritedWindowDeps {
+): InheritedWindowDeps & { primeOwnership: (shas: string[]) => void } {
   const mappings = state.commitTurns || [];
   const thisTurnId = (state.promptTurnIds || [])[promptIndex];
   let localEmail = '';
@@ -3563,6 +3680,20 @@ function inheritedWindowDeps(
   if (nextShadow) {
     try { windowEnd = baselineCommit(nextShadow); } catch { windowEnd = null; }
   }
+  // `isOwnWork` is asked of every commit in the window. Read their facts in one
+  // git process when the window is listed, and per commit only for a sha the
+  // listing did not name (a first-parent walk past the window, say).
+  const ownershipFacts = new Map<string, CommitOwnershipFacts | null>();
+  const primeOwnership = (shas: string[]): void => {
+    const missing = shas.filter((sha) => !ownershipFacts.has(sha.toLowerCase()));
+    if (missing.length < 2) return;
+    for (const [sha, facts] of readCommitOwnershipFactsBatch(repoPath, missing)) ownershipFacts.set(sha, facts);
+  };
+  const factsFor = (sha: string): CommitOwnershipFacts | null => {
+    const key = sha.toLowerCase();
+    if (!ownershipFacts.has(key)) ownershipFacts.set(key, readCommitOwnershipFacts(repoPath, sha));
+    return ownershipFacts.get(key) ?? null;
+  };
   return {
     ownCommits: mappings.filter((m) => m.sha && thisTurnId && m.turnId === thisTurnId).map((m) => m.sha!),
     baselineCommit,
@@ -3575,18 +3706,58 @@ function inheritedWindowDeps(
     changedFilesBetween: (from, to) => execFileSync('git', ['diff', '--name-only', '--no-renames', '-z', from, to, '--'], {
       ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
     }).split('\0').filter(Boolean),
-    listWindow: (sha) => shasInWindow(repoPath, sha, windowEnd),
+    listWindow: (sha) => {
+      const window = shasInWindow(repoPath, sha, windowEnd);
+      primeOwnership(window);
+      return window;
+    },
+    primeOwnership,
+    // The same range as listWindow, with parents: ancestry among the window's
+    // commits in one read rather than one merge-base spawn per pair.
+    windowParents: (sha) => {
+      const graph = new Map<string, string[]>();
+      const out = execFileSync('git', ['rev-list', '--parents', `${sha}..${windowEnd || 'HEAD'}`], {
+        ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+      });
+      for (const line of out.split('\n')) {
+        const [commit, ...parents] = line.trim().split(/\s+/);
+        if (commit) graph.set(commit, parents);
+      }
+      return graph;
+    },
     isOwnWork: (sha) => {
       const owner = mappings.find((m) => m.sha && sameSha(m.sha, sha));
       // Attributed: this turn's own commit stops the walk, another turn's does
       // not — an earlier turn's work is inherited by this one exactly as a
       // stranger's is.
       if (owner?.turnId) return !!thisTurnId && owner.turnId === thisTurnId;
+      // Whoever committed it, the turn being closed did not TYPE a commit that
+      // this machine did not make. GitHub's squash of our own PR keeps the
+      // branch commits' `Origin-Session` trailer, so the session-level
+      // predicate below calls it ours — rightly, it is this session's work —
+      // and the per-turn question then inherits an answer to a different
+      // question. Session a7740ea3 turn 15 merged main into its PR branch, the
+      // squash of turn 13's #1659 came in with it, every window commit counted
+      // as this turn's own, and the walk fell through to the checkout-boundary
+      // rule and handed back the squash's PARENT: main before the PR. The turn
+      // was measured from before its own session's earlier work and re-reported
+      // it, +284/-9.
+      //
+      // Committer, not author: a squash-merge of your own PR keeps you as its
+      // author and `noreply@github.com` as its committer, which is the same
+      // line `commitBelongsToSession` draws for an untrailered commit. With no
+      // local identity configured there is nothing to compare, so the generous
+      // default stands.
+      const facts = factsFor(sha);
+      if (localEmail) {
+        const committer = facts?.committerEmail || '';
+        if (committer && committer !== localEmail) return false;
+      }
       // Unattributed: `commitBelongsToSession` is the generous predicate the
       // rest of this file shares, and generous is the right direction here.
       // Re-baselining PAST work the turn authored would erase it from the
       // record; declining to re-baseline only leaves today's behaviour.
-      return commitBelongsToSession(repoPath, sha, state, localEmail);
+      return commitBelongsToSession(repoPath, sha, state, localEmail, facts);
     },
     changedFiles: (sha) => commitChangedFiles(repoPath, sha),
     // A turn that inherited more than one line (checkout, then merge main)
@@ -3598,6 +3769,26 @@ function inheritedWindowDeps(
       ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
     }).split('\n').map((s) => s.trim()).filter(Boolean),
     combineTips: (tips, side) => commitCombiningTips(repoPath, tips, side),
+    // When git cannot merge the inherited lines, the tree is assembled file by
+    // file instead (`fileByFileTree`), which asks `inheritedFileSources` — so
+    // it needs the reads post-commit gives that resolver: the window narrowed
+    // by pathspec, and which merges were the turn's and what they resolved.
+    listWindowTouching: (sha, paths) => execFileSync(
+      'git', ['rev-list', `${sha}..${windowEnd || 'HEAD'}`, '--', ...paths],
+      { ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8' },
+    ).split('\n').map((s) => s.trim()).filter(Boolean),
+    isMerge: (sha) => execFileSync('git', ['rev-list', '--parents', '-n', '1', sha], {
+      ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+    }).trim().split(/\s+/).length > 2,
+    mergeConflicts: (sha) => {
+      const parents = execFileSync('git', ['rev-list', '--parents', '-n', '1', sha], {
+        ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+      }).trim().split(/\s+/).slice(1);
+      if (parents.length !== 2) return null;
+      const merged = mergeTreeOf(repoPath, parents[0], parents[1], { cwd: repoPath });
+      return merged ? (merged.clean ? [] : merged.conflicted) : null;
+    },
+    commitWithFiles: (base, sources) => commitWithInheritedFiles(repoPath, base, sources),
     readAtRev: (sha, file) => readFileAtRev(repoPath, sha, file),
     isAncestor: (a, b) => {
       try {
@@ -4496,6 +4687,11 @@ async function runHookEvent(event: string, agentSlug?: string): Promise<void> {
       }
     } catch (err: any) { transcriptInfo.err = err?.message; }
     debugLog(event, 'copilot payload', { keys: Object.keys(input), hasSession: !!input.session_id, hasPrompt: !!input.prompt, transcript: transcriptInfo });
+  }
+
+  if (skipManuallyEndedHook(event, input, agentSlug)) {
+    debugLog(event, 'capture explicitly ended; waiting for a new user prompt');
+    return;
   }
 
   // Antigravity (agy) has its own event set + payload shape — handle it on a

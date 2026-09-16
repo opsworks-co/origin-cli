@@ -372,10 +372,11 @@ export function commitTurnContentUnit(
  * session working in the tree this git hook fired in", which `lastCwd` cannot
  * answer — that records a subdirectory as often as a root.
  */
-export function sessionTrees(s: { repoPath?: string | null; repoPaths?: string[] | null }): string[] {
+export function sessionTrees(s: { repoPath?: string | null; repoPaths?: string[] | null; discoveredWorkTrees?: Array<{ path?: string | null }> | null }): string[] {
   const trees = new Set<string>();
   if (s.repoPath) trees.add(s.repoPath);
   for (const p of s.repoPaths || []) if (p) trees.add(p);
+  for (const wt of s.discoveredWorkTrees || []) if (wt?.path) trees.add(wt.path);
   return [...trees];
 }
 
@@ -386,7 +387,7 @@ export function sessionTrees(s: { repoPath?: string | null; repoPaths?: string[]
  * repoPath returns false and stays a candidate.
  */
 export function worksInAnotherTree(
-  s: { repoPath?: string | null; repoPaths?: string[] | null },
+  s: { repoPath?: string | null; repoPaths?: string[] | null; discoveredWorkTrees?: Array<{ path?: string | null }> | null },
   hookTree: string,
 ): boolean {
   const trees = sessionTrees(s);

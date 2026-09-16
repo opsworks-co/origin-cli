@@ -115,6 +115,12 @@ export interface PreferCommitPatchDeps {
    * Omit and the turn is measured from its shadow exactly as before.
    */
   inheritedBaseline?: (shadowSha: string, localTurn: number) => string | null;
+  /**
+   * Per-file inherited sources, matching post-commit's scoping. `endSha` is
+   * the turn's own last commit, which bounds the window the resolver walks and
+   * narrows it by pathspec — see `inheritedFileSourcesForTurn`.
+   */
+  inheritedFiles?: (shadowSha: string, localTurn: number, files: string[], endSha: string) => Map<string, string> | null;
   log?: (event: string, data: Record<string, unknown>) => void;
   /** What this pass found for each row — see resolve-turn.ts. */
   observe?: (promptIndex: number, observation: TurnObservation) => void;
@@ -343,14 +349,15 @@ export function preferCommitPatchForCommittedTurns(
   deps: PreferCommitPatchDeps = {},
 ): number {
   const turns = state.commitTurns || [];
+  // Earlier passes may have replaced the content a previous Stop flagged, and
+  // the flag now survives the state round-trip — so it is re-earned every pass.
+  for (const pm of mappings || []) if (pm) delete pm.commitPatch;
   if (turns.length === 0 || !repoPath) {
     for (const pm of mappings || []) if (pm) declined(deps, pm, 'the session has no attested commits');
     return 0;
   }
   let replaced = 0;
   for (const pm of mappings) {
-    // Earlier passes may have replaced the content a previous Stop flagged.
-    delete pm.commitPatch;
     // The mapping is a SERVER row; ids and shadows are numbered by this
     // launch (see turn-index.ts). A row from before the launch has neither.
     const local = localTurnForServerRow(pm.promptIndex, state.promptIndexBase);
@@ -451,9 +458,12 @@ export function preferCommitPatchForCommittedTurns(
     //
     // Where the window holds inherited commits, the tree the turn started from
     // is the one they left, not the one the shadow holds.
-    const inherited = !merge && shadow ? deps.inheritedBaseline?.(shadow, local) || null : null;
-    const baseline = merge ? mergeParent : (inherited && HEX.test(inherited) ? inherited : shadow);
-    if (!baseline || !HEX.test(baseline)) { declined(deps, pm, 'the turn has no baseline'); continue; }
+    //
+    // Per-file sources answer that for each file the commit names, and are the
+    // authoritative answer where they are given. What they do NOT name still
+    // needs a base, and it is settled further down — it depends on which of
+    // the commit's files came back proven, and that list does not exist yet.
+    if (merge && (!mergeParent || !HEX.test(mergeParent))) { declined(deps, pm, 'the turn has no baseline'); continue; }
 
     // Dirty/untracked is judged on what the ledger named PLUS what the
     // commits carry: an extra file the turn wrote and did not commit is
@@ -537,7 +547,34 @@ export function preferCommitPatchForCommittedTurns(
       continue;
     }
 
-    const scoped = commitDiffScopedToPrompt(repoPath, baseline, last, commitFiles);
+    // Per-file sources, and the base every file they do not name is measured
+    // from. Which base depends on WHY a file is not named:
+    //
+    //   • The resolver ran and left it out on purpose — no inherited commit
+    //     touched it, or the turn's own merge resolved it and the side it stood
+    //     on is where it began. The turn's shadow is that start. The whole-tree
+    //     answer would be wrong here: for a turn that stood on main and merged
+    //     a PR in, it names the PR's commit, a tree the turn never stood on.
+    //   • The resolver gave up (null) — more files or window commits than the
+    //     budget, or a read failed. It knows nothing, and the shadow was cut
+    //     before any checkout in the window, so every file measured from it
+    //     carries what the checkout brought: the a073a85b +574. The whole-tree
+    //     answer is the best information left, and is only walked for then.
+    let inheritedFiles: Map<string, string> | null = null;
+    let gaveUp = false;
+    if (!merge && shadow && deps.inheritedFiles) {
+      try { inheritedFiles = deps.inheritedFiles(shadow, local, commitFiles, last); } catch { inheritedFiles = null; }
+      gaveUp = inheritedFiles === null;
+    }
+    const wholeTree = !merge && shadow && (!deps.inheritedFiles || gaveUp)
+      ? deps.inheritedBaseline?.(shadow, local) || null : null;
+    const baseline = merge ? mergeParent! : (wholeTree && HEX.test(wholeTree) ? wholeTree : shadow!);
+    // Context steps down to the per-turn wire budget. At the session budget a
+    // small change kept whole-file context — 1e2aecba's +21/-1 to hooks.ts was
+    // a 249 KB section — and Stop's upload cap then dropped that file and
+    // declared it unavailable (prod e33b6ee1 turn 7, "4 of 5 shown"). Files are
+    // still only cut at the session budget, as before.
+    const scoped = commitDiffScopedToPrompt(repoPath, baseline, last, commitFiles, undefined, inheritedFiles, MAX_PROMPT_DIFF_LEN);
     if (!scoped || !scoped.diff.trim()) {
       declined(deps, pm, 'nothing between the turn baseline and its commit');
       deps.log?.('commit patch declined: nothing between the turn baseline and its commit', { promptIndex: pm.promptIndex, commit: last.slice(0, 8) });

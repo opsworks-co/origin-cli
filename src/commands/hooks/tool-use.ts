@@ -694,6 +694,15 @@ export async function handlePostToolUse(rawInput: Record<string, any>, agentSlug
     // non-fatal
   }
 
+  // A command can CREATE the worktree it names. It did not exist during the
+  // pre-tool-use discovery, so adopt it now and baseline its clean post-create
+  // state. Later commands need not repeat the path for their edits and commits
+  // to belong to this session. Only paths that were missing at pre-tool-use
+  // are re-probed; a command that named none costs no git here.
+  if (discoverWorkTreesFromCommand(state, input, 'post')) {
+    saveSessionState(state, saveCwd, state.sessionTag);
+  }
+
   // ── Live edit ledger ──────────────────────────────────────────────────────
   // Capture this tool call's edits in real time, tagged with the active
   // prompt. Authoritative source for per-prompt blame at Stop/end.
@@ -962,20 +971,75 @@ export function endShellProbe(state: SessionState, input: Record<string, any>): 
 // worktrees in one turn is not a case worth paying for on every Bash call.
 export const MAX_DISCOVERED_WORKTREES = 4;
 
-export function discoverWorkTreesFromCommand(state: SessionState, input: Record<string, any>): void {
+// Paths a command named that did not exist when pre-tool-use looked, kept per
+// tool call so post-tool-use can re-probe ONLY those. Bounded: a run of calls
+// whose post hook never fired must not grow the state file.
+export const MAX_PENDING_WORKTREE_TARGETS = 8;
+
+/**
+ * Adopt the linked worktrees a shell command names.
+ *
+ * `pre` (the default) probes every candidate path and remembers the ones that
+ * did not exist yet. `post` re-probes only those: the post pass exists for a
+ * target the command itself created, and anything that already existed was
+ * settled before the command ran. Without this gate every Bash call paid the
+ * git probes twice — up to 8 `git rev-parse` spawns each time — in a hook
+ * whose latency is a recorded way to lose a prompt.
+ */
+export function discoverWorkTreesFromCommand(
+  state: SessionState,
+  input: Record<string, any>,
+  phase: 'pre' | 'post' = 'pre',
+): boolean {
   try {
     const toolInput = (input.tool_input && typeof input.tool_input === 'object') ? input.tool_input : {};
     const command = String((toolInput as any).command || (toolInput as any).cmd || '');
-    if (!command || !state.repoPath) return;
+    if (!command || !state.repoPath) return false;
     const promptIndex = state.prompts?.length ? state.prompts.length - 1 : 0;
+    const toolCallId: string | undefined = input.tool_call_id || input.tool_use_id || undefined;
+
+    let changed = false;
+    let candidates: string[];
+    if (phase === 'post') {
+      // Consume this call's pending entry. No entry means every path the
+      // command named already existed at pre-tool-use (or it named none), so
+      // there is nothing new to find and no git to run.
+      const pending = state.pendingWorktreeTargets || [];
+      if (pending.length === 0) return false;
+      const named = candidateDirsFromCommand(command);
+      const at = pending.findIndex((e) => e.promptIndex === promptIndex && (
+        toolCallId && e.toolCallId
+          ? e.toolCallId === toolCallId
+          : e.paths.every((p) => named.some((n) => samePath(n, p)))
+      ));
+      if (at < 0) return false;
+      candidates = pending[at].paths;
+      state.pendingWorktreeTargets = pending.filter((_, i) => i !== at);
+      changed = true;
+    } else {
+      candidates = candidateDirsFromCommand(command);
+      if (candidates.length === 0) return false;
+    }
+
     const already = (state.discoveredWorkTrees || []).filter((w) => w.promptIndex === promptIndex);
-    if (already.length >= MAX_DISCOVERED_WORKTREES) return;
+    if (already.length >= MAX_DISCOVERED_WORKTREES) return changed;
+
+    if (phase === 'pre') {
+      const missing = candidates.filter((c) => !fs.existsSync(c));
+      if (missing.length > 0) {
+        // Entries from an earlier turn are dropped: that turn's post hook is
+        // long past, and a worktree it created is no longer this turn's.
+        const kept = (state.pendingWorktreeTargets || []).filter((e) => e.promptIndex === promptIndex);
+        kept.push({ toolCallId, promptIndex, paths: missing });
+        state.pendingWorktreeTargets = kept.slice(-MAX_PENDING_WORKTREE_TARGETS);
+      }
+    }
 
     const found = worktreesAmongCandidates(
-      state.repoPath, candidateDirsFromCommand(command),
+      state.repoPath, candidates,
       { gitRoot: getWorkingGitRoot, gitCommonDir: getGitCommonDir },
     );
-    if (found.length === 0) return;
+    if (found.length === 0) return changed;
 
     const kept = state.discoveredWorkTrees || [];
     for (const wt of found) {
@@ -986,12 +1050,15 @@ export function discoverWorkTreesFromCommand(state: SessionState, input: Record<
       const sha = createShadowCommit(wt, `discovered-${(state.sessionTag || state.sessionId).slice(0, 12)}`) || getHeadSha(wt);
       if (!sha) continue;
       kept.push({ path: wt, sha, promptIndex });
-      debugLog('pre-tool-use', 'worktree discovered from command', { workTree: wt, sha: sha.slice(0, 12), promptIndex });
+      changed = true;
+      debugLog(`${phase}-tool-use`, 'worktree discovered from command', { workTree: wt, sha: sha.slice(0, 12), promptIndex });
     }
     state.discoveredWorkTrees = kept;
+    return changed;
   } catch (err: unknown) {
-    debugLog('pre-tool-use', 'worktree discovery failed (non-fatal)', {
+    debugLog(`${phase}-tool-use`, 'worktree discovery failed (non-fatal)', {
       message: err instanceof Error ? err.message : String(err),
     });
+    return false;
   }
 }

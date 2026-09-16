@@ -12,6 +12,7 @@ import { resolveAgentDisplayName } from '../agents/registry.js';
 import { makeSyncBlock } from '../sync-block.js';
 import { durableUpdateSession } from '../update-queue.js';
 import { debugLog } from '../debug-log.js';
+import { recordManualSessionEnd } from '../manual-session-end.js';
 
 const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
@@ -510,6 +511,31 @@ export async function sessionEndCommand(id: string) {
   const path = await import('path');
   const os = await import('os');
 
+  // Install the end barrier before stopping daemons or awaiting the API. Tool
+  // hooks may otherwise recover the ENDED mirror immediately, and an already
+  // running hook may save its stale RUNNING state after the command returns.
+  const matches = (sessionId: unknown): sessionId is string =>
+    typeof sessionId === 'string' && id.length > 0 && sessionId.startsWith(id);
+  const matchedStates = [];
+  for (const state of listAllActiveSessions()) {
+    if (matches(state.sessionId)) matchedStates.push(state);
+  }
+  const mirrorDir = path.join(os.homedir(), '.origin', 'sessions');
+  if (fs.existsSync(mirrorDir)) {
+    for (const entry of fs.readdirSync(mirrorDir).filter(f => f.endsWith('.json'))) {
+      let state;
+      try { state = JSON.parse(fs.readFileSync(path.join(mirrorDir, entry), 'utf8')); }
+      catch { continue; }
+      if (matches(state?.sessionId)) matchedStates.push(state);
+    }
+  }
+  if (new Set(matchedStates.map(state => state.sessionId)).size > 1) {
+    console.error(`Session prefix ${id} is ambiguous; use the full session ID.`);
+    process.exitCode = 1;
+    return;
+  }
+  for (const state of matchedStates) recordManualSessionEnd(state);
+
   // 1. Kill heartbeat FIRST — before ending on platform, so it can't re-ping
   try {
     const hbDir = path.join(os.homedir(), '.origin', 'heartbeats');
@@ -517,7 +543,7 @@ export async function sessionEndCommand(id: string) {
       const pidFiles = fs.readdirSync(hbDir).filter(f => f.endsWith('.pid'));
       for (const pf of pidFiles) {
         const sessionId = pf.replace('.pid', '');
-        if (sessionId === id || sessionId.startsWith(id) || id.startsWith(sessionId.slice(0, 8))) {
+        if (matches(sessionId)) {
           const pidPath = path.join(hbDir, pf);
           try {
             const pid = parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
@@ -548,7 +574,7 @@ export async function sessionEndCommand(id: string) {
     // Clean active state files (in .git/ dirs)
     const allSessions = listAllActiveSessions();
     for (const s of allSessions) {
-      if (s.sessionId === id || s.sessionId.startsWith(id) || id.startsWith(s.sessionId.slice(0, 8))) {
+      if (matches(s.sessionId)) {
         stopHeartbeat(s.sessionId); // double-check
         if (s.sessionTag) {
           clearSessionState(s.repoPath || undefined, s.sessionTag);
@@ -569,7 +595,7 @@ export async function sessionEndCommand(id: string) {
         try {
           const raw = fs.readFileSync(filePath, 'utf-8');
           const state = JSON.parse(raw);
-          if (state.sessionId === id || state.sessionId?.startsWith(id) || id.startsWith(state.sessionId?.slice(0, 8) || '')) {
+          if (matches(state.sessionId)) {
             state.status = 'ENDED';
             state.endedAt = new Date().toISOString();
             fs.writeFileSync(filePath, JSON.stringify(state), { mode: 0o600 });
@@ -582,6 +608,7 @@ export async function sessionEndCommand(id: string) {
 
   if (localCleaned) {
     console.log(chalk.green(`  Local state cleaned.`));
+    console.log(chalk.gray('  Capture stays ended until the next user prompt in this conversation.'));
   }
 
   // 4. Update origin-sessions git branch — mark as ended
@@ -594,7 +621,7 @@ export async function sessionEndCommand(id: string) {
       for (const dir of sessionDirs) {
         const safeId = dir.replace('sessions/', '');
         if (!SAFE_ID.test(safeId)) continue;
-        if (safeId === id || safeId.startsWith(id) || id.startsWith(safeId.slice(0, 8))) {
+        if (matches(safeId)) {
           try {
             const metaRaw = (readSessionFile(repoPath, safeId, 'metadata.json') ?? '').trim();
             const metadata = JSON.parse(metaRaw);
