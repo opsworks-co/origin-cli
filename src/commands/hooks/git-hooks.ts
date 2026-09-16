@@ -3,6 +3,7 @@
 // Moved out of commands/hooks.ts mechanically: the text is unchanged, only its
 // home is. Shared helpers still live in hooks.ts and are imported from there.
 import { livePrompts } from '../../transcript.js';
+import { replayInProgress } from '../../commit-replay.js';
 import { attributionPgrepChecks, resolveAgentDisplayName, sessionMatchesAgent } from '../../agents/registry.js';
 import { api } from '../../api.js';
 import { clearBudgetLockNotice } from '../../budget-breach.js';
@@ -158,8 +159,14 @@ export async function handleGitPostCheckout(prevHead: string, newHead: string, f
       if (state.writeJournalPath) fenceJournal(state.writeJournalPath);
     }
 
-    const { handlePostCheckout } = await import('../../history-preservation.js');
-    handlePostCheckout(repoPath, prevHead, newHead);
+    // No attribution note moves on a checkout. This used to copy the old
+    // HEAD's `refs/notes/origin` onto the new HEAD whenever the stash list was
+    // non-empty, for a stash pop — which never moves HEAD. What it did copy on
+    // was every real branch switch, since the stash stack is shared by every
+    // worktree: the session on the old branch became the recorded author of
+    // the commit the new branch pointed at, and pre-push published it
+    // (session 6c21a6d8 wrote itself onto Codex's 9f8e2bbf). Rewrites carry
+    // their notes through post-rewrite, the only hook that knows old from new.
   } catch {
     // Never fail a checkout.
   }
@@ -961,6 +968,17 @@ export async function handlePrepareCommitMsg(
     const commitLinkingConfig = config?.commitLinking || 'always';
     if (commitLinkingConfig === 'never') {
       debugLog('prepare-commit-msg', 'skip — commitLinking=never');
+      return;
+    }
+
+    // A rebase pick or cherry-pick arrives here with source=message, like
+    // `git commit -m`, so the source=commit skip above never sees it. The copy
+    // is not this session's work: stamping it put this session's trailer on
+    // Codex's #1665 and #1670 when a merge session rebased them, and GitHub's
+    // squash kept it. See commit-replay.ts.
+    const replay = replayInProgress(hookCwd);
+    if (replay) {
+      debugLog('prepare-commit-msg', 'skip — the commit is a replay', { replay });
       return;
     }
 

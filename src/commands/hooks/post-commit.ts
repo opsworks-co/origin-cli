@@ -17,6 +17,7 @@ import { capDiff, fitDiffToBudget } from '../../diff-budget.js';
 import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
 import { MAX_PROMPT_DIFF_LEN, capCommitMessage, captureGitState, commitLineCounts } from '../../git-capture.js';
 import { writeGitNotes } from '../../git-notes.js';
+import { commitReplayKind } from '../../commit-replay.js';
 import { BACKFILL_TIMEOUT_MS, COMMIT_INGEST_TIMEOUT_MS, RECENT_SHAS_LIMIT, acquireBackfillLock, backfillUnknownCommits, commitAuthoredDelta, extractCommitDiff, listRecentShas, releaseBackfillLock, shouldAdvertiseHistory, writeSyncMarker } from '../../history-backfill.js';
 import { pushSessionBranch, writeSessionFiles } from '../../local-entrypoint.js';
 import { memoryUpdateTrigger, shouldWriteMemoryOnCommit, summarizeFromCommitSubjects, writeCommitMemory, writeSessionMemory } from '../../memory.js';
@@ -1689,14 +1690,27 @@ export async function handlePostCommit(): Promise<void> {
   // more, and that commit is still ours — the same distinction
   // commitBelongsToSession draws for the per-turn capture.
   const trailerOwner = state ? commitTrailerBelongsToSession(commitMessage, state) : 'none';
-  const commitIsAnotherSessions = trailerOwner === 'other'
+  const trailerNamesAnotherLiveSession = trailerOwner === 'other'
     && trailerNamesAKnownSession(hookCwd, commitMessage, state as SessionState);
-  if (commitIsAnotherSessions) {
+  if (trailerNamesAnotherLiveSession) {
     debugLog('post-commit', 'SKIP recording: trailer names another live session', {
       commitSha: commitSha.slice(0, 8),
       pickedSession: state?.sessionId,
     });
   }
+  // A rebase pick, cherry-pick or `git am` is a COPY of a commit that already
+  // existed, not the running turn's work — see commit-replay.ts. The trailer
+  // rung above cannot see it: the copy of a stranger's commit carries no
+  // trailer, or one naming a session that has ended, and both read as ours.
+  // A replay of this session's own commit is not lost: post-rewrite moves its
+  // sha, its turn attestation and its note onto the copy.
+  const replayed = state ? commitReplayKind(hookCwd, commitSha) : null;
+  if (replayed) {
+    debugLog('post-commit', 'SKIP recording: the commit is a replay, not this turn\'s work', {
+      commitSha: commitSha.slice(0, 8), replay: replayed, pickedSession: state?.sessionId,
+    });
+  }
+  const commitIsAnotherSessions = trailerNamesAnotherLiveSession || !!replayed;
   if (state && state.sessionTag && !commitIsAnotherSessions) {
     if (!state.sessionCommitShas) state.sessionCommitShas = [];
     if (!state.sessionCommitShas.includes(commitSha)) {
@@ -1942,7 +1956,9 @@ export async function handlePostCommit(): Promise<void> {
     }
   }
 
-  try {
+  // A replay's note is the original's, which post-rewrite copies across;
+  // writing this session's here would claim the copy (and race that copy).
+  if (!replayed) try {
     writeGitNotes(repoPath, [commitSha], {
       sessionId: state?.sessionId || 'unknown',
       model: noteModel || 'unknown',

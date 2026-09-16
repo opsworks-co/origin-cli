@@ -1412,6 +1412,36 @@ export function dropRenumberedDuplicateMappings(state: {
   return dropped;
 }
 
+// The file each state OBJECT last wrote. When the file is still exactly that
+// write, nobody saved since, so there is nothing to merge and no reason to
+// parse it again — a long session's state file is megabytes. Keyed by the
+// object, not the process: one process can hold two copies of a session
+// (post-commit's candidate list and a re-read), and the stale one must still
+// merge.
+const lastWriteByState = new WeakMap<object, { file: string; mtimeMs: number; size: number }>();
+
+function rememberOwnWrite(state: SessionState, file: string): void {
+  try {
+    const st = fs.statSync(file);
+    lastWriteByState.set(state, { file, mtimeMs: st.mtimeMs, size: st.size });
+  } catch { /* best-effort */ }
+}
+
+/** See keepCommitRecordsSavedMeanwhile. Never throws: a failed read keeps today's write. */
+function keepCommitsRecordedSinceRead(state: SessionState, statePath: string): void {
+  try {
+    const st = fs.statSync(statePath);
+    const mine = lastWriteByState.get(state);
+    if (mine && mine.file === statePath && mine.mtimeMs === st.mtimeMs && mine.size === st.size) return;
+    const kept = keepCommitRecordsSavedMeanwhile(state, JSON.parse(fs.readFileSync(statePath, 'utf-8')));
+    if (kept) {
+      debugLog('session-state', 'kept commit records another hook saved since this state was read', {
+        sessionId: state.sessionId, shas: kept.shas.map((sha) => sha.slice(0, 8)), turns: kept.turns, pairs: kept.pairs,
+      });
+    }
+  } catch { /* no file yet, or unreadable — write as before */ }
+}
+
 export function saveSessionState(state: SessionState, cwd?: string, sessionTag?: string): void {
   if (isManuallyEnded(state.sessionId)) return;
   // First-write-wins ownership stamp so a later account switch can't pull this
@@ -1429,10 +1459,12 @@ export function saveSessionState(state: SessionState, cwd?: string, sessionTag?:
     });
   }
   const statePath = getStatePath(cwd, sessionTag || state.sessionTag);
+  keepCommitsRecordedSinceRead(state, statePath);
   try {
     const tmpStatePath = statePath + '.tmp.' + process.pid;
     fs.writeFileSync(tmpStatePath, JSON.stringify(state, null, 2), { mode: 0o600 });
     fs.renameSync(tmpStatePath, statePath);
+    rememberOwnWrite(state, statePath);
   } catch (err: any) {
     // Sandboxed agents (Codex's workspace-write) forbid writes INSIDE .git →
     // EPERM/EACCES. A thrown save aborts the whole Stop hook, which the agent
@@ -1801,6 +1833,15 @@ export function applyRewritePairsToState(
   }
   if (!changed) return false;
   state.rewrittenCommits = pairs;
+  foldCommitRecordsToSurvivors(state, pairs);
+  return true;
+}
+
+/** The sha list (deduped) and the turn attestations, each moved to its final survivor. */
+function foldCommitRecordsToSurvivors(
+  state: Pick<SessionState, 'sessionCommitShas' | 'commitTurns'>,
+  pairs: ReadonlyArray<RewritePair>,
+): void {
   if (Array.isArray(state.sessionCommitShas)) {
     const out: string[] = [];
     const seen = new Set<string>();
@@ -1823,7 +1864,55 @@ export function applyRewritePairsToState(
     }
     state.commitTurns = [...bySha.values()];
   }
-  return true;
+}
+
+/**
+ * The commits another process recorded on this session after `state` was
+ * read, kept instead of written over.
+ *
+ * The git hooks run in the BACKGROUND (the global post-commit forks Origin so
+ * a commit never waits on it), so the agent's next tool hook can load the
+ * state before post-commit has saved the sha and save after it. The save was
+ * last-writer-wins, so the sha — and the turn attestation beside it — was
+ * gone. Session 6c21a6d8 (2026-09-16) committed 6af8dfdd, b7b5c652 and
+ * d73928a2 in turn 1; post-commit logged each as `recorded commit on session`
+ * with `totalForSession: 1, 1, 2`, the Claude PostToolUse beside it had read
+ * the file 200ms earlier and wrote it back, and turn 1 ended owning none of
+ * its three commits — an empty row on the page.
+ *
+ * These three lists only ever grow, except through a rewrite: an orphan is
+ * dropped by mapping it onto its survivor (`applyRewritePairsToState`). So the
+ * union of both copies, folded through the union of both copies' pairs, loses
+ * nothing either process recorded and resurrects nothing either one folded.
+ * The in-memory copy's own entries win; the disk copy only adds.
+ *
+ * Returns what was added, or null when nothing was. Does not save.
+ */
+export function keepCommitRecordsSavedMeanwhile(
+  state: Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits'>,
+  onDisk: Partial<Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits'>> | null | undefined,
+): { shas: string[]; turns: number; pairs: number } | null {
+  if (!onDisk || !state?.sessionId || onDisk.sessionId !== state.sessionId) return null;
+  const same = (a: string, b: string) => {
+    const x = a.toLowerCase(); const y = b.toLowerCase();
+    return x === y || (x.length >= 7 && y.length >= 7 && (x.startsWith(y) || y.startsWith(x)));
+  };
+  const ownPairs = Array.isArray(state.rewrittenCommits) ? state.rewrittenCommits : [];
+  const addPairs = (Array.isArray(onDisk.rewrittenCommits) ? onDisk.rewrittenCommits : []).filter((p) =>
+    p?.from && p?.to && !ownPairs.some((q) => q?.from && q.from.toLowerCase() === p.from.toLowerCase()));
+  const ownShas = Array.isArray(state.sessionCommitShas) ? state.sessionCommitShas : [];
+  const addShas = (Array.isArray(onDisk.sessionCommitShas) ? onDisk.sessionCommitShas : []).filter((sha) =>
+    typeof sha === 'string' && sha.length > 0 && !ownShas.some((own) => typeof own === 'string' && same(own, sha)));
+  const ownTurns = Array.isArray(state.commitTurns) ? state.commitTurns : [];
+  const addTurns = (Array.isArray(onDisk.commitTurns) ? onDisk.commitTurns : []).filter((ct) =>
+    ct?.sha && ct.turnId && !ownTurns.some((own) => own?.sha && same(own.sha, ct.sha)));
+  if (addPairs.length === 0 && addShas.length === 0 && addTurns.length === 0) return null;
+  const pairs = [...ownPairs, ...addPairs];
+  if (addPairs.length > 0) state.rewrittenCommits = pairs;
+  if (addShas.length > 0) state.sessionCommitShas = [...ownShas, ...addShas];
+  if (addTurns.length > 0) state.commitTurns = [...ownTurns, ...addTurns];
+  foldCommitRecordsToSurvivors(state, pairs);
+  return { shas: addShas, turns: addTurns.length, pairs: addPairs.length };
 }
 
 /**

@@ -31,14 +31,9 @@ describe('handleGitPostCheckout routing: clone vs ordinary checkout', () => {
   async function run(prev: string, next: string, flag: string) {
     vi.resetModules();
     const syncNotes = vi.fn().mockReturnValue(true);
-    const preserve = vi.fn();
     vi.doMock('../git-notes.js', async () => ({
       ...(await vi.importActual<Record<string, unknown>>('../git-notes.js')),
       syncNotesFromRemoteThrottled: syncNotes,
-    }));
-    vi.doMock('../history-preservation.js', async () => ({
-      ...(await vi.importActual<Record<string, unknown>>('../history-preservation.js')),
-      handlePostCheckout: preserve,
     }));
     vi.doMock('../session-state.js', async () => ({
       ...(await vi.importActual<Record<string, unknown>>('../session-state.js')),
@@ -46,28 +41,26 @@ describe('handleGitPostCheckout routing: clone vs ordinary checkout', () => {
     }));
     const { handleGitPostCheckout } = await import('../commands/hooks.js');
     await handleGitPostCheckout(prev, next, flag);
-    return { syncNotes, preserve };
+    return { syncNotes };
   }
 
   afterEach(() => { vi.resetModules(); vi.restoreAllMocks(); });
 
-  it('clone (null-ref previous HEAD) → fetches notes, no stash work', async () => {
-    const { syncNotes, preserve } = await run(NULL_REF, SHA_B, '1');
+  it('clone (null-ref previous HEAD) → fetches notes', async () => {
+    const { syncNotes } = await run(NULL_REF, SHA_B, '1');
     expect(syncNotes).toHaveBeenCalledTimes(1);
-    expect(preserve).not.toHaveBeenCalled();
   });
 
-  it('ordinary branch switch → stash preservation, and NO notes fetch', async () => {
+  it('ordinary branch switch → NO notes fetch', async () => {
     // The whole point: flag is 1 here too. Only the previous HEAD differs.
-    const { syncNotes, preserve } = await run(SHA_A, SHA_B, '1');
+    // (It also moves no attribution note — see checkout-does-not-copy-attribution.)
+    const { syncNotes } = await run(SHA_A, SHA_B, '1');
     expect(syncNotes).not.toHaveBeenCalled();
-    expect(preserve).toHaveBeenCalledTimes(1);
   });
 
-  it('file checkout (flag=0) → neither', async () => {
-    const { syncNotes, preserve } = await run(SHA_A, SHA_B, '0');
+  it('file checkout (flag=0) → no fetch', async () => {
+    const { syncNotes } = await run(SHA_A, SHA_B, '0');
     expect(syncNotes).not.toHaveBeenCalled();
-    expect(preserve).not.toHaveBeenCalled();
   });
 });
 

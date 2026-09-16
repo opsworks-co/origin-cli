@@ -194,8 +194,8 @@ function installPostRewriteHook(hooksDir: string): void {
 }
 
 /**
- * Install post-checkout hook for stash pop/apply operations.
- * Stash operations can create new commits that need attribution transfer.
+ * Install the post-checkout hook: notes fetch on a fresh clone, and fencing
+ * the write journals of sessions whose tree a checkout just rewrote.
  */
 function installPostCheckoutHook(hooksDir: string): void {
   const hookPath = path.join(hooksDir, 'post-checkout');
@@ -204,7 +204,7 @@ function installPostCheckoutHook(hooksDir: string): void {
   const hookScript = [
     '#!/bin/sh',
     ORIGIN_MARKER,
-    '# Handle stash operations that may affect attribution',
+    '# Fresh-clone notes fetch; fences write journals across a checkout',
     '# $1=prev-HEAD, $2=new-HEAD, $3=flag (1=branch checkout, 0=file checkout)',
     HOOK_PATH_SHIM,
     'if [ "$3" = "1" ]; then',
@@ -236,34 +236,6 @@ function installPostCheckoutHook(hooksDir: string): void {
 }
 
 // ─── Stash Handling ────────────────────────────────────────────────────────
-
-/**
- * Handle post-checkout events that may be triggered by stash operations.
- * Checks if the checkout was caused by a stash pop/apply and preserves attribution.
- */
-export function handlePostCheckout(repoPath: string, prevHead: string, newHead: string): void {
-  if (!prevHead || !newHead || prevHead === newHead) return;
-
-  const gitDir = getGitDir(repoPath);
-  if (!gitDir) return;
-
-  // Check for stash-related refs
-  try {
-    // If there are stash entries, check if any of them match the transition
-    const stashList = execSync('git stash list --format=%H', { windowsHide: true,
-      cwd: repoPath,
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-
-    if (!stashList) return;
-
-    // The checkout after a stash pop changes HEAD — try to copy notes
-    preserveAttributionOnRewrite(repoPath, prevHead, newHead);
-  } catch {
-    // Non-fatal
-  }
-}
 
 // ─── Utilities ─────────────────────────────────────────────────────────────
 
