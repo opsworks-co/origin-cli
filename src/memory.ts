@@ -177,6 +177,17 @@ interface MemoryPayload {
   // a closure recorded only on one laptop leaves every clone, every other
   // machine and CI reading the item as still open.
   closedTodos?: TodoClosure[];
+  // TODOs a person typed (`origin todo add`). Session-mined leftovers reach the
+  // repo through `openTodos` on a session rollup, but a manual one had no
+  // session to be written under, so it lived only in
+  // `~/.origin/origin-todos.json` — one laptop's file, outside any repo. Every
+  // clone, every other machine, every other agent and CI read the list without
+  // it: three follow-ups recorded on 2026-09-15 were invisible to everything
+  // except the machine that typed them.
+  //
+  // Same append-only shape as `closedTodos`, and closed the same way — the
+  // closure is the fact that discharges it.
+  manualTodos?: ManualTodo[];
 }
 
 /**
@@ -208,6 +219,27 @@ export interface TodoClosure {
   shas?: string[];
   /** When `pending` became `closed`. */
   confirmedAt?: string;
+}
+
+/**
+ * A TODO someone typed, recorded in the repo rather than on one machine.
+ *
+ * KEYED BY TEXT like a closure, and for the same reason: the id is
+ * `hash(text + something)`, and the same sentence typed twice (or typed here
+ * and mined from a prompt there) must be ONE item. The id is kept for display
+ * so `origin todo done <id>` resolves what the list printed.
+ */
+export interface ManualTodo {
+  /** The TODO's text, lowercased and whitespace-collapsed — see todoClosureKey. */
+  key: string;
+  /** The id the list shows. Display only; the key is what identifies it. */
+  id: string;
+  text: string;
+  /** When it was typed. First write wins, so re-adding keeps the original. */
+  at: string;
+  /** The session that typed it, when there was one. */
+  sessionId?: string;
+  branch?: string | null;
 }
 
 /**
@@ -244,7 +276,7 @@ function memoryRootCommit(repoPath: string): string | null {
 function readMemoryPayload(repoPath: string): MemoryPayload {
   try {
     const root = memoryRootCommit(repoPath);
-    if (!root) return { version: 2, sessions: [], commits: [], tombstones: [], closedTodos: [] };
+    if (!root) return { version: 2, sessions: [], commits: [], tombstones: [], closedTodos: [], manualTodos: [] };
     const raw = git(['notes', '--ref=origin-memory', 'show', root], { cwd: repoPath, timeoutMs: 10_000 }).trim();
     const data = JSON.parse(raw);
     return {
@@ -253,9 +285,11 @@ function readMemoryPayload(repoPath: string): MemoryPayload {
       commits: Array.isArray(data.commits) ? data.commits : [], // absent in v1 payloads
       tombstones: Array.isArray(data.tombstones) ? data.tombstones : [],
       closedTodos: Array.isArray(data.closedTodos) ? data.closedTodos : [],
+      // Absent in every payload written before manual TODOs travelled.
+      manualTodos: Array.isArray(data.manualTodos) ? data.manualTodos : [],
     };
   } catch {
-    return { version: 2, sessions: [], commits: [], tombstones: [], closedTodos: [] };
+    return { version: 2, sessions: [], commits: [], tombstones: [], closedTodos: [], manualTodos: [] };
   }
 }
 
@@ -269,10 +303,13 @@ function writeMemoryPayload(
   tombstones?: CommitTombstone[],
   // Same contract as `tombstones`: omitting it PRESERVES what is recorded.
   closedTodos?: TodoClosure[],
+  // Same contract again. A session-end write knows nothing about the TODOs a
+  // person typed, and must not drop them.
+  manualTodos?: ManualTodo[],
 ): void {
   const root = memoryRootCommit(repoPath);
   if (!root) return;
-  const existing = (tombstones === undefined || closedTodos === undefined)
+  const existing = (tombstones === undefined || closedTodos === undefined || manualTodos === undefined)
     ? readMemoryPayload(repoPath)
     : null;
   const keptTombstones = tombstones ?? existing?.tombstones ?? [];
@@ -287,9 +324,25 @@ function writeMemoryPayload(
   // closure whose TODO is still in the window resurrects the TODO.
   const liveTodoKeys = new Set<string>();
   for (const e of sessions) for (const t of e.openTodos || []) liveTodoKeys.add(todoClosureKey(t));
+  // A manual TODO is its own record rather than a line on a session that ages
+  // out, so it keeps its own closure alive: pruning the closure while the item
+  // is still here is what would resurrect it.
+  const keptManual = manualTodos ?? existing?.manualTodos ?? [];
+  for (const m of keptManual) if (m?.key) liveTodoKeys.add(m.key);
   const keptClosures = (closedTodos ?? existing?.closedTodos ?? []).filter((c) => liveTodoKeys.has(c.key));
+  // Closed means gone — the item leaves, and its closure leaves with it on the
+  // next write, once nothing references the key any more.
+  const closedKeys = new Set(keptClosures.filter((c) => c.state === 'closed').map((c) => c.key));
+  const visibleManual = keptManual.filter((m) => m?.key && !closedKeys.has(m.key));
   const payload = JSON.stringify(
-    { version: 2, sessions, commits: visibleCommits, tombstones: keptTombstones, closedTodos: keptClosures },
+    {
+      version: 2,
+      sessions,
+      commits: visibleCommits,
+      tombstones: keptTombstones,
+      closedTodos: keptClosures,
+      manualTodos: visibleManual,
+    },
     null,
     2,
   );
@@ -359,6 +412,13 @@ export function mergeMemoryPayloads(local: MemoryPayload, remote: MemoryPayload)
     if (!mine || (mine.state !== 'closed' && c.state === 'closed')) closedTodos.set(c.key, c);
   }
 
+  // Manual TODOs union by key, first seen wins — the item is the same sentence
+  // whichever machine typed it, and keeping the first keeps its original `at`.
+  const manualTodos = new Map<string, ManualTodo>();
+  for (const m of [...(local?.manualTodos || []), ...(remote?.manualTodos || [])]) {
+    if (m?.key && m.text && !manualTodos.has(m.key)) manualTodos.set(m.key, m);
+  }
+
   const commits = new Map<string, CommitMemoryEntry>();
   for (const c of local?.commits || []) if (c?.commitSha) commits.set(c.commitSha, c);
   for (const c of remote?.commits || []) {
@@ -387,12 +447,18 @@ export function mergeMemoryPayloads(local: MemoryPayload, remote: MemoryPayload)
 
   const liveTodoKeys = new Set<string>();
   for (const e of mergedSessions) for (const t of e.openTodos || []) liveTodoKeys.add(todoClosureKey(t));
+  for (const m of manualTodos.values()) if (m?.key) liveTodoKeys.add(m.key);
+  const mergedClosures = [...closedTodos.values()].filter((c) => liveTodoKeys.has(c.key));
+  const closedKeys = new Set(mergedClosures.filter((c) => c.state === 'closed').map((c) => c.key));
   return {
     version: 2,
     sessions: mergedSessions,
     commits: mergedCommits,
     tombstones: [...tombstones.values()],
-    closedTodos: [...closedTodos.values()].filter((c) => liveTodoKeys.has(c.key)),
+    closedTodos: mergedClosures,
+    // A closure that arrived from either side discharges the item, exactly as
+    // it does on a local write.
+    manualTodos: [...manualTodos.values()].filter((m) => !closedKeys.has(m.key)),
   };
 }
 
@@ -622,6 +688,43 @@ export function recordTodoClosures(repoPath: string, closures: TodoClosure[]): n
     if (changed === 0) return 0;
     writeMemoryPayload(repoPath, sessions, commits, tombstones, [...byKey.values()]);
     return changed;
+  } catch {
+    return 0;
+  }
+}
+
+/** The TODOs someone typed against this repo, as recorded in its memory note. */
+export function readManualTodos(repoPath: string): ManualTodo[] {
+  try {
+    return readMemoryPayload(repoPath).manualTodos || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Record typed TODOs in the repo's memory note so they travel with the repo.
+ *
+ * Add-once by key: re-adding the same sentence keeps the first record, so its
+ * `at` stays the moment it was actually written down. Returns how many the note
+ * gained.
+ */
+export function recordManualTodos(repoPath: string, items: ManualTodo[]): number {
+  try {
+    if (!items?.length) return 0;
+    if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return 0;
+    const { sessions, commits, tombstones, closedTodos, manualTodos } = readMemoryPayload(repoPath);
+    const byKey = new Map<string, ManualTodo>();
+    for (const m of manualTodos || []) if (m?.key) byKey.set(m.key, m);
+    let added = 0;
+    for (const m of items) {
+      if (!m?.key || !m.text || byKey.has(m.key)) continue;
+      byKey.set(m.key, m);
+      added++;
+    }
+    if (added === 0) return 0;
+    writeMemoryPayload(repoPath, sessions, commits, tombstones, closedTodos, [...byKey.values()]);
+    return added;
   } catch {
     return 0;
   }

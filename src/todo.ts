@@ -3,8 +3,8 @@ import path from 'path';
 import os from 'os';
 import { extractTodosFromPrompts } from './handoff.js';
 import {
-  readAllSessionMemory, readTodoClosures, recordTodoClosures, sortByDateAsc,
-  todoClosureKey, todoDisplayId, type TodoClosure,
+  readAllSessionMemory, readManualTodos, readTodoClosures, recordManualTodos, recordTodoClosures,
+  sortByDateAsc, todoClosureKey, todoDisplayId, type TodoClosure,
 } from './memory.js';
 import { samePath } from './paths.js';
 
@@ -133,6 +133,28 @@ export function readMemoryTodos(repoPath: string): TodoItem[] {
       });
     }
   }
+  // …and the ones a person typed. These have no session to be written under, so
+  // they sit in the note as their own records — see ManualTodo.
+  for (const m of readManualTodos(repoPath)) {
+    const text = typeof m?.text === 'string' ? m.text.trim() : '';
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const closure = closures.get(todoClosureKey(text));
+    if (closure?.state === 'closed') continue;
+    items.push({
+      id: m.id || generateId(text, m.sessionId || 'manual'),
+      text,
+      sessionId: m.sessionId || 'manual',
+      repoPath,
+      branch: m.branch ?? null,
+      createdAt: m.at || new Date().toISOString(),
+      status: 'open',
+      source: 'manual',
+      ...(closure ? { pending: { reason: closure.reason, sessionId: closure.sessionId, at: closure.at } } : {}),
+    });
+  }
   return items;
 }
 
@@ -183,6 +205,19 @@ export function addManualTodo(text: string, repoPath?: string): TodoItem {
   };
   store.items.push(item);
   saveTodos(store);
+  // …and into the repo's memory note, which is what makes it travel. The local
+  // store stays the fast path and keeps working where the note cannot be
+  // written (a read-only checkout, a directory that is not a repo).
+  try {
+    recordManualTodos(item.repoPath, [{
+      key: todoClosureKey(text),
+      id: item.id,
+      text,
+      at: item.createdAt,
+      sessionId,
+      branch: null,
+    }]);
+  } catch { /* best-effort — never fail an add on a note write */ }
   return item;
 }
 
@@ -220,7 +255,7 @@ function liftLocalClosuresIntoNotes(repoPath: string): void {
   try {
     const store = loadTodos();
     const local = store.items.filter(
-      (i) => i.status === 'done' && i.source === 'memory' && samePath(i.repoPath, repoPath),
+      (i) => i.status === 'done' && (i.source === 'memory' || i.source === 'manual') && samePath(i.repoPath, repoPath),
     );
     if (local.length === 0) return;
     recordTodoClosures(repoPath, local.map((i) => ({
@@ -253,13 +288,19 @@ export function markTodoDone(idPrefix: string, repoPath?: string): TodoItem | nu
     item.status = 'done';
     item.doneAt = now;
     saveTodos(store);
-    // A manual or prompt-mined TODO lives only in the local store; there is
-    // nothing in the note for a closure to refer to.
-    if (repoPath && item.source === 'memory') closeInMemoryNotes(repoPath, item, now, 'closed by hand');
+    // A prompt-mined TODO lives only in the local store; there is nothing in
+    // the note for a closure to refer to. A manual one IS in the note now, so
+    // its closure has to travel the same way a memory TODO's does.
+    if (repoPath && (item.source === 'memory' || item.source === 'manual')) {
+      closeInMemoryNotes(repoPath, item, now, 'closed by hand');
+    }
     return item;
   }
+  // Anything the NOTE carries, not just a session-mined leftover: a typed TODO
+  // read back on another machine has no local record to find, which is the
+  // whole point of it travelling.
   const fromMemory = repoPath
-    ? getOpenTodos(repoPath).find(i => i.source === 'memory' && i.id.startsWith(idPrefix))
+    ? getOpenTodos(repoPath).find(i => (i.source === 'memory' || i.source === 'manual') && i.id.startsWith(idPrefix))
     : undefined;
   if (!fromMemory) return null;
   const closed: TodoItem = { ...fromMemory, status: 'done', doneAt: now };
