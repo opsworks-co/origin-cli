@@ -311,20 +311,39 @@ describe.skipIf(!haveDist)('a merge session does not claim the commits it replay
     expect(noteSession(wtMerge, squash)).not.toBe(MERGE_API);
   }, 120_000 * WINDOWS_SLOWDOWN);
 
+  function assertPublishedSessionExcludesReplay(): void {
+    // Missing publication or unreadable git objects are failures, not evidence
+    // that a foreign commit was excluded. Inspect full trees so an unchanged
+    // session file is checked even in commits that only updated another session.
+    const commits = git(repo, ['log', 'origin-sessions', '--format=%H']).split('\n').filter(Boolean);
+    const sessionDir = `sessions/${MERGE_API}/`;
+    const records: Array<{ file: string; content: string }> = [];
+    for (const commit of commits) {
+      const files = git(repo, ['ls-tree', '-r', '--name-only', commit]).split('\n')
+        .filter(f => f.startsWith(sessionDir) && f.endsWith('.json'));
+      for (const file of files) records.push({ file, content: git(repo, ['show', `${commit}:${file}`]) });
+    }
+    const metadata = records.filter(r => r.file.endsWith('/metadata.json')).map(r => JSON.parse(r.content));
+    expect(metadata.length, 'the merge session must publish metadata').toBeGreaterThan(0);
+    expect(metadata.some(m => m.sessionId === MERGE_API && m.git?.commitShas?.includes(own)),
+      'positive control: the published session must contain its own commit').toBe(true);
+    expect(records.some(r => r.file.endsWith('/changes.json')), 'the published session must contain changes').toBe(true);
+    for (const { file, content } of records) {
+      expect(content.includes(replayed), `origin-sessions ${file} names the replayed commit`).toBe(false);
+    }
+  }
+
   it('the replayed commit does not put an origin-sessions entry on the merge session', () => {
-    // post-commit publishes the session's origin-sessions entry on every
-    // commit. For a commit it just refused as another session's, that entry
-    // must not name the commit.
-    let listing = '';
-    try { listing = git(repo, ['log', 'origin-sessions', '--format=%H']); } catch { return; }
-    for (const commit of listing.split('\n').filter(Boolean)) {
-      let files = '';
-      try { files = git(repo, ['show', '--name-only', '--format=', commit]); } catch { continue; }
-      for (const f of files.split('\n').filter((x) => x.includes(MERGE_API.slice(0, 8)) && x.endsWith('.json'))) {
-        let content = '';
-        try { content = git(repo, ['show', `${commit}:${f}`]); } catch { continue; }
-        expect(content.includes(replayed), `origin-sessions ${f} at ${commit.slice(0, 8)} names the replayed commit`).toBe(false);
-      }
+    assertPublishedSessionExcludesReplay();
+  });
+
+  it('the publication check fails when the session branch is absent', () => {
+    const tip = git(repo, ['rev-parse', 'refs/heads/origin-sessions']);
+    git(repo, ['update-ref', '-d', 'refs/heads/origin-sessions']);
+    try {
+      expect(() => assertPublishedSessionExcludesReplay()).toThrow();
+    } finally {
+      git(repo, ['update-ref', 'refs/heads/origin-sessions', tip]);
     }
   });
 

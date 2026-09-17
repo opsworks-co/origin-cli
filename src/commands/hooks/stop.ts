@@ -3771,6 +3771,18 @@ export function recordProbedShellEdits(
     try { newContent = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : null; } catch { continue; }
     let oldContent: string | null = null;
     if (baselineSha) { try { oldContent = readFileAtRev(tree, baselineSha, file); } catch { oldContent = null; } }
+    // A file that ends the turn as it began it is not an edit. The journal
+    // and the probe see every byte a process lands on disk, and two shapes
+    // land bytes without changing anything: a checkout round-trip (`gh pr
+    // merge --delete-branch` switches to main and the fast-forward brings
+    // the same tree back — five files rewritten in one second, all equal to
+    // the baseline), and a transient file (a test suite's self-test golden,
+    // created and deleted inside the turn — absent at baseline, absent now).
+    // Session aec13f50 turn 10 committed nothing and touched nothing, and its
+    // editsJson carried six `write_journal` edits of exactly those shapes;
+    // the blame's per-prompt list read them as the turn's files.
+    if (baselineSha && oldContent === newContent) continue;
+    if (oldContent === null && newContent === null) continue;
     const edit: PromptEdit = {
       file,
       op: newContent === null ? 'delete' : (oldContent === null ? 'create' : 'write'),
