@@ -19,6 +19,7 @@ import type { TreeProbe } from '../../shell-command-probe.js';
 import { commandWritesFiles, isShellTool, shellCommandText } from '../../shell-write-capture.js';
 import { recordGitPathspecs } from '../../git-pathspec-names.js';
 import { isSubagentSpawnTool } from '../../subagent-tools.js';
+import { recordWriteTree } from '../../session-write-trees.js';
 import { spawn } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -710,6 +711,14 @@ export async function handlePostToolUse(rawInput: Record<string, any>, agentSlug
   // Resolve the probe first: it closes the pre/post pair opened before this
   // command ran, and its result is EVIDENCE, unlike the window Stop falls back
   // to. Both can be true — a turn that used Edit and a heredoc did both.
+  // A tree this session actually WROTE in is the only kind the commit hooks
+  // may attribute a commit to (see session-write-trees.ts). An edit tool that
+  // succeeded is the cleanest observation of one; shell writes are recorded by
+  // endShellProbe below, from the probe's own before/after evidence.
+  if (noteWrittenTree(state, input, hookCwd)) {
+    saveSessionState(state, saveCwd, state.sessionTag);
+  }
+
   const probesBefore = state.shellProbes?.length || 0;
   const probed = endShellProbe(state, input);
   const probeClosed = (state.shellProbes?.length || 0) < probesBefore;
@@ -724,6 +733,60 @@ export async function handlePostToolUse(rawInput: Record<string, any>, agentSlug
     // Not an edit tool — but a shell command that could have written files.
     // Stop turns this flag into real edits from the turn's git window.
     saveSessionState(state, saveCwd, state.sessionTag);
+  }
+}
+
+/**
+ * Record the working tree an edit tool just WROTE in, with the files it wrote.
+ *
+ * Deliberately narrow: a Read, a Grep or a tool call that FAILED wrote nothing
+ * and must leave no trace, or the entry alone could make this session the lone
+ * candidate for somebody else's commit in that tree. Same failure rule as
+ * recordLiveEdits (a rejected Edit describes a write that does not exist).
+ *
+ * The write's OWN path decides the tree, not the hook cwd: an agent that edits
+ * `../other-worktree/src/a.ts` wrote there, not here.
+ *
+ * Exported for testing.
+ */
+export function noteWrittenTree(state: SessionState, input: Record<string, any>, hookCwd: string): boolean {
+  try {
+    if (!liveCaptureEnabled()) return false;
+    const toolName = String(input.tool_name || '');
+    if (!toolName || isShellTool(toolName)) return false;
+    if (toolCallFailed(input)) return false;
+    const toolInput =
+      (input.tool_input && typeof input.tool_input === 'object') ? input.tool_input
+        : (input.toolInput && typeof input.toolInput === 'object') ? input.toolInput
+          : (input.tool_response && typeof input.tool_response === 'object' && input.tool_response.input) ? input.tool_response.input
+            : {};
+    // hookCwd, not getWorkingGitRoot(hookCwd): this runs on every non-shell
+    // tool call, and a Read or a Grep must cost nothing. extractEditsFromToolCall
+    // returns [] for them before anything touches the filesystem; the tree of an
+    // actual write is resolved per file below, by fs walk and not a subprocess.
+    const edits = extractEditsFromToolCall(toolName, toolInput, hookCwd, state.agentSlug === 'cursor' ? 'cursor' : 'claude', false);
+    if (edits.length === 0) return false;
+    const byTree = new Map<string, string[]>();
+    for (const e of edits) {
+      const abs = path.isAbsolute(e.file) ? e.file : path.resolve(hookCwd, e.file);
+      const dir = path.dirname(abs);
+      const group = byTree.get(dir) || [];
+      group.push(abs);
+      byTree.set(dir, group);
+    }
+    let changed = false;
+    for (const [dir, files] of byTree) {
+      if (recordWriteTree(state, dir, files, (evicted) => {
+        debugLog('post-tool-use', 'write tree evicted at the cap', { evicted: evicted.map((w) => w.path) });
+      })) {
+        changed = true;
+        debugLog('post-tool-use', 'write tree recorded', { dir, files: files.length, tool: toolName });
+      }
+    }
+    return changed;
+  } catch (err: unknown) {
+    debugLog('post-tool-use', 'write tree note failed (non-fatal)', { message: err instanceof Error ? err.message : String(err) });
+    return false;
   }
 }
 
@@ -960,6 +1023,12 @@ export function endShellProbe(state: SessionState, input: Record<string, any>): 
         state, before.tree, before.baselineSha, before.promptIndex, touched,
         { command: before.command },
       )) changed = true;
+      // The probe is evidence a write LANDED in this tree — the shell half of
+      // noteWrittenTree, and the only observation for a sub-agent that writes
+      // through a script rather than an edit tool.
+      if (recordWriteTree(state, before.tree, touched, (evicted) => {
+        debugLog('post-tool-use', 'write tree evicted at the cap', { evicted: evicted.map((w) => w.path) });
+      })) changed = true;
     }
   } catch (err: unknown) {
     debugLog('post-tool-use', 'shell probe resolve failed (non-fatal)', {

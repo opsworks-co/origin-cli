@@ -27,6 +27,7 @@ import { currentTurnIndex, getBranch, getGitRoot, getHeadSha, getWorkingGitRoot,
 import type { SessionState } from '../../session-state.js';
 import { estimateCost, extractPromptFileMappings, livePrompts, parseTranscript } from '../../transcript.js';
 import type { ParsedTranscript } from '../../transcript.js';
+import { commitOverlapsWritesInTree } from '../../session-write-trees.js';
 import { drainQueueFromHook, durableUpdateSession, enqueueFailedUpdate, isRetriableApiError, persistUpdateBeforeWork } from '../../update-queue.js';
 import { isProcessRunning, uniqueMatchingId } from '../../utils/process-detect.js';
 import { ensureSqlite } from '../../utils/sqlite.js';
@@ -396,6 +397,28 @@ export function worksInAnotherTree(
   return !trees.some((t) => sameDir(t, hookTree));
 }
 
+/**
+ * May this session claim `hookTree` on the strength of having WRITTEN there?
+ *
+ * Two conditions, both required:
+ *   • a recent write in that tree (session-write-trees.ts ages entries out), and
+ *   • the commit touches one of the files it wrote there.
+ *
+ * The second is what keeps this from becoming a licence. A candidate list is
+ * trusted absolutely when it holds one name — `pickActiveSessionForCommit`
+ * returns early on `length === 1`, and `loneSessionMayOwnCommit` lets a session
+ * with an open turn through — so a bare "this session wrote something here once"
+ * would put its trailer on a human's unrelated commit in that worktree. The
+ * file overlap is the same evidence every other rung in this file stands on.
+ */
+export function mayClaimTreeByWrites(
+  s: SessionState,
+  hookTree: string,
+  commitFiles?: string[],
+): boolean {
+  return commitOverlapsWritesInTree(s, hookTree, commitFiles);
+}
+
 export function pathNamesSession(
   s: { agentSessionId?: string | null; sessionId?: string | null; sessionTag?: string | null },
   dir: string,
@@ -563,7 +586,7 @@ export function listSessionsForGitHookUnscoped(
   // candidate on its own and every caller then trusts that one absolutely —
   // which is how a sibling worktree's session ended up owning this one's commit
   // with `ofActive: 1` in the log. See excludeSessionsFromOtherTrees.
-  sessions = excludeSessionsFromOtherTrees(sessions, hookCwd);
+  sessions = excludeSessionsFromOtherTrees(sessions, hookCwd, opts);
   if (sessions.length > 1) {
     // Git runs hooks from the working-tree root; this is the tree being
     // committed in. Needed by both narrowing rules below.
@@ -614,16 +637,17 @@ export function listSessionsForGitHookUnscoped(
       // whose open turn staged the commit.
       const sameTree = sessions.filter((s) =>
         !exact.includes(s)
-        && !!s.lastCwd
-        && sessionTrees(s).some((t) => sameDir(t, hookTree))
-        && isInsideRepo(hookTree, s.lastCwd));
+        && ((!!s.lastCwd
+          && sessionTrees(s).some((t) => sameDir(t, hookTree))
+          && isInsideRepo(hookTree, s.lastCwd))
+          || mayClaimTreeByWrites(s, hookTree, opts?.commitFiles)));
       debugLog('git-hook-sessions', 'narrowed by lastCwd', {
         hookCwd,
         matched: exact.map(s => s.sessionId.slice(0, 12)),
         keptSameTree: sameTree.map(s => s.sessionId.slice(0, 12)),
         keptUnknownCwd: unknownCwd.map(s => s.sessionId.slice(0, 12)),
       });
-      return [...exact, ...sameTree, ...unknownCwd];
+      return [...exact, ...sameTree, ...unknownCwd.filter((s) => !sameTree.includes(s))];
     }
     // Git runs its hooks from the WORKING TREE ROOT, but a session's lastCwd is
     // wherever its last lifecycle hook fired — routinely a SUBDIRECTORY, because
@@ -654,9 +678,17 @@ export function listSessionsForGitHookUnscoped(
     // commits, because a worktree under `.claude/worktrees/` is textually
     // inside it; that session's tree is the worktree, so the tree check
     // excludes it.
+    //
+    // A session that WROTE the committed files in this tree is working here
+    // too, even when lastCwd has since moved: its sub-agents share its
+    // session_id, so lastCwd is whichever of them fired last (fd13f970,
+    // 2026-09-17: commit 78043a60e in agent-a47deb… went unattributed because a
+    // sibling sub-agent had just moved lastCwd to agent-abcef6…). Presence in
+    // the tree is NOT enough — see mayClaimTreeByWrites.
     const inHookTree = sessions.filter((s) =>
-      sessionTrees(s).some((t) => sameDir(t, hookTree))
-      && (!s.lastCwd || isInsideRepo(hookTree, s.lastCwd)));
+      (sessionTrees(s).some((t) => sameDir(t, hookTree))
+        && (!s.lastCwd || isInsideRepo(hookTree, s.lastCwd)))
+      || mayClaimTreeByWrites(s, hookTree, opts?.commitFiles));
     if (inHookTree.length > 0) {
       const merged = [...inHookTree, ...unknownCwd.filter((s) => !inHookTree.includes(s))];
       debugLog('git-hook-sessions', 'narrowed by working tree', {
@@ -753,6 +785,7 @@ export function listSessionsForGitHookUnscoped(
 export function excludeSessionsFromOtherTrees(
   sessions: SessionState[],
   hookCwd: string,
+  opts?: { commitFiles?: string[] },
 ): SessionState[] {
   if (sessions.length === 0) return sessions;
   // getWorkingGitRoot, NOT getGitRoot: the latter collapses a linked worktree
@@ -766,9 +799,18 @@ export function excludeSessionsFromOtherTrees(
   // reached out to find it, and its recorded tree being "elsewhere" is exactly
   // what that fallback expects. Dropping it there credits the commit to nobody,
   // which is the failure worktree-capture.test.ts pins.
-  if (!sessions.some((s) => !worksInAnotherTree(s, hookTree))) return sessions;
+  //
+  // A session that wrote the committed files in this tree claims it as surely
+  // as one recorded there: a sub-agent's worktree is never any session's
+  // repoPath, and without this its commit fell to the unclaimed-tree path
+  // below, where the outcome depended on where the parent's lastCwd pointed at
+  // that moment. The write must be recent AND overlap the commit — see
+  // mayClaimTreeByWrites.
+  const claims = (s: SessionState): boolean =>
+    !worksInAnotherTree(s, hookTree) || mayClaimTreeByWrites(s, hookTree, opts?.commitFiles);
+  if (!sessions.some(claims)) return sessions;
   const kept = sessions.filter((s) =>
-    !worksInAnotherTree(s, hookTree)
+    claims(s)
     || (!!s.lastCwd && isInsideRepo(hookTree, s.lastCwd))
     || pathNamesSession(s, hookCwd));
   if (kept.length !== sessions.length) {

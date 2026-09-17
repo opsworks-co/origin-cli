@@ -1001,6 +1001,91 @@ function prefetchCommitReads(repoPath: string, shas: string[]): CommitReads {
   };
 }
 
+/**
+ * How many of the session's other trees the rescue will read a HEAD from.
+ *
+ * `discoveredWorkTrees` is capped per prompt but never across a session, and
+ * `writeTrees` holds up to MAX_WRITE_TREES, so a long session with sub-agents
+ * can accumulate dozens; each tree this repository does not list costs a
+ * `rev-parse` inside a hook Codex kills at 10s. The session's own roots come
+ * first and the freshest trees next, because a tree nothing has touched in
+ * hours is the least likely to still be standing on a commit of ours.
+ */
+const RESCUE_MAX_OTHER_TREES = 8;
+
+/**
+ * The HEAD of every OTHER working tree this session is known to work in —
+ * its home tree, its other repo roots, the worktrees its turns discovered, and
+ * the trees it has WRITTEN in — excluding `repoPath`'s own HEAD. A tree that is
+ * gone or unreadable is left out: it stands on nothing.
+ *
+ * `writeTrees` is the list that matters for sub-agents. `discoveredWorkTrees`
+ * only holds paths a shell command literally named, so a harness-created
+ * `.claude/worktrees/agent-*` checkout never appears there — which is how a
+ * sub-agent's commit was invisible to this guard (#1708). Read HERE and not in
+ * `sessionTrees()`, which also backs `siblingSharesOurTree`, where "this
+ * session works here too" is a different question with its own evidence rules.
+ *
+ * AGE IS DELIBERATELY IGNORED. A `writeTrees` entry expires after three hours
+ * because it stops being evidence that a NEW commit there is this session's.
+ * The question here is the opposite and is not about the session at all: does
+ * some checkout still have this commit at its HEAD? A tree the session last
+ * wrote in four hours ago answers that exactly as well as one it wrote in a
+ * minute ago — and if it is gone, the existence check below drops it anyway.
+ * Freshness only orders the list, so the cap keeps the likeliest trees.
+ */
+function headsOfOtherSessionTrees(repoPath: string, state: SessionState): string[] {
+  // Roots first, then the freshest write trees, then the newest discovered.
+  const roots = [state.repoPath, ...(state.repoPaths || [])];
+  const written = [...(state.writeTrees || [])]
+    .filter((w) => w && typeof w.path === 'string' && w.path)
+    .sort((a, b) => (Date.parse(b.at || '') || 0) - (Date.parse(a.at || '') || 0))
+    .map((w) => w.path);
+  const discovered = (state.discoveredWorkTrees || []).map((w) => w?.path).reverse();
+  const seen = new Set<string>();
+  const trees: string[] = [];
+  for (const tree of [...roots, ...written, ...discovered]) {
+    if (!tree || samePath(tree, repoPath)) continue;
+    const key = path.resolve(tree);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    trees.push(tree);
+    if (trees.length >= RESCUE_MAX_OTHER_TREES) break;
+  }
+  if (trees.length === 0) return [];
+  const git = (cwd: string, args: string[]): string => {
+    try {
+      return execFileSync('git', args, {
+        windowsHide: true, cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000,
+      }).toString();
+    } catch { return ''; }
+  };
+  // One spawn for every linked worktree of this repository and the commit each
+  // one is standing on. A per-tree `rev-parse` is the fallback for a tree this
+  // repository does not list — another repo of a multi-repo session, or a path
+  // that is no longer a worktree.
+  const listed = new Map<string, string>();
+  let cur = '';
+  for (const line of git(repoPath, ['worktree', 'list', '--porcelain']).split('\n')) {
+    const [key, value = ''] = line.trim().split(' ');
+    if (key === 'worktree') cur = value;
+    else if (key === 'HEAD' && cur) { listed.set(path.resolve(cur), value.trim().toLowerCase()); cur = ''; }
+  }
+  const headOf = (tree: string): string => {
+    const known = listed.get(path.resolve(tree));
+    if (known) return known;
+    if (!fs.existsSync(tree)) return '';
+    return git(tree, ['rev-parse', '--verify', '--quiet', 'HEAD']).trim().toLowerCase();
+  };
+  const own = headOf(repoPath);
+  const heads = new Set<string>();
+  for (const tree of trees) {
+    const head = headOf(tree);
+    if (/^[a-f0-9]{40,64}$/.test(head) && head !== own) heads.add(head);
+  }
+  return [...heads];
+}
+
 function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
   if (!state.sessionCommitShas || state.sessionCommitShas.length === 0) return;
   const gitOpts = {
@@ -1011,6 +1096,33 @@ function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
     timeout: 5000,
   };
   const replacements = new Map<string, string>();
+  // "HEAD cannot reach it" is only evidence of a rewrite in the tree the commit
+  // was made in. The session's other trees are checkouts of their own, and a
+  // commit one of them still stands on was rewritten by nobody.
+  //
+  // Session fd13f970 (2026-09-17) committed turns 0 and 1 in worktree A, and a
+  // subagent then committed in worktree B, cut from a main that held the
+  // squash of A's PR. Its post-commit ran this rescue from B: neither of A's
+  // commits was reachable from B's HEAD, the squash had their parent and final
+  // tree, so both were recorded as squashed into it and `commitTurns` folded
+  // onto that one sha under turn 0. Turn 1 was left owning no commit, and every
+  // later Stop in A — where both commits were still on HEAD — sent the ledger's
+  // one-file rendering in place of turn 1's three-file commit patch.
+  let otherHeadsCache: string[] | null = null;
+  const otherHeads = (): string[] => (otherHeadsCache ??= headsOfOtherSessionTrees(repoPath, state));
+  // Memoized: the shape rungs below ask about the same sha more than once, and
+  // each answer is a merge-base per tree.
+  const liveCache = new Map<string, boolean>();
+  const liveInAnotherTree = (sha: string): boolean => {
+    const key = String(sha || '').toLowerCase();
+    const known = liveCache.get(key);
+    if (known !== undefined) return known;
+    const live = otherHeads().some((head) => {
+      try { execFileSync('git', ['merge-base', '--is-ancestor', sha, head], gitOpts); return true; } catch { return false; }
+    });
+    liveCache.set(key, live);
+    return live;
+  };
   // Computed once: the rescue may examine every orphan against this pool.
   const reachablePool = reachableWindowShas(repoPath, state, gitOpts);
   // Shape, patch-id, parent and tree for the window and our own commits, read
@@ -1179,6 +1291,13 @@ function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
     }
   }
   for (const sha of unplaced()) {
+    // Shape is not proof, and a commit another tree of this session still
+    // stands on was rewritten by nobody — see liveInAnotherTree. The rungs
+    // ABOVE stay unguarded on purpose: git's own record of the amend, the same
+    // patch and the same tree prove a rewrite wherever the rescue runs from,
+    // and a rebase inside a subagent's own worktree is exactly that (session
+    // 92e45049's double count is what happens when such a pair is refused).
+    if (liveInAnotherTree(sha)) continue;
     for (const candidate of reachablePool) {
       if (candidate === sha || claimed.has(candidate)) continue;
       // When resolving a conflict moved the patch and the author time was not
@@ -1239,6 +1358,14 @@ function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
       }
       // A single orphan the amend rung already placed is not a run to squash.
       if (run.length === 1 && replacements.has(o)) continue;
+      // The run's TIP decides whether this shape is a squash at all: the
+      // candidate below has to carry the tip's tree, so a tip another tree of
+      // this session still stands on means that end state is still live and
+      // nothing was reset away. Asked of the tip ALONE — every member is
+      // walked into the run first, because dropping a guarded member from the
+      // walk would break the parentage chain and strand the run's later
+      // commits (a sibling detached mid-run is exactly that shape).
+      if (liveInAnotherTree(tip)) continue;
       const base = parentOf(orphanFull.get(o)!);
       const endTree = revParse(`${tip}^{tree}`);
       if (!base || !endTree) continue;

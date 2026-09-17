@@ -10,6 +10,8 @@ import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { processInfo } from './utils/process-detect.js';
 import { samePath } from './paths.js';
+import { keepWriteTreesSavedMeanwhile } from './session-write-trees.js';
+import type { WriteTree } from './session-write-trees.js';
 import type { PromptEdit } from './prompt-capture/types.js';
 import { ensureOwnerStamp } from './session-owner.js';
 import { debugLog } from './debug-log.js';
@@ -132,6 +134,14 @@ export interface SessionState {
   // so this is their only signal for matching a worktree commit to the
   // session that made it when several sessions share one repo.
   lastCwd?: string;
+  // Every working tree this session has been OBSERVED WRITING in — its
+  // sub-agents' worktrees included, since their hooks carry the parent's
+  // session_id — with what it wrote there and when. The bare git hooks read it
+  // to ask "did this session write the files being committed in this tree",
+  // which lastCwd cannot answer once several sub-agents move it concurrently.
+  // Presence is deliberately not recorded, and entries age out; the file list
+  // is the evidence a commit is matched against. See session-write-trees.ts.
+  writeTrees?: WriteTree[];
   // Did this session actually READ the repo's Origin memory? Set at
   // pre-tool-use the first time a tool call matches isMemoryReadCommand /
   // isMemoryReadToolName. Session-start injects a directive to do so; without
@@ -1458,7 +1468,9 @@ function keepCommitsRecordedSinceRead(state: SessionState, statePath: string): v
     const st = fs.statSync(statePath);
     const mine = lastWriteByState.get(state);
     if (mine && mine.file === statePath && mine.mtimeMs === st.mtimeMs && mine.size === st.size) return;
-    const kept = keepCommitRecordsSavedMeanwhile(state, JSON.parse(fs.readFileSync(statePath, 'utf-8')));
+    const onDisk = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+    keepWriteTreesSavedMeanwhile(state, onDisk);
+    const kept = keepCommitRecordsSavedMeanwhile(state, onDisk);
     if (kept) {
       debugLog('session-state', 'kept commit records another hook saved since this state was read', {
         sessionId: state.sessionId, shas: kept.shas.map((sha) => sha.slice(0, 8)), turns: kept.turns, pairs: kept.pairs,

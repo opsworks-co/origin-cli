@@ -24,8 +24,9 @@
  * The rule stands down whenever the ledger knows more than the commit does:
  *   • a file the turn wrote is dirty against the commit (commit-and-go), or
  *     untracked — the ledger's diff carries the uncommitted part;
- *   • no commit of the turn is still reachable (an amend that the rescue has
- *     not yet mapped) — there is nothing exact to point at;
+ *   • no commit of the turn is still reachable and none is stranded on a
+ *     branch (an amend that the rescue has not yet mapped) — there is nothing
+ *     exact to point at;
  *   • the scoped patch is empty — the commit only shipped an earlier turn's
  *     work, and the ledger's answer for THIS turn is the one to keep.
  *
@@ -205,29 +206,94 @@ function chainsOf(repoPath: string, shas: string[]): CommitChain[] {
 }
 
 /**
- * Whether a chain is work that sits on ANOTHER branch: HEAD does not hold it,
- * and a local branch still does.
+ * Where a chain of the turn's commits stands relative to the tree at Stop.
  *
- * HEAD holds it when a member, or a recorded rewrite of one, is reachable — or
- * the chain's files read the same in HEAD as at its tip (a squash the session
- * never saw as a rewrite). An amended-away original fails all three, yet it is
- * no branch's work: it sits on no branch, and the amend in HEAD is the turn's
- * commit. That is the same line the rescue draws (`onLiveBranch` in hooks.ts),
- * and Origin's shadow refs do not count for the same reason — a snapshot can
- * still hold the original.
+ *   • `reachable` — a member, or a recorded rewrite of one, is an ancestor of
+ *     HEAD. One range off HEAD describes it.
+ *   • `carried` — HEAD does not reach it, but its files read the same in HEAD
+ *     as at its tip (a squash the session never saw as a rewrite).
+ *   • `stranded` — work that sits on ANOTHER branch: HEAD neither reaches nor
+ *     carries it, and it is still the turn's commit. Sent as that branch's own
+ *     patch (patchAcrossBranches).
+ *   • `superseded` — an amended-away original. It sits on no branch, and its
+ *     replacement — a commit of the same turn with the same parents — is what
+ *     the turn actually made. Left out, or the amend counts twice.
+ *
+ * A branch still holding the tip settles `stranded` outright, remote-tracking
+ * branches included: a pushed commit is real work whether or not the local
+ * branch outlived the push. Origin's shadow refs do not count — a snapshot can
+ * still hold an amended-away original. That is the same line the rescue draws
+ * (`onLiveBranch` in hooks.ts).
+ *
+ * When NO branch holds the tip, the two remaining readings are told apart by
+ * the turn's other commits. Session 674d384a turn 1 ran `git checkout -B
+ * pr-1701 origin/<pr>`, committed +11/-3, pushed, checked the original branch
+ * back out and deleted `pr-1701` — all before Stop. The commit was the turn's
+ * only one, nothing of the turn was in HEAD, and the working tree was clean;
+ * the old local-branch test read that as "no branch's work", declined, and
+ * Stop sent {f:0, a:0, r:0, c:null} over post-commit's correct row. A commit
+ * with no same-parent sibling that is reachable, held by a branch, recorded
+ * as its rewrite, or simply newer, is not an amend of anything: it is the
+ * turn's work with its branch gone.
+ *
+ * Two branches cut from the same commit and both deleted before Stop share a
+ * parent, so only the newer is sent here. That trade is deliberate: an amend
+ * pair looks exactly the same, and counting it twice is the worse error.
  */
-function strandedOnBranch(
+type ChainStanding = 'reachable' | 'carried' | 'stranded' | 'superseded';
+
+/** Refs holding `sha`, cached per pass: one `for-each-ref` per chain. */
+function heldByABranch(repoPath: string, sha: string, cache: Map<string, boolean>): boolean {
+  const hit = cache.get(sha);
+  if (hit !== undefined) return hit;
+  const refs = git(repoPath, ['for-each-ref', '--contains', sha, '--format=%(refname)', 'refs/heads', 'refs/remotes']);
+  const held = refs.out.split('\n').map((r) => r.trim()).some((r) => !!r && !/(^|\/)shadow(\/|$)/.test(r));
+  cache.set(sha, held);
+  return held;
+}
+
+function chainStanding(
   repoPath: string,
   chain: CommitChain,
+  siblings: CommitChain[],
   reachable: string[],
   rewrites: Array<{ from: string; to: string }>,
-): boolean {
-  if (chain.members.some((m) => reachable.includes(m) || rewritesOf(m, rewrites).some((r) => reachable.includes(r)))) return false;
+  refCache: Map<string, boolean>,
+): ChainStanding {
+  if (chain.members.some((m) => reachable.includes(m) || rewritesOf(m, rewrites).some((r) => reachable.includes(r)))) return 'reachable';
   const files = filesOfCommits(repoPath, chain.members);
-  if (files.length === 0) return false;
-  if (git(repoPath, ['diff', '--quiet', chain.tip, 'HEAD', '--', ...files]).ok) return false;
-  const refs = git(repoPath, ['for-each-ref', '--contains', chain.tip, '--format=%(refname)', 'refs/heads']);
-  return refs.out.split('\n').map((r) => r.trim()).some((r) => !!r && !/(^|\/)shadow(\/|$)/.test(r));
+  if (files.length === 0) return 'carried';
+  if (git(repoPath, ['diff', '--quiet', chain.tip, 'HEAD', '--', ...files]).ok) return 'carried';
+  if (heldByABranch(repoPath, chain.tip, refCache)) return 'stranded';
+  // No branch holds it. A recorded rewrite whose survivor still exists says
+  // what replaced it, wherever that survivor sits.
+  if (chain.members.some((m) => rewritesOf(m, rewrites).some((r) => git(repoPath, ['cat-file', '-e', `${r}^{commit}`]).ok))) return 'superseded';
+  const facts = (sha: string) => {
+    const line = git(repoPath, ['show', '-s', '--format=%P%n%ct', sha]).out.split('\n');
+    return { parents: (line[0] || '').trim(), at: Number((line[1] || '').trim()) || 0 };
+  };
+  const own = facts(chain.first);
+  if (!own.parents) return 'stranded';
+  for (const sibling of siblings) {
+    if (sibling === chain) continue;
+    const theirs = facts(sibling.first);
+    if (theirs.parents !== own.parents) continue;
+    const held = sibling.members.some((m) => reachable.includes(m)) || heldByABranch(repoPath, sibling.tip, refCache);
+    if (held || theirs.at > own.at) return 'superseded';
+  }
+  // The replacement may not be attested to the turn at all — an amend the
+  // rescue has not yet mapped. It is still on HEAD's line, as a child of the
+  // same parents: `git commit --amend` keeps them. A parent HEAD does not
+  // reach cannot have been amended into HEAD (the 674d384a commit sat on a
+  // PR tip the tree never held).
+  const parents = own.parents.split(' ');
+  if (!parents.every((p) => isAncestor(repoPath, p, 'HEAD'))) return 'stranded';
+  const line = git(repoPath, ['rev-list', '--parents', '--max-count=5000', `${parents[0]}..HEAD`]).out;
+  const replacedOnHead = line.split('\n').some((l) => {
+    const cols = l.trim().split(' ');
+    return cols.length > 1 && cols.slice(1).join(' ') === own.parents;
+  });
+  return replacedOnHead ? 'superseded' : 'stranded';
 }
 
 /**
@@ -406,15 +472,20 @@ export function preferCommitPatchForCommittedTurns(
     // range off HEAD cannot describe.
     if (existing.length > 0) {
       const originalChains = chainsOf(repoPath, existing);
-      const stranded = originalChains.filter((c) => strandedOnBranch(repoPath, c, shas, rewrites)).length;
+      const refCache = new Map<string, boolean>();
+      const standing = new Map(originalChains.map((c) => [c, chainStanding(repoPath, c, originalChains, shas, rewrites, refCache)] as const));
+      const stranded = originalChains.filter((c) => standing.get(c) === 'stranded').length;
       if (stranded > 0) {
         // An amend leaves the old object in Git. It must not become another
         // branch patch alongside its replacement merely because a different
-        // sibling branch is stranded. Keep the original only when none of its
-        // recorded replacements with the same parents is locally available.
-        // A squash can replace an entire chain; leave that chain intact for
-        // the existing squash handling instead of substituting only its tip.
-        const surviving = [...new Set(existing.map((sha) =>
+        // sibling branch is stranded. An original no branch holds whose
+        // replacement is known (`superseded`) is left out here; one a branch
+        // still holds is kept only when none of its recorded replacements
+        // with the same parents is locally available. A squash can replace an
+        // entire chain; leave that chain intact for the existing squash
+        // handling instead of substituting only its tip.
+        const superseded = new Set(originalChains.filter((c) => standing.get(c) === 'superseded').flatMap((c) => c.members));
+        const surviving = [...new Set(existing.filter((sha) => !superseded.has(sha)).map((sha) =>
           rewritesOf(sha, rewrites).reverse().find((replacement) =>
             git(repoPath, ['cat-file', '-e', `${replacement}^{commit}`]).ok
             && git(repoPath, ['show', '-s', '--format=%P', replacement]).out.trim()
