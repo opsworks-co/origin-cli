@@ -95,3 +95,18 @@ describe('post-commit note telemetry', () => {
     expect(block).toContain("startsWith('devin-')");
   });
 });
+
+// A commit with no session behind it gets no note. The old fallback wrote
+// `sessionId: 'unknown'` for every such commit and the server's note import
+// turned that into an AI-authored commit with a virtual session. Source guard,
+// same reasoning as above: the branch structure is what protects this.
+describe('post-commit note requires a session', () => {
+  it('skips the note when there is no session state, and never falls back to "unknown"', () => {
+    const before = postCommitFn.slice(0, postCommitFn.indexOf('writeGitNotes(repoPath, [commitSha]'));
+    expect(before).toMatch(/else if \(!state\) \{[\s\S]*no git note — no session state/);
+    // `model: noteModel || 'unknown'` is fine — an unknown MODEL is not a
+    // session claim. The session id must never be defaulted.
+    expect(noteCall).not.toMatch(/sessionId:[^\n]*'unknown'/);
+    expect(noteCall).toContain('sessionId: state.sessionId');
+  });
+});

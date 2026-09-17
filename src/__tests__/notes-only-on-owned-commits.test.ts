@@ -79,6 +79,8 @@ describe('every multi-commit note writer asks first', () => {
     expect(src('stop.ts')).toMatch(/commitsThisSessionMayNote\(state\.repoPath, state, noteCommits\)/);
   });
   it('post-commit skips a commit another live session owns', () => {
-    expect(src('post-commit.ts')).toMatch(/if \(commitIsAnotherSessions\) \{[\s\S]{0,200}\} else try \{\s*writeGitNotes\(repoPath, \[commitSha\]/);
+    // The `else if (!state)` branch between them: no session, no note
+    // (post-commit-note-telemetry.test.ts pins that one).
+    expect(src('post-commit.ts')).toMatch(/if \(commitIsAnotherSessions\) \{[\s\S]{0,200}\} else if \(!state\) \{[\s\S]{0,1200}\} else try \{\s*writeGitNotes\(repoPath, \[commitSha\]/);
   });
 });

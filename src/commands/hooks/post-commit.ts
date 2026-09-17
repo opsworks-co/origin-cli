@@ -1999,9 +1999,19 @@ export async function handlePostCommit(): Promise<void> {
   // got a note naming 6c21a6d8, and it served 45 commits for the 4 it wrote.
   if (commitIsAnotherSessions) {
     debugLog('post-commit', 'no git note — commit is another session\'s', { commitSha: commitSha.slice(0, 8) });
+  } else if (!state) {
+    // No session state at all — a detached release worktree, a checkout whose
+    // session lives in a sibling, the mirror's sync commit. The note we used
+    // to write here said `sessionId: 'unknown', model: 'unknown',
+    // promptCount: 0`: a receipt that the hook ran, which the server's note
+    // import read as an AI-authored commit (aiDetectionMethod git-notes, a
+    // virtual session with agentSessionId 'unknown'). 32 such rows in one week
+    // on prod; one was the Codex commit session aec13f50's page listed as its
+    // own. No session, no claim — and no note.
+    debugLog('post-commit', 'no git note — no session state for this commit', { commitSha: commitSha.slice(0, 8) });
   } else try {
     writeGitNotes(repoPath, [commitSha], {
-      sessionId: state?.sessionId || 'unknown',
+      sessionId: state.sessionId,
       model: noteModel || 'unknown',
       agentSlug: state?.agentSlug,
       promptCount: state?.prompts?.length || 0,
