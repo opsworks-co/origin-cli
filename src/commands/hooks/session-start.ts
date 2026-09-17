@@ -1467,6 +1467,7 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
           // worktree session must attribute to the real project, not a repo
           // called "zen-margulis-c0587a".
           repoPath: canonicalRepoPath,
+          checkoutPath: repoPath || undefined,
           repoUrl: repoUrl || undefined,
           recentShas: sessionRecentShas.length > 0 ? sessionRecentShas : undefined,
           agentSlug: finalAgentSlug,

@@ -13,7 +13,8 @@ import { stateLedgerIsContended } from '../../ledger-producer.js';
 import { preferCommitPatchForCommittedTurns } from '../../commit-patch-for-committed-turn.js';
 import { preferShadowRangeForTurns } from '../../prefer-shadow-range.js';
 import { dropInheritedFilesFromTurns } from '../../drop-inherited-files.js';
-import { authoredFilesForTurn } from './stop.js';
+import { filesPutBackAcrossTheGap } from '../../restored-from-history.js';
+import { authoredFilesForTurn, dropForeignCommitsFromCapture } from './stop.js';
 import { trimWatchedEditsForTurns } from '../../trim-watched-edits.js';
 import { isConnectedMode, loadAgentConfig, loadConfig } from '../../config.js';
 import { debugLog } from '../../debug-log.js';
@@ -60,7 +61,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { localTurnForServerRow, rebaseToServerRows, turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
-import { applyAuthoredTotals, currentSessionWorkTree, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFileSourcesForTurn, inheritedFilesForTurn, windowInheritsCommitsForTurn, filterUncommittedDiff, findStateForHookInput, liveCaptureEnabled, normalizeWorkspaceRoot, recordShellWindowEdits, sessionAuthoredSnapshot, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
+import { applyAuthoredTotals, commitsThisSessionMayNote, currentSessionWorkTree, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFileSourcesForTurn, inheritedFilesForTurn, windowInheritsCommitsForTurn, filterUncommittedDiff, findStateForHookInput, liveCaptureEnabled, normalizeWorkspaceRoot, recordShellWindowEdits, sessionAuthoredSnapshot, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
 import { compareResolverWithPasses, createTurnObserver, observeReconstruction, type TurnObservation } from '../../resolve-turn.js';
 
 
@@ -706,6 +707,7 @@ export async function ensureServerSession(
       prompt: (state.prompts && state.prompts[0]) || '',
       model: isSpecificModel(state.model) ? state.model : 'claude',
       repoPath: state.canonicalRepoPath || state.repoPath || saveCwd,
+      checkoutPath: state.repoPath || undefined,
       repoUrl: repoRemoteUrl(state.repoPath || state.canonicalRepoPath || saveCwd),
       agentSlug,
       branch: state.branch || undefined,
@@ -964,6 +966,9 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
     // REPLACES whatever a weaker producer appended, rather than merging onto
     // it. The uncommitted side stays what scopeSessionDiffToStart produced.
     let endIsAuthoredSnapshot = false;
+    // Whether commitShas is the authored list. Without it the sha list and
+    // commit details are still the range walk — see the filter below.
+    let commitListIsAuthored = false;
     try {
       const authoredEnd = sessionAuthoredSnapshot(state.repoPath, state, { uncommittedDiff: gitCapture.uncommittedDiff || '' });
       if (authoredEnd.source !== 'none') {
@@ -973,8 +978,23 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
         gitCapture.commitShas = authoredEnd.commitShas;
         applyAuthoredTotals(state, authoredEnd);
         endIsAuthoredSnapshot = true;
+        commitListIsAuthored = true;
         debugLog('session-end', 'session diff is the authored snapshot', {
           source: authoredEnd.source, commits: authoredEnd.commitShas.length,
+          linesAdded: authoredEnd.linesAdded, linesRemoved: authoredEnd.linesRemoved,
+        });
+      } else if (gitCapture.diff) {
+        // No commit in the range is this session's, so its whole diff is its
+        // uncommitted work. `gitCapture.diff` is the session-start shadow to
+        // the working tree — every commit a pull or a sibling session put on
+        // the branch, sent as this session's lines. The authored snapshot's
+        // committed side is empty here, which is the answer.
+        gitCapture.diff = authoredEnd.diff;
+        gitCapture.linesAdded = authoredEnd.linesAdded;
+        gitCapture.linesRemoved = authoredEnd.linesRemoved;
+        applyAuthoredTotals(state, authoredEnd);
+        endIsAuthoredSnapshot = true;
+        debugLog('session-end', 'session diff is the uncommitted work — no commit in range is ours', {
           linesAdded: authoredEnd.linesAdded, linesRemoved: authoredEnd.linesRemoved,
         });
       }
@@ -982,6 +1002,16 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
       debugLog('session-end', 'authored snapshot failed (non-fatal) — keeping the range capture', {
         message: err instanceof Error ? err.message : String(err),
       });
+    }
+    // With no authored snapshot, `commitShas` / `commitDetails` are still the
+    // raw session-start..HEAD walk: every commit a pull, a checkout or another
+    // session put on this branch. Both are sent below, and the git notes
+    // written further down name this session on each sha — the server's
+    // import-note then links every one of those Commit rows to it for good.
+    if (!commitListIsAuthored) {
+      try {
+        dropForeignCommitsFromCapture(state.repoPath, state, gitCapture, 'session-end');
+      } catch { /* keep the range rather than fail session-end */ }
     }
 
     // Extract prompt → file change mappings from transcript
@@ -1158,6 +1188,9 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
           state.repoPath || '', state, fromShadow, toShadow, localTurn,
         ),
         authoredFiles: (localTurn, serverRow) => authoredFilesForTurn(state, localTurn, serverRow),
+        restoredFromHistory: (fromShadow, toShadow, localTurn, files) => filesPutBackAcrossTheGap(
+          state.repoPath || '', state, localTurn, fromShadow, toShadow, files,
+        ),
         log: (event, data) => debugLog('session-end', event, data),
       });
     } catch { /* never block the end of a session */ }
@@ -1412,9 +1445,14 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
     debugLog('session-end', 'session files written + published');
 
     // Write Git Notes with AI attribution metadata on each commit
-    if (gitCapture.commitShas.length > 0) {
+    // Only the session's own commits: with no authored snapshot, commitShas is
+    // still the raw session-start..HEAD range — every commit a pull brought in.
+    const noteShas = gitCapture.commitShas.length > 0
+      ? commitsThisSessionMayNote(state.repoPath, state, gitCapture.commitShas)
+      : [];
+    if (noteShas.length > 0) {
       try {
-        writeGitNotes(state.repoPath, gitCapture.commitShas, {
+        writeGitNotes(state.repoPath, noteShas, {
           sessionId: state.sessionId,
           model,
           agentSlug: agentSlug || state.agentSlug,
@@ -1435,7 +1473,7 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
           linesRemoved: gitCapture.linesRemoved,
           originUrl: `${apiUrl}/sessions/${state.sessionId}`,
         });
-        debugLog('session-end', 'git notes written', { commitCount: gitCapture.commitShas.length });
+        debugLog('session-end', 'git notes written', { commitCount: noteShas.length, declined: gitCapture.commitShas.length - noteShas.length });
       } catch (err: any) {
         debugLog('session-end', 'git notes error (non-fatal)', { message: err.message });
       }

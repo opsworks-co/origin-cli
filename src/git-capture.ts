@@ -1,6 +1,6 @@
 import { spawnSync } from 'child_process';
 import { git, gitDetailed, gitOrNull } from './utils/exec.js';
-import { shouldIgnoreFile, stripIgnoredSectionsFromDiff, trimDiffText } from './ignore-patterns.js';
+import { isOriginAutoManagedPath, shouldIgnoreFile, stripIgnoredSectionsFromDiff, trimDiffText } from './ignore-patterns.js';
 import { combineApplyableTurnDiff } from './applyable-turn-diff.js';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -238,6 +238,10 @@ export function numstatByFile(
     // Renames print as "old => new" or "{a => b}/x"; the new path decides.
     const file = parts.slice(2).join('\t').replace(/^.*=> /, '').replace(/[{}]/g, '');
     if (!includeIgnored && shouldIgnoreFile(file, customPatterns)) continue;
+    // git counts a context file whole, Origin's managed block included. Only
+    // its diff section can say which lines are the agent's; see
+    // contextFileRowsFromDiff.
+    if (!includeIgnored && isOriginAutoManagedPath(file)) continue;
     const a = Number(parts[0]);
     const r = Number(parts[1]);
     rows.push({ file, added: Number.isFinite(a) ? a : 0, removed: Number.isFinite(r) ? r : 0 });
@@ -281,6 +285,11 @@ export function commitLineCounts(repoPath: string, sha: string): LineTotals | nu
   return resolution ? sumLineTotals(resolution) : null;
 }
 
+function addLineTotals(base: LineTotals, rows: LineTotals[]): LineTotals {
+  const extra = sumLineTotals(rows);
+  return { added: base.added + extra.added, removed: base.removed + extra.removed };
+}
+
 function sumLineTotals(rows: LineTotals[]): LineTotals {
   const totals = { added: 0, removed: 0 };
   for (const r of rows) {
@@ -294,7 +303,7 @@ function sumLineTotals(rows: LineTotals[]): LineTotals {
 function untrackedLineTotals(repoPath: string, files: string[], customPatterns?: string[]): LineTotals {
   const totals = { added: 0, removed: 0 };
   for (const file of files) {
-    if (shouldIgnoreFile(file, customPatterns)) continue;
+    if (shouldIgnoreFile(file, customPatterns) || isOriginAutoManagedPath(file)) continue;
     try {
       const buf = fs.readFileSync(path.join(repoPath, file));
       if (buf.includes(0)) continue;
@@ -975,7 +984,9 @@ export function captureGitState(
         : [[committedDiff, committedStat], [uncommittedDiff, uncommittedStat]];
   for (const [d, stat] of countSrc) {
     if (!d && !stat) continue;
-    const t = stat ?? countText(d);
+    // numstat leaves context files out (numstatByFile); the diff kept only
+    // their agent lines, so those are counted from the text.
+    const t = stat ? addLineTotals(stat, contextFileRowsFromDiff([], d)) : countText(d);
     linesAdded += t.added;
     linesRemoved += t.removed;
   }
@@ -1582,7 +1593,7 @@ export function commitDiffScopedToPrompt(
     // is how session 29b32c38 turn 1 was sent as 22 files / +794 after the
     // range itself was already right. Context steps down before anything is
     // dropped, and what is dropped is whole sections, never half a hunk.
-    const rows = numstatByFile(['diff', '--numstat', baseTree, commitTree, ...pathspec], gitOpts);
+    const gitRows = numstatByFile(['diff', '--numstat', baseTree, commitTree, ...pathspec], gitOpts);
     let diff = '';
     let diffTruncated = false;
     for (const u of CONTEXT_LADDER) {
@@ -1593,6 +1604,9 @@ export function commitDiffScopedToPrompt(
       diff = truncateToWholeSections(diff, maxDiffSize);
       diffTruncated = true;
     }
+    // A context file Origin also writes (CLAUDE.md, AGENTS.md, …) counts
+    // only the agent's lines the diff kept.
+    const rows = gitRows && contextFileRowsFromDiff(gitRows, diff);
     let linesAdded = 0;
     let linesRemoved = 0;
     if (rows) {
@@ -1608,6 +1622,28 @@ export function commitDiffScopedToPrompt(
   } catch {
     return null;
   }
+}
+
+/**
+ * Numstat rows plus a row for each Origin context file (CLAUDE.md, AGENTS.md,
+ * …) that `diff` kept a section for, counted from that section: the agent's
+ * lines only. numstatByFile leaves these files out because git's count for
+ * them includes Origin's managed block.
+ */
+function contextFileRowsFromDiff(rows: FileLineTotals[], diff: string): FileLineTotals[] {
+  const out = [...rows];
+  for (const part of diff.split(/^(?=diff --git )/m)) {
+    const m = part.match(/^diff --git a\/(.+?) b\/(.+)$/m);
+    if (!m || !isOriginAutoManagedPath(m[2])) continue;
+    let added = 0;
+    let removed = 0;
+    for (const line of part.split('\n')) {
+      if (line.startsWith('+') && !line.startsWith('+++')) added++;
+      else if (line.startsWith('-') && !line.startsWith('---')) removed++;
+    }
+    out.push({ file: m[2], added, removed });
+  }
+  return out;
 }
 
 /**

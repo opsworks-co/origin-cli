@@ -39,6 +39,7 @@
 // codex-watch daemon; this one covers the other five.
 // ---------------------------------------------------------------------------
 
+import { foreignWalkCommits, localCommitterEmail, readCommitOwnershipFactsBatch, type CommitOwnershipFacts } from './commit-ownership-facts.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -344,6 +345,13 @@ export interface WatchDeps {
   authoredCommits?: (workRoot: string, shas: string[]) => {
     diff: string; filesChanged: string[]; linesAdded: number; linesRemoved: number;
   };
+  /**
+   * Ownership facts for the commits the walk saw, and the local committer
+   * identity — what `foreignWalkCommits` judges them by. Optional so existing
+   * test deps keep their shape; absent means every walked commit is treated as
+   * the session's, which is the old behaviour.
+   */
+  commitFacts?: (workRoot: string, shas: string[]) => { facts: Map<string, CommitOwnershipFacts>; localEmail: string };
   // `preSessionBaseline` is the session's first shadow — measured against for
   // the inherited-work split, never walked. See codex-watch's copy.
   captureGit: (workRoot: string, headBefore: string | null, preSessionBaseline?: string | null) => {
@@ -1472,6 +1480,16 @@ export async function reconcileSession(
   // Commits SEEN in the session's window, owned or not. Deliberately not
   // persisted and never treated as ownership — see the walk below.
   let rangeCommitShas: string[] = [];
+  // What git says about each walked commit, read once per poll.
+  let walkFacts: { facts: Map<string, CommitOwnershipFacts>; localEmail: string } | null = null;
+  // The walked commits that are provably somebody else's, given what this
+  // session owns right now. See foreignWalkCommits.
+  const foreignInWalk = (owned: string[]): Set<string> => walkFacts
+    ? foreignWalkCommits(rangeCommitShas, walkFacts.facts, {
+      sessionIds: [originSessionId, scanned.sessionId], owned,
+      startedAt: prior?.createdAt, localEmail: walkFacts.localEmail,
+    })
+    : new Set<string>();
   /**
    * Shas the PAIRING passes may consider: this session's own, plus everything
    * seen in the window.
@@ -1517,6 +1535,7 @@ export async function reconcileSession(
         // a sha, which is what makes a range list safe THERE — but ownership,
         // commit memory and everything persisted read the owned list only.
         rangeCommitShas = Array.from(new Set([...rangeCommitShas, ...gc.commitShas]));
+        try { walkFacts = deps.commitFacts?.(repo.workRoot, gc.commitShas) || null; } catch { walkFacts = null; }
         gitCapture = {
           headBefore: gc.headBefore,
           headAfter: gc.headAfter,
@@ -2075,7 +2094,11 @@ export async function reconcileSession(
     // by the user) in the same repo during the window, and an unrelated commit in
     // the list shifts the pairing so every turn gets the wrong sha.
     const sessionFiles = new Set(toRepoRel(parsed.filesChanged || []));
-    const orderedShas = commitCandidates().filter((sha) => {
+    // A commit whose trailer or committer names somebody else cannot be paired
+    // on file overlap alone: a pulled squash of a PR that touched our files
+    // overlaps them too.
+    const foreignForPairing = foreignInWalk(sessionCommitShas);
+    const orderedShas = commitCandidates().filter((sha) => !foreignForPairing.has(sha)).filter((sha) => {
       const files = commitFiles.get(sha);
       return !!files && files.some((f) => sessionFiles.has(f));
     });
@@ -2093,6 +2116,7 @@ export async function reconcileSession(
       // it deterministic by walking commits oldest-first and never reusing a turn.
       const taken = new Set<number>();
       for (const sha of commitCandidates()) {
+        if (foreignForPairing.has(sha)) continue;
         const files = commitFiles.get(sha);
         if (!files) continue;
         const inCommit = new Set(files);
@@ -2518,6 +2542,55 @@ export async function reconcileSession(
       parsed.cacheCreationTokens || 0,
     );
   } catch { /* pricing unavailable — leave 0 rather than guess */ }
+
+  // The session-level capture carries the walk's sha list and commit details,
+  // and the server links every Commit row in `commitDetails` to this session —
+  // first claim wins, permanently. The walk holds whatever reached the branch
+  // meanwhile: a sibling agent's commit, a pulled squash of somebody else's PR.
+  // Keep only what this session owns or cannot be shown not to: its recorded
+  // and paired commits, and commits the hook path's rules do not reject.
+  if (gitCapture && walkFacts) {
+    const gitStateShas = (() => {
+      try {
+        const st = deps.loadGitState?.(repo.workRoot, sessionTag);
+        return Array.isArray(st?.sessionCommitShas) ? (st!.sessionCommitShas as string[]) : [];
+      } catch { return []; }
+    })();
+    const foreign = foreignInWalk([...sessionCommitShas, ...commitShaByIndex.values(), ...gitStateShas]);
+    if (foreign.size > 0) {
+      const details = ((gitCapture.commitDetails as Array<{ sha: string; linesAdded?: number; linesRemoved?: number }>) || [])
+        .filter((d) => !foreign.has(d.sha));
+      const shas = ((gitCapture.commitShas as string[]) || []).filter((sha) => !foreign.has(sha));
+      debugLog('transcript-watch', 'dropped foreign commits from the session capture', {
+        agent: adapter.slug, sessionId: scanned.sessionId,
+        dropped: [...foreign].map((sha) => sha.slice(0, 8)), kept: shas.length,
+      });
+      if (shas.length === 0) {
+        gitCapture = undefined;
+      } else {
+        gitCapture.commitShas = shas;
+        gitCapture.commitDetails = details;
+        // The diff was the range's unless it is already the owned render.
+        if (gitCapture.snapshot !== true) {
+          const own = deps.authoredCommits?.(repo.workRoot, shas);
+          if (own?.diff) {
+            gitCapture.diff = own.diff;
+            gitCapture.linesAdded = own.linesAdded;
+            gitCapture.linesRemoved = own.linesRemoved;
+            gitCapture.snapshot = true;
+          } else {
+            // No owned render: send a commit carrier. A capture without `diff`
+            // leaves the stored session diff alone, where the range's diff
+            // would put the foreign commits' lines on the header.
+            delete gitCapture.diff;
+            delete gitCapture.diffTruncated;
+            delete gitCapture.linesAdded;
+            delete gitCapture.linesRemoved;
+          }
+        }
+      }
+    }
+  }
 
   // What actually goes on the wire, per turn. Inference has been wrong three
   // times on this: the capture computes a commit SHA, the daemon logs it, the
@@ -3199,6 +3272,10 @@ export function buildRealDeps(machineId: string, hostname?: string): WatchDeps {
         committedOnly: true, fullContext: true, preSessionBaseline,
       }),
     authoredCommits: (workRoot: string, shas: string[]) => renderAuthoredCommits(workRoot, shas),
+    commitFacts: (workRoot: string, shas: string[]) => ({
+      facts: readCommitOwnershipFactsBatch(workRoot, shas),
+      localEmail: localCommitterEmail(workRoot),
+    }),
     loadState: (agentSlug: string, sessionId: string) => loadSessionState(agentSlug, sessionId),
     saveState: (s: SessionWatchState) => saveSessionState(s),
     // Write the `.git/origin-session-<tag>.json` state file the local git hooks

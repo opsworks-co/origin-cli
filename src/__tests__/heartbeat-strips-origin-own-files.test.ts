@@ -23,6 +23,12 @@ const section = (file: string, adds: string[]) =>
   `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -0,0 +1,${adds.length} @@\n` +
   adds.map((l) => `+${l}`).join('\n') + '\n';
 
+// What Origin writes into a context file: its managed block, markers included.
+// The agent's own lines around the block are its work (managed-block-diff.ts);
+// the block never is.
+const M = '<!-- origin-managed -->';
+const originBlock = (lines: string[]) => [M, 'Origin: Session tracking active', ...lines, M];
+
 const addedLines = (diff: string): number =>
   diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
 
@@ -32,8 +38,8 @@ const filesIn = (diff: string): string[] =>
 describe("heartbeat strips Origin's own injected files", () => {
   it('a chat-only turn that touched ONLY Origin bookkeeping counts zero lines', () => {
     const diff =
-      section('CLAUDE.md', ['origin ctx 1', 'origin ctx 2']) +
-      section('.devin/rules/origin.md', ['devin rule 1', 'devin rule 2']);
+      section('CLAUDE.md', originBlock(['origin ctx 1', 'origin ctx 2'])) +
+      section('.devin/rules/origin.md', originBlock(['devin rule 1', 'devin rule 2']));
     const stripped = stripIgnoredSectionsFromDiff(diff);
     expect(filesIn(stripped)).toEqual([]);
     expect(addedLines(stripped)).toBe(0);
@@ -41,9 +47,9 @@ describe("heartbeat strips Origin's own injected files", () => {
 
   it("keeps the agent's real work while dropping Origin's files", () => {
     const diff =
-      section('CLAUDE.md', ['origin ctx']) +
+      section('CLAUDE.md', originBlock(['origin ctx'])) +
       section('src/app.ts', ['const real = 1;', 'const work = 2;']) +
-      section('.devin/rules/origin.md', ['devin rule']);
+      section('.devin/rules/origin.md', originBlock(['devin rule']));
     const stripped = stripIgnoredSectionsFromDiff(diff);
     expect(filesIn(stripped)).toEqual(['src/app.ts']);
     expect(addedLines(stripped)).toBe(2);
@@ -51,9 +57,16 @@ describe("heartbeat strips Origin's own injected files", () => {
 
   it('covers every per-agent context file Origin writes', () => {
     for (const f of ['CLAUDE.md', 'AGENTS.md', 'GEMINI.md', '.windsurfrules', '.devin/rules/origin.md']) {
-      const stripped = stripIgnoredSectionsFromDiff(section(f, ['x']));
+      const stripped = stripIgnoredSectionsFromDiff(section(f, originBlock(['x'])));
       expect(filesIn(stripped)).toEqual([]);
     }
+  });
+
+  it("keeps the agent's own lines around Origin's block", () => {
+    const stripped = stripIgnoredSectionsFromDiff(section('AGENTS.md', [...originBlock(['ctx']), '', '## Our rules', 'Run tests.']));
+    expect(filesIn(stripped)).toEqual(['AGENTS.md']);
+    expect(stripped).not.toContain(M);
+    expect(addedLines(stripped)).toBe(2);
   });
 
   it('does NOT strip .gitignore — a real user-requested change stays attributed', () => {

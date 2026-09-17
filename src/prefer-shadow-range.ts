@@ -22,6 +22,7 @@
  */
 import { captureShadowWindow, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
 import { fitDiffToBudget } from './diff-budget.js';
+import { turnWindowEndShadow, turnWindowLateWork, withLateWork } from './restored-from-history.js';
 import { localTurnForServerRow } from './turn-index.js';
 import type { TurnObservation } from './resolve-turn.js';
 
@@ -33,6 +34,8 @@ export interface ShadowRangeState {
   /** LOCAL prompt list — the last index is the turn still in flight. */
   prompts?: unknown[];
   contendingSessionIds?: string[];
+  /** LOCAL-numbered: the tree Stop closed turn L with — see restored-from-history.ts. */
+  turnEndShadows?: Array<{ promptIndex: number; shadowSha: string; capturedAt: string; completeBaseline?: boolean; lateFiles?: string[] }>;
 }
 
 export interface ShadowRangeMapping {
@@ -127,7 +130,10 @@ export function preferShadowRangeForTurns(
       const start = shadows.find((s) => s.promptIndex === local);
       if (start?.completeBaseline === false) { declined(pm, 'the start shadow is not a complete baseline'); continue; }
       const from = start?.shadowSha || null;
-      const next = shadows.find((s) => s.promptIndex === local + 1);
+      // A closed turn ends where its Stop saw the tree, not where the next
+      // prompt found it: a background job can rewrite the tree in between
+      // (session 874ff028). Falls back to the next turn's start shadow.
+      const next = turnWindowEndShadow(state, local);
       if (next?.completeBaseline === false) { declined(pm, 'the next shadow is not a complete baseline'); continue; }
       const to = next?.shadowSha || null;
       // A completed turn without the next shadow cannot be scoped to the
@@ -139,7 +145,20 @@ export function preferShadowRangeForTurns(
         continue;
       }
 
-      const win = captureShadowWindow(repoPath, from, end, { completeBaseline: start?.completeBaseline });
+      let win = captureShadowWindow(repoPath, from, end, { completeBaseline: start?.completeBaseline });
+      // Files the turn's background job changed after its Stop, which the next
+      // prompt added to the row (extendClosedTurnWithLateWork): their window
+      // runs to the next turn's start. Any doubt keeps the stored row.
+      const late = end ? turnWindowLateWork(state, local) : undefined;
+      if (late && (win.status === 'changed' || win.status === 'empty' || win.status === 'identical-sha')) {
+        if (late.completeBaseline === false) { declined(pm, 'the late-work shadow is not a complete baseline'); continue; }
+        const lateWin = captureShadowWindow(repoPath, from, late.shadowSha, { completeBaseline: start?.completeBaseline });
+        if (lateWin.status !== 'changed' && lateWin.status !== 'empty') { declined(pm, `late-work window ${lateWin.status}`); continue; }
+        let lateInherits = false;
+        try { lateInherits = !!deps.windowInheritsCommits?.(from, late.shadowSha, local); } catch { lateInherits = false; }
+        if (lateInherits) { declined(pm, 'the late-work window spans commits the turn did not make'); continue; }
+        win = withLateWork(win, lateWin, late.files);
+      }
       if (win.status === 'identical-sha' || win.status === 'unavailable' || win.status === 'not-shadow') {
         declined(pm, `window ${win.status}`);
         continue;

@@ -17,6 +17,7 @@ import { candidateDirsFromCommand, samePath, worktreesAmongCandidates } from '..
 import { probeTree, touchedSince } from '../../shell-command-probe.js';
 import type { TreeProbe } from '../../shell-command-probe.js';
 import { commandWritesFiles, isShellTool, shellCommandText } from '../../shell-write-capture.js';
+import { recordGitPathspecs } from '../../git-pathspec-names.js';
 import { isSubagentSpawnTool } from '../../subagent-tools.js';
 import { spawn } from 'child_process';
 import crypto from 'crypto';
@@ -829,6 +830,9 @@ export function beginShellProbe(state: SessionState, input: Record<string, any>)
     // window. Same id the subagent ring already keys on for the same reason
     // ("R1": parallel tool calls with one toolName raced through a find-by-name).
     const toolCallId: string | undefined = input.tool_call_id || input.tool_use_id || undefined;
+    // The paths a mutating git command names are the turn's own, whatever the
+    // probe window later sees — see git-pathspec-names.ts.
+    recordGitPathspecs(state, promptIndex, shellCommandText(toolInput), currentSessionWorkTree(state) || state.repoPath);
     for (const tree of treesToProbe(state, promptIndex)) {
       const p = probeTree(tree, deps);
       probes.push({

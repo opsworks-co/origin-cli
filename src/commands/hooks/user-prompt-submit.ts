@@ -37,6 +37,10 @@ import { estimateCost, extractPromptFileMappings, formatTranscriptForDisplay, is
 import type { ParsedTranscript, PromptFileMapping } from '../../transcript.js';
 import { persistUpdateBeforeWork } from '../../update-queue.js';
 import { markTurn } from '../../write-journal-watch.js';
+import { withoutFiles } from '../../drop-inherited-files.js';
+import { filesTurnNamedByGitPathspec } from '../../git-pathspec-names.js';
+import { extendClosedTurnWithLateWork, filesRestoredFromHistory, settleTurnEndShadow, turnClosedByStop } from '../../restored-from-history.js';
+import { authoredFilesForTurn } from './stop.js';
 import { execFileSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -72,7 +76,19 @@ export function retroactiveTurnFiles(
 export function previousMappingKept(
   existing: { diff?: string; uncommittedDiff?: string; chatOnly?: boolean; commitPatch?: boolean },
   incoming: { diff?: string; uncommittedDiff?: string },
-): 'commit patch' | 'chat-only' | 'new diff was empty' | null {
+  turnState?: { activeTurn?: { index: number } | null; lastClosedTurnIndex?: number },
+  localIdx?: number,
+): 'closed by stop' | 'commit patch' | 'chat-only' | 'new diff was empty' | null {
+  // Stop closed this turn and no agent activity re-opened it since (any tool
+  // hook would have, via currentTurnIndex). Stop saw the turn's last action,
+  // so its row is final. What changed on disk between that Stop and this
+  // prompt is not the turn's work: session 874ff028 turn 6 lost Stop's
+  // 4 files / +517/-74 to a background job's pathspec checkout of an older
+  // main, re-captured here as 19 files / +129/-1059. An interrupted turn has
+  // no Stop after its last tool call, stays open, and is recovered below.
+  if (turnState && Number.isInteger(localIdx) && turnClosedByStop(turnState, localIdx as number)) {
+    return 'closed by stop';
+  }
   // Stop already replaced this turn with its commit patch: git's own record,
   // shell writes included. The rebuild from the session's commits says the same
   // thing less precisely and without the flag, so the server took it for a
@@ -1047,6 +1063,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
 
         let sessionId: string;
         let agentSystemPrompt: string | undefined;
+        let autoCapturedTo: import('../../session-state.js').SessionState['capturedTo'];
         let activePolicies: string[] | undefined;
         let enforcementRules: any[] | undefined;
         if (isConnectedMode() && autoConfig) {
@@ -1069,6 +1086,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
               prompt: input.prompt || '',
               model,
               repoPath: canonicalRepoPath || repoPath,
+              checkoutPath: repoPath,
               repoUrl: repoUrl || undefined,
               recentShas: autoRecentShas.length > 0 ? autoRecentShas : undefined,
               agentSlug: finalAgentSlug,
@@ -1077,6 +1095,22 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
             });
             sessionId = result.sessionId as string;
             agentSystemPrompt = (result.agentSystemPrompt as string) || undefined;
+            {
+              // The org the server routed this capture to (see server-side
+              // services/org-routing.ts). Older servers omit it.
+              const landed = result.org as { id?: string; name?: string | null; type?: string; routed?: string } | undefined;
+              if (landed && typeof landed.id === 'string') {
+                autoCapturedTo = {
+                  orgId: landed.id,
+                  orgName: typeof landed.name === 'string' ? landed.name : null,
+                  orgType: typeof landed.type === 'string' ? landed.type : 'team',
+                  routed: landed.routed === 'private' || landed.routed === 'key' ? landed.routed : 'team',
+                };
+                if (landed.routed === 'team' || landed.routed === 'private') {
+                  process.stderr.write(`[origin] captured to: ${landed.routed === 'private' ? 'your private workspace' : landed.name || 'team'}${landed.routed === 'team' ? ' (assigned repo)' : ''}\n`);
+                }
+              }
+            }
             activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
             enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
             debugLog('user-prompt-submit', 'api returned policies', { sessionId, policiesCount: activePolicies?.length || 0, rulesCount: enforcementRules?.length || 0 });
@@ -1196,6 +1230,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           transcriptPath: input.transcript_path || '',
           model,
           startedAt: priorState?.startedAt || lateAttach.startedAt || new Date().toISOString(),
+          capturedTo: autoCapturedTo ?? priorState?.capturedTo,
           prompts: initialPrompts,
           // Written out rather than routed through a local:
           // `reattach-carries-index-base.test.ts` reads this object literal as
@@ -1520,15 +1555,61 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
         );
         // Filter uncommitted diff against the prompt-baseline + session-start
         // pre-existing dirt union (see uncommittedExcludeUnion).
+        const excludeUnion = uncommittedExcludeUnion(state);
         const filteredUncommitted = filterUncommittedDiff(
-          prevGitCapture.uncommittedDiff || '', uncommittedExcludeUnion(state),
+          prevGitCapture.uncommittedDiff || '', excludeUnion,
         );
         if (filteredUncommitted) {
           for (const m of filteredUncommitted.matchAll(/^diff --git a\/(.*?) b\//gm)) {
             if (m[1]) prevFilesSet.add(m[1]);
           }
         }
-        const prevFilesChanged = Array.from(prevFilesSet);
+        let prevFilesChanged = Array.from(prevFilesSet);
+        const closedByStop = turnClosedByStop(state, prevLocalIdx);
+        // A turn Stop closed keeps Stop's row (previousMappingKept), and its
+        // recorded end stands. One re-opened after that Stop ended somewhere
+        // nobody recorded, so its window falls back to this prompt's shadow.
+        settleTurnEndShadow(state, prevLocalIdx, closedByStop);
+        // …but not against being EXTENDED: what the turn's background job
+        // changed after that Stop is still the turn's (`./gen.sh >
+        // src/gen_client.py` fires no hook). Restorations and foreign commits'
+        // files stay out; see extendClosedTurnWithLateWork.
+        if (closedByStop) {
+          const stopRow = (state.completedPromptMappings || []).find((m) => m.promptIndex === prevPromptIdx);
+          const late = extendClosedTurnWithLateWork(repoPath, state, prevLocalIdx, stopRow as any, {
+            // Another live session's writes in this checkout, pre-existing
+            // dirt, and foreign commits' files are not this turn's late work.
+            excluded: [...prevForeignFiles, ...excludeUnion],
+            // captureGitState already diffed this turn's start shadow against
+            // the live tree; reuse it instead of snapshotting the tree again.
+            windowDiff: promptShadow?.shadowSha ? (prevGitCapture.workingTreeDiff || '') : undefined,
+            log: (event, data) => debugLog('user-prompt-submit', event, { promptIndex: prevPromptIdx, ...data }),
+          });
+          if (late.length > 0 && stopRow) stampCaptured(stopRow);
+        }
+        // Files this capture would bill that the turn only put back to a
+        // version history already had, with no authored write of its own —
+        // a pathspec checkout of an older commit brings no commit into the
+        // window, so the foreign-commit drop above cannot see it. Only on the
+        // path that may replace the row: a closed turn's row is kept whole.
+        let restoredDrop = new Set<string>();
+        if (!closedByStop && prevFilesChanged.length > 0) {
+          try {
+            const restored = filesRestoredFromHistory(repoPath, captureBaseline, null, prevFilesChanged);
+            if (restored.size > 0) {
+              const authored = authoredFilesForTurn(state, prevLocalIdx, prevPromptIdx);
+              const namedByGit = filesTurnNamedByGitPathspec(state, prevLocalIdx, restored);
+              const isAuthored = (f: string) => namedByGit.has(f) || [...authored].some((a) => a === f || a.endsWith(`/${f}`) || f.endsWith(`/${a}`));
+              restoredDrop = new Set([...restored].filter((f) => !isAuthored(f)));
+              if (restoredDrop.size > 0) {
+                prevFilesChanged = prevFilesChanged.filter((f) => !restoredDrop.has(f));
+                debugLog('user-prompt-submit', 'files the turn only restored from history dropped from the previous prompt', {
+                  promptIndex: prevPromptIdx, files: [...restoredDrop].slice(0, 20), count: restoredDrop.size,
+                });
+              }
+            }
+          } catch { /* answer nothing: today's capture */ }
+        }
         if (prevGitCapture.diff || filteredUncommitted || prevFilesChanged.length > 0) {
           // Get the current checkout SHA + working-tree SHA for restore
           // support. A checkout SHA is not, by itself, proof that this prompt
@@ -1542,18 +1623,18 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           } catch { /* ignore */ }
           prevCommitSha = attestedHeadForPrompt(state, prevPromptIdx, currentHeadSha);
           prevTreeSha = getWorkingTreeSha(state.repoPath || hookCwd);
-          const diffText = combineApplyableTurnDiff({
+          const diffText = withoutFiles(combineApplyableTurnDiff({
             committedDiff: sessionCommitted,
             uncommittedDiff: filteredUncommitted,
             workingTreeDiff: prevGitCapture.workingTreeDiff || '',
-          });
+          }), restoredDrop);
           const prevMapping = {
             promptIndex: prevPromptIdx,
             // …but the TEXT comes out of our own list, which is local-space.
             promptText: (state.prompts[prevLocalIdx] || '').slice(0, 1000),
             filesChanged: prevFilesChanged,
             diff: diffText.slice(0, 200_000),
-            uncommittedDiff: filteredUncommitted.slice(0, 200_000),
+            uncommittedDiff: withoutFiles(filteredUncommitted, restoredDrop).slice(0, 200_000),
             commitSha: prevCommitSha,
             treeSha: prevTreeSha,
           };
@@ -1563,7 +1644,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           const existingIdx = state.completedPromptMappings.findIndex(m => m.promptIndex === prevPromptIdx);
           if (existingIdx >= 0) {
             const existing = state.completedPromptMappings[existingIdx];
-            const keep = previousMappingKept(existing, prevMapping);
+            const keep = previousMappingKept(existing, prevMapping, state, prevLocalIdx);
             if (keep) {
               debugLog('user-prompt-submit', `kept existing previous-prompt mapping (${keep})`, {
                 promptIndex: prevPromptIdx,

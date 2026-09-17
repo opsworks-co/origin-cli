@@ -36,6 +36,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { ORIGIN_BUDGET_LOCK_MARKER } from './managed-block-diff.js';
 
 export const BUDGET_END_GRACE_MS = 60_000;
 export const BUDGET_END_QUIET_MS = 60_000;
@@ -101,7 +102,8 @@ export function evaluateBudgetBreach(
 // time. Removed the moment the lockout lifts. Markers keep the block
 // idempotent and independent of Origin's main origin-managed section.
 
-const BUDGET_NOTICE_MARKER = '<!-- origin-budget-lock -->';
+// Shared with managed-block-diff.ts, which removes this block from capture.
+const BUDGET_NOTICE_MARKER = ORIGIN_BUDGET_LOCK_MARKER;
 
 function buildBudgetNotice(reason: string): string {
   return [

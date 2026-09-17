@@ -11,6 +11,8 @@ import { preferCommitPatchForCommittedTurns } from '../../commit-patch-for-commi
 import { preferShadowRangeForTurns } from '../../prefer-shadow-range.js';
 import { WATCHED_ONLY_EVIDENCE, trimWatchedEditsForTurns } from '../../trim-watched-edits.js';
 import { dropInheritedFilesFromTurns } from '../../drop-inherited-files.js';
+import { filesPutBackAcrossTheGap, recordTurnEndShadow } from '../../restored-from-history.js';
+import { fileNamedByGitPathspec } from '../../git-pathspec-names.js';
 import { commitAuthoredDelta } from '../../history-backfill.js';
 import { recoverCommittedTurnProofs, rehomeGitOnlyCommitStamp } from '../../rehome-git-only-commit-stamp.js';
 import { backfillCodexPromptMappings } from '../../codex-prompt-mapping.js';
@@ -57,7 +59,7 @@ import os from 'os';
 import path from 'path';
 import { localTurnForServerRow, serverRowForLocalTurn, turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
 import { applyRewritePairsToState, finalRewriteOf, firstUnanchoredPrompt, markSkippedPromptBaselines, recordPromptShadow } from '../../session-state.js';
-import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, gitCommonDirOnce, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
+import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, commitsThisSessionMayNote, gitCommonDirOnce, readCommitOwnershipFactsBatch, type CommitOwnershipFacts, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
 
 
 // ─── Debug Logger ─────────────────────────────────────────────────────────
@@ -66,7 +68,7 @@ import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE
 // Durable upload wrappers (update-queue.ts) bound to this file's debugLog.
 // On a retriable API failure the payload is persisted to ~/.origin/queue/
 // and replayed by a later hook — capture data is never silently lost.
-export const durableUpdate = (sessionId: string, data: any, opts: { supersedes?: string | null; logEvent?: string } = {}) =>
+export const durableUpdate = (sessionId: string, data: any, opts: { supersedes?: string | null; logEvent?: string; snapshot?: boolean } = {}) =>
   durableUpdateSession(sessionId, data, (e, m, d) => debugLog(e, m, d), opts);
 
 // FIX 3 — SESSION-LEVEL pre-existing-dirt exclusion.
@@ -302,7 +304,12 @@ export function ownedRangeCommitShas(repoPath: string, state: SessionState): str
   } catch { return []; }
   const localEmail = localCommitterEmail(repoPath);
   const commonDir = gitCommonDirOnce(repoPath);
-  return list.filter((sha) => commitBelongsToSession(repoPath, sha, state, localEmail, undefined, commonDir));
+  // One git process for the range's facts, not a `git show` per commit. A sha
+  // the batch did not return (or a failed batch) is read per commit, as before.
+  const facts = list.length >= 2 ? readCommitOwnershipFactsBatch(repoPath, list) : new Map<string, CommitOwnershipFacts>();
+  return list.filter((sha) => commitBelongsToSession(
+    repoPath, sha, state, localEmail, facts.get(sha.toLowerCase()), commonDir,
+  ));
 }
 
 /**
@@ -424,11 +431,23 @@ export function dropForeignCommitsFromCapture(
   if (details.length === 0) return [];
   const localEmail = localCommitterEmail(repoPath);
   const commonDir = gitCommonDirOnce(repoPath);
+  // One git process for every detail's facts, not a `git show` each. The batch
+  // keys by FULL sha and a capture may carry an abbreviated one; git resolved
+  // that abbreviation to exactly one commit, so a single key starting with it
+  // is that commit. Anything else is read per commit, as before.
+  const shas = details.map((d) => (d.sha || '').trim()).filter(Boolean);
+  const batch = shas.length >= 2 ? readCommitOwnershipFactsBatch(repoPath, shas) : new Map<string, CommitOwnershipFacts>();
+  const factsFor = (sha: string): CommitOwnershipFacts | undefined => {
+    const key = sha.toLowerCase();
+    if (batch.has(key)) return batch.get(key);
+    const matches = [...batch.keys()].filter((full) => full.startsWith(key));
+    return matches.length === 1 ? batch.get(matches[0]) : undefined;
+  };
   const foreignFiles = new Set<string>();
   const foreignShas = new Set<string>();
   for (const d of details) {
     const sha = (d.sha || '').trim();
-    if (!sha || commitBelongsToSession(repoPath, sha, state, localEmail, undefined, commonDir)) continue;
+    if (!sha || commitBelongsToSession(repoPath, sha, state, localEmail, factsFor(sha), commonDir)) continue;
     foreignShas.add(sha);
     for (const f of d.filesChanged || []) foreignFiles.add(f);
   }
@@ -2507,6 +2526,9 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
       authoredFiles: (localTurn, serverRow) => authoredFilesForTurn(
         state, localTurn, serverRow, promptEditsByIndex?.get(serverRow),
       ),
+      restoredFromHistory: (fromShadow, toShadow, localTurn, files) => filesPutBackAcrossTheGap(
+        state.repoPath || hookCwd, state, localTurn, fromShadow, toShadow, files,
+      ),
       log: (event, data) => debugLog('stop', event, data),
     });
     // A turn whose work is entirely in its commits sends the commit's patch —
@@ -2673,7 +2695,9 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
       payload: summarizePromptPayload(stopUpdatePayload.promptChanges as any),
     });
 
-    const sendStopUpdate = (id: string) => durableUpdate(id, stopUpdatePayload, { supersedes: prePersisted, logEvent: 'stop' });
+    // A snapshot: every row this session has, so it replaces any older Stop
+    // update still queued for the session (see QueueEntry.snapshot).
+    const sendStopUpdate = (id: string) => durableUpdate(id, stopUpdatePayload, { supersedes: prePersisted, logEvent: 'stop', snapshot: true });
     let updateRes: any;
     try {
       updateRes = await sendStopUpdate(state.sessionId);
@@ -2756,7 +2780,10 @@ function writeCommitNotes({ gitCapture, state, model, agentSlug, prompts, prompt
       const execOptsNotes = {
   windowsHide: true, cwd: state.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
       // Only write notes for commits that don't already have them
-      const missingNotes = noteCommits.filter(sha => {
+      // The turn window holds every commit HEAD moved past — a pull, a merge of
+      // main — not only this session's. Note-less is not the same as ours.
+      const ownNoteCommits = new Set(commitsThisSessionMayNote(state.repoPath, state, noteCommits));
+      const missingNotes = noteCommits.filter(sha => ownNoteCommits.has(sha)).filter(sha => {
         try {
           execFileSync('git', ['notes', '--ref=origin', 'show', sha], execOptsNotes);
           return false; // already has a note
@@ -3203,6 +3230,7 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
             prompt: '',
             model: (typeof input.model === 'string' && input.model !== 'cursor' && input.model !== 'default' && input.model !== 'unknown') ? input.model : 'cursor',
             repoPath: canonicalRepoPath,
+            checkoutPath: repoPath,
             repoUrl: repoRemoteUrl(repoPath) || undefined,
             agentSlug: 'cursor',
             branch: branch || undefined,
@@ -3642,7 +3670,15 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     // Prod bc4a1438 (vodka): turn 2 was a question, turn 3 wrote four files
     // and committed; the probe and the commit trailer both said turn 2, and
     // the state ended the four-turn session at lastClosedTurnIndex 1.
-    closeTurn(state, state.activeTurn?.index ?? Math.max(state.prompts.length - 1, 0));
+    const closingTurn = state.activeTurn?.index ?? Math.max(state.prompts.length - 1, 0);
+    closeTurn(state, closingTurn);
+    // advanceTurnBaselines just cut the tree this Stop saw. It is where the
+    // closed turn ENDS, which is not where the next turn starts when something
+    // rewrites the tree before the next prompt (session 874ff028: a background
+    // job's pathspec checkout of an older main). See restored-from-history.ts.
+    recordTurnEndShadow(state, closingTurn, state.prePromptSha, {
+      completeBaseline: Array.isArray(state.prePromptDirtyFiles) && state.prePromptDirtyFiles.length === 0,
+    });
     // The turn is over as far as the heartbeat's liveness is concerned: from
     // here until the next user-prompt-submit, a quiet transcript means idle,
     // not "still generating". See turnInProgress in heartbeat-liveness.ts.
@@ -3701,7 +3737,9 @@ export function fileNamedInCommand(command: string, file: string, tree?: string)
     const abs = path.join(tree, file).replace(/\\/g, '/');
     if (cmd.includes(abs)) return true;
   }
-  return false;
+  // A mutating git command touches exactly the paths it names, so a root file
+  // or a directory named as its pathspec is proof too — see git-pathspec-names.ts.
+  return fileNamedByGitPathspec(command, file, tree);
 }
 
 /** The baseline this turn diffs `tree` against — its own, never another's. */

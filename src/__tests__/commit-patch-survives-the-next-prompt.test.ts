@@ -25,6 +25,7 @@ import path from 'path';
 import { persistCompletedMappings } from '../commands/hooks/stop.js';
 import { previousMappingKept } from '../commands/hooks/user-prompt-submit.js';
 import { preferCommitPatchForCommittedTurns } from '../commit-patch-for-committed-turn.js';
+import { turnClosedByStop } from '../restored-from-history.js';
 import { fitDiffToBudget } from '../diff-budget.js';
 import { MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
 
@@ -63,6 +64,24 @@ describe('the retroactive capture of the previous prompt', () => {
       { diff: DIFF, uncommittedDiff: '', commitPatch: true },
       { diff: DIFF, uncommittedDiff: 'diff --git a/b.ts b/b.ts\n+later\n' },
     )).toBeNull();
+  });
+
+  // Session 874ff028 turn 6: Stop's row was right; a background job then
+  // reverted the tree with a pathspec checkout and the next prompt landed
+  // mid-revert. Nothing the agent did re-opened the turn after its Stop.
+  it('keeps the mapping of a turn Stop closed and nothing re-opened', () => {
+    const closed = { activeTurn: null, lastClosedTurnIndex: 5 };
+    expect(previousMappingKept({ diff: 'x', uncommittedDiff: '' }, { diff: 'reverted tree', uncommittedDiff: 'y' }, closed, 5))
+      .toBe('closed by stop');
+    expect(turnClosedByStop(closed, 5)).toBe(true);
+  });
+
+  it('still recovers an interrupted turn: agent activity after its last Stop re-opened it', () => {
+    const reopened = { activeTurn: { index: 5 }, lastClosedTurnIndex: 5 };
+    expect(previousMappingKept({ diff: 'x', uncommittedDiff: '' }, rebuild, reopened, 5)).toBeNull();
+    // Never closed at all (no Stop fired): recovered, as today.
+    expect(previousMappingKept({ diff: 'x', uncommittedDiff: '' }, rebuild, { activeTurn: null, lastClosedTurnIndex: 4 }, 5)).toBeNull();
+    expect(previousMappingKept({ diff: 'x', uncommittedDiff: '' }, rebuild, { activeTurn: null }, 5)).toBeNull();
   });
 
   it('replaces an ordinary mapping, as before', () => {

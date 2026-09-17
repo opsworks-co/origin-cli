@@ -238,13 +238,16 @@ describe.skipIf(!haveDist)('a turn that commits on two branches, end to end thro
     // Each branch's files as git names them. Session-start writes Origin's
     // managed CLAUDE.md into the repo and `git add -A` commits it on both
     // branches; each branch is measured from its parent, which predates it.
-    // (The server drops that path on read — see isAutoManagedPath.)
+    // That CLAUDE.md holds nothing but Origin's block, so the turn names only
+    // what commitDiffScopedToPrompt keeps (see managed-block-diff.ts).
     const filesOf = (sha: string) => git(['show', '--no-renames', '--name-only', '--format=', sha]).split('\n').filter(Boolean);
     const branchA = commitDiffScopedToPrompt(repo, baseSha, aSha, filesOf(aSha))!;
     const branchB = commitDiffScopedToPrompt(repo, baseSha, bSha, filesOf(bSha))!;
     expect(filesOf(aSha)).toEqual(expect.arrayContaining(['README.md', 'a.py']));
     expect(filesOf(bSha)).toEqual(expect.arrayContaining(['README.md', 'b.py']));
-    expect([...last.filesChanged].sort(), why).toEqual([...new Set([...filesOf(aSha), ...filesOf(bSha)])].sort());
+    expect(filesOf(aSha)).toContain('CLAUDE.md');
+    expect([...last.filesChanged].sort(), why).toEqual([...new Set([...branchA.files, ...branchB.files])].sort());
+    expect(last.filesChanged, why).not.toContain('CLAUDE.md');
     expect(last.diff).toContain(branchA.diff.trim());
     expect(last.diff).toContain(branchB.diff.trim());
     expect([last.linesAdded, last.linesRemoved]).toEqual([

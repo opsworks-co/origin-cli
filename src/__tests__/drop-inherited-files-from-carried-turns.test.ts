@@ -16,6 +16,7 @@ import path from 'path';
 import { createShadowCommit } from '../git-capture.js';
 import { dropInheritedFilesFromTurns, type InheritedFilesRow } from '../drop-inherited-files.js';
 import { inheritedFilesForTurn } from '../commands/hooks.js';
+import { filesRestoredFromHistory } from '../restored-from-history.js';
 
 let repo: string;
 let upstream: string;
@@ -153,5 +154,131 @@ describe('what the turn wrote stays', () => {
 
     expect(run(stateFor([s0]), [row])).toBe(0);
     expect(row.filesChanged).toEqual(['b.ts', 'c.ts']);
+  });
+});
+
+// ─── Files a turn only restored from history (session 874ff028) ────────────
+//
+// A pathspec checkout of an OLDER commit and its later restoration bring no
+// commit into either window, so inheritedFiles answers nothing for them.
+
+describe('a turn that only put files back to versions history already had', () => {
+  let older: string;
+  /** main = base -> the other session's PR (#1676), as in the incident. */
+  function mergedPr() {
+    older = git(['rev-parse', 'HEAD']);
+    git(['merge', '-q', '--ff-only', upstream]);
+  }
+  const runWithHistory = (state: any, rows: InheritedFilesRow[], authored: string[] = []) =>
+    dropInheritedFilesFromTurns(state, rows, {
+      inheritedFiles: (from, to, local) => inheritedFilesForTurn(repo, state, from, to, local),
+      authoredFiles: () => new Set(authored),
+      restoredFromHistory: (from, to, _local, files) => filesRestoredFromHistory(repo, from, to, files),
+    });
+
+  it('drops the removal: a pathspec checkout of an older commit straddling the boundary', () => {
+    mergedPr();
+    write('a.ts', 'a1\nmine\n');
+    const s0 = boundary(0, 'turn0');
+    git(['add', '-A']); git(['commit', '-qm', 'wip']);
+    git(['checkout', older, '--', 'b.ts', 'c.ts']);
+    const s1 = boundary(1, 'turn1');
+    const row: InheritedFilesRow = {
+      promptIndex: 0,
+      filesChanged: ['b.ts', 'c.ts'],
+      diff: `${git(['diff', s0.shadowSha, s1.shadowSha, '--', 'b.ts', 'c.ts'])}\n`,
+    };
+
+    // Without the history test, nothing names these files.
+    expect(run(stateFor([s0, s1]), [{ ...row }])).toBe(0);
+    expect(runWithHistory(stateFor([s0, s1]), [row])).toBe(1);
+    expect(row.filesChanged).toEqual([]);
+    expect(row.chatOnly).toBe(true);
+    expect(row.inheritedFiles).toEqual(['b.ts', 'c.ts']);
+  });
+
+  it('drops the mirror: the restoration in the next turn, still in flight', () => {
+    mergedPr();
+    write('a.ts', 'a1\nmine\n');
+    git(['add', '-A']); git(['commit', '-qm', 'wip']);
+    git(['checkout', older, '--', 'b.ts', 'c.ts', 'a.ts']);
+    const s0 = boundary(0, 'turn0');
+    git(['checkout', 'HEAD', '--', '.']);
+    git(['reset', '-q', '--soft', 'HEAD~1']);
+    git(['reset', '-q']);
+    const row: InheritedFilesRow = { promptIndex: 0, filesChanged: ['a.ts', 'b.ts', 'c.ts'], diff: '' };
+
+    // The turn has no next shadow: its end is the live working tree.
+    expect(runWithHistory({ ...stateFor([s0]), prompts: ['explain'] }, [row])).toBe(1);
+    expect(row.filesChanged).toEqual([]);
+    expect(row.inheritedFiles).toEqual(['a.ts', 'b.ts', 'c.ts']);
+  });
+
+  it('keeps a file the turn authored, even when its bytes are an older version (an Edit-tool revert)', () => {
+    mergedPr();
+    const s0 = boundary(0, 'turn0');
+    write('b.ts', 'b1\n');
+    const s1 = boundary(1, 'turn1');
+    const row: InheritedFilesRow = { promptIndex: 0, filesChanged: ['b.ts'], diff: `${git(['diff', s0.shadowSha, s1.shadowSha])}\n` };
+
+    expect(runWithHistory(stateFor([s0, s1]), [row], ['b.ts'])).toBe(0);
+    expect(row.filesChanged).toEqual(['b.ts']);
+  });
+
+  it('drops a shell-only revert with no authorship evidence (accepted: it looks like the background job)', () => {
+    mergedPr();
+    const s0 = boundary(0, 'turn0');
+    git(['checkout', 'HEAD~1', '--', 'b.ts']);
+    const s1 = boundary(1, 'turn1');
+    const row: InheritedFilesRow = { promptIndex: 0, filesChanged: ['b.ts'], diff: `${git(['diff', s0.shadowSha, s1.shadowSha])}\n` };
+
+    expect(runWithHistory(stateFor([s0, s1]), [row])).toBe(1);
+    expect(row.filesChanged).toEqual([]);
+  });
+
+  it('keeps work a LATER turn committed: history is read from the window start, not HEAD', () => {
+    const s0 = boundary(0, 'turn0');
+    write('a.ts', 'a1\nwritten by a shell command\n');
+    write('new.ts', 'brand new\n');
+    const s1 = boundary(1, 'turn1');
+    git(['add', '-A']); git(['commit', '-qm', 'the next turn commits it']);
+    const s2 = boundary(2, 'turn2');
+    const row: InheritedFilesRow = {
+      promptIndex: 0,
+      filesChanged: ['a.ts', 'new.ts'],
+      diff: `${git(['diff', s0.shadowSha, s1.shadowSha])}\n`,
+    };
+
+    expect(runWithHistory(stateFor([s0, s1, s2]), [row])).toBe(0);
+    expect(row.filesChanged).toEqual(['a.ts', 'new.ts']);
+    expect(filesRestoredFromHistory(repo, s0.shadowSha, s1.shadowSha, ['a.ts', 'new.ts']).size).toBe(0);
+  });
+
+  it('answers nothing for a checkout of a NEWER commit (the c5487aa9 shape stays with inheritedFiles)', () => {
+    const s0 = boundary(0, 'turn0');
+    git(['checkout', '-q', '--detach', upstream]);
+    const s1 = boundary(1, 'turn1');
+    expect(filesRestoredFromHistory(repo, s0.shadowSha, s1.shadowSha, ['b.ts', 'c.ts']).size).toBe(0);
+    const row: InheritedFilesRow = { promptIndex: 0, filesChanged: ['b.ts', 'c.ts'] };
+    expect(runWithHistory(stateFor([s0, s1]), [row])).toBe(1);
+    expect(row.inheritedFiles).toEqual(['b.ts', 'c.ts']);
+  });
+
+  it('ends a closed turn at the tree its Stop recorded, not at the next prompt', () => {
+    mergedPr();
+    const s0 = boundary(0, 'turn0');
+    write('a.ts', 'a1\nmine\n');
+    const end = boundary(0, 'turn0-end');
+    git(['checkout', older, '--', 'b.ts']);
+    const s1 = boundary(1, 'turn1');
+    const row: InheritedFilesRow = { promptIndex: 0, filesChanged: ['a.ts', 'b.ts'] };
+    const state = { ...stateFor([s0, s1]), turnEndShadows: [{ promptIndex: 0, shadowSha: end.shadowSha, capturedAt: '' }] };
+    const seen: Array<string | null> = [];
+    dropInheritedFilesFromTurns(state, [row], {
+      inheritedFiles: (_from, to) => { seen.push(to); return new Set(); },
+      authoredFiles: () => new Set(['a.ts']),
+      restoredFromHistory: (from, to, _l, files) => { seen.push(to); return filesRestoredFromHistory(repo, from, to, files); },
+    });
+    expect(seen).toEqual([end.shadowSha, end.shadowSha]);
   });
 });

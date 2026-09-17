@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { agentPartOfManagedSection } from './managed-block-diff.js';
 
 // ─── Default Ignore Patterns ──────────────────────────────────────────────
 
@@ -61,18 +62,11 @@ const DEFAULT_IGNORE_PATTERNS = [
   // generated files are: the agent caused it and it ships in the commit.
   '**/drizzle/meta/**',
   '**/prisma/migrations/migration_lock.toml',
-  // Origin auto-managed agent-rules files. The CLI writes these as a
-  // per-repo agent rules buffer (`<!-- origin-managed -->` blocks); the
-  // churn they generate is bookkeeping, not the agent's actual work, and
-  // pollutes per-prompt AI Blame attribution. AGENTS.md / GEMINI.md /
-  // .windsurfrules are *exclusively* Origin-managed (users don't hand-edit
-  // them), so blanket-ignoring is safe. We DO NOT add CLAUDE.md here —
-  // many projects maintain that file themselves; we only strip the
-  // Origin-marker section from those, not the whole file.
-  'AGENTS.md',
-  'GEMINI.md',
-  '.windsurfrules',
-  '.devin/rules/origin.md',
+  // Origin's context files (CLAUDE.md, AGENTS.md, GEMINI.md, …) are NOT
+  // here. Origin writes a `<!-- origin-managed -->` block into them, and
+  // people and agents write the rest — AGENTS.md is as hand-maintained as
+  // CLAUDE.md. `stripIgnoredSectionsFromDiff` keeps the lines outside the
+  // block and `isOriginAutoManagedPath` marks the files for everything else.
   // Origin's own hook-config files, written by `origin enable`. They are our
   // bookkeeping, not the agent's work — when enable runs in a repo they land
   // as untracked additions and would otherwise be attributed to the next
@@ -361,8 +355,13 @@ export function stripIgnoredSectionsFromDiff(
     const m = header.match(/^diff --git a\/(.+?) b\/(.+)$/);
     const filePath = m ? m[2] : '';
     if (filePath && shouldIgnoreFile(filePath, customPatterns)) continue;
-    const basename = filePath.split('/').pop() || '';
-    if (ORIGIN_AUTO_MANAGED_BASENAMES.has(basename)) continue;
+    if (isOriginAutoManagedPath(filePath)) {
+      // Origin's block is bookkeeping; the lines around it are whoever wrote
+      // them. Keep those, when the section carries the whole file to split.
+      const agent = agentPartOfManagedSection(part, filePath);
+      if (agent) kept.push(`${agent}\n`);
+      continue;
+    }
     kept.push(part);
   }
   return trimDiffText(kept.join(''));

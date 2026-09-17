@@ -21,6 +21,7 @@
  *
  * Mutates in place, never throws. Returns how many rows changed.
  */
+import { turnWindowEndShadow } from './restored-from-history.js';
 import { localTurnForServerRow } from './turn-index.js';
 
 export interface InheritedFilesState {
@@ -28,6 +29,10 @@ export interface InheritedFilesState {
   promptShadows?: Array<{ promptIndex: number; shadowSha: string; completeBaseline?: boolean }>;
   /** Server row of this launch's turn 0 — see turn-index.ts. */
   promptIndexBase?: number | null;
+  /** LOCAL-numbered: the tree Stop closed turn L with — see restored-from-history.ts. */
+  turnEndShadows?: Array<{ promptIndex: number; shadowSha: string; capturedAt: string; completeBaseline?: boolean }>;
+  /** This launch's prompts; the last one is the turn still in flight. */
+  prompts?: string[];
 }
 
 export interface InheritedFilesRow {
@@ -52,6 +57,14 @@ export interface DropInheritedFilesDeps {
   inheritedFiles: (fromShadow: string, toShadow: string, localTurn: number) => Set<string>;
   /** Files the turn shows it wrote: tool calls, edit hooks, named commands, its own commits. */
   authoredFiles: (localTurn: number, serverRow: number) => Set<string>;
+  /**
+   * Files among `files` the window (ending at `toShadow`, or the live tree
+   * when null) only put back — what a background job's pathspec checkout of an
+   * older commit, or its restoration, put on disk. Stop and session-end answer
+   * with `filesPutBackAcrossTheGap`; see restored-from-history.ts. Optional:
+   * without it only commit-borne inheritance is dropped.
+   */
+  restoredFromHistory?: (fromShadow: string, toShadow: string | null, localTurn: number, files: string[]) => Set<string>;
   log?: (event: string, data: Record<string, unknown>) => void;
 }
 
@@ -78,7 +91,7 @@ function sectionFiles(diff: string | null | undefined): string[] {
   return out;
 }
 
-function withoutFiles(diff: string | null | undefined, drop: Set<string>): string {
+export function withoutFiles(diff: string | null | undefined, drop: Set<string>): string {
   const text = String(diff || '');
   if (!text) return text;
   return text.split(/(?=^diff --git )/m).filter((part) => {
@@ -122,15 +135,22 @@ export function dropInheritedFilesFromTurns(
       const local = localTurnForServerRow(pm.promptIndex, state.promptIndexBase);
       if (local === null) continue;
       const start = shadows.find((s) => s.promptIndex === local);
-      const next = shadows.find((s) => s.promptIndex === local + 1);
-      if (!start?.shadowSha || !next?.shadowSha) continue;
-      if (start.completeBaseline === false || next.completeBaseline === false) continue;
+      // A closed turn ends at the tree its Stop recorded, else at the next
+      // turn's start. The turn still in flight ends at the live tree, and only
+      // the history test answers for it: its commits are scoped when captured.
+      const end = turnWindowEndShadow(state, local);
+      const inFlight = !end && Array.isArray(state.prompts) && local === state.prompts.length - 1;
+      if (!start?.shadowSha || (!end?.shadowSha && !inFlight)) continue;
+      if (start.completeBaseline === false || end?.completeBaseline === false) continue;
       const files = rowFiles(pm);
       if (files.length === 0) continue;
-      const inherited = deps.inheritedFiles(start.shadowSha, next.shadowSha, local);
-      if (inherited.size === 0) continue;
+      const inherited = end ? deps.inheritedFiles(start.shadowSha, end.shadowSha, local) : new Set<string>();
+      const restored = deps.restoredFromHistory
+        ? deps.restoredFromHistory(start.shadowSha, end?.shadowSha ?? null, local, files)
+        : new Set<string>();
+      if (inherited.size === 0 && restored.size === 0) continue;
       const authored = deps.authoredFiles(local, pm.promptIndex);
-      const drop = new Set(files.filter((f) => inSet(inherited, f) && !inSet(authored, f)));
+      const drop = new Set(files.filter((f) => (inSet(inherited, f) || inSet(restored, f)) && !inSet(authored, f)));
       if (drop.size === 0) continue;
 
       pm.filesChanged = (Array.isArray(pm.filesChanged) ? pm.filesChanged : [])

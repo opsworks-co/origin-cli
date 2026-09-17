@@ -248,6 +248,21 @@ export interface SessionState {
     capturedAt: string; // ISO timestamp
     completeBaseline?: boolean; // Full tree captured at the prompt hook, including a clean HEAD.
   }>;
+  // LOCAL-numbered: the tree Stop saw when it CLOSED turn L. The next prompt's
+  // shadow is where turn L+1 starts, which is not where turn L ended when
+  // something rewrote the tree between that Stop and the next prompt — a
+  // background job's `git checkout <older> -- dir` (session 874ff028). Kept only
+  // while no agent activity re-opened the turn after its Stop; see
+  // settleTurnEndShadow and turnWindowEndShadow.
+  turnEndShadows?: Array<{
+    promptIndex: number;
+    shadowSha: string;
+    capturedAt: string;
+    completeBaseline?: boolean;
+    // Files a background job changed after that Stop, added by the next
+    // prompt (extendClosedTurnWithLateWork); their window runs to turn L+1's start.
+    lateFiles?: string[];
+  }>;
   // Prompts recovered after their start hook was missed. Their transcript can
   // prove the turn exists, but not the working-tree state it began from.
   // Keep that uncertainty explicit so a later capture never assigns a
@@ -441,6 +456,10 @@ export interface SessionState {
   // read-only commands is never in here, so it can never claim a file the
   // user changed in their editor while the agent was talking.
   shellWriteTurns?: number[];
+  // LOCAL-numbered: repo-relative paths ('' = the whole tree) the turn's
+  // mutating git commands named (checkout/restore/rm/mv/reset -- <paths>, the
+  // files a revert or apply rewrites). See git-pathspec-names.ts.
+  gitPathspecsByTurn?: Array<{ promptIndex: number; paths: string[] }>;
   branch: string | null;      // Git branch at session start
   sessionTag?: string;        // Tag for concurrent session support
   // Ring buffer of tool-call pre/post records. Field kept as `subagents` for
@@ -529,6 +548,12 @@ export interface SessionState {
   // previous account's session. Absent on legacy/standalone sessions.
   ownerOrgId?: string;
   ownerKeyHash?: string;
+  // Where the server put this session — the org it was ROUTED to at
+  // session/start, which since repo-assignment routing need not be the org
+  // the API key was minted in. `routed` is the server's reason: 'team'
+  // (an assigned team repo), 'private' (the user's own workspace) or 'key'
+  // (legacy one-key-one-org). Shown by `origin status`.
+  capturedTo?: { orgId: string; orgName: string | null; orgType: string; routed: 'team' | 'private' | 'key' };
   // Canonical (main) repo path when repoPath is a linked worktree — the
   // identity sent to the server (repo naming, session/commit ingest) so a
   // worktree session attributes to the real project, while repoPath stays

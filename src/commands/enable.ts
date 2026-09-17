@@ -2130,10 +2130,13 @@ export function writeGlobalPostCommitHook(globalHooksDir: string): void {
 ${hookShimPreamble()}
 
 if [ -n "$ORIGIN_BIN" ]; then
+  # Resolve the commit NOW, before backgrounding: the agent can move HEAD
+  # (\`git checkout -B\`, a reset) before a backgrounded \`rev-parse HEAD\` runs.
+  _origin_commit_sha="\$(git rev-parse HEAD 2>/dev/null)"
   # Redirect stdout/stderr to /dev/null so the backgrounded child doesn't
   # inherit git's stdout fd. Otherwise it holds the write-end of a
   # \`git commit | tee\` pipe open and tee stalls until origin exits.
-  "$ORIGIN_BIN" hooks git-post-commit >/dev/null 2>&1 &
+  ORIGIN_COMMIT_SHA="$_origin_commit_sha" "$ORIGIN_BIN" hooks git-post-commit >/dev/null 2>&1 &
 fi
 
 # Chain to local repo hooks if they exist
@@ -2343,6 +2346,8 @@ export function ensurePolicyHookInstalled(gitRoot: string): { installed: boolean
         // post-checkout, so a fresh clone on this machine would silently land
         // without its attribution notes. Heal it in place — checked separately
         // from pre-commit because a dir can be missing either one.
+        // And post-commit scripts from before the committed sha was passed in.
+        upgradePostCommitHookScript(path.join(resolvedDir, 'post-commit'), 'global');
         const globalPostCheckout = path.join(resolvedDir, 'post-checkout');
         if (fs.existsSync(resolvedDir) && !fs.existsSync(globalPostCheckout)) {
           writeGlobalPostCheckoutHook(resolvedDir);
@@ -2369,6 +2374,7 @@ export function ensurePolicyHookInstalled(gitRoot: string): { installed: boolean
 
     // 2. Repo-local check.
     const hooksDir = path.join(gitRoot, '.git', 'hooks');
+    upgradePostCommitHookScript(path.join(hooksDir, 'post-commit'), 'local');
     const hookPath = path.join(hooksDir, 'pre-commit');
     const ORIGIN_MARKER = '# origin-pre-commit';
 
@@ -2475,6 +2481,48 @@ export function installGitPrepareCommitMsgHook(gitRoot: string): void {
   console.log(chalk.green('  ✓ Git prepare-commit-msg hook installed (session trailer)'));
 }
 
+/** Marker of a post-commit hook script that hands the committed sha to the capture. */
+export const POST_COMMIT_SHA_MARKER = 'ORIGIN_COMMIT_SHA=';
+
+/** The local post-commit hook's Origin lines: resolve the sha synchronously, then background. */
+export function localPostCommitLines(hookScript: string): string {
+  return `_origin_commit_sha="$(git rev-parse HEAD 2>/dev/null)"\nORIGIN_COMMIT_SHA="$_origin_commit_sha" ${hookScript} >/dev/null 2>&1 &\n`;
+}
+
+/**
+ * Rewrite a post-commit hook installed by an older CLI, whose capture read HEAD
+ * after backgrounding and so could record the wrong commit (session 874ff028).
+ * Global scripts are Origin's own file and are rewritten whole; a local hook
+ * may hold the user's own lines, so only Origin's line after its marker is
+ * replaced. Returns true when a file was rewritten.
+ */
+export function upgradePostCommitHookScript(hookPath: string, kind: 'global' | 'local'): boolean {
+  try {
+    if (!fs.existsSync(hookPath)) return false;
+    const existing = fs.readFileSync(hookPath, 'utf-8');
+    if (existing.includes(POST_COMMIT_SHA_MARKER)) return false;
+    if (kind === 'global') {
+      if (!existing.includes('# origin-global-post-commit')) return false;
+      writeGlobalPostCommitHook(path.dirname(hookPath));
+      return true;
+    }
+    const ORIGIN_MARKER = '# origin-post-commit';
+    const at = existing.indexOf(ORIGIN_MARKER);
+    if (at < 0) return false;
+    const lineStart = existing.indexOf('\n', at);
+    if (lineStart < 0) return false;
+    const lineEnd = existing.indexOf('\n', lineStart + 1);
+    const oldLine = existing.slice(lineStart + 1, lineEnd < 0 ? undefined : lineEnd);
+    if (!/hooks git-post-commit/.test(oldLine)) return false;
+    const hookScript = originCmd(`origin hooks git-post-commit`);
+    const updated = existing.slice(0, lineStart + 1) + localPostCommitLines(hookScript)
+      + (lineEnd < 0 ? '' : existing.slice(lineEnd + 1));
+    fs.writeFileSync(hookPath, updated);
+    fs.chmodSync(hookPath, '755');
+    return true;
+  } catch { return false; }
+}
+
 export function installGitPostCommitHook(gitRoot: string): void {
   const hooksDir = path.join(gitRoot, '.git', 'hooks');
   const hookPath = path.join(hooksDir, 'post-commit');
@@ -2491,17 +2539,21 @@ export function installGitPostCommitHook(gitRoot: string): void {
   if (fs.existsSync(hookPath)) {
     const existing = fs.readFileSync(hookPath, 'utf-8');
     if (existing.includes(ORIGIN_MARKER)) {
-      console.log(chalk.gray('  ✓ Git post-commit hook already installed'));
+      if (upgradePostCommitHookScript(hookPath, 'local')) {
+        console.log(chalk.green('  ✓ Git post-commit hook upgraded (passes the committed sha)'));
+      } else {
+        console.log(chalk.gray('  ✓ Git post-commit hook already installed'));
+      }
       return;
     }
     // Append to existing hook. Redirect the backgrounded child so it doesn't
     // inherit git's stdout fd and stall a `git commit | tee` pipe (same fix as
     // the global post-commit hook).
-    const append = `\n${ORIGIN_MARKER}\n${hookScript} >/dev/null 2>&1 &\n`;
+    const append = `\n${ORIGIN_MARKER}\n${localPostCommitLines(hookScript)}`;
     fs.appendFileSync(hookPath, append);
   } else {
     // Create new hook file
-    const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript} >/dev/null 2>&1 &\n`;
+    const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${localPostCommitLines(hookScript)}`;
     fs.writeFileSync(hookPath, content);
   }
 

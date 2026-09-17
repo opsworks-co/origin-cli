@@ -27,7 +27,7 @@ import { currentTurnIndex, getBranch, getGitRoot, getHeadSha, getWorkingGitRoot,
 import type { SessionState } from '../../session-state.js';
 import { estimateCost, extractPromptFileMappings, livePrompts, parseTranscript } from '../../transcript.js';
 import type { ParsedTranscript } from '../../transcript.js';
-import { drainUpdateQueue, durableUpdateSession, enqueueFailedUpdate, isRetriableApiError, persistUpdateBeforeWork } from '../../update-queue.js';
+import { drainQueueFromHook, durableUpdateSession, enqueueFailedUpdate, isRetriableApiError, persistUpdateBeforeWork } from '../../update-queue.js';
 import { isProcessRunning, uniqueMatchingId } from '../../utils/process-detect.js';
 import { ensureSqlite } from '../../utils/sqlite.js';
 import { condenseSnapshot, listSnapshots } from '../snapshot.js';
@@ -1294,12 +1294,37 @@ export function sessionDurationMs(startedAt: string | undefined): number | undef
   return Math.max(0, Date.now() - started);
 }
 
+/**
+ * The commit this post-commit run is about.
+ *
+ * The hook script runs the capture in the BACKGROUND, so by the time this
+ * process reads `HEAD` the agent may already have moved it: session 874ff028
+ * ran `git checkout -B <branch> origin/main` right after `git commit`, the
+ * capture read another session's commit (bda43822), skipped it as foreign, and
+ * the real commit was never recorded. The hook script now resolves the sha
+ * synchronously, before backgrounding, and passes it as ORIGIN_COMMIT_SHA.
+ * Hook scripts installed by older CLIs do not, so HEAD stays the fallback.
+ * The variable is cleared once read so nothing this process spawns inherits it.
+ */
+export function committedShaForHook(hookCwd: string, env: NodeJS.ProcessEnv = process.env): string {
+  const passed = String(env.ORIGIN_COMMIT_SHA || '').trim();
+  delete env.ORIGIN_COMMIT_SHA;
+  const opts = { windowsHide: true, encoding: 'utf-8' as const, cwd: hookCwd, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  if (/^[a-fA-F0-9]{7,40}$/.test(passed)) {
+    try {
+      const full = execFileSync('git', ['rev-parse', '--verify', '--quiet', `${passed}^{commit}`], opts).trim();
+      if (/^[a-fA-F0-9]{40}$/.test(full)) return full;
+    } catch { /* not a commit here — fall back to HEAD */ }
+  }
+  return execFileSync('git', ['rev-parse', 'HEAD'], opts).trim();
+}
+
 export async function handlePostCommit(): Promise<void> {
   debugLog('post-commit', '=== GIT HOOK INVOKED ===', { pid: process.pid, cwd: process.cwd() });
   // Ready the SQLite backend for the Codex thread reader below (see hooksCommand).
   await ensureSqlite();
   // Replay any queued capture uploads (fire-and-forget; commit already done).
-  drainUpdateQueue((e, m, d) => debugLog(e, m, d)).catch(() => {});
+  drainQueueFromHook((e, m, d) => debugLog(e, m, d)).catch(() => {});
 
   const config = loadConfig();
   const connected = isConnectedMode();
@@ -1321,13 +1346,13 @@ export async function handlePostCommit(): Promise<void> {
     windowsHide: true, encoding: 'utf-8' as const, cwd: hookCwd, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
   let commitSha: string, commitMessage: string, commitAuthor: string;
   try {
-    commitSha = execFileSync('git', ['rev-parse', 'HEAD'], execOpts).trim();
+    commitSha = committedShaForHook(hookCwd);
     // %B, not %s. The subject alone drops the `Origin-Session:` trailer that
     // prepare-commit-msg wrote into the body moments ago — the one piece of
     // evidence that says whose commit this is. It is what the server's
     // ownership guards read, and what the ownership check below reads.
-    commitMessage = capCommitMessage(execFileSync('git', ['log', '-1', '--format=%B'], execOpts));
-    commitAuthor = execFileSync('git', ['log', '-1', '--format=%an'], execOpts).trim();
+    commitMessage = capCommitMessage(execFileSync('git', ['log', '-1', '--format=%B', commitSha], execOpts));
+    commitAuthor = execFileSync('git', ['log', '-1', '--format=%an', commitSha], execOpts).trim();
   } catch (err: any) {
     debugLog('post-commit', 'ERROR: cannot read commit', { message: err.message });
     return;
@@ -1416,7 +1441,7 @@ export async function handlePostCommit(): Promise<void> {
       } catch { /* no remote, fine */ }
       const committedAtIso = (() => {
         try {
-          return execFileSync('git', ['log', '-1', '--format=%cI'], execOpts).trim() || undefined;
+          return execFileSync('git', ['log', '-1', '--format=%cI', commitSha], execOpts).trim() || undefined;
         } catch { return undefined; }
       })();
       // Advertise the SHAs reachable from HEAD so the server can report
@@ -1443,6 +1468,9 @@ export async function handlePostCommit(): Promise<void> {
         message: commitMessage,
         author: commitAuthor,
         branch: currentBranch || null,
+        // git runs the post-commit hook at the top level of the worktree
+        // being committed in, so hookCwd IS the checkout that made this.
+        checkoutPath: hookCwd,
         filesChanged,
         additions: linesAdded,
         deletions: linesRemoved,
@@ -1956,9 +1984,22 @@ export async function handlePostCommit(): Promise<void> {
     }
   }
 
+  // A commit this hook refused as another session's gets no note. The note
+  // names `state.sessionId` — the session this hook PICKED, not the one that
+  // made the commit — and `writeGitNotes` mirrors it to the server's
+  // import-note, which links the Commit row to the named session whenever that
+  // session exists. That link is first-wins and permanent, and the session's
+  // commit list and header then count the commit.
+  //
   // A replay's note is the original's, which post-rewrite copies across;
   // writing this session's here would claim the copy (and race that copy).
-  if (!replayed) try {
+  // A trailer naming another live session is the same claim made without a
+  // replay: prod session 6c21a6d8 (2026-09-16) merged other sessions' PRs in
+  // its own worktree, every such commit logged "SKIP recording" here and still
+  // got a note naming 6c21a6d8, and it served 45 commits for the 4 it wrote.
+  if (commitIsAnotherSessions) {
+    debugLog('post-commit', 'no git note — commit is another session\'s', { commitSha: commitSha.slice(0, 8) });
+  } else try {
     writeGitNotes(repoPath, [commitSha], {
       sessionId: state?.sessionId || 'unknown',
       model: noteModel || 'unknown',
@@ -2383,7 +2424,11 @@ export async function handlePostCommit(): Promise<void> {
   // session record, so publishing a RUNNING shell to the branch would pre-empt
   // the git-note importer — which materializes a COMPLETE, COMPLETED session
   // from the commit note instead. The note is already written above.
-  if (state && !state.sessionId.startsWith('detected-') && !state.sessionId.startsWith('devin-')) {
+  //
+  // Nor for a commit refused as another live session's: the entry would list
+  // it under `commitShas`, with its files and lines, on the session that did
+  // not make it — the same wrong claim the note above no longer makes.
+  if (state && !commitIsAnotherSessions && !state.sessionId.startsWith('detected-') && !state.sessionId.startsWith('devin-')) {
     const durationMs = Date.now() - new Date(state.startedAt).getTime();
 
     // Parse transcript for full metrics (or use empty defaults for agents without transcripts)

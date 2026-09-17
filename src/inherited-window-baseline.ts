@@ -53,6 +53,8 @@ export interface InheritedWindowDeps {
   changedFiles: (sha: string) => string[];
   /** `git show <sha>:<file>`; null when the file does not exist there. */
   readAtRev: (sha: string, file: string) => string | null;
+  /** The `readAtRev` pairs about to be asked, so they can be read at once. */
+  primeReadAtRev?: (pairs: Array<[string, string]>) => void;
   /** `git merge-base --is-ancestor <a> <b>`. */
   isAncestor: (a: string, b: string) => boolean;
   /**
@@ -487,8 +489,10 @@ export function inheritedBeforeStates(
   // a walk of newly reachable commits cannot name.
   if (deps.changedFilesBetween && deps.baselineCommit) {
     try {
-      const files = deps.changedFilesBetween(deps.baselineCommit(baselineSha), upTo);
-      for (const file of [...new Set(files)].slice(0, deps.fileBudget ?? DEFAULT_FILE_BUDGET)) {
+      const files = [...new Set(deps.changedFilesBetween(deps.baselineCommit(baselineSha), upTo))]
+        .slice(0, deps.fileBudget ?? DEFAULT_FILE_BUDGET);
+      deps.primeReadAtRev?.(files.map((file) => [upTo, file]));
+      for (const file of files) {
         out.set(file, deps.readAtRev(upTo, file));
       }
       return out;
@@ -506,6 +510,7 @@ export function inheritedBeforeStates(
     }
     let files: string[];
     try { files = deps.changedFiles(sha); } catch { files = []; }
+    try { deps.primeReadAtRev?.(files.filter((file) => !out.has(file)).map((file) => [upTo, file])); } catch { /* read per file */ }
     for (const file of files) {
       if (budget-- <= 0) return out;
       if (out.has(file)) continue;

@@ -212,6 +212,14 @@ export async function statusCommand(opts: { global?: boolean; all?: boolean } = 
       }
       console.log(chalk.gray(`    Prompts:     ${chalk.white(String(state.prompts.length))}`));
       console.log(chalk.gray(`    Repo:        ${chalk.white(state.repoPath)}`));
+      if (state.capturedTo) {
+        // Captures route by repo assignment, so the org a session lives in
+        // can differ from the org the key was minted in — say which.
+        const where = state.capturedTo.routed === 'private'
+          ? 'your private workspace'
+          : `${state.capturedTo.orgName || state.capturedTo.orgId}${state.capturedTo.routed === 'team' ? ' (assigned repo)' : ''}`;
+        console.log(chalk.gray(`    Captured to: ${chalk.white(where)}`));
+      }
 
       if (state.transcriptPath) {
         console.log(chalk.gray(`    Transcript:  ${chalk.white(state.transcriptPath)}`));

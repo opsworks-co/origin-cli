@@ -272,12 +272,14 @@ function patchAcrossBranches(
   // with the ledger. Against HEAD — a file only another branch holds is simply
   // absent here, which is not dirty.
   const watch = [...new Set([...ledgerFilesOf(pm), ...commitFiles])].filter(f => !isOriginAutoManagedPath(f));
-  if (!git(repoPath, ['diff', '--quiet', 'HEAD', '--', ...watch]).ok) {
+  if (watch.length > 0 && !git(repoPath, ['diff', '--quiet', 'HEAD', '--', ...watch]).ok) {
     declined(deps, pm, 'a file of the turn is dirty against its commit');
     deps.log?.('commit patch declined: a file of the turn is dirty against its commit', { promptIndex: pm.promptIndex, commits: tips });
     return false;
   }
-  const untracked = git(repoPath, ['ls-files', '--others', '--exclude-standard', '--', ...watch]);
+  const untracked = watch.length > 0
+    ? git(repoPath, ['ls-files', '--others', '--exclude-standard', '--', ...watch])
+    : { ok: true, out: '' };
   if (!untracked.ok || untracked.out.trim()) {
     declined(deps, pm, 'a file of the turn is untracked');
     deps.log?.('commit patch declined: a file of the turn is untracked', { promptIndex: pm.promptIndex, commits: tips });
@@ -542,13 +544,19 @@ export function preferCommitPatchForCommittedTurns(
     // anyway. Session 29b32c38 turn 1: its range ended at the squash of its
     // own branch, a later turn's commit had edited three of its files, and
     // the turn stayed at the ledger's 13 files for every Stop after that.
-    const dirty = !git(repoPath, ['diff', '--quiet', 'HEAD', '--', ...watch]).ok;
+    // An empty pathspec is the whole tree, not "none of the turn's files":
+    // a turn whose every file is a context file checks nothing here. Session
+    // 97c6ba73 turn 4 committed only CLAUDE.md/AGENTS.md/GEMINI.md and was
+    // declined because Origin's own refresh of them sat uncommitted.
+    const dirty = watch.length > 0 && !git(repoPath, ['diff', '--quiet', 'HEAD', '--', ...watch]).ok;
     if (dirty) {
       declined(deps, pm, 'a file of the turn is dirty against its commit');
       deps.log?.('commit patch declined: a file of the turn is dirty against its commit', { promptIndex: pm.promptIndex, commit: last.slice(0, 8) });
       continue;
     }
-    const untracked = git(repoPath, ['ls-files', '--others', '--exclude-standard', '--', ...watch]);
+    const untracked = watch.length > 0
+      ? git(repoPath, ['ls-files', '--others', '--exclude-standard', '--', ...watch])
+      : { ok: true, out: '' };
     if (!untracked.ok || untracked.out.trim()) {
       declined(deps, pm, 'a file of the turn is untracked');
       deps.log?.('commit patch declined: a file of the turn is untracked', { promptIndex: pm.promptIndex, commit: last.slice(0, 8) });

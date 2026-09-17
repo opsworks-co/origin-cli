@@ -240,7 +240,7 @@ describe('persistUpdateBeforeWork', () => {
     expect(persistUpdateBeforeWork('sess-killed-stop', payload)).toBeTruthy();
     updateSession.mockResolvedValue({ ok: true });
     await drainUpdateQueue();
-    expect(updateSession).toHaveBeenCalledWith('sess-killed-stop', payload);
+    expect(updateSession).toHaveBeenCalledWith('sess-killed-stop', payload, { timeoutMs: 8000 });
     expect(entryFiles()).toHaveLength(0);
     expect(payload.promptChanges.map(row => row.promptIndex)).toEqual(Array.from({ length: 21 }, (_, i) => i));
   });
@@ -262,7 +262,7 @@ describe('persistUpdateBeforeWork', () => {
     updateSession.mockResolvedValueOnce({});
     const res = await drainUpdateQueue();
     expect(res.replayed).toBe(1);
-    expect(updateSession).toHaveBeenCalledWith('sess-kill', { prompt: 'prompt 3' });
+    expect(updateSession).toHaveBeenCalledWith('sess-kill', { prompt: 'prompt 3' }, { timeoutMs: 8000 });
     expect(entryFiles()).toHaveLength(0);
   });
 

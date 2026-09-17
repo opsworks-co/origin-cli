@@ -761,6 +761,13 @@ hooks.command('journal-watch').description('Internal: watch the repo and journal
   const { runJournalWatcher } = await import('./commands/hooks.js');
   await runJournalWatcher();
 });
+// The background half of the upload queue: replays session updates too large to
+// land inside a hook's 8s budget, each with a timeout sized to its payload.
+hooks.command('drain-queue').description('Internal: replay queued capture uploads in the background').action(async () => {
+  const { drainUpdateQueue } = await import('./update-queue.js');
+  const { debugLog } = await import('./debug-log.js');
+  await drainUpdateQueue((e, m, d) => debugLog(e, m, d), { background: true });
+});
 hooks.command('memory-brief-backfill').description('Internal: generate the continuation brief for a repo that has none').action(() => handleMemoryBriefBackfill());
 hooks.command('git-pre-push').description('Handle git pre-push hook').action(() => handlePrePush());
 hooks.command('git-post-rewrite').description('Handle git post-rewrite hook (rebase/amend)').action(async () => {

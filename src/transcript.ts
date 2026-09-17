@@ -1,7 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { shouldIgnoreFile } from './ignore-patterns.js';
+import { isOriginAutoManagedPath, shouldIgnoreFile } from './ignore-patterns.js';
 import { isShellTool, shellCommandText, commandWritesFiles } from './shell-write-capture.js';
 import { isInsideRepo, toRepoRelativePath , abbreviateHome, MAX_OUT_OF_REPO_FILES } from './paths.js';
 
@@ -150,7 +150,9 @@ function buildToolFields(
     toolBreakdown: Array.from(counts.entries())
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count),
-    filesRead: Array.from(readSet).filter((f) => !shouldIgnoreFile(f)),
+    // Reading a context file is reading Origin's injected block as much as
+    // anything else in it; it is not a file of the task.
+    filesRead: Array.from(readSet).filter((f) => !shouldIgnoreFile(f) && !isOriginAutoManagedPath(f)),
   };
 }
 

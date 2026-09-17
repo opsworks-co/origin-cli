@@ -50,6 +50,10 @@ describe('user-prompt-submit session update', () => {
   });
 
   it('still drains the queue, or nothing ever replays', () => {
-    expect(src).toContain('drainUpdateQueue(');
+    // Hooks drain through drainQueueFromHook, which replays what fits a hook
+    // and hands the rest to the background drain.
+    expect(src).toContain('drainQueueFromHook(');
+    const queue = fs.readFileSync(path.join(__dirname, '..', 'update-queue.ts'), 'utf-8');
+    expect(queue).toMatch(/export async function drainQueueFromHook[\s\S]*?await drainUpdateQueue\(log\)/);
   });
 });

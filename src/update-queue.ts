@@ -31,10 +31,13 @@
 // Caps (safety valves, generous for the realistic failure — an API deploy
 // window of a few minutes): 25MB/entry, 60 entries, 72h age, 25 attempts.
 
+import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { api } from './api.js';
+import { DEFAULT_FETCH_TIMEOUT_MS, timeoutForPayload } from './fetch-timeout.js';
+import { fitSessionUpdateForServer } from './session-update-size.js';
 
 export type QueueKind = 'updateSession' | 'endSession' | 'ingestCommits';
 
@@ -46,6 +49,12 @@ export interface QueueEntry {
   attempts: number;
   enqueuedAt: string;
   lastError?: string;
+  /**
+   * A session-to-date state (Stop's update): every row the session has, not a
+   * slice. A newer snapshot of the same session makes an older one worthless —
+   * replaying it could only put back what the newer one corrected.
+   */
+  snapshot?: boolean;
 }
 
 type Log = (event: string, message: string, data?: any) => void;
@@ -58,6 +67,10 @@ const noop: Log = () => {};
 const INGEST_REPLAY_TIMEOUT_MS = 60_000;
 
 const MAX_ENTRY_BYTES = 25 * 1024 * 1024;
+// Largest session update a hook replays itself, with its 8s fast-fail. A
+// session PATCH past a few hundred KB cannot land inside 8s (see
+// api.updateSession); larger ones go to the background drain.
+export const HOOK_REPLAY_MAX_BYTES = 256 * 1024;
 const MAX_QUEUE_ENTRIES = 60;
 const MAX_AGE_MS = 72 * 60 * 60 * 1000;
 const MAX_ATTEMPTS = 25;
@@ -81,8 +94,9 @@ export function enqueueFailedUpdate(
   payload: any,
   err: any,
   log: Log = noop,
+  opts: { snapshot?: boolean } = {},
 ): boolean {
-  return writeQueueEntry(kind, sessionId, payload, err, log) !== null;
+  return writeQueueEntry(kind, sessionId, payload, err, log, opts) !== null;
 }
 
 /** The entry writer behind enqueueFailedUpdate; returns the entry's file name so a caller can remove it. */
@@ -92,16 +106,20 @@ function writeQueueEntry(
   payload: any,
   err: any,
   log: Log = noop,
+  opts: { snapshot?: boolean } = {},
 ): string | null {
   try {
     const entry: QueueEntry = {
       v: 1,
       kind,
       sessionId,
-      payload,
+      // Queued exactly as it will be sent: api.updateSession fits editsJson to
+      // the server's limit, so storing the unfitted copy only fills the disk.
+      payload: kind === 'updateSession' ? fitSessionUpdateForServer(payload) : payload,
       attempts: 0,
       enqueuedAt: new Date().toISOString(),
       lastError: err?.message || String(err),
+      ...(opts.snapshot ? { snapshot: true } : {}),
     };
     const body = JSON.stringify(entry);
     if (body.length > MAX_ENTRY_BYTES) {
@@ -137,6 +155,26 @@ export function removeQueuedUpdate(name: string | null | undefined): void {
   try { fs.unlinkSync(path.join(queueDir(), name)); } catch { /* already drained or gone */ }
 }
 
+/**
+ * Remove this session's snapshots queued before `sentAt`, other than `keep`.
+ * Called once a newer snapshot has been sent or queued: see
+ * QueueEntry.snapshot. The time bound keeps a snapshot another hook queued
+ * while this one was still sending.
+ */
+function dropSupersededSnapshots(sessionId: string, keep: string | null, sentAt: number, log: Log): void {
+  const dir = queueDir();
+  for (const name of listEntryFiles(dir)) {
+    if (name === keep) continue;
+    // Names start with their enqueue time (see writeQueueEntry).
+    const queuedAt = Number(name.split('-')[0]);
+    if (!Number.isFinite(queuedAt) || queuedAt > sentAt) continue;
+    const entry = readEntry(path.join(dir, name));
+    if (!entry || entry.sessionId !== sessionId || entry.kind !== 'updateSession' || !entry.snapshot) continue;
+    try { fs.unlinkSync(path.join(dir, name)); } catch { continue; }
+    log('queue', 'dropped a queued snapshot a newer one supersedes', { sessionId, dropped: name });
+  }
+}
+
 function listEntryFiles(dir: string): string[] {
   try {
     return fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
@@ -153,9 +191,9 @@ function readEntry(file: string): QueueEntry | null {
   return null;
 }
 
-async function replayEntry(entry: QueueEntry): Promise<void> {
+async function replayEntry(entry: QueueEntry, updateTimeoutMs: number): Promise<void> {
   if (entry.kind === 'updateSession') {
-    await api.updateSession(entry.sessionId, entry.payload);
+    await api.updateSession(entry.sessionId, entry.payload, { timeoutMs: updateTimeoutMs });
   } else if (entry.kind === 'ingestCommits') {
     // Replayed with the backfill timeout, not the hook default: this payload
     // carries a per-commit patch, and the 8s default is what dropped it in the
@@ -189,20 +227,38 @@ function releaseLock(dir: string): void {
   try { fs.rmdirSync(path.join(dir, '.drain.lock')); } catch { /* fine */ }
 }
 
-export interface DrainResult { replayed: number; dropped: number; remaining: number; }
+export interface DrainResult {
+  replayed: number;
+  dropped: number;
+  remaining: number;
+  /** Entries left for a background drain: too large to land inside a hook. */
+  deferred: number;
+}
 
 /**
  * Replay pending entries oldest-first. When an entry fails retriably, LATER
  * entries for the same session are skipped this round (per-session order must
  * hold); other sessions keep draining. `forSessionId` narrows the drain to one
  * session's backlog (used by durableUpdateSession before sending fresh state).
+ *
+ * A session update is replayed with a timeout sized to its payload only when
+ * `background` says nobody is waiting on this process. Everywhere else it keeps
+ * the 8s fast-fail a hook needs, so an entry that cannot upload in 8s is
+ * DEFERRED rather than attempted: replayed with the same 8s that failed it,
+ * it failed again on every hook, forever, and blocked every later update of
+ * its session behind it (session 874ff028: 4.7MB Stop updates, each aborted at
+ * 8s, queued, and re-aborted by the next hook's drain). `hooks drain-queue`
+ * is the background drain.
+ *
+ * `skipSnapshots` leaves the session's queued snapshots alone: the caller is
+ * about to send a newer one, which replaces them.
  */
 export async function drainUpdateQueue(
   log: Log = noop,
-  opts: { forSessionId?: string } = {},
+  opts: { forSessionId?: string; background?: boolean; skipSnapshots?: boolean } = {},
 ): Promise<DrainResult> {
   const dir = queueDir();
-  const result: DrainResult = { replayed: 0, dropped: 0, remaining: 0 };
+  const result: DrainResult = { replayed: 0, dropped: 0, remaining: 0, deferred: 0 };
   const files = listEntryFiles(dir);
   if (files.length === 0) return result;
   if (!acquireLock(dir)) {
@@ -220,6 +276,7 @@ export async function drainUpdateQueue(
         continue;
       }
       if (opts.forSessionId && entry.sessionId !== opts.forSessionId) continue;
+      if (opts.skipSnapshots && entry.snapshot && entry.kind === 'updateSession') { result.remaining++; continue; }
       if (blockedSessions.has(entry.sessionId)) { result.remaining++; continue; }
       const age = Date.now() - new Date(entry.enqueuedAt).getTime();
       if (age > MAX_AGE_MS || entry.attempts >= MAX_ATTEMPTS) {
@@ -228,8 +285,21 @@ export async function drainUpdateQueue(
         log('queue', 'entry expired — dropped', { sessionId: entry.sessionId, attempts: entry.attempts });
         continue;
       }
+      let updateTimeoutMs = DEFAULT_FETCH_TIMEOUT_MS;
+      if (entry.kind === 'updateSession') {
+        let bytes = 0;
+        try { bytes = fs.statSync(file).size; } catch { /* unknown — treat as small */ }
+        if (bytes > HOOK_REPLAY_MAX_BYTES && !opts.background) {
+          // Order still holds: nothing later of this session goes ahead of it.
+          blockedSessions.add(entry.sessionId);
+          result.remaining++;
+          result.deferred++;
+          continue;
+        }
+        if (opts.background) updateTimeoutMs = timeoutForPayload(bytes);
+      }
       try {
-        await replayEntry(entry);
+        await replayEntry(entry, updateTimeoutMs);
         try { fs.unlinkSync(file); } catch { /* gone */ }
         result.replayed++;
         log('queue', 'replayed queued upload', { sessionId: entry.sessionId, kind: entry.kind });
@@ -255,6 +325,37 @@ export async function drainUpdateQueue(
   }
   return result;
 }
+
+/**
+ * The drain a hook runs: fast-fail replays, and when something was too large
+ * to replay inside a hook, a detached `origin hooks drain-queue` to replay it
+ * with room. Its lock (acquireLock) keeps a second one from running at once.
+ */
+export async function drainQueueFromHook(log: Log = noop): Promise<DrainResult> {
+  const result = await drainUpdateQueue(log);
+  if (result.deferred > 0) spawnBackgroundDrain(result.deferred, log);
+  return result;
+}
+
+function spawnBackgroundDrain(deferred: number, log: Log): void {
+  const bin = process.argv[1];
+  if (!bin) return;
+  try {
+    const child = spawn(process.execPath, [bin, 'hooks', 'drain-queue'], {
+      detached: true,
+      stdio: 'ignore',
+      // A detached console app opens its own window on Windows without this.
+      windowsHide: true,
+    });
+    child.unref();
+    log('queue', 'handed large queued uploads to a background drain', { deferred });
+  } catch (err: any) {
+    log('queue', 'background drain spawn failed', { message: err?.message });
+  }
+}
+
+/** Why a fresh send is queued instead: it must not land ahead of a deferred older update. */
+const BEHIND_DEFERRED = { message: 'queued behind a larger update of this session left for the background drain' };
 
 /**
  * Write-ahead copy of a session PATCH, taken BEFORE work that might kill this
@@ -302,19 +403,35 @@ export async function durableUpdateSession(
   sessionId: string,
   data: any,
   log: Log = noop,
-  opts: { supersedes?: string | null; logEvent?: string } = {},
+  opts: { supersedes?: string | null; logEvent?: string; snapshot?: boolean } = {},
 ): Promise<any | null> {
   // The write-ahead copy this payload replaces (persistUpdateBeforeWork).
   // Removed BEFORE the drain so it is neither replayed ahead of this send
   // nor left behind for a later one; a retriable failure below re-enqueues
   // the full payload, so nothing is lost in between.
   removeQueuedUpdate(opts.supersedes);
+  const sentAt = Date.now();
+  let deferred = 0;
   try {
-    await drainUpdateQueue(log, { forSessionId: sessionId });
+    deferred = (await drainUpdateQueue(log, { forSessionId: sessionId, skipSnapshots: opts.snapshot === true })).deferred;
   } catch { /* drain is best-effort */ }
+  if (deferred > 0) {
+    // An older update of this session is still queued (too large for a hook).
+    // Sent now, this one lands first and the older one then lands on top of it
+    // — a session-to-date snapshot replaces the stored session diff. Queue
+    // behind it; the background drain replays both in order.
+    const queued = writeQueueEntry('updateSession', sessionId, data, BEHIND_DEFERRED, log, { snapshot: opts.snapshot });
+    if (queued) {
+      if (opts.snapshot) dropSupersededSnapshots(sessionId, queued, sentAt, log);
+      spawnBackgroundDrain(deferred, log);
+      return null;
+    }
+  }
   for (let attempt = 0; ; attempt++) {
     try {
-      return await api.updateSession(sessionId, data);
+      const res = await api.updateSession(sessionId, data);
+      if (opts.snapshot) dropSupersededSnapshots(sessionId, null, sentAt, log);
+      return res;
     } catch (err: any) {
       // A pooled socket may close just as fetch reuses it. Retry that transport
       // failure once, without reminting capture IDs. HTTP errors and timeouts
@@ -334,7 +451,11 @@ export async function durableUpdateSession(
         continue;
       }
       if (isRetriableApiError(err)) {
-        if (enqueueFailedUpdate('updateSession', sessionId, data, err, log)) return null;
+        const queued = writeQueueEntry('updateSession', sessionId, data, err, log, { snapshot: opts.snapshot });
+        if (queued) {
+          if (opts.snapshot) dropSupersededSnapshots(sessionId, queued, sentAt, log);
+          return null;
+        }
       }
       throw err;
     }
@@ -347,9 +468,14 @@ export async function durableEndSession(
   data: any,
   log: Log = noop,
 ): Promise<any | null> {
+  let deferred = 0;
   try {
-    await drainUpdateQueue(log, { forSessionId: sessionId });
+    deferred = (await drainUpdateQueue(log, { forSessionId: sessionId })).deferred;
   } catch { /* best-effort */ }
+  if (deferred > 0 && enqueueFailedUpdate('endSession', sessionId, data, BEHIND_DEFERRED, log)) {
+    spawnBackgroundDrain(deferred, log);
+    return null;
+  }
   try {
     return await api.endSession(data);
   } catch (err: any) {

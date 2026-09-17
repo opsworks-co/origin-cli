@@ -68,7 +68,7 @@ describe('stop flushes prompts before captureGitState', () => {
     expect(src.slice(persist, persist + 300)).not.toContain("status: 'RUNNING'");
     // sendStopCapture is defined above handleStop, so order says nothing here;
     // the entry name travels in as a parameter and the send names it.
-    expect(src).toContain("durableUpdate(id, stopUpdatePayload, { supersedes: prePersisted, logEvent: 'stop' })");
+    expect(src).toContain("durableUpdate(id, stopUpdatePayload, { supersedes: prePersisted, logEvent: 'stop', snapshot: true })");
     expect(src).toContain('devinPromptTimes, prePersisted }));');
   });
 

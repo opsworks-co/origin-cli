@@ -63,3 +63,19 @@ describe('post-commit commit ingest', () => {
     expect(block).toContain('diff: diff');
   });
 });
+
+// The checkout that MADE the commit travels with post-commit's own ingest and
+// with nothing else. The history backfill ingests commits discovered from
+// `git log` — made in any worktree, by anyone — so a checkout stamped there
+// would mark a sibling's commits as this worktree's and the session page's
+// sibling-checkout guard would then hide this session's own work.
+describe('post-commit reports the checkout that made the commit', () => {
+  it('the live ingest carries the hook cwd as checkoutPath', () => {
+    const block = hooksSrc.slice(hooksSrc.indexOf('const ingestCommit = {'), hooksSrc.indexOf('await api.ingestCommits({'));
+    expect(block).toMatch(/checkoutPath:\s*hookCwd/);
+  });
+  it('the history backfill never sends one', () => {
+    const backfill = fs.readFileSync(path.join(__dirname, '..', 'history-backfill.ts'), 'utf-8');
+    expect(backfill).not.toMatch(/checkoutPath/);
+  });
+});

@@ -42,7 +42,8 @@ const READ = { encoding: 'utf-8' as const, stdio: ['ignore', 'pipe', 'ignore'] a
 /** How far back to look for the entry. A rebase of hundreds of commits writes one per pick. */
 const REFLOG_WINDOW = 2_000;
 
-function kindOfReflogSubject(subject: string): ReplayKind | null {
+/** What kind of replay a HEAD reflog subject records, if any. */
+export function kindOfReflogSubject(subject: string): ReplayKind | null {
   if (/^(?:rebase|pull --rebase)\b/.test(subject)) return 'rebase';
   if (/^cherry-pick\b/.test(subject)) return 'cherry-pick';
   if (/^am\b/.test(subject)) return 'am';

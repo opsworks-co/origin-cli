@@ -46,8 +46,9 @@ import {
   turnBaseline,
   applyRewritePairsToState,
 } from '../session-state.js';
-import { capCommitMessage, captureGitState, captureAgyDiff, getDirtyFiles, createShadowCommit, commitCombiningTips, commitWithInheritedFiles, mergeTreeOf, commitDiffScopedToPrompt, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, sameSha, MAX_DIFF_SIZE, MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
+import { capCommitMessage, captureGitState, captureAgyDiff, getDirtyFiles, createShadowCommit, commitCombiningTips, commitWithInheritedFiles, mergeTreeOf, commitDiffScopedToPrompt, filesChangedSinceShadow, readFileAtRev, isUnsafeGitShowPath, gitIgnoredFiles, sameSha, MAX_DIFF_SIZE, MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
 import { capDiff, fitDiffToBudget } from '../diff-budget.js';
+import { proveReplays, readReflogRewrites, replayedInto, rewriteReaches, type ReflogRewrites, type ReplayProof } from '../rewrite-proof.js';
 import { finalHunksForCaptures } from '../final-state-blame.js';
 import { parseAntigravityTranscript, estimateAntigravityUsage, agyArgs } from '../antigravity-transcript.js';
 import { claudeSessionName, cursorSessionName } from '../agent-session-name.js';
@@ -96,7 +97,7 @@ export { GENERIC_ASSIGNMENT_RULES, PRE_COMMIT_PATTERNS, buildOriginTrailers, han
 import { backfillCodexPromptMappings } from '../codex-prompt-mapping.js';
 import { buildCodexThreadByCwdQuery } from '../codex-thread-query.js';
 import {
-  durableUpdateSession, durableEndSession, drainUpdateQueue,
+  durableUpdateSession, durableEndSession, drainUpdateQueue, drainQueueFromHook,
   enqueueFailedUpdate, isRetriableApiError,
 } from '../update-queue.js';
 import { debugLog } from '../debug-log.js';
@@ -175,6 +176,7 @@ import {
   SHELL_WINDOW_SOURCE,
 } from '../shell-write-capture.js';
 import { isOriginAutoManagedPath, shouldIgnoreFile, stripIgnoredSectionsFromDiff } from '../ignore-patterns.js';
+import { ORIGIN_MANAGED_MARKER, PREAMBLE_VISIBLE_ANCHOR } from '../managed-block-diff.js';
 import { normalizeToolHookPayload } from '../hook-payload.js';
 import { skipManuallyEndedHook } from '../manual-session-end.js';
 import {
@@ -901,14 +903,6 @@ function reachableWindowShas(repoPath: string, state: SessionState, gitOpts: any
   return [];
 }
 
-/** Same subject line on both commits — what an amend that only folded in a
- *  forgotten file or re-touched the body leaves intact. */
-function sameSubject(repoPath: string, a: string, b: string, reads?: CommitReads): boolean {
-  const sa = reads ? reads.shape(a) : commitShape(repoPath, a);
-  const sb = reads ? reads.shape(b) : commitShape(repoPath, b);
-  return !!sa && !!sb && sa.subject === sb.subject;
-}
-
 /** The per-commit reads the rescue below compares commits with. */
 export interface CommitReads {
   shape(sha: string): { subject: string; files: string } | null;
@@ -1024,85 +1018,56 @@ function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
   let readsCache: CommitReads | null = null;
   const reads = (): CommitReads =>
     (readsCache ??= prefetchCommitReads(repoPath, [...reachablePool, ...(state.sessionCommitShas || [])]));
-  // Is this commit still on a local branch? Then nothing rewrote it away.
-  // Sibling branches cut from one base put this session's commits on the same
-  // parent, which is all the same-turn rung below can see: session 049d69db
-  // branched four PRs off one main commit in a turn and the rung folded them
-  // into one another (40416b28 → 05a909f5 → 3f52e3e4 → 5e275a6a), so the turn
-  // kept one commit and its card read +9/-1 beside +866/-179. An amend leaves
-  // its original on no branch. Origin's own shadow branches are snapshots that
-  // can still hold an amended-away original, so they do not count.
-  //
-  // A MERGED commit is not an amend either. `gh pr merge --squash
-  // --delete-branch` deletes the local branch and moves the worktree to main,
-  // so the commit is on no local branch, and its sibling from the same turn
-  // sits on the same parent. Session 936ac5d1 (2026-09-14) folded 48cad5c0
-  // (the PR, squash-merged as 9e4e650b) into 8c608841 (another branch's
-  // one-file test change): the turn lost its commit, and the rewrite pair told
-  // the server to drop it. Two facts say "merged, not amended": a
-  // remote-tracking branch still holds the commit, or a commit only the
-  // remotes reach carries the same patch (a squash or a rebase-merge keeps it;
-  // an amend changes it).
-  const liveMemo = new Map<string, boolean>();
-  let upstreamPatchIds: Set<string> | null = null;
-  const patchLandedUpstream = (sha: string): boolean => {
-    const own = commitPatchId(repoPath, sha);
-    if (!own) return false;
-    if (!upstreamPatchIds) {
-      upstreamPatchIds = new Set();
-      try {
-        // Bounded: the merge lands shortly after the orphan's parent, and this
-        // runs only for an orphan that reached the same-turn rung.
-        const log = execFileSync('git', ['log', '-p', '--no-color', '--no-merges', '-n', '200', '--remotes', '--not', `${sha}^`], { ...gitOpts, maxBuffer: 64 * 1024 * 1024 }).toString();
-        const ids = execFileSync('git', ['patch-id', '--stable'], { ...gitOpts, input: log, maxBuffer: 16 * 1024 * 1024 }).toString();
-        for (const line of ids.split('\n')) {
-          const pid = line.trim().split(/\s+/)[0];
-          if (pid) upstreamPatchIds.add(pid);
-        }
-      } catch { /* no remotes, or git cannot answer — nothing proves a merge */ }
-    }
-    return upstreamPatchIds.has(own);
-  };
-  const onLiveBranch = (sha: string): boolean => {
-    if (!liveMemo.has(sha)) {
-      let live = false;
-      try {
-        const refs = execFileSync('git', ['for-each-ref', '--contains', sha, '--format=%(refname)', 'refs/heads', 'refs/remotes'], gitOpts).toString();
-        live = refs.split('\n').map((r) => r.trim()).some((r) => !!r && !/(^|\/)shadow(\/|$)/.test(r) && !/\/HEAD$/.test(r));
-      } catch { live = false; }
-      if (!live) live = patchLandedUpstream(sha);
-      liveMemo.set(sha, live);
-    }
-    return liveMemo.get(sha)!;
-  };
   // Starts EMPTY. Seeding it with every recorded sha would block the case
   // #1360 exists for — where BOTH the orphan and its rewrite were recorded and
   // the rewrite is the correct target. It only records targets already taken.
   const claimed = new Set<string>();
-  // Every sha this session's own post-commit hook recorded, full-length and
-  // lower-cased so a candidate from `git log` compares directly.
-  const ownedShas = new Set<string>();
-  for (const s of state.sessionCommitShas) {
-    if (/^[a-fA-F0-9]{40}$/.test(s)) ownedShas.add(s.toLowerCase());
-  }
-  const turnOf = new Map<string, string>();
-  for (const c of state.commitTurns || []) {
-    if (!c || typeof c.sha !== 'string' || !/^[a-fA-F0-9]{40}$/.test(c.sha)) continue;
-    ownedShas.add(c.sha.toLowerCase());
-    if (typeof c.turnId === 'string' && c.turnId) turnOf.set(c.sha.toLowerCase(), c.turnId);
-  }
-  // This session's own commit, filed under the SAME turn as the orphan when
-  // the turn ledger knows both — an amend lands in the turn that made the
-  // original. Two owned commits on one parent under DIFFERENT turns is a
-  // reset-and-recommit across turns, which is not one commit rewritten; that
-  // case is left to the subject and shape rules.
-  const ownedSameTurn = (orphan: string, candidate: string): boolean => {
-    const c = candidate.toLowerCase();
-    if (!ownedShas.has(c)) return false;
-    const to = turnOf.get(orphan.toLowerCase());
-    const tc = turnOf.get(c);
-    return to && tc ? to === tc : true;
+  // What git's reflogs say was rewritten, read once and only when an orphan
+  // first needs it.
+  let reflogCache: ReflogRewrites | null = null;
+  const reflog = (): ReflogRewrites => (reflogCache ??= readReflogRewrites(repoPath));
+  const fullOf = (sha: string): string => (reads().revParse(`${sha}^{commit}`) || sha).toLowerCase();
+  // Which commit each rebase and cherry-pick step replayed, worked out once the
+  // orphans are known, and only when one needs it.
+  const orphans: string[] = [];
+  let proofCache: ReplayProof | null = null;
+  const proof = (): ReplayProof => (proofCache ??= proveReplays(
+    repoPath, reflog(),
+    new Set(reachablePool.map((c) => c.toLowerCase())),
+    new Set(orphans.map(fullOf)),
+  ));
+  const gitRewrote = (from: string, to: string): boolean => {
+    const f = fullOf(from);
+    const t = fullOf(to);
+    // Amends alone first: they need no further git process.
+    return rewriteReaches(reflog(), null, f, t) || rewriteReaches(reflog(), proof(), f, t);
   };
+  const samePatch = (a: string, b: string): boolean => {
+    const pa = reads().patchId(a);
+    return !!pa && pa === reads().patchId(b);
+  };
+  const sameTree = (a: string, b: string): boolean => {
+    const ta = reads().revParse(`${a}^{tree}`);
+    return !!ta && ta === reads().revParse(`${b}^{tree}`);
+  };
+  // A rewrite is what GIT proves, never what the session infers. Sharing a
+  // parent is what an amend leaves — and equally what `git reset --soft
+  // HEAD~1 && git reset` followed by a different commit leaves. Session
+  // 874ff028 did exactly that, and the old same-turn rung paired the abandoned
+  // "wip" commits with later, different commits (650598eb → ca004579 →
+  // d518fbf4 → b316816f) because a commit post-commit filed under no turn
+  // counted as "same turn" as anything. The server then moved turn 5 onto a
+  // commit turn 8 made. Sibling branches cut from one base (049d69db) and a
+  // squash-merged sibling (936ac5d1) look the same, and a shared subject
+  // ("wip") proves nothing either.
+  //
+  // Proof is: the reflog recorded `commit (amend)` from one to the other
+  // (through any chain of amends), or the two carry the same patch or the same
+  // tree.
+  const provenAmend = (orphan: string, candidate: string): boolean =>
+    samePatch(orphan, candidate)
+    || sameTree(orphan, candidate)
+    || rewriteReaches(reflog(), null, fullOf(orphan), fullOf(candidate));
   for (const sha of state.sessionCommitShas) {
     if (!/^[a-fA-F0-9]{7,40}$/.test(sha)) continue;
     // Is the recorded sha still reachable from HEAD? merge-base
@@ -1126,6 +1091,7 @@ function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
       parent = execFileSync('git', ['rev-parse', `${sha}^`], gitOpts).toString().trim();
     } catch { continue; }
     if (!parent || !/^[a-fA-F0-9]{7,40}$/.test(parent)) continue;
+    orphans.push(sha);
     // Walk first-parent history from parent..HEAD and take the first
     // commit whose parent matches `parent`. `--first-parent` keeps us
     // on the main line (avoids picking up merge-side commits as
@@ -1147,76 +1113,86 @@ function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
         // orphan onto it credits this session with another session's work.
         // Confirm it is actually a rewrite of ours before substituting.
         if (parents[0] !== parent) continue;
-        // `isRewriteOf` was written for a REBASE, where the copy keeps the
-        // subject and the exact path set. An amend keeps neither: the point
-        // of `git commit --amend` is usually to fold one more file or fix
-        // the message. Prod vodka 5adc4b18 amended a 3-file commit into a
-        // 4-file one — same parent, same subject, one extra path — and the
-        // rescue found no rewrite, so the orphan stayed owned: the turn read
-        // "2 commits total +996/-4" for +509/-3 of work and the session
-        // header counted shelf.py twice.
-        //
-        // Same parent is the amend's signature; on top of it, EITHER of two
-        // facts settles ownership without a shape match: this session
-        // recorded the candidate itself (post-commit filed both under the
-        // same turn — nobody else's commit gets into sessionCommitShas), or
-        // the subject survived. Neither can reach a concurrent session's
-        // commit: that one is not in our list, and the rescue's founding
-        // rule — never add a sha we did not already own — still holds
-        // because the candidate replaces an entry, it is never appended.
-        if (isRewriteOf(repoPath, sha, candidate, reads())
-          // Same parent and same turn is not content evidence — two sibling
-          // branches look exactly like this. Only an orphan no branch still
-          // holds can be an amend.
-          || (ownedSameTurn(sha, candidate) && !onLiveBranch(sha))
-          || sameSubject(repoPath, sha, candidate, reads())) {
+        // An amend usually changes the subject or the path set — prod vodka
+        // 5adc4b18 amended a 3-file commit into a 4-file one — so shape is not
+        // the test here; git's own record of the amend is (see provenAmend).
+        // The candidate replaces an entry and is never appended, so the
+        // rescue's founding rule — never add a sha we did not already own —
+        // still holds.
+        if (provenAmend(sha, candidate)) {
           replacements.set(sha, candidate);
           break;
         }
       }
     } catch { /* parent unreachable — orphan irrecoverable */ }
+  }
 
-    // ── Rebase, not amend ──────────────────────────────────────────────
-    // The walk above matches on SAME PARENT, which is what an amend
-    // preserves. A rebase moves the whole branch onto a new base, so every
-    // rewritten commit has a different parent and the walk finds nothing —
-    // the orphan stayed in the list while the rewritten copy was recorded
-    // separately, and the session counted the same work twice.
-    //
-    // Measured on session 92e45049: three rebases onto a moving main turned
-    // 4 real commits into 14 rows, four of them sharing one patch-id
-    // (81e24d414357). The page then showed a turn reading +46/-14 above
-    // "2 commits total +313/-13" — badges for work already counted under
-    // earlier turns.
-    //
-    // Candidates are drawn ONLY from shas this session already owns and that
-    // are still reachable. That keeps the rescue's founding rule intact: it
-    // never adds a sha we did not already have, so a concurrent session's
-    // commit can never be pulled in as a "replacement".
-    if (!replacements.has(sha)) {
-      // Search the BRANCH, not just our own recorded shas.
-      //
-      // #1360 looked for the replacement among `sessionCommitShas`. That can
-      // never find a rebase's rewrite: after a rebase the session still holds
-      // the PRE-rebase shas and never recorded the rewritten ones, so the pool
-      // it searched contained only other orphans. Session a77105c0 had 6 of its
-      // 7 recorded commits orphaned and the rescue collapsed nothing — the
-      // rewrites were sitting on the branch, unlooked-at, while the orphans'
-      // patches kept being concatenated into the session diff (five blocks of
-      // one version bump, +12/-12 of pure re-count).
-      //
-      // Candidates are reachable commits in this session's own window, so the
-      // pool is the branch this session worked on rather than all of history.
-      // `claimed` keeps two orphans from mapping onto one rewrite — after a
-      // rebase the mapping is 1:1, and letting two collapse onto the same
-      // commit would delete a real one.
-      for (const candidate of reachablePool) {
-        if (candidate === sha || claimed.has(candidate)) continue;
-        if (isRewriteOf(repoPath, sha, candidate, reads())) {
-          replacements.set(sha, candidate);
-          claimed.add(candidate);
-          break;
-        }
+  // ── Rebase, not amend ──────────────────────────────────────────────
+  // The walk above matches on SAME PARENT, which is what an amend
+  // preserves. A rebase moves the whole branch onto a new base, so every
+  // rewritten commit has a different parent and the walk finds nothing —
+  // the orphan stayed in the list while the rewritten copy was recorded
+  // separately, and the session counted the same work twice.
+  //
+  // Measured on session 92e45049: three rebases onto a moving main turned
+  // 4 real commits into 14 rows, four of them sharing one patch-id
+  // (81e24d414357). The page then showed a turn reading +46/-14 above
+  // "2 commits total +313/-13" — badges for work already counted under
+  // earlier turns.
+  //
+  // Candidates are drawn ONLY from shas this session already owns and that
+  // are still reachable. That keeps the rescue's founding rule intact: it
+  // never adds a sha we did not already have, so a concurrent session's
+  // commit can never be pulled in as a "replacement".
+  //
+  // Search the BRANCH, not just our own recorded shas.
+  //
+  // #1360 looked for the replacement among `sessionCommitShas`. That can
+  // never find a rebase's rewrite: after a rebase the session still holds
+  // the PRE-rebase shas and never recorded the rewritten ones, so the pool
+  // it searched contained only other orphans. Session a77105c0 had 6 of its
+  // 7 recorded commits orphaned and the rescue collapsed nothing — the
+  // rewrites were sitting on the branch, unlooked-at, while the orphans'
+  // patches kept being concatenated into the session diff (five blocks of
+  // one version bump, +12/-12 of pure re-count).
+  //
+  // Candidates are reachable commits in this session's own window, so the
+  // pool is the branch this session worked on rather than all of history.
+  // `claimed` keeps two orphans from mapping onto one rewrite — after a
+  // rebase the mapping is 1:1 unless git recorded a fixup or squash, and
+  // letting two collapse onto the same commit would delete a real one.
+  //
+  // Two passes, so a guess never takes a copy git can prove belongs to another
+  // orphan. First what git proves: the same patch, or a reflog chain of amend,
+  // rebase and cherry-pick steps from the orphan to the candidate (a fixup
+  // folds several orphans into one copy, so that proof ignores `claimed`).
+  // Then the shape rule below.
+  const unplaced = () => orphans.filter((sha) => !replacements.has(sha));
+  for (const sha of unplaced()) {
+    for (const candidate of reachablePool) {
+      if (candidate === sha) continue;
+      if ((!claimed.has(candidate) && samePatch(sha, candidate)) || gitRewrote(sha, candidate)) {
+        replacements.set(sha, candidate);
+        claimed.add(candidate);
+        break;
+      }
+    }
+  }
+  for (const sha of unplaced()) {
+    for (const candidate of reachablePool) {
+      if (candidate === sha || claimed.has(candidate)) continue;
+      // When resolving a conflict moved the patch and the author time was not
+      // carried (`--reset-author-date`): the same subject and path set on a
+      // commit a rebase step produced — from a run that replayed THIS orphan.
+      // Shape alone is not proof: an abandoned "wip" and a later "wip" touching
+      // the same files share it, and a rebase of the later one made a copy
+      // with that shape which the abandoned one claimed first.
+      if (reflog().rebaseDerived.has(fullOf(candidate))
+        && replayedInto(proof(), fullOf(sha), fullOf(candidate))
+        && isRewriteOf(repoPath, sha, candidate, reads())) {
+        replacements.set(sha, candidate);
+        claimed.add(candidate);
+        break;
       }
     }
   }
@@ -1611,9 +1587,9 @@ export function sessionScopedCommittedDiff(
  */
 function dropBookkeepingSections(diff: string): string {
   if (!diff) return diff;
-  const stripped = stripIgnoredSectionsFromDiff(diff);
-  const managed = new Set(filesNamedInDiff(stripped).filter(isOriginAutoManagedPath));
-  return managed.size > 0 ? dropDiffSectionsForFiles(stripped, managed) : stripped;
+  // stripIgnoredSectionsFromDiff already reduces a context file to the lines
+  // outside Origin's block, or drops it when the section cannot be split.
+  return stripIgnoredSectionsFromDiff(diff);
 }
 
 /**
@@ -1750,27 +1726,6 @@ export const GIT_READ_OPTS = {
   stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 5000,
 };
 
-/**
- * The repo's configured committer email, lowercased — the identity a local
- * `git commit` in this checkout stamps. Empty when nothing is configured.
- */
-export function localCommitterEmail(repoPath: string): string {
-  try {
-    return execFileSync('git', ['config', '--get', 'user.email'], { ...GIT_READ_OPTS, cwd: repoPath })
-      .toString().trim().toLowerCase();
-  } catch { return ''; }
-}
-
-/** The three facts `commitBelongsToSession` weighs for one commit. */
-export interface CommitOwnershipFacts {
-  /** Committer email, trimmed and lowercased. */
-  committerEmail: string;
-  /** Committer date in ms (NaN when unparseable). */
-  committedAtMs: number;
-  /** Raw commit message. */
-  body: string;
-}
-
 /** One commit's ownership facts; null when it cannot be read. */
 export function readCommitOwnershipFacts(repoPath: string, sha: string): CommitOwnershipFacts | null {
   try {
@@ -1783,39 +1738,6 @@ export function readCommitOwnershipFacts(repoPath: string, sha: string): CommitO
       body: bodyLines.join('\n'),
     };
   } catch { return null; }
-}
-
-/**
- * Ownership facts for many commits in ONE git process, keyed by lowercased
- * full sha. A commit git could not name is simply absent, and a failed read
- * returns an empty map — callers fall back to `readCommitOwnershipFacts`.
- *
- * A turn that merged a busy main holds hundreds of commits in its window, and
- * reading each with its own `git show` (twice, once for the committer rule and
- * once inside `commitBelongsToSession`) cost ~4.6s for 300 commits inside
- * hooks that run on a timeout.
- */
-export function readCommitOwnershipFactsBatch(repoPath: string, shas: string[]): Map<string, CommitOwnershipFacts> {
-  const out = new Map<string, CommitOwnershipFacts>();
-  const wanted = [...new Set(shas.filter((s) => /^[a-fA-F0-9]{7,40}$/.test(s)))];
-  if (wanted.length === 0) return out;
-  try {
-    // --stdin: a window can hold thousands of shas, more than an argv should.
-    const raw = execFileSync('git', ['log', '--no-walk=unsorted', '--stdin', '--format=%H%x00%ce%x00%ct%x00%B%x1e'], {
-      ...GIT_READ_OPTS, cwd: repoPath, input: wanted.join('\n') + '\n', maxBuffer: 256 * 1024 * 1024,
-    }).toString();
-    for (const record of raw.split('\x1e')) {
-      const [shaField = '', email = '', ct = '', ...rest] = record.replace(/^\n/, '').split('\0');
-      const full = shaField.trim().toLowerCase();
-      if (!/^[a-f0-9]{40,64}$/.test(full)) continue;
-      out.set(full, {
-        committerEmail: email.trim().toLowerCase(),
-        committedAtMs: Number(ct.trim()) * 1000,
-        body: rest.join('\0'),
-      });
-    }
-  } catch { return new Map(); }
-  return out;
 }
 
 /**
@@ -1959,6 +1881,55 @@ export function gitCommonDirOnce(repoPath: string): () => string | null {
 }
 
 /**
+ * The commits a session may write its `refs/notes/origin` note on.
+ *
+ * `writeGitNotes` writes ONE payload onto every sha it is handed. Session end
+ * handed it the whole `headShaAtStart..HEAD` range whenever the authored
+ * snapshot came back empty — a session that pulled main and committed nothing
+ * — so it stamped itself onto every squash-merge the pull brought in. Stop did
+ * the same with its turn window until #1114. Measured on refs/notes/origin
+ * (2026-09-16): 15 such bursts, 330 notes, not one on a commit the session
+ * authored — 116 at once from session 79164ad3, 115 from 7dbef779.
+ *
+ * Two rules. The commit must be this session's by `commitBelongsToSession`.
+ * And a note already naming ANOTHER real session is left alone unless the
+ * commit's own trailer names us: the other session wrote it at commit time,
+ * we are guessing at the end. An `unknown`/`detected-*` placeholder is not a
+ * session and may be replaced.
+ */
+export function commitsThisSessionMayNote(repoPath: string, state: SessionState, shas: string[]): string[] {
+  const wanted = [...new Set(shas.filter((s) => /^[a-fA-F0-9]{7,40}$/.test(s)))];
+  if (wanted.length === 0) return [];
+  const facts = readCommitOwnershipFactsBatch(repoPath, wanted);
+  const factsFor = (sha: string): CommitOwnershipFacts | undefined => {
+    const lower = sha.toLowerCase();
+    if (facts.has(lower)) return facts.get(lower);
+    for (const [full, f] of facts) if (full.startsWith(lower)) return f;
+    return undefined;
+  };
+  let localEmail = '';
+  try { localEmail = localCommitterEmail(repoPath); } catch { localEmail = ''; }
+  const commonDir = gitCommonDirOnce(repoPath);
+  return wanted.filter((sha) => {
+    // A failed batch read leaves `facts` empty: undefined makes the predicate read the commit itself.
+    const f = factsFor(sha);
+    if (!commitBelongsToSession(repoPath, sha, state, localEmail, f, commonDir)) return false;
+    const existing = existingNoteSessionId(repoPath, sha);
+    if (!existing || existing === state.sessionId || !/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(existing)) return true;
+    const body = f?.body ?? readCommitOwnershipFacts(repoPath, sha)?.body ?? '';
+    return commitTrailerBelongsToSession(body, { sessionId: state.sessionId }) === 'self';
+  });
+}
+
+function existingNoteSessionId(repoPath: string, sha: string): string | null {
+  try {
+    const raw = execFileSync('git', ['notes', '--ref=origin', 'show', sha], { ...GIT_READ_OPTS, cwd: repoPath }).toString();
+    const id = JSON.parse(raw)?.origin?.sessionId;
+    return typeof id === 'string' ? id : null;
+  } catch { return null; }
+}
+
+/**
  * Does this commit's trailer name a session that actually EXISTS on this
  * machine, other than us?
  *
@@ -2060,6 +2031,8 @@ import type { ParsedTranscript, PromptFileMapping } from '../transcript.js';
 // every existing `from './commands/hooks.js'` import keeps resolving.
 import { AGY_CACHE_MAX_AGE_MS, AGY_WATCH_LOCK_FRESH_MS, MAX_PENDING_PROMPT_CHANGES, agyDetectSessionCommit, agyEvaluatePreTool, agyGlobToRegex, agyOpenTurn, agyRulesCachePath, agySessionTag, agyToolPaths, discoverLatestAgyConversation, dropPhantomNestedRepoDeletions, handleAntigravity, mergePendingPromptChanges, pruneAgyRulesCaches, readAgyRulesCache, registerAgySessionState, spawnAgyContextRefresh, spawnAgyWatcher, writeAgyRulesCache } from './hooks/antigravity.js';
 import { newCaptureStamp } from '../capture-stamp.js';
+import { localCommitterEmail, readCommitOwnershipFactsBatch, type CommitOwnershipFacts } from '../commit-ownership-facts.js';
+export { localCommitterEmail, readCommitOwnershipFactsBatch, type CommitOwnershipFacts } from '../commit-ownership-facts.js';
 export { AGY_CACHE_MAX_AGE_MS, AGY_WATCH_LOCK_FRESH_MS, MAX_PENDING_PROMPT_CHANGES, agyDetectSessionCommit, agyEvaluatePreTool, agyGlobToRegex, agyOpenTurn, agyRulesCachePath, agySessionTag, agyToolPaths, discoverLatestAgyConversation, dropPhantomNestedRepoDeletions, handleAntigravity, mergePendingPromptChanges, pruneAgyRulesCaches, readAgyRulesCache, registerAgySessionState, spawnAgyContextRefresh, spawnAgyWatcher, writeAgyRulesCache };
 export type { AgyRulesCache } from './hooks/antigravity.js';
 
@@ -2223,7 +2196,7 @@ function spawnBackgroundHook(agentSlug: string, event: string, input: Record<str
  */
 // (sessionMatchesAgent moved to agents/registry.ts)
 
-export const ORIGIN_MANAGED_MARKER = '<!-- origin-managed -->';
+export { ORIGIN_MANAGED_MARKER } from '../managed-block-diff.js';
 
 /**
  * Every repo-resident context file Origin manages with an
@@ -2480,10 +2453,9 @@ export function buildOriginFrameworkGuidance(): string {
   ].join('\n');
 }
 
-// Anchor where the human-facing portion of the preamble begins. Everything
-// before it (budget banner, agent system prompt) is either already surfaced
-// on its own stderr line or is model-only config, not a user banner.
-export const PREAMBLE_VISIBLE_ANCHOR = 'Origin: Session tracking active';
+// Anchor where the human-facing portion of the preamble begins — defined
+// beside the managed-block reader, which needs it too.
+export { PREAMBLE_VISIBLE_ANCHOR } from '../managed-block-diff.js';
 
 // ─── Concurrent Session State Lookup ──────────────────────────────────────
 
@@ -3360,23 +3332,76 @@ export function filesLeftByForeignCommits(
   let localEmail = '';
   try { localEmail = localCommitterEmail(repoPath); } catch { localEmail = ''; }
   const commonDir = gitCommonDirOnce(repoPath);
-  let budget = FOREIGN_WINDOW_FILE_BUDGET;
-  for (const sha of inWindow) {
-    if (budget <= 0) break;
-    if (commitBelongsToSession(repoPath, sha, state, localEmail, undefined, commonDir)) continue;
-    for (const file of commitChangedFiles(repoPath, sha)) {
-      if (budget-- <= 0) break;
-      if (pulled.has(file)) continue;
-      const atCommit = readFileAtRev(repoPath, sha, file);
-      let working: string | null;
-      try {
-        const abs = path.join(repoPath, file);
-        working = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : null;
-      } catch { continue; }
-      if (atCommit === working) pulled.add(file);
+  // One git process for the window's facts, not a `git show` per commit. A sha
+  // the batch did not return (or a failed batch) is read per commit, as before.
+  const facts = inWindow.length >= 2 ? readCommitOwnershipFactsBatch(repoPath, inWindow) : new Map<string, CommitOwnershipFacts>();
+  return filesTheWorkingTreeStillHolds(repoPath, inWindow,
+    (sha) => !commitBelongsToSession(repoPath, sha, state, localEmail, facts.get(sha.toLowerCase()), commonDir));
+}
+
+/**
+ * The walk both `filesLeftBy…` exclusions share: newest first, for each commit
+ * `include` accepts, each file it changed whose working-tree content is still
+ * exactly what that commit left — within FOREIGN_WINDOW_FILE_BUDGET file visits.
+ *
+ * It read one `diff-tree` per commit and one `git show <sha>:<path>` per file:
+ * ~330 spawns for a window of 300 pulled commits. The commits' file lists and
+ * the files' bytes are now read in batches, and the walk is run twice — once
+ * to name the reads, once to compare — because the budget is spent per file
+ * visit before anything is compared, so where it runs out does not depend on
+ * what the reads return. Whatever a batch does not answer is read as before.
+ */
+function filesTheWorkingTreeStillHolds(
+  repoPath: string, inWindow: string[], include: (sha: string) => boolean,
+): Set<string> {
+  const out = new Set<string>();
+  const included = new Map<string, boolean>();
+  const includes = (sha: string): boolean => {
+    if (!included.has(sha)) included.set(sha, include(sha));
+    return included.get(sha)!;
+  };
+  let exact: boolean | undefined;
+  const batchesAreExact = (): boolean => (exact ??= batchedReadsMatchPerCommitReads(repoPath));
+  // File lists in chunks from the commit the walk reached, so a budget spent
+  // on the first commits does not ask ownership of the whole window.
+  const names = new Map<string, string[]>();
+  const namesOf = (sha: string): string[] => {
+    if (!names.has(sha)) {
+      const at = inWindow.indexOf(sha);
+      const chunk = inWindow.slice(at, at + 100).filter((c) => !names.has(c) && includes(c));
+      if (chunk.length >= 2 && batchesAreExact()) {
+        for (const [commit, files] of commitChangedFilesBatch(repoPath, chunk)) names.set(commit, files);
+      }
+      if (!names.has(sha)) names.set(sha, commitChangedFiles(repoPath, sha));
     }
-  }
-  return pulled;
+    return names.get(sha)!;
+  };
+  const walk = (visit: (sha: string, file: string) => void): void => {
+    let budget = FOREIGN_WINDOW_FILE_BUDGET;
+    for (const sha of inWindow) {
+      if (budget <= 0) break;
+      if (!includes(sha)) continue;
+      for (const file of namesOf(sha)) {
+        if (budget-- <= 0) break;
+        visit(sha, file);
+      }
+    }
+  };
+  const pairs: Array<[string, string]> = [];
+  walk((sha, file) => pairs.push([sha, file]));
+  const bytes = pairs.length >= 2 && batchesAreExact() ? readFilesAtRevBatch(repoPath, pairs) : new Map<string, string | null>();
+  walk((sha, file) => {
+    if (out.has(file)) return;
+    const key = `${sha}:${file}`;
+    const atCommit = bytes.has(key) ? bytes.get(key)! : readFileAtRev(repoPath, sha, file);
+    let working: string | null;
+    try {
+      const abs = path.join(repoPath, file);
+      working = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : null;
+    } catch { return; }
+    if (atCommit === working) out.add(file);
+  });
+  return out;
 }
 
 /**
@@ -3421,27 +3446,13 @@ export function filesLeftByOwnEarlierCommits(
   // The turn being closed. Its OWN commit must stay in the window — a turn that
   // commits its work is still the turn that wrote it.
   const thisTurnId = (state.promptTurnIds || [])[promptIndex];
-  let budget = FOREIGN_WINDOW_FILE_BUDGET;
-  for (const sha of inWindow) {
-    if (budget <= 0) break;
+  return filesTheWorkingTreeStillHolds(repoPath, inWindow, (sha) => {
     const owner = mappings.find((m) => m.sha && sameSha(m.sha, sha));
     // No mapping means we do not know which turn made it; that is the foreign
     // check's question, not this one. Silence here, not a guess.
-    if (!owner?.turnId) continue;
-    if (thisTurnId && owner.turnId === thisTurnId) continue;
-    for (const file of commitChangedFiles(repoPath, sha)) {
-      if (budget-- <= 0) break;
-      if (out.has(file)) continue;
-      const atCommit = readFileAtRev(repoPath, sha, file);
-      let working: string | null;
-      try {
-        const abs = path.join(repoPath, file);
-        working = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : null;
-      } catch { continue; }
-      if (atCommit === working) out.add(file);
-    }
-  }
-  return out;
+    if (!owner?.turnId) return false;
+    return !(thisTurnId && owner.turnId === thisTurnId);
+  });
 }
 
 /**
@@ -3467,7 +3478,7 @@ export function inheritedBaselineForTurn(
   promptIndex: number,
 ): string | null {
   try {
-    return inheritedBaseline(baselineSha, inheritedWindowDeps(repoPath, state, promptIndex));
+    return inheritedBaseline(baselineSha, inheritedWindowDeps(repoPath, state, promptIndex, [baselineSha]));
   } catch {
     return null;
   }
@@ -3480,7 +3491,7 @@ export function inheritedBeforeStatesForTurn(
   promptIndex: number,
 ): Map<string, string | null> {
   try {
-    return inheritedBeforeStates(baselineSha, inheritedWindowDeps(repoPath, state, promptIndex));
+    return inheritedBeforeStates(baselineSha, inheritedWindowDeps(repoPath, state, promptIndex, [baselineSha]));
   } catch {
     return new Map();
   }
@@ -3524,17 +3535,22 @@ export function inheritedFileSourcesForTurn(
 ): Map<string, string> | null {
   try {
     const opts = { ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8' as const };
-    const base = inheritedWindowDeps(repoPath, state, promptIndex);
+    const base = inheritedWindowDeps(repoPath, state, promptIndex, [baselineSha]);
     const end = endSha && /^[a-fA-F0-9]{7,40}$/.test(endSha) ? endSha : null;
     let gaveUp = false;
     const sources = inheritedFileSources(baselineSha, files, {
       ...base,
       ...(end ? { head: () => end } : {}),
-      listWindowTouching: (sha, paths) => execFileSync(
-        'git', ['rev-list', `${sha}..${end || base.head!()}`, '--', ...paths], opts,
-      ).split('\n').map((s) => s.trim()).filter(Boolean),
-      isMerge: (sha) => execFileSync('git', ['rev-list', '--parents', '-n', '1', sha], opts)
-        .trim().split(/\s+/).length > 2,
+      listWindowTouching: (sha, paths) => {
+        const to = end || base.head!();
+        const window = execFileSync('git', ['rev-list', `${sha}..${to}`, '--', ...paths], opts)
+          .split('\n').map((s) => s.trim()).filter(Boolean);
+        // `isOwnWork` and `changedFiles` are asked of these; read them at once.
+        base.primeOwnership(window);
+        base.noteRange(sha, to);
+        base.noteWindow(window);
+        return window;
+      },
     }, () => { gaveUp = true; });
     return gaveUp ? null : sources;
   } catch {
@@ -3565,7 +3581,7 @@ export function scopedCommitForTurn(
   if (baselineSha && files.length > 0) {
     try {
       const opts = { ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8' as const };
-      const deps = inheritedWindowDeps(repoPath, state, promptIndex);
+      const deps = inheritedWindowDeps(repoPath, state, promptIndex, [baselineSha]);
       inherited = inheritedFileSources(baselineSha, files, {
         ...deps,
         // The window this commit closes, whichever turn is open now.
@@ -3574,10 +3590,10 @@ export function scopedCommitForTurn(
           const window = execFileSync('git', ['rev-list', `${sha}..${commitSha}`, '--', ...paths], opts)
             .split('\n').map((s) => s.trim()).filter(Boolean);
           deps.primeOwnership(window);
+          deps.noteRange(sha, commitSha);
+          deps.noteWindow(window);
           return window;
         },
-        isMerge: (sha) => execFileSync('git', ['rev-list', '--parents', '-n', '1', sha], opts)
-          .trim().split(/\s+/).length > 2,
       });
     } catch { inherited = new Map(); }
   }
@@ -3609,7 +3625,7 @@ export function windowInheritsCommitsForTurn(
   promptIndex: number,
 ): boolean {
   try {
-    const deps = inheritedWindowDeps(repoPath, state, promptIndex);
+    const deps = inheritedWindowDeps(repoPath, state, promptIndex, [fromShadow, toShadow]);
     const start = deps.baselineCommit!(fromShadow);
     const end = toShadow ? deps.baselineCommit!(toShadow) : deps.head!();
     const hex = /^[a-fA-F0-9]{7,40}$/;
@@ -3645,7 +3661,7 @@ export function inheritedFilesForTurn(
 ): Set<string> {
   const out = new Set<string>();
   try {
-    const deps = inheritedWindowDeps(repoPath, state, promptIndex);
+    const deps = inheritedWindowDeps(repoPath, state, promptIndex, [fromShadow, toShadow]);
     const start = deps.baselineCommit!(fromShadow);
     const end = deps.baselineCommit!(toShadow);
     const hex = /^[a-fA-F0-9]{7,40}$/;
@@ -3655,23 +3671,197 @@ export function inheritedFilesForTurn(
       ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
     }).split('\n').map((s) => s.trim()).filter(Boolean);
     deps.primeOwnership(shas);
+    // The window's foreign commits' file lists, then every file's bytes at its
+    // commit and at the end shadow, each in one git process — a merged main of
+    // 300 commits cost a `diff-tree` per commit and two `git show` per file.
+    // Whatever a batch does not answer is read the old way.
+    const exact = batchedReadsMatchPerCommitReads(repoPath);
+    const foreign = shas.filter((sha) => !deps.isOwnWork(sha));
+    const names = exact ? commitChangedFilesBatch(repoPath, foreign) : new Map<string, string[]>();
+    const pairs: Array<[string, string]> = [];
     let budget = FOREIGN_WINDOW_FILE_BUDGET;
     const seen = new Set<string>();
     // Newest first: the last commit to touch a file is the one whose bytes the
     // end of the window can still hold.
-    for (const sha of shas) {
-      if (deps.isOwnWork(sha)) continue;
-      for (const file of deps.changedFiles(sha)) {
+    walk: for (const sha of foreign) {
+      for (const file of names.get(sha) ?? deps.changedFiles(sha)) {
         if (seen.has(file)) continue;
         seen.add(file);
-        if (budget-- <= 0) return out;
-        if (deps.readAtRev(sha, file) === deps.readAtRev(toShadow, file)) out.add(file);
+        if (budget-- <= 0) break walk;
+        pairs.push([sha, file]);
       }
+    }
+    const blobs = exact
+      ? readFilesAtRevBatch(repoPath, pairs.flatMap(([sha, file]) => [[sha, file], [toShadow, file]] as Array<[string, string]>))
+      : new Map<string, string | null>();
+    const at = (rev: string, file: string): string | null => {
+      const key = `${rev}:${file}`;
+      return blobs.has(key) ? blobs.get(key)! : deps.readAtRev(rev, file);
+    };
+    for (const [sha, file] of pairs) {
+      if (at(sha, file) === at(toShadow, file)) out.add(file);
     }
     return out;
   } catch {
     return new Set();
   }
+}
+
+/**
+ * Whether one `git log --name-only` and one `git cat-file --batch` answer
+ * exactly what `commitChangedFiles` and `readFileAtRev` do per commit. Those
+ * run `diff-tree` and `git show <rev>:<path>`, which ignore or apply config the
+ * batch reads would not: a textconv driver rewrites what `git show` prints for
+ * a blob, and an order file or `diff.relative` reshapes porcelain name lists.
+ * With any of those set, callers keep the per-commit reads.
+ */
+function batchedReadsMatchPerCommitReads(repoPath: string): boolean {
+  try {
+    const out = execFileSync('git', ['config', '--get-regexp', '^diff\\.(orderfile|relative|.*\\.textconv)$'], {
+      ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+    });
+    return out.trim() === '';
+  } catch (err: any) {
+    // `--get-regexp` exits 1 when nothing matches, which is the answer we want.
+    return err?.status === 1 && !String(err?.stdout || '').trim();
+  }
+}
+
+/**
+ * `commitChangedFiles` for many commits in one git process, keyed by the sha
+ * as given. A commit missing from the result — or every commit, when the read
+ * fails — is for the caller to read per commit.
+ *
+ * `diff-tree -r --root` lists nothing for a merge and `commitChangedFiles`
+ * then lists its first-parent diff; `--diff-merges=first-parent` gives that
+ * list in the same pass, and for any other commit the same one diff-tree does.
+ */
+export function commitChangedFilesBatch(repoPath: string, shas: string[]): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const wanted = [...new Set(shas.filter((s) => /^[a-fA-F0-9]{7,40}$/.test(s)))];
+  if (wanted.length < 2) return out;
+  try {
+    const raw = execFileSync('git', [
+      '-c', 'diff.ignoreSubmodules=none', 'log', '--no-walk=unsorted', '--stdin', '--no-show-signature',
+      '--format=%x1e%H', '--name-only', '--no-renames', '--root', '--diff-merges=first-parent',
+    ], { ...GIT_READ_OPTS, timeout: READ_BATCH_TIMEOUT_MS, cwd: repoPath, encoding: 'utf-8', input: wanted.join('\n') + '\n', maxBuffer: 256 * 1024 * 1024 });
+    const byFull = new Map<string, string[]>();
+    for (const record of raw.split('\x1e').slice(1)) {
+      const newline = record.indexOf('\n');
+      const full = (newline < 0 ? record : record.slice(0, newline)).trim().toLowerCase();
+      // Trimmed as a whole, as `gitOrNull` trims `commitChangedFiles`' output.
+      const block = newline < 0 ? '' : record.slice(newline + 1);
+      if (/^[a-f0-9]{40,64}$/.test(full)) byFull.set(full, block.trim().split('\n').filter(Boolean));
+    }
+    for (const sha of wanted) {
+      const matches = [...byFull.keys()].filter((full) => full.startsWith(sha.toLowerCase()));
+      if (matches.length === 1) out.set(sha, byFull.get(matches[0])!);
+    }
+  } catch { return new Map(); }
+  return out;
+}
+
+// One batched read stands in for hundreds of per-commit reads, each of which
+// had its own few-second allowance. A batch that still runs out is read the
+// old way, so this only decides how long before falling back.
+const READ_BATCH_TIMEOUT_MS = 20_000;
+
+// `readFileAtRev` reads at most this many bytes of one file; past it the read
+// fails and answers null.
+const READ_AT_REV_MAX_BYTES = 10 * 1024 * 1024;
+// Most file bytes one batched read holds in memory at once. Blobs past it are
+// read per file, as they were.
+const READ_AT_REV_BATCH_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * `readFileAtRev` for many (rev, path) pairs in two git processes, keyed
+ * `${rev}:${path}`. Only pairs whose answer is certain are returned: a blob
+ * (its bytes, or null past `readFileAtRev`'s size limit), a path absent at
+ * that rev (null), or a pair `readFileAtRev` refuses outright (null). Anything
+ * else — a tree or submodule at that path, a path git cannot take on stdin, a
+ * failed read — is left out for the caller to read per file.
+ */
+export function readFilesAtRevBatch(repoPath: string, pairs: Array<[string, string]>): Map<string, string | null> {
+  const out = new Map<string, string | null>();
+  const specs: string[] = [];
+  const queued = new Set<string>();
+  for (const [rev, file] of pairs) {
+    const key = `${rev}:${file}`;
+    if (out.has(key) || queued.has(key)) continue;
+    if (!rev || !/^[a-fA-F0-9]+$/.test(rev) || isUnsafeGitShowPath(file)) { out.set(key, null); continue; }
+    if (/[\r\n]/.test(file)) continue;
+    queued.add(key);
+    specs.push(key);
+  }
+  if (specs.length < 2) return out;
+  try {
+    const checked = execFileSync('git', ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'], {
+      ...GIT_READ_OPTS, timeout: READ_BATCH_TIMEOUT_MS, cwd: repoPath, encoding: 'utf-8', input: specs.join('\n') + '\n', maxBuffer: 64 * 1024 * 1024,
+    }).split('\n');
+    const toRead: Array<{ key: string; oid: string; size: number }> = [];
+    let batchBytes = 0;
+    specs.forEach((key, i) => {
+      const line = checked[i] || '';
+      if (line === `${key} missing`) { out.set(key, null); return; }
+      const [oid = '', type = '', size = ''] = line.split(' ');
+      if (type !== 'blob' || !/^[a-f0-9]{40,64}$/.test(oid)) return;
+      const bytes = Number(size);
+      if (bytes > READ_AT_REV_MAX_BYTES) { out.set(key, null); return; }
+      if (batchBytes + bytes > READ_AT_REV_BATCH_MAX_BYTES) return;
+      batchBytes += bytes;
+      toRead.push({ key, oid, size: bytes });
+    });
+    if (toRead.length === 0) return out;
+    const oids = [...new Set(toRead.map((r) => r.oid))];
+    // No encoding: blob bytes are decoded per file below, exactly as each
+    // `git show` decoded its own output.
+    const { encoding: _utf8, ...bytesOpts } = GIT_READ_OPTS;
+    const raw: Buffer = execFileSync('git', ['cat-file', '--batch'], {
+      ...bytesOpts, timeout: READ_BATCH_TIMEOUT_MS, cwd: repoPath,
+      input: oids.join('\n') + '\n', maxBuffer: batchBytes + oids.length * 128 + 1024,
+    });
+    const content = new Map<string, string>();
+    let pos = 0;
+    for (const oid of oids) {
+      const eol = raw.indexOf(0x0a, pos);
+      if (eol < 0) break;
+      const [name, type, size] = raw.subarray(pos, eol).toString('utf-8').split(' ');
+      if (name !== oid || type !== 'blob') break;
+      const start = eol + 1;
+      const end = start + Number(size);
+      content.set(oid, raw.subarray(start, end).toString('utf-8'));
+      pos = end + 1;
+    }
+    for (const { key, oid } of toRead) {
+      if (content.has(oid)) out.set(key, content.get(oid)!);
+    }
+  } catch { /* the caller reads what is not here */ }
+  return out;
+}
+
+/**
+ * `readFileAtRev` that can be told which (rev, path) pairs are coming and then
+ * reads them in one batch — for a loop that reads a file per iteration. A pair
+ * the batch did not answer, or one nobody announced, is read as before.
+ */
+export function batchedReadAtRev(repoPath: string): {
+  prime: (pairs: Array<[string, string]>) => void;
+  read: (rev: string, file: string) => string | null;
+} {
+  const known = new Map<string, string | null>();
+  let exact: boolean | undefined;
+  return {
+    prime: (pairs) => {
+      const missing = pairs.filter(([rev, file]) => !known.has(`${rev}:${file}`));
+      if (missing.length < 2) return;
+      if (!(exact ??= batchedReadsMatchPerCommitReads(repoPath))) return;
+      for (const [key, content] of readFilesAtRevBatch(repoPath, missing)) known.set(key, content);
+    },
+    read: (rev, file) => {
+      const key = `${rev}:${file}`;
+      return known.has(key) ? known.get(key)! : readFileAtRev(repoPath, rev, file);
+    },
+  };
 }
 
 /** The reads both resolvers above share, bound to one repo and one turn.
@@ -3681,15 +3871,51 @@ function inheritedWindowDeps(
   repoPath: string,
   state: SessionState & { commitTurns?: Array<{ sha?: string; turnId?: string }>; promptTurnIds?: string[] },
   promptIndex: number,
-): InheritedWindowDeps & { primeOwnership: (shas: string[]) => void } {
+  // The shadows the caller will hand `baselineCommit`, so they are read in the
+  // same git process as the next turn's shadow.
+  shadows: Array<string | null | undefined> = [],
+): InheritedWindowDeps & {
+  primeOwnership: (shas: string[]) => void;
+  /** A range a caller listed itself, so the graph reads can cover it. */
+  noteRange: (from: string, to: string) => void;
+  /** A window a caller listed itself, so its changed files are read at once. */
+  noteWindow: (shas: string[]) => void;
+} {
   const mappings = state.commitTurns || [];
   const thisTurnId = (state.promptTurnIds || [])[promptIndex];
   let localEmail = '';
   try { localEmail = localCommitterEmail(repoPath); } catch { localEmail = ''; }
+  // Subject and parents per commit, as `git show -s --format=%s%n%P` splits
+  // them. A closed turn's resolvers asked for the next shadow here, then again
+  // as `toShadow`, then for `fromShadow` — one `git show` each, repeats included.
+  const commitHeads = new Map<string, string[]>();
+  const primeHeads = (shas: Array<string | null | undefined>): void => {
+    const wanted = [...new Set(shas.filter((s): s is string => !!s && /^[a-fA-F0-9]{7,40}$/.test(s) && !commitHeads.has(s)))];
+    if (wanted.length < 2) return;
+    try {
+      const raw = execFileSync('git', ['log', '--no-walk=unsorted', '--stdin', '--format=%H%x00%s%x00%P%x1e'], {
+        ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8', input: wanted.join('\n') + '\n',
+      });
+      const byFull = new Map<string, string[]>();
+      for (const record of raw.split('\x1e')) {
+        const [full = '', subject = '', parents = ''] = record.replace(/^\n/, '').split('\0');
+        if (/^[a-f0-9]{40,64}$/.test(full.trim())) byFull.set(full.trim(), `${subject}\n${parents}`.trim().split('\n'));
+      }
+      // A requested sha may be abbreviated; git resolved it to one commit.
+      for (const sha of wanted) {
+        const matches = [...byFull.keys()].filter((full) => full.startsWith(sha.toLowerCase()));
+        if (matches.length === 1) commitHeads.set(sha, byFull.get(matches[0])!);
+      }
+    } catch { /* read per sha below, as before */ }
+  };
   const baselineCommit = (sha: string): string => {
-    const record = execFileSync('git', ['show', '-s', '--format=%s%n%P', sha], {
-      ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
-    }).trim().split('\n');
+    let record = commitHeads.get(sha);
+    if (!record) {
+      record = execFileSync('git', ['show', '-s', '--format=%s%n%P', sha], {
+        ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+      }).trim().split('\n');
+      commitHeads.set(sha, record);
+    }
     return record[0].startsWith('origin shadow ') ? record[1].split(' ')[0] : sha;
   };
   // A COMPLETED turn's window closes at the next turn's shadow, exactly as
@@ -3702,6 +3928,7 @@ function inheritedWindowDeps(
   // flight (no next shadow) reads up to HEAD. An unresolvable next shadow
   // keeps today's behaviour.
   const nextShadow = (state.promptShadows || []).find((ps) => ps.promptIndex === promptIndex + 1)?.shadowSha;
+  primeHeads([nextShadow, ...shadows]);
   let windowEnd: string | null = null;
   if (nextShadow) {
     try { windowEnd = baselineCommit(nextShadow); } catch { windowEnd = null; }
@@ -3716,6 +3943,96 @@ function inheritedWindowDeps(
     for (const [sha, facts] of readCommitOwnershipFactsBatch(repoPath, missing)) ownershipFacts.set(sha, facts);
   };
   const commonDir = gitCommonDirOnce(repoPath);
+  // The resolvers ask `changedFiles`, `isAncestor`, `isMerge` and `firstParent`
+  // one commit or one pair at a time — ~85 spawns for a turn that merged a
+  // 300-commit main. Each window they list is remembered, and past the first
+  // question one read answers the rest:
+  //
+  // - `rev-list --parents from..to` gives every commit of the range with its
+  //   parents. For two commits of one range, ancestry never leaves the range:
+  //   every commit between them descends from the older (so is not behind
+  //   `from`) and is behind the newer (so is behind `to`). A commit of the
+  //   range is also never behind `from` itself, or behind the commit a shadow
+  //   `from` stands on — the range excludes exactly those.
+  // - One `git log --name-only` lists the window's changed files.
+  //
+  // A question those cannot answer — a commit outside every range read, a root
+  // commit's parent — is asked the old way.
+  const ranges: Array<{ from: string; to: string }> = [];
+  const graphs: Array<{ from: string; to: string; commits: Map<string, string[]> }> = [];
+  const failedRanges = new Set<string>();
+  const readRangeGraph = (from: string, to: string): Map<string, string[]> => {
+    const built = graphs.find((g) => g.from === from && g.to === to);
+    if (built) return built.commits;
+    const commits = new Map<string, string[]>();
+    const out = execFileSync('git', ['rev-list', '--parents', `${from}..${to}`], {
+      ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+    });
+    for (const line of out.split('\n')) {
+      const [commit, ...parents] = line.trim().split(/\s+/);
+      if (commit) commits.set(commit, parents);
+    }
+    graphs.push({ from, to, commits });
+    return commits;
+  };
+  const noteRange = (from: string, to: string): void => {
+    if (!ranges.some((r) => r.from === from && r.to === to)) ranges.push({ from, to });
+  };
+  let graphQuestions = 0;
+  // The graph holding every sha, reading a noted range only from the second
+  // question on, so a resolver that asks once spawns no more than it did.
+  const graphHolding = (...shas: string[]): { from: string; commits: Map<string, string[]> } | null => {
+    const holds = (g: { commits: Map<string, string[]> }) => shas.every((sha) => g.commits.has(sha));
+    const known = graphs.find(holds);
+    if (known) return known;
+    if (++graphQuestions < 2) return null;
+    for (const r of ranges) {
+      const key = `${r.from}..${r.to}`;
+      if (failedRanges.has(key) || graphs.some((g) => g.from === r.from && g.to === r.to)) continue;
+      try { readRangeGraph(r.from, r.to); } catch { failedRanges.add(key); }
+    }
+    return graphs.find(holds) ?? null;
+  };
+  const reachCache = new WeakMap<Map<string, string[]>, Map<string, Set<string>>>();
+  const ancestorsInGraph = (commits: Map<string, string[]>, sha: string): Set<string> => {
+    let byTip = reachCache.get(commits);
+    if (!byTip) { byTip = new Map(); reachCache.set(commits, byTip); }
+    let reach = byTip.get(sha);
+    if (!reach) {
+      reach = new Set<string>();
+      const stack = [sha];
+      while (stack.length) {
+        const cur = stack.pop()!;
+        if (reach.has(cur) || !commits.has(cur)) continue;
+        reach.add(cur);
+        for (const parent of commits.get(cur)!) stack.push(parent);
+      }
+      byTip.set(sha, reach);
+    }
+    return reach;
+  };
+  const windows: string[][] = [];
+  const changedFilesCache = new Map<string, string[]>();
+  let batchedReadsExact: boolean | undefined;
+  const noteWindow = (shas: string[]): void => { if (shas.length >= 2) windows.push(shas); };
+  const changedFilesFor = (sha: string): string[] => {
+    const cached = changedFilesCache.get(sha);
+    if (cached) return [...cached];
+    const window = windows.find((w) => w.includes(sha));
+    if (window) {
+      windows.splice(windows.indexOf(window), 1);
+      if (batchedReadsExact === undefined) batchedReadsExact = batchedReadsMatchPerCommitReads(repoPath);
+      if (batchedReadsExact) {
+        for (const [commit, files] of commitChangedFilesBatch(repoPath, window.filter((c) => !changedFilesCache.has(c)))) {
+          changedFilesCache.set(commit, files);
+        }
+      }
+      const batched = changedFilesCache.get(sha);
+      if (batched) return [...batched];
+    }
+    return commitChangedFiles(repoPath, sha);
+  };
+  const reads = batchedReadAtRev(repoPath);
   const factsFor = (sha: string): CommitOwnershipFacts | null => {
     const key = sha.toLowerCase();
     if (!ownershipFacts.has(key)) ownershipFacts.set(key, readCommitOwnershipFacts(repoPath, sha));
@@ -3727,30 +4044,31 @@ function inheritedWindowDeps(
     head: () => windowEnd || execFileSync('git', ['rev-parse', 'HEAD'], {
       ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
     }).trim(),
-    firstParent: (sha) => execFileSync('git', ['rev-parse', `${sha}^1`], {
-      ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
-    }).trim(),
+    firstParent: (sha) => {
+      const parents = graphHolding(sha)?.commits.get(sha);
+      if (parents && parents.length > 0) return parents[0];
+      return execFileSync('git', ['rev-parse', `${sha}^1`], {
+        ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+      }).trim();
+    },
     changedFilesBetween: (from, to) => execFileSync('git', ['diff', '--name-only', '--no-renames', '-z', from, to, '--'], {
       ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
     }).split('\0').filter(Boolean),
     listWindow: (sha) => {
       const window = shasInWindow(repoPath, sha, windowEnd);
+      noteRange(sha, windowEnd || 'HEAD');
+      noteWindow(window);
       primeOwnership(window);
       return window;
     },
     primeOwnership,
+    noteRange,
+    noteWindow,
     // The same range as listWindow, with parents: ancestry among the window's
     // commits in one read rather than one merge-base spawn per pair.
     windowParents: (sha) => {
-      const graph = new Map<string, string[]>();
-      const out = execFileSync('git', ['rev-list', '--parents', `${sha}..${windowEnd || 'HEAD'}`], {
-        ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
-      });
-      for (const line of out.split('\n')) {
-        const [commit, ...parents] = line.trim().split(/\s+/);
-        if (commit) graph.set(commit, parents);
-      }
-      return graph;
+      noteRange(sha, windowEnd || 'HEAD');
+      return new Map(readRangeGraph(sha, windowEnd || 'HEAD'));
     },
     isOwnWork: (sha) => {
       const owner = mappings.find((m) => m.sha && sameSha(m.sha, sha));
@@ -3786,7 +4104,7 @@ function inheritedWindowDeps(
       // record; declining to re-baseline only leaves today's behaviour.
       return commitBelongsToSession(repoPath, sha, state, localEmail, facts, commonDir);
     },
-    changedFiles: (sha) => commitChangedFiles(repoPath, sha),
+    changedFiles: changedFilesFor,
     // A turn that inherited more than one line (checkout, then merge main)
     // started from all of them merged, not from whichever is newest by date.
     ancestryInWindow: (baseline, sha) => execFileSync('git', ['rev-list', `${baseline}..${sha}`], {
@@ -3800,13 +4118,22 @@ function inheritedWindowDeps(
     // file instead (`fileByFileTree`), which asks `inheritedFileSources` — so
     // it needs the reads post-commit gives that resolver: the window narrowed
     // by pathspec, and which merges were the turn's and what they resolved.
-    listWindowTouching: (sha, paths) => execFileSync(
-      'git', ['rev-list', `${sha}..${windowEnd || 'HEAD'}`, '--', ...paths],
-      { ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8' },
-    ).split('\n').map((s) => s.trim()).filter(Boolean),
-    isMerge: (sha) => execFileSync('git', ['rev-list', '--parents', '-n', '1', sha], {
-      ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
-    }).trim().split(/\s+/).length > 2,
+    listWindowTouching: (sha, paths) => {
+      const window = execFileSync(
+        'git', ['rev-list', `${sha}..${windowEnd || 'HEAD'}`, '--', ...paths],
+        { ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8' },
+      ).split('\n').map((s) => s.trim()).filter(Boolean);
+      noteRange(sha, windowEnd || 'HEAD');
+      noteWindow(window);
+      return window;
+    },
+    isMerge: (sha) => {
+      const parents = graphHolding(sha)?.commits.get(sha);
+      if (parents) return parents.length > 1;
+      return execFileSync('git', ['rev-list', '--parents', '-n', '1', sha], {
+        ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
+      }).trim().split(/\s+/).length > 2;
+    },
     mergeConflicts: (sha) => {
       const parents = execFileSync('git', ['rev-list', '--parents', '-n', '1', sha], {
         ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
@@ -3816,8 +4143,15 @@ function inheritedWindowDeps(
       return merged ? (merged.clean ? [] : merged.conflicted) : null;
     },
     commitWithFiles: (base, sources) => commitWithInheritedFiles(repoPath, base, sources),
-    readAtRev: (sha, file) => readFileAtRev(repoPath, sha, file),
+    readAtRev: reads.read,
+    primeReadAtRev: reads.prime,
     isAncestor: (a, b) => {
+      const both = graphHolding(a, b);
+      if (both) return a === b || ancestorsInGraph(both.commits, b).has(a);
+      // `b` is the start of a range `a` belongs to (or the commit that start's
+      // shadow stands on): the range left out everything behind it.
+      const ofA = graphs.find((g) => g.commits.has(a));
+      if (ofA && (b === ofA.from || (commitHeads.has(ofA.from) && baselineCommit(ofA.from) === b))) return false;
       try {
         execFileSync('git', ['merge-base', '--is-ancestor', a, b], { ...GIT_READ_OPTS, cwd: repoPath });
         return true;
@@ -3956,11 +4290,17 @@ export function recordShellWindowEdits(
       });
     }
 
+    // Every listed file is read at the baseline; read them in one batch.
+    const baselineReads = batchedReadAtRev(repoPath);
     const { edits, skipped } = shellWindowEdits(
       {
-        listChangedFiles: (sha) => filesChangedSinceShadow(repoPath, sha)
-          .filter((f) => !absorbed.has(f) && (!shadowChanged || shadowChanged.has(f))),
-        readAtRev: (sha, file) => readFileAtRev(repoPath, sha, file),
+        listChangedFiles: (sha) => {
+          const files = filesChangedSinceShadow(repoPath, sha)
+            .filter((f) => !absorbed.has(f) && (!shadowChanged || shadowChanged.has(f)));
+          baselineReads.prime(files.map((f) => [sha, f]));
+          return files;
+        },
+        readAtRev: baselineReads.read,
         readWorking: (file) => {
           try {
             const abs = path.join(repoPath, file);
@@ -4733,7 +5073,7 @@ async function runHookEvent(event: string, agentSlug?: string): Promise<void> {
   // deploy window, offline). Fire-and-forget and only on the slow lifecycle
   // events — pre-tool-use/user-prompt-submit stay latency-clean.
   if (event === 'session-start' || event === 'stop' || event === 'session-end') {
-    drainUpdateQueue((e, m, d) => debugLog(e, m, d)).catch(() => {});
+    drainQueueFromHook((e, m, d) => debugLog(e, m, d)).catch(() => {});
   }
 
   // Devin writes its ATIF transcript only when a CONVERSATION ends, so a turn's

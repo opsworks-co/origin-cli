@@ -5,6 +5,8 @@ import path from 'path';
 import { loadConfig } from './config.js';
 import { fetchWithTimeout, LLM_CALL_TIMEOUT_MS } from './fetch-timeout.js';
 import { cliVersion } from './cli-version.js';
+import { debugLog } from './debug-log.js';
+import { fitSessionUpdateForServer } from './session-update-size.js';
 
 function getConfig() {
   const config = loadConfig();
@@ -286,6 +288,10 @@ export const api = {
     additionalRepoPaths?: string[];
     agentSessionId?: string;
     importedFromPreviousAccount?: boolean;
+    // The WORKING root (a linked worktree's own dir), as opposed to repoPath,
+    // which is canonical. The server keeps it so the session page can tell a
+    // sibling worktree's commit from this checkout's.
+    checkoutPath?: string;
     // Recent HEAD SHAs (newest first) — lets the server's basename-fallback
     // repo gate corroborate a moved local-only checkout by SHA overlap, the
     // same proof /commits/ingest offers via commits[] + its advertisement.
@@ -310,9 +316,12 @@ export const api = {
   // timeoutForPayload). Hooks deliberately keep the default fast-fail: they are
   // killed at ~10s, and a kill skips the durable-retry enqueue entirely.
   updateSession: async (id: string, data: any, reqOpts?: { timeoutMs?: number }) => {
+    // Every producer's PATCH passes here, so this is where a turn's editsJson
+    // is held to the server's size limit (see session-update-size.ts).
+    const fitted = fitSessionUpdateForServer(data, (fit) => debugLog('api', 'editsJson fitted to the server limit', { sessionId: id, ...fit }));
     const res = await request(
       `/api/mcp/session/${id}`,
-      { method: 'PATCH', body: JSON.stringify(data) },
+      { method: 'PATCH', body: JSON.stringify(fitted) },
       reqOpts?.timeoutMs,
     );
     assertObj(res, 'updateSession');
@@ -388,6 +397,10 @@ export const api = {
       additions?: number;
       deletions?: number;
       committedAt?: string;
+      // Working root the post-commit hook ran in. ONLY post-commit's own
+      // ingest sets it — the history backfill ingests commits made anywhere
+      // and must leave it unset.
+      checkoutPath?: string;
       // Per-commit unified diff (`git diff <sha>~1..<sha>` output).
       // Stored on Commit.patch so the dashboard can render this commit's
       // changes instead of the session aggregate.
