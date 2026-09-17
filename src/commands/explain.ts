@@ -44,6 +44,13 @@ interface LocalSessionData {
   prompts?: Array<{ index: number; text: string }>;
 }
 
+interface LocalPromptChange {
+  filesChanged?: string[];
+  diff?: string;
+  linesAdded?: number;
+  linesRemoved?: number;
+}
+
 function loadLocalSession(sessionId: string, repoPath: string): LocalSessionData | null {
   try {
     const dir = resolveSessionDir(sessionId, repoPath);
@@ -53,6 +60,42 @@ function loadLocalSession(sessionId: string, repoPath: string): LocalSessionData
   } catch {
     return null;
   }
+}
+
+function loadLocalChanges(sessionId: string, repoPath: string): LocalPromptChange[] {
+  try {
+    const dir = resolveSessionDir(sessionId, repoPath);
+    if (!dir || !SAFE_ID.test(dir)) return [];
+    const raw = readSessionFile(repoPath, dir, 'changes.json');
+    if (!raw) return [];
+    const parsed = JSON.parse(raw.trim());
+    return Array.isArray(parsed?.changes) ? parsed.changes : [];
+  } catch {
+    return [];
+  }
+}
+
+function improveLocalRollupFromChanges(session: any, sessionId: string, repoPath: string): void {
+  const changes = loadLocalChanges(sessionId, repoPath);
+  if (changes.length === 0) return;
+
+  const files = Array.from(new Set(
+    changes.flatMap((c) => Array.isArray(c.filesChanged) ? c.filesChanged : []),
+  ));
+  if (files.length > 0) {
+    session.filesChanged = JSON.stringify(files);
+  }
+
+  const linesAdded = changes.reduce((n, c) => {
+    if (typeof c.linesAdded === 'number') return n + c.linesAdded;
+    return n + (c.diff || '').split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
+  }, 0);
+  const linesRemoved = changes.reduce((n, c) => {
+    if (typeof c.linesRemoved === 'number') return n + c.linesRemoved;
+    return n + (c.diff || '').split('\n').filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
+  }, 0);
+  if ((session.linesAdded || 0) === 0 && linesAdded > 0) session.linesAdded = linesAdded;
+  if ((session.linesRemoved || 0) === 0 && linesRemoved > 0) session.linesRemoved = linesRemoved;
 }
 
 function resolveSessionDir(sessionId: string, repoPath: string): string | null {
@@ -65,6 +108,110 @@ function resolveSessionDir(sessionId: string, repoPath: string): string | null {
   } catch {
     return null;
   }
+}
+
+function loadLocalExplainSession(sessionId: string, repoPath: string): { session: any; promptsText: string } | null {
+  let session: any = loadLocalSession(sessionId, repoPath);
+  let promptsText = '';
+
+  // Fallback: check ~/.origin/sessions/ state files
+  if (!session) {
+    try {
+      const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
+      const entries = fs.readdirSync(sessionsDir);
+      for (const entry of entries) {
+        if (!entry.endsWith('.json')) continue;
+        try {
+          const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, entry), 'utf-8'));
+          if (state?.sessionId?.startsWith(sessionId)) {
+            session = {
+              id: state.sessionId,
+              model: state.model || 'unknown',
+              agentSlug: state.agentSlug,
+              tokensUsed: 0,
+              costUsd: 0,
+              toolCalls: 0,
+              linesAdded: 0,
+              linesRemoved: 0,
+              durationMs: state.startedAt ? Date.now() - new Date(state.startedAt).getTime() : 0,
+              filesChanged: JSON.stringify([]),
+              createdAt: state.startedAt,
+              status: (state as any).status || 'RUNNING',
+              promptChanges: state.prompts?.map((p: string, i: number) => ({
+                promptIndex: i,
+                promptText: p,
+                filesChanged: [],
+              })) || [],
+            };
+            promptsText = state.prompts?.join('\n') || '';
+            break;
+          }
+        } catch { /* skip */ }
+      }
+    } catch { /* no sessions dir */ }
+  }
+
+  if (!session) {
+    // Try local DB as fallback
+    const prompts = getPromptsBySession(sessionId);
+    if (prompts.length === 0) return null;
+    // Build minimal session from prompts
+    session = {
+      id: sessionId,
+      model: prompts[0].model || 'unknown',
+      tokensUsed: 0,
+      costUsd: 0,
+      toolCalls: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      durationMs: 0,
+      filesChanged: JSON.stringify([...new Set(prompts.flatMap(p => p.filesChanged))]),
+      promptChanges: prompts.map(p => ({
+        promptIndex: p.promptIndex,
+        promptText: p.promptText,
+        filesChanged: p.filesChanged,
+      })),
+    };
+  } else if (session.sessionId) {
+    // session is from metadata.json — normalize
+    session = {
+      id: session.sessionId || sessionId,
+      model: session.model || 'unknown',
+      tokensUsed: session.tokensUsed || session.tokens?.total || 0,
+      inputTokens: session.inputTokens || session.tokens?.input || 0,
+      outputTokens: session.outputTokens || session.tokens?.output || 0,
+      costUsd: session.costUsd || session.cost?.usd || 0,
+      toolCalls: session.toolCalls || 0,
+      linesAdded: session.linesAdded || session.lines?.added || 0,
+      linesRemoved: session.linesRemoved || session.lines?.removed || 0,
+      durationMs: session.durationMs || 0,
+      filesChanged: JSON.stringify(session.filesChanged || []),
+      branch: session.branch || session.git?.branch,
+      startedAt: session.startedAt,
+      endedAt: session.endedAt,
+      status: session.status || 'COMPLETED',
+      prompts: session.prompts,
+    };
+  }
+
+  improveLocalRollupFromChanges(session, sessionId, repoPath);
+
+  // Load prompts markdown from git
+  const promptsMd = loadLocalPromptsMarkdown(sessionId, repoPath);
+  if (promptsMd) {
+    promptsText = promptsMd;
+    // Parse prompts from markdown into promptChanges if not present
+    if (!session.promptChanges) {
+      const parsed = promptsMd.split(/^## Prompt \d+/m).filter(Boolean);
+      session.promptChanges = parsed.map((block: string, i: number) => ({
+        promptIndex: i,
+        promptText: block.trim().slice(0, 500),
+        filesChanged: [],
+      }));
+    }
+  }
+
+  return { session, promptsText };
 }
 
 function loadLocalPromptsMarkdown(sessionId: string, repoPath: string): string | null {
@@ -204,7 +351,16 @@ export async function explainCommand(target?: string, opts?: { short?: boolean; 
 
     if (connected && config) {
       // ── Connected mode: fetch from API ──
-      session = await api.getSession(sessionId!);
+      try {
+        session = await api.getSession(sessionId!);
+      } catch (err: any) {
+        const notFound = err?.status === 404 || /not found/i.test(err?.message || String(err));
+        if (!notFound || !repoPath) throw err;
+        const local = loadLocalExplainSession(sessionId!, repoPath);
+        if (!local) throw err;
+        session = local.session;
+        promptsText = local.promptsText;
+      }
       if (session.promptChanges) {
         promptsText = session.promptChanges.map((pc: any) => pc.promptText).join('\n');
       }
@@ -215,106 +371,14 @@ export async function explainCommand(target?: string, opts?: { short?: boolean; 
         return;
       }
 
-      session = loadLocalSession(sessionId!, repoPath);
-
-      // Fallback: check ~/.origin/sessions/ state files
-      if (!session) {
-        try {
-          const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
-          const entries = fs.readdirSync(sessionsDir);
-          for (const entry of entries) {
-            if (!entry.endsWith('.json')) continue;
-            try {
-              const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, entry), 'utf-8'));
-              if (state?.sessionId?.startsWith(sessionId!)) {
-                session = {
-                  id: state.sessionId,
-                  model: state.model || 'unknown',
-                  agentSlug: state.agentSlug,
-                  tokensUsed: 0,
-                  costUsd: 0,
-                  toolCalls: 0,
-                  linesAdded: 0,
-                  linesRemoved: 0,
-                  durationMs: state.startedAt ? Date.now() - new Date(state.startedAt).getTime() : 0,
-                  filesChanged: JSON.stringify([]),
-                  createdAt: state.startedAt,
-                  status: (state as any).status || 'RUNNING',
-                  promptChanges: state.prompts?.map((p: string, i: number) => ({
-                    promptIndex: i,
-                    promptText: p,
-                    filesChanged: [],
-                  })) || [],
-                };
-                promptsText = state.prompts?.join('\n') || '';
-                break;
-              }
-            } catch { /* skip */ }
-          }
-        } catch { /* no sessions dir */ }
+      const local = loadLocalExplainSession(sessionId!, repoPath);
+      if (!local) {
+        console.log(chalk.red(`Session ${sessionId} not found locally.`));
+        console.log(chalk.gray('Run: origin db import    (to import from origin-sessions branch)'));
+        return;
       }
-
-      if (!session) {
-        // Try local DB as fallback
-        const prompts = getPromptsBySession(sessionId!);
-        if (prompts.length === 0) {
-          console.log(chalk.red(`Session ${sessionId} not found locally.`));
-          console.log(chalk.gray('Run: origin db import    (to import from origin-sessions branch)'));
-          return;
-        }
-        // Build minimal session from prompts
-        session = {
-          id: sessionId,
-          model: prompts[0].model || 'unknown',
-          tokensUsed: 0,
-          costUsd: 0,
-          toolCalls: 0,
-          linesAdded: 0,
-          linesRemoved: 0,
-          durationMs: 0,
-          filesChanged: JSON.stringify([...new Set(prompts.flatMap(p => p.filesChanged))]),
-          promptChanges: prompts.map(p => ({
-            promptIndex: p.promptIndex,
-            promptText: p.promptText,
-            filesChanged: p.filesChanged,
-          })),
-        };
-      } else {
-        // session is from metadata.json — normalize
-        session = {
-          id: session.sessionId || sessionId,
-          model: session.model || 'unknown',
-          tokensUsed: session.tokensUsed || 0,
-          inputTokens: session.inputTokens || 0,
-          outputTokens: session.outputTokens || 0,
-          costUsd: session.costUsd || 0,
-          toolCalls: session.toolCalls || 0,
-          linesAdded: session.linesAdded || 0,
-          linesRemoved: session.linesRemoved || 0,
-          durationMs: session.durationMs || 0,
-          filesChanged: JSON.stringify(session.filesChanged || []),
-          branch: session.branch || session.git?.branch,
-          startedAt: session.startedAt,
-          endedAt: session.endedAt,
-          status: session.status || 'COMPLETED',
-          prompts: session.prompts,
-        };
-      }
-
-      // Load prompts markdown from git
-      const promptsMd = loadLocalPromptsMarkdown(sessionId!, repoPath);
-      if (promptsMd) {
-        promptsText = promptsMd;
-        // Parse prompts from markdown into promptChanges if not present
-        if (!session.promptChanges) {
-          const parsed = promptsMd.split(/^## Prompt \d+/m).filter(Boolean);
-          session.promptChanges = parsed.map((block: string, i: number) => ({
-            promptIndex: i,
-            promptText: block.trim().slice(0, 500),
-            filesChanged: [],
-          }));
-        }
-      }
+      session = local.session;
+      promptsText = local.promptsText;
     }
 
     // ── JSON output ──
