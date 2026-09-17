@@ -2,6 +2,7 @@ import { spawnSync } from 'child_process';
 import { git, gitDetailed, gitOrNull } from './utils/exec.js';
 import { isOriginAutoManagedPath, shouldIgnoreFile, stripIgnoredSectionsFromDiff, trimDiffText } from './ignore-patterns.js';
 import { combineApplyableTurnDiff } from './applyable-turn-diff.js';
+import { mergeOwnDiff } from './history-backfill.js';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -596,7 +597,7 @@ export function captureGitState(
       // actually shows. Diff-content filtering still happens at the patch
       // layer (stripIgnoredSectionsFromDiff), which is the right place to
       // hide bookkeeping changes without lying about file counts.
-      const filesChanged = filesRaw ? filesRaw.split('\n').filter(Boolean) : [];
+      let filesChanged = filesRaw ? filesRaw.split('\n').filter(Boolean) : [];
       // Per-commit line counts from --numstat ("added<TAB>removed<TAB>path"
       // per file; binary files report "-"). Summed across files.
       let cAdded = 0;
@@ -675,15 +676,26 @@ export function captureGitState(
           }
         } catch { /* unprovable — report nothing rather than a guess */ }
       }
-      // Per-commit unified patch — git truth for the committed lines, so the
-      // API doesn't have to reconstruct them. `git show --format=` prints only
-      // the diff (no commit header); `-m --first-parent` gives a merge commit a
-      // real patch too. Strip ignored sections and cap so a huge commit can't
-      // blow the payload; drop it entirely past the cap (better no patch than a
-      // truncated, malformed one that mis-parses in blame).
+      // A merge's first-parent patch includes the absorbed branch. Send only
+      // its resolution, just as post-commit does; otherwise the API sees an
+      // empty file list/0 counts beside a nonempty patch and recounts inherited
+      // lines as authored work. Keep metadata uncapped when the patch is large.
       let patch = '';
       try {
-        const raw = diffWithinBudget(['show', '--format=', '-m', '--first-parent'], [sha], gitOpts, wantFullContext);
+        const merge = mergeOwnDiff(repoPath, sha);
+        if (merge) {
+          filesChanged = merge.filesChanged;
+          const counts = filesChanged.length > 0
+            ? numstatByFile(['diff', '--numstat', merge.baseline || `${sha}^1`, sha, '--', ...filesChanged], gitOpts, undefined, true)
+            : [];
+          if (counts) {
+            const totals = sumLineTotals(counts);
+            cAdded = totals.added;
+            cRemoved = totals.removed;
+          }
+        }
+        const raw = merge ? merge.diff
+          : diffWithinBudget(['show', '--format='], [sha], gitOpts, wantFullContext);
         patch = stripIgnoredSectionsFromDiff(raw);
         if (patch.length > MAX_DIFF_SIZE) patch = '';
       } catch { /* show failed — leave patch empty, API falls back */ }

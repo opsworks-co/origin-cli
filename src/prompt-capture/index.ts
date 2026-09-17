@@ -986,58 +986,53 @@ function pickFilePath(input: Record<string, any>): string | null {
   return null;
 }
 
-// Directory → containing linked-worktree root (or null), memoized. An agent
-// working in a worktree hits the same few directories thousands of times.
-const worktreeRootCache = new Map<string, string | null>();
+// Cache repository identity, not a membership answer tied to the first session.
+const worktreeRootCache = new Map<string, string>();
+const commonGitDirCache = new Map<string, string>();
 
-/**
- * Root of the linked git worktree holding `filePath`, when that worktree
- * belongs to `repoPath`'s repository — else null.
- *
- * A linked worktree's root carries a `.git` FILE reading
- * `gitdir: <repo>/.git/worktrees/<name>`, which is what ties it back to the
- * session's checkout. Cheap fs walk, no subprocess: this runs per tool call.
- */
+function commonGitDir(root: string): string | null {
+  const cached = commonGitDirCache.get(root);
+  if (cached) return cached;
+  try {
+    const dotGit = path.join(root, '.git');
+    let gitDir = dotGit;
+    if (fs.statSync(dotGit).isFile()) {
+      const match = fs.readFileSync(dotGit, 'utf-8').match(/^gitdir:\s*(.+)$/m);
+      if (!match) return null;
+      gitDir = path.resolve(root, match[1].trim());
+    }
+    const commonFile = path.join(gitDir, 'commondir');
+    const common = fs.existsSync(commonFile)
+      ? path.resolve(gitDir, fs.readFileSync(commonFile, 'utf-8').trim())
+      : gitDir;
+    let identity = fs.realpathSync.native(common);
+    if (process.platform === 'win32') identity = identity.toLowerCase();
+    commonGitDirCache.set(root, identity);
+    return identity;
+  } catch { return null; }
+}
+
+/** Find another checkout of the session's repository without spawning Git. */
 function linkedWorktreeRoot(filePath: string, repoPath: string): string | null {
-  const repoNorm = repoPath.replace(/\\/g, '/').replace(/\/+$/, '');
-  if (!repoNorm) return null;
+  const identity = commonGitDir(repoPath);
+  if (!identity) return null;
   let dir = path.dirname(filePath);
   const seen: string[] = [];
   for (let depth = 0; depth < 40; depth++) {
     const cached = worktreeRootCache.get(dir);
-    if (cached !== undefined) {
-      for (const d of seen) worktreeRootCache.set(d, cached);
-      return cached;
-    }
+    if (cached) return commonGitDir(cached) === identity ? cached : null;
     seen.push(dir);
-    let resolved: string | null | undefined;
-    try {
-      const dotGit = path.join(dir, '.git');
-      const st = fs.statSync(dotGit);
-      if (st.isFile()) {
-        const m = fs.readFileSync(dotGit, 'utf-8').match(/^gitdir:\s*(.+)$/m);
-        const gitdir = m ? m[1].trim().replace(/\\/g, '/') : '';
-        // Case-insensitive on Windows for the same reason makeRepoRelative is
-        // below: one machine spells the same path `c:\repo` and `C:\repo`.
-        const marker = repoNorm + '/.git/worktrees/';
-        const ours = process.platform === 'win32'
-          ? gitdir.toLowerCase().startsWith(marker.toLowerCase())
-          : gitdir.startsWith(marker);
-        resolved = ours ? dir : null;
-      } else if (st.isDirectory()) {
-        // Its own main checkout — a different repository, not our worktree.
-        resolved = null;
-      }
-    } catch { /* no .git here; keep walking up */ }
-    if (resolved !== undefined) {
-      for (const d of seen) worktreeRootCache.set(d, resolved);
-      return resolved;
+    const candidate = commonGitDir(dir);
+    if (candidate) {
+      for (const ancestor of seen) worktreeRootCache.set(ancestor, dir);
+      return candidate === identity ? dir : null;
     }
+    // An inaccessible repository boundary is not its parent's repository.
+    if (fs.existsSync(path.join(dir, '.git'))) return null;
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
-  for (const d of seen) worktreeRootCache.set(d, null);
   return null;
 }
 
