@@ -15,7 +15,7 @@ import { notifyRepoMemoryChanged } from '../../memory-transport.js';
 import { reconcileSessionBranchWithRemote } from '../../local-entrypoint.js';
 import { decidePushBlock } from '../../push-block.js';
 import { isNonSecretAssignmentValue, isSkippedScanPath } from '../../secret-rules.js';
-import { getGitRoot, gitDirFilePath, listActiveSessions, saveSessionState } from '../../session-state.js';
+import { getGitRoot, getWorkingGitRoot, gitDirFilePath, listActiveSessions, saveSessionState } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import { listSnapshots } from '../snapshot.js';
 import { execFileSync } from 'child_process';
@@ -164,8 +164,14 @@ export async function handleGitPostCheckout(prevHead: string, newHead: string, f
     // a checkout rewrites the files of the tree it ran in: session ed0e33c8's
     // journal was fenced by its sibling's checkout in another worktree, for
     // files that never moved on its own disk.
+    //
+    // THIS tree is the working root, not `repoPath`: inside a linked worktree
+    // getGitRoot answers with the MAIN checkout (the repo's identity), and
+    // measured against that every worktree session "works in another tree" —
+    // cli-v0.20260918.1434 fenced no worktree session at all.
+    const hookTree = getWorkingGitRoot(process.cwd()) || repoPath;
     for (const state of listActiveSessions(repoPath)) {
-      if (!state.writeJournalPath || worksInAnotherTree(state, repoPath)) continue;
+      if (!state.writeJournalPath || worksInAnotherTree(state, hookTree)) continue;
       fenceJournal(state.writeJournalPath, prevHead, newHead);
     }
 
