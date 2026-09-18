@@ -33,7 +33,7 @@ import type { SessionState } from '../../session-state.js';
 import { openTurnLiveness } from '../../turn-liveness.js';
 import { samePath, sessionWorkTree } from '../../session-worktree.js';
 import { detectTools } from '../../tools-detector.js';
-import { estimateCost, extractPromptFileMappings, formatTranscriptForDisplay, isKnownCursorInternalPrompt, parseTranscript, promptTextForEntry, readCopilotModel } from '../../transcript.js';
+import { estimateSessionCost, extractPromptFileMappings, formatTranscriptForDisplay, isKnownCursorInternalPrompt, parseTranscript, promptTextForEntry, readCopilotModel } from '../../transcript.js';
 import type { ParsedTranscript, PromptFileMapping } from '../../transcript.js';
 import { persistUpdateBeforeWork } from '../../update-queue.js';
 import { markTurn } from '../../write-journal-watch.js';
@@ -1252,6 +1252,10 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           // the originals' attestation and the server counts a squash on top
           // of the commits it replaced.
           rewrittenCommits: priorState?.rewrittenCommits,
+          // What each turn committed before a squash ACROSS turns folded it
+          // away. It is written at fold time and nowhere else; without it the
+          // earliest turn is billed the whole squash again at every Stop.
+          preSquashCommitTurns: priorState?.preSquashCommitTurns,
           // Carry the local→server offset and the turn IDENTITIES with it.
           //
           // This literal is an explicit field list, and every field missing
@@ -2020,7 +2024,14 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           hbTokensUsed = hbInputTokens + hbOutputTokens;
         }
         const costUsd = hbTokensUsed > 0
-          ? estimateCost(model, hbInputTokens, hbOutputTokens, parsed?.cacheReadTokens || 0, parsed?.cacheCreationTokens || 0, { cacheCreation1hTokens: parsed?.cacheCreation1hTokens || 0 })
+          // The heartbeat may price its own counts (the prompt-length estimate
+          // above); estimateSessionCost uses the per-model split only when it
+          // adds up to exactly the counts being priced.
+          ? estimateSessionCost({
+              inputTokens: hbInputTokens, outputTokens: hbOutputTokens,
+              cacheReadTokens: parsed?.cacheReadTokens || 0, cacheCreationTokens: parsed?.cacheCreationTokens || 0,
+              cacheCreation1hTokens: parsed?.cacheCreation1hTokens || 0, modelUsage: parsed?.modelUsage,
+            }, model)
           : 0;
 
         // Redact secrets from prompts
@@ -2058,6 +2069,19 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           tokensUsed: hbTokensUsed > 0 ? hbTokensUsed : undefined,
           inputTokens: hbInputTokens > 0 ? hbInputTokens : undefined,
           outputTokens: hbOutputTokens > 0 ? hbOutputTokens : undefined,
+          // The cache columns and the per-model split that `costUsd` above was
+          // priced from. This update used to move inputTokens/outputTokens
+          // alone: the row then held this prompt's fresh counts beside the last
+          // Stop's cache counts, and a session that ended without sending
+          // tokens (an interrupted turn, the idle reaper) was repriced from
+          // that mix at one model. Only when the counts are the transcript's —
+          // the prompt-length estimate has no cache and no split.
+          ...(parsed && hbTokensUsed === parsed.tokensUsed && parsed.tokensUsed > 0 ? {
+            cacheReadTokens: parsed.cacheReadTokens > 0 ? parsed.cacheReadTokens : undefined,
+            cacheCreationTokens: parsed.cacheCreationTokens > 0 ? parsed.cacheCreationTokens : undefined,
+            cacheCreation1hTokens: parsed.cacheCreation1hTokens > 0 ? parsed.cacheCreation1hTokens : undefined,
+            modelUsage: parsed.modelUsage && parsed.modelUsage.length > 0 ? parsed.modelUsage : undefined,
+          } : {}),
           toolCalls: parsed?.toolCalls ? parsed.toolCalls : undefined,
           durationMs: durationMs > 0 ? durationMs : undefined,
           costUsd: costUsd > 0 ? costUsd : undefined,

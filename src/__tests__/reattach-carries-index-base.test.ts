@@ -50,6 +50,7 @@ describe('the re-attach carries what identifies a turn', () => {
     ['promptShadows', 'per-turn baselines'],
     ['sessionCommitShas', 'which commits are this session\'s'],
     ['rewrittenCommits', 'the (orphan → rewrite) pairs; without them the next Stop re-badges the originals'],
+    ['preSquashCommitTurns', 'what each turn made before a cross-turn squash; without it the earliest turn is billed the whole squash'],
     ['headShaAtStart', 'the conversation\'s baseline, not today\'s HEAD'],
   ])('carries %s — %s', (field) => {
     expect(literal).toContain(`${field}: priorState?.${field}`);

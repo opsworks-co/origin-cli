@@ -55,7 +55,7 @@ import { newCaptureStamp } from './capture-stamp.js';
 import { promptKey } from './session-state.js';
 import { getWorkingGitRoot, getCanonicalRepoPath, getBranch, getHeadSha, saveSessionState as writeGitSessionFile, loadSessionState as readGitSessionFile, clearSessionState as endGitSessionFile } from './session-state.js';
 import { createSnapshot } from './commands/snapshot.js';
-import { estimateCost } from './transcript.js';
+import { estimateSessionCost } from './transcript.js';
 import { uploadPromptImages, applyImageDescriptions } from './prompt-images.js';
 import { capturePromptEdits } from './prompt-capture/index.js';
 import { timeoutForPayload } from './fetch-timeout.js';
@@ -2537,14 +2537,14 @@ export async function reconcileSession(
   // the server's final figure never matched the one the watcher stamped.
   let costUsd = 0;
   try {
-    costUsd = estimateCost(
-      parsed.model || adapter.slug,
-      parsed.inputTokens,
-      parsed.outputTokens,
-      parsed.cacheReadTokens || 0,
-      parsed.cacheCreationTokens || 0,
-      { cacheCreation1hTokens: parsed.cacheCreation1hTokens || 0 },
-    );
+    costUsd = estimateSessionCost({
+      inputTokens: parsed.inputTokens,
+      outputTokens: parsed.outputTokens,
+      cacheReadTokens: parsed.cacheReadTokens || 0,
+      cacheCreationTokens: parsed.cacheCreationTokens || 0,
+      cacheCreation1hTokens: parsed.cacheCreation1hTokens || 0,
+      modelUsage: parsed.modelUsage,
+    }, parsed.model || adapter.slug);
   } catch { /* pricing unavailable — leave 0 rather than guess */ }
 
   // The session-level capture carries the walk's sha list and commit details,
@@ -2624,6 +2624,7 @@ export async function reconcileSession(
       cacheReadTokens: (parsed.cacheReadTokens || 0) > 0 ? parsed.cacheReadTokens : undefined,
       cacheCreationTokens: (parsed.cacheCreationTokens || 0) > 0 ? parsed.cacheCreationTokens : undefined,
       cacheCreation1hTokens: (parsed.cacheCreation1hTokens || 0) > 0 ? parsed.cacheCreation1hTokens : undefined,
+      modelUsage: parsed.modelUsage && parsed.modelUsage.length > 0 ? parsed.modelUsage : undefined,
       // Explicit boolean only when the adapter says so: the server applies the
       // flag on `typeof === 'boolean'`, and undefined leaves a stored value be.
       tokensEstimated: parsed.tokensEstimated === true ? true : undefined,

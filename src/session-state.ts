@@ -1,3 +1,4 @@
+import { crossTurnSquashTargets } from './cross-turn-squash.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -334,6 +335,13 @@ export interface SessionState {
   // commit-time attestation can never exist for it; discovery is the only
   // evidence available.
   commitTurns?: Array<{ sha: string; turnId: string; at: string; via: 'post-commit' | 'transcript' }>;
+  /**
+   * What each turn committed before a squash ACROSS turns folded it away —
+   * `commitTurns` then names the squash under the earliest turn only. Read by
+   * the commit-patch pass, which measures a turn from its own commit. Local;
+   * never sent.
+   */
+  preSquashCommitTurns?: Array<{ sha: string; turnId: string; at?: string; squash: string }>;
   // Shas whose Commit-row patch Stop already rescued via `git show` (post-commit's
   // PATCH never landed). Once per sha per session — the server keeps the first
   // patch it gets, so re-sending is spawn cost with no effect.
@@ -1886,9 +1894,15 @@ export function applyRewritePairsToState(
   return true;
 }
 
+function sameRecordedSha(a: string, b: string): boolean {
+  const x = String(a || '').toLowerCase(); const y = String(b || '').toLowerCase();
+  if (!x || !y) return false;
+  return x === y || (x.length >= 7 && y.length >= 7 && (x.startsWith(y) || y.startsWith(x)));
+}
+
 /** The sha list (deduped) and the turn attestations, each moved to its final survivor. */
 function foldCommitRecordsToSurvivors(
-  state: Pick<SessionState, 'sessionCommitShas' | 'commitTurns'>,
+  state: Pick<SessionState, 'sessionCommitShas' | 'commitTurns' | 'preSquashCommitTurns'>,
   pairs: ReadonlyArray<RewritePair>,
 ): void {
   if (Array.isArray(state.sessionCommitShas)) {
@@ -1904,6 +1918,36 @@ function foldCommitRecordsToSurvivors(
   }
   if (Array.isArray(state.commitTurns) && state.commitTurns.length > 0) {
     type CommitTurn = NonNullable<SessionState['commitTurns']>[number];
+    // A squash that folds commits of SEVERAL turns is not any one turn's
+    // commit, and the fold below — "keeping the earliest" — hands the whole of
+    // it to the first turn and leaves the others attested to nothing. Session
+    // c98599c8 turn 12 committed a11fa47b (+290/-6), turn 14 added two review
+    // fixes and a bump on the same branch, GitHub squashed all four as
+    // d1454ba0 — and every Stop after that re-sent turn 12 as +414/-10, the
+    // squash, fixups it never wrote included.
+    //
+    // The fold itself stays: the server badges and every local owner lookup
+    // read `commitTurns` as survivors. What each turn actually made is kept
+    // BESIDE it, one hop short of the shared squash, for the one reader that
+    // measures a turn's work (preferCommitPatchForCommittedTurns). Recorded
+    // here because this is the last moment the state still knows it.
+    const shared = crossTurnSquashTargets(state.commitTurns, pairs);
+    if (shared.size > 0) {
+      const kept = pairs.filter((p) => !shared.has(p.to.toLowerCase()));
+      const pre = Array.isArray(state.preSquashCommitTurns) ? [...state.preSquashCommitTurns] : [];
+      for (const ct of state.commitTurns) {
+        if (!ct?.sha || !ct.turnId) continue;
+        const own = finalRewriteOf(ct.sha, kept);
+        const squash = pairs.find((p) => sameRecordedSha(p.from, own) && shared.has(p.to.toLowerCase()))?.to;
+        if (!squash || pre.some((x) => sameRecordedSha(x.sha, own))) continue;
+        // A shared squash squashed AGAIN (a local squash, a review fix, then
+        // GitHub's): the attestation standing on it is the fold's, not a commit
+        // that turn made — the turns behind it are already on record.
+        if (pre.some((x) => sameRecordedSha(x.squash, own) || sameRecordedSha(finalRewriteOf(x.squash, kept), own))) continue;
+        pre.push({ sha: own, turnId: ct.turnId, at: ct.at, squash });
+      }
+      state.preSquashCommitTurns = pre;
+    }
     const bySha = new Map<string, CommitTurn>();
     for (const ct of state.commitTurns) {
       if (!ct?.sha) continue;
@@ -1938,8 +1982,8 @@ function foldCommitRecordsToSurvivors(
  * Returns what was added, or null when nothing was. Does not save.
  */
 export function keepCommitRecordsSavedMeanwhile(
-  state: Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits'>,
-  onDisk: Partial<Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits'>> | null | undefined,
+  state: Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits' | 'preSquashCommitTurns'>,
+  onDisk: Partial<Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits' | 'preSquashCommitTurns'>> | null | undefined,
 ): { shas: string[]; turns: number; pairs: number } | null {
   if (!onDisk || !state?.sessionId || onDisk.sessionId !== state.sessionId) return null;
   const same = (a: string, b: string) => {
@@ -1955,6 +1999,12 @@ export function keepCommitRecordsSavedMeanwhile(
   const ownTurns = Array.isArray(state.commitTurns) ? state.commitTurns : [];
   const addTurns = (Array.isArray(onDisk.commitTurns) ? onDisk.commitTurns : []).filter((ct) =>
     ct?.sha && ct.turnId && !ownTurns.some((own) => own?.sha && same(own.sha, ct.sha)));
+  // What a squash across turns folded away is recorded at fold time only, by
+  // whichever process saw the pairs — a stale save must not drop it either.
+  const ownPre = Array.isArray(state.preSquashCommitTurns) ? state.preSquashCommitTurns : [];
+  const addPre = (Array.isArray(onDisk.preSquashCommitTurns) ? onDisk.preSquashCommitTurns : []).filter((c) =>
+    c?.sha && c.turnId && c.squash && !ownPre.some((own) => own?.sha && same(own.sha, c.sha)));
+  if (addPre.length > 0) state.preSquashCommitTurns = [...ownPre, ...addPre];
   if (addPairs.length === 0 && addShas.length === 0 && addTurns.length === 0) return null;
   const pairs = [...ownPairs, ...addPairs];
   if (addPairs.length > 0) state.rewrittenCommits = pairs;

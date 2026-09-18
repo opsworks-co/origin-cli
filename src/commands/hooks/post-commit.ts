@@ -25,7 +25,7 @@ import { parseMarkersFromTranscriptPath } from '../../origin-markers.js';
 import type { OriginMarkers } from '../../origin-markers.js';
 import { currentTurnIndex, getBranch, getGitRoot, getHeadSha, getWorkingGitRoot, isSessionAlive, listActiveSessions, listMirroredSessionsForTree, markSessionEnded, saveSessionState, stampCaptured } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
-import { estimateCost, extractPromptFileMappings, livePrompts, parseTranscript } from '../../transcript.js';
+import { estimateSessionCost, extractPromptFileMappings, livePrompts, parseTranscript } from '../../transcript.js';
 import type { ParsedTranscript } from '../../transcript.js';
 import { commitOverlapsWritesInTree } from '../../session-write-trees.js';
 import { drainQueueFromHook, durableUpdateSession, enqueueFailedUpdate, isRetriableApiError, persistUpdateBeforeWork } from '../../update-queue.js';
@@ -2004,14 +2004,7 @@ export async function handlePostCommit(): Promise<void> {
         since: state.startedAt, repoRoots: sessionRepoRoots(state),
       });
       const costModel = parsedForSessionWrite.model || state.model;
-      const cost = estimateCost(
-        costModel,
-        parsedForSessionWrite.inputTokens,
-        parsedForSessionWrite.outputTokens,
-        parsedForSessionWrite.cacheReadTokens,
-        parsedForSessionWrite.cacheCreationTokens,
-        { cacheCreation1hTokens: parsedForSessionWrite.cacheCreation1hTokens },
-      );
+      const cost = estimateSessionCost(parsedForSessionWrite, costModel);
       // Absent, never zero, when the walk finds nothing. A zero reads as a
       // measurement — the exact false claim the old hardcoded `0` made, and
       // the reason these fields were made optional in the first place.

@@ -73,6 +73,16 @@ export interface CommittedTurnState {
   promptIndexBase?: number | null;
   /** Squash / amend rewrites the session has seen: original → survivor. */
   rewrittenCommits?: Array<{ from: string; to: string }>;
+  /** Each turn's own commit, one hop short of a squash that folded several
+   *  turns' commits together — see foldCommitRecordsToSurvivors. */
+  preSquashCommitTurns?: Array<{ sha: string; turnId: string; squash: string }>;
+}
+
+/** Recorded shas may be short or differently cased; seven hex digits is git's own floor. */
+function sameSha(a: string, b: string): boolean {
+  const x = String(a || '').toLowerCase(); const y = String(b || '').toLowerCase();
+  if (!x || !y) return false;
+  return x === y || (x.length >= 7 && y.length >= 7 && (x.startsWith(y) || y.startsWith(x)));
 }
 
 /** The survivors of `sha` through every recorded rewrite, nearest first. */
@@ -215,6 +225,8 @@ function chainsOf(repoPath: string, shas: string[]): CommitChain[] {
  *   • `stranded` — work that sits on ANOTHER branch: HEAD neither reaches nor
  *     carries it, and it is still the turn's commit. Sent as that branch's own
  *     patch (patchAcrossBranches).
+ *     Also a chain that was folded, together with OTHER turns' commits, into
+ *     one squash: the squash is nobody's turn, so each is sent as its own.
  *   • `superseded` — an amended-away original. It sits on no branch, and its
  *     replacement — a commit of the same turn with the same parents — is what
  *     the turn actually made. Left out, or the amend counts twice.
@@ -259,8 +271,14 @@ function chainStanding(
   reachable: string[],
   rewrites: Array<{ from: string; to: string }>,
   refCache: Map<string, boolean>,
+  intoSharedSquash = false,
 ): ChainStanding {
   if (chain.members.some((m) => reachable.includes(m) || rewritesOf(m, rewrites).some((r) => reachable.includes(r)))) return 'reachable';
+  // Folded, with other turns' commits, into one squash. Every test below would
+  // misread it: HEAD "carries" the last turn's tip, and the squash sits on the
+  // first commit's parents exactly as an amend would. It is this turn's work
+  // and is sent as its own patch.
+  if (intoSharedSquash) return 'stranded';
   const files = filesOfCommits(repoPath, chain.members);
   if (files.length === 0) return 'carried';
   if (git(repoPath, ['diff', '--quiet', chain.tip, 'HEAD', '--', ...files]).ok) return 'carried';
@@ -323,6 +341,7 @@ function patchAcrossBranches(
   chains: CommitChain[],
   stranded: number,
   deps: PreferCommitPatchDeps,
+  stampFor: (tip: string) => string = (tip) => tip,
 ): boolean {
   const perChain = chains
     .map((chain) => ({ chain, files: filesOfCommits(repoPath, chain.members) }))
@@ -400,8 +419,8 @@ function patchAcrossBranches(
   pm.commitPatch = true;
   // The same attestation that supplied the patch supplies its primary SHA.
   // A stale HEAD stamp may name an unrelated commit from a branch checkout.
-  pm.commitSha = perChain.find(x => x.chain.members.includes(pm.commitSha || ''))?.chain.tip
-    || perChain[perChain.length - 1].chain.tip;
+  pm.commitSha = stampFor(perChain.find(x => x.chain.members.includes(pm.commitSha || ''))?.chain.tip
+    || perChain[perChain.length - 1].chain.tip);
   applied(deps, pm);
   deps.log?.('ledger diff replaced by the commit patches of several branches', {
     promptIndex: pm.promptIndex, turnId, branches: parts.length, stranded, commits: tips,
@@ -442,7 +461,28 @@ export function preferCommitPatchForCommittedTurns(
     // work sits entirely on branches the tree has left has nothing off HEAD,
     // so every pass before this one leaves its row empty — and Stop then sent
     // that empty row over post-commit's correct ones.
-    const own = turns.filter((c) => c && c.turnId === turnId && typeof c.sha === 'string' && HEX.test(c.sha));
+    // A squash that folded SEVERAL turns' commits is attested to the earliest
+    // of them and is no one turn's commit. Session c98599c8 turn 12 made
+    // a11fa47b (+290/-6), turn 14 added review fixes to the same branch, GitHub
+    // squashed them as d1454ba0, and every later Stop measured turn 12 against
+    // the squash — +414/-10, fixups it never wrote included — while turn 14
+    // owned nothing of that branch. Each turn is measured from the commit it
+    // made instead (patchAcrossBranches): the objects exist whether or not a
+    // branch still holds them.
+    const allRewrites = Array.isArray(state.rewrittenCommits) ? state.rewrittenCommits : [];
+    const preSquash = (state.preSquashCommitTurns || []).filter((c) => c && HEX.test(c.sha || '') && HEX.test(c.squash || ''));
+    // The shared squash AND whatever it was rewritten to afterwards: a squash
+    // rebased onto a moved main (S → S') is attested as S', which is still the
+    // place several turns' work merged. Left out, the first turn owned S' AND
+    // its own commit, and was billed both.
+    const sharedSquashes = [...new Set(preSquash.flatMap((c) => [c.squash, ...rewritesOf(c.squash, allRewrites)]))];
+    const isSharedSquash = (sha: string) => sharedSquashes.some((q) => sameSha(q, sha));
+    const intoSharedSquash = (sha: string) => preSquash.some((c) => sameSha(c.sha, sha));
+    const own = [
+      ...turns.filter((c) => c && c.turnId === turnId && typeof c.sha === 'string' && HEX.test(c.sha)
+        && !isSharedSquash(c.sha) && !intoSharedSquash(c.sha)),
+      ...preSquash.filter((c) => c.turnId === turnId),
+    ];
     if (own.length === 0) { declined(deps, pm, 'the turn made no commit'); continue; }
     // Every commit of the turn that still exists as an object names the
     // pathspec, reachable from HEAD or not. The END of the range is the
@@ -464,16 +504,26 @@ export function preferCommitPatchForCommittedTurns(
     // squash-merged every branch commit and the tree moved to main, none of
     // the originals is reachable but each survivor is; `rewrittenCommits`
     // is the session's own record of that. Take the newest reachable one.
-    const rewrites = Array.isArray(state.rewrittenCommits) ? state.rewrittenCommits : [];
+    // …except INTO a squash shared with other turns — see `preSquash` above.
+    const rewrites = sharedSquashes.length > 0
+      ? allRewrites.filter((r) => !isSharedSquash(String(r?.to || '')))
+      : allRewrites;
     const candidates = [...new Set(existing.flatMap((sha) => [sha, ...rewritesOf(sha, rewrites)]))];
     const shas = candidates.filter((sha) => git(repoPath, ['merge-base', '--is-ancestor', sha, 'HEAD']).ok);
     // …but only when HEAD holds all of the turn's work. A branch whose
     // commits HEAD neither reaches nor carries the content of is work one
     // range off HEAD cannot describe.
     if (existing.length > 0) {
-      const originalChains = chainsOf(repoPath, existing);
+      // Pre-squash commits chain apart from the turn's other commits. One that
+      // descends from a commit HEAD reaches would otherwise join ITS chain,
+      // stand as `reachable`, and be dropped by the single range that follows.
+      const chainsApart = (shas: string[]) => [
+        ...chainsOf(repoPath, shas.filter((sha) => !intoSharedSquash(sha))),
+        ...chainsOf(repoPath, shas.filter((sha) => intoSharedSquash(sha))),
+      ];
+      const originalChains = chainsApart(existing);
       const refCache = new Map<string, boolean>();
-      const standing = new Map(originalChains.map((c) => [c, chainStanding(repoPath, c, originalChains, shas, rewrites, refCache)] as const));
+      const standing = new Map(originalChains.map((c) => [c, chainStanding(repoPath, c, originalChains, shas, rewrites, refCache, c.members.some(intoSharedSquash))] as const));
       const stranded = originalChains.filter((c) => standing.get(c) === 'stranded').length;
       if (stranded > 0) {
         // An amend leaves the old object in Git. It must not become another
@@ -485,15 +535,25 @@ export function preferCommitPatchForCommittedTurns(
         // entire chain; leave that chain intact for the existing squash
         // handling instead of substituting only its tip.
         const superseded = new Set(originalChains.filter((c) => standing.get(c) === 'superseded').flatMap((c) => c.members));
+        // A pre-squash commit is already the turn's own; it has no same-parent
+        // replacement to look for, and must stay recognisable to chainsApart.
         const surviving = [...new Set(existing.filter((sha) => !superseded.has(sha)).map((sha) =>
-          rewritesOf(sha, rewrites).reverse().find((replacement) =>
+          (intoSharedSquash(sha) ? undefined : rewritesOf(sha, rewrites).reverse().find((replacement) =>
             git(repoPath, ['cat-file', '-e', `${replacement}^{commit}`]).ok
             && git(repoPath, ['show', '-s', '--format=%P', replacement]).out.trim()
               === git(repoPath, ['show', '-s', '--format=%P', sha]).out.trim(),
-          ) || sha,
+          )) || sha,
         ))];
-        const chains = chainsOf(repoPath, surviving);
-        if (patchAcrossBranches(repoPath, pm, turnId, chains, stranded, deps)) replaced++;
+        const chains = chainsApart(surviving);
+        // The row is stamped with the commit the page will show. A pre-squash
+        // sha is superseded on the server: stamping it made the row's sha flip
+        // between the orphan and nothing on alternate PATCHes.
+        const stampFor = (tip: string): string => {
+          const pre = preSquash.find((c) => sameSha(c.sha, tip));
+          if (!pre) return tip;
+          return rewritesOf(pre.squash, allRewrites).pop() || pre.squash;
+        };
+        if (patchAcrossBranches(repoPath, pm, turnId, chains, stranded, deps, stampFor)) replaced++;
         continue;
       }
     }

@@ -47,7 +47,7 @@ import type { ParsedTranscript } from '../../transcript.js';
 import { samePath, shellWindowTarget } from '../../session-worktree.js';
 import { SUBAGENT_SPAWN_TOOLS, detectRenamedSpawner } from '../../subagent-tools.js';
 import { countDiffLines } from '../../transcript-adapters.js';
-import { estimateCost, extractPromptFileMappings, formatTranscriptForDisplay, parseTranscript, scopeCapturedPath } from '../../transcript.js';
+import { estimateSessionCost, extractPromptFileMappings, formatTranscriptForDisplay, parseTranscript, scopeCapturedPath } from '../../transcript.js';
 import { durableUpdateSession, persistUpdateBeforeWork } from '../../update-queue.js';
 import { querySqlite } from '../../utils/sqlite.js';
 import { readJournal } from '../../write-journal-watch.js';
@@ -2607,6 +2607,8 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
       cacheReadTokens: parsed.cacheReadTokens > 0 ? parsed.cacheReadTokens : undefined,
       cacheCreationTokens: parsed.cacheCreationTokens > 0 ? parsed.cacheCreationTokens : undefined,
       cacheCreation1hTokens: parsed.cacheCreation1hTokens > 0 ? parsed.cacheCreation1hTokens : undefined,
+      // Per-model split of the counts above; the server reprices from it.
+      modelUsage: parsed.modelUsage && parsed.modelUsage.length > 0 ? parsed.modelUsage : undefined,
       toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
       // Real sub-agent spawns (Task tool): count, the files each edited (by
       // execution window), and the token portion they incurred — so the
@@ -3564,7 +3566,9 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     let model = stdinModel || parsed.model || state.model;
     // Phase: resolveModelFromCursorDb.
     model = (resolveModelFromCursorDb({ model, agentSlug, input })).model;
-    const costUsd = estimateCost(model, parsed.inputTokens, parsed.outputTokens, parsed.cacheReadTokens, parsed.cacheCreationTokens, { cacheCreation1hTokens: parsed.cacheCreation1hTokens });
+    // Each model's tokens at its own rates — a session is rarely one model
+    // once sub-agents and mid-conversation switches are counted.
+    const costUsd = estimateSessionCost(parsed, model);
 
     // Extract prompt → file change mappings
     let promptMappings = extractPromptFileMappings(state.transcriptPath, { since: state.startedAt, repoRoots: sessionRepoRoots(state) });

@@ -48,7 +48,7 @@ import { memorySummaryMode, synthesizeSessionSummary } from '../../session-summa
 import { samePath, sessionWorkTree, shellWindowTarget } from '../../session-worktree.js';
 import { addTodosFromSession, readMemoryTodos } from '../../todo.js';
 import { claimSessionCloses } from '../../todo-sweep.js';
-import { estimateCost, extractPromptFileMappings, formatTranscriptForDisplay, parseTranscript } from '../../transcript.js';
+import { estimateSessionCost, extractPromptFileMappings, formatTranscriptForDisplay, parseTranscript } from '../../transcript.js';
 import type { ParsedTranscript, PromptFileMapping } from '../../transcript.js';
 import { durableEndSession } from '../../update-queue.js';
 import { querySqlite } from '../../utils/sqlite.js';
@@ -432,7 +432,7 @@ export function buildSessionWriteData(opts: {
     endedAt: new Date().toISOString(),
     durationMs,
     status,
-    costUsd: estimateCost(model, parsed.inputTokens, parsed.outputTokens, parsed.cacheReadTokens, parsed.cacheCreationTokens, { cacheCreation1hTokens: parsed.cacheCreation1hTokens }),
+    costUsd: estimateSessionCost(parsed, model),
     tokensUsed: parsed.tokensUsed,
     inputTokens: parsed.inputTokens,
     outputTokens: parsed.outputTokens,
@@ -947,7 +947,7 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
     // Prefer: stdin model → transcript → state
     const stdinModel2 = (input.model && input.model !== 'default' && input.model !== 'unknown') ? input.model : '';
     const model = stdinModel2 || parsed.model || state.model;
-    const costUsd = estimateCost(model, parsed.inputTokens, parsed.outputTokens, parsed.cacheReadTokens, parsed.cacheCreationTokens, { cacheCreation1hTokens: parsed.cacheCreation1hTokens });
+    const costUsd = estimateSessionCost(parsed, model);
 
     // Capture real git state: HEAD SHA, new commits, unified diff. The
     // session-end snapshot powers AI Blame's full-file render, so capture
@@ -1383,6 +1383,8 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
         cacheReadTokens: parsed.cacheReadTokens > 0 ? parsed.cacheReadTokens : undefined,
         cacheCreationTokens: parsed.cacheCreationTokens > 0 ? parsed.cacheCreationTokens : undefined,
         cacheCreation1hTokens: parsed.cacheCreation1hTokens > 0 ? parsed.cacheCreation1hTokens : undefined,
+        // Per-model split of the counts above; the server reprices from it.
+        modelUsage: parsed.modelUsage && parsed.modelUsage.length > 0 ? parsed.modelUsage : undefined,
         toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
         // See the stop handler — structured tool/files data so the PR-detail
         // "behind the work" view doesn't depend on transcript-text markers.

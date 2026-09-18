@@ -1,6 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { debugLog } from './debug-log.js';
 import { isOriginAutoManagedPath, shouldIgnoreFile } from './ignore-patterns.js';
 import { isShellTool, shellCommandText, commandWritesFiles } from './shell-write-capture.js';
 import { isInsideRepo, toRepoRelativePath , abbreviateHome, MAX_OUT_OF_REPO_FILES } from './paths.js';
@@ -60,6 +61,16 @@ interface TranscriptLine {
   };
 }
 
+/** One model's share of a session's token usage. Field meanings as on ParsedTranscript. */
+export interface ModelUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  cacheCreation1hTokens: number;
+}
+
 export interface ParsedTranscript {
   prompts: string[];
   filesChanged: string[];
@@ -88,6 +99,15 @@ export interface ParsedTranscript {
   // but breaking it out lets the UI show "N tokens (M in sub-agents)" and
   // avoids pretending all tokens ran on the parent model.
   subagentTokens: number;
+  // The same totals, split by the model that produced them. A session is not
+  // one model: the user switches mid-conversation, and Task sub-agents run on
+  // whatever the agent definition names (often a cheaper tier). Pricing the
+  // whole session at the FIRST model it used moved single sessions by ±$16 in
+  // either direction on real data. Buckets sum exactly to the token fields
+  // above; absent when the transcript carries no per-message usage (Gemini,
+  // Cursor, anything estimated), and then the session is priced at one model
+  // as before. See estimateSessionCost.
+  modelUsage?: ModelUsage[];
   // Files edited INSIDE a sub-agent (isSidechain) turn, with the turn's
   // timestamp — lets the CLI attribute each file to the Task spawn whose
   // execution window contains it (see buildSubagentSummary). Best-effort:
@@ -385,6 +405,91 @@ function effectiveSinceMs(raw: string, since?: Date | string | null): number {
   return sinceMs - firstMs <= SESSION_JOIN_GRACE_MS ? 0 : sinceMs;
 }
 
+/** A message's model, or '' when it names none worth pricing by. */
+function realModelName(model: unknown): string {
+  if (typeof model !== 'string') return '';
+  const m = model.trim();
+  // Claude Code stamps `<synthetic>` on messages it fabricates locally (an
+  // interrupted turn, an API error notice). They carry no usage and no price.
+  return !m || m.startsWith('<') ? '' : m;
+}
+
+/**
+ * Hard bounds on the sub-agent sweep — this runs inside the Stop hook.
+ *
+ * Both are far above anything measured (45 files and 13 MB in the largest of
+ * 29 real sessions) and both LOG when they bite, because a cap that drops usage
+ * silently is the defect this sweep exists to fix. The file cap keeps the
+ * OLDEST files by modification time: names are random, so keeping the first N
+ * by name let a newly spawned agent push out one already counted, and a
+ * session's tokens could go DOWN between two parses. A finished agent's file
+ * stops changing, so oldest-first is stable once the cap is reached.
+ */
+const MAX_SUBAGENT_FILES = 2000;
+const MAX_SUBAGENT_FILE_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Usage records from a Claude Code session's sub-agent transcripts.
+ *
+ * `<dir>/<session>.jsonl` → `<dir>/<session>/subagents/agent-*.jsonl`. Each
+ * record keeps its message id so the caller can dedupe against the parent
+ * transcript. Best-effort by construction: an unreadable directory or file
+ * contributes nothing, exactly as if the sub-agent had never been spawned —
+ * which is what every session reported before this existed.
+ */
+function readSubagentUsage(
+  transcriptPath: string,
+  sinceMs: number,
+): Array<{ id: string; model: string; usage: MessageUsage }> {
+  const out: Array<{ id: string; model: string; usage: MessageUsage }> = [];
+  if (!transcriptPath.endsWith('.jsonl')) return out;
+  const dir = path.join(transcriptPath.slice(0, -'.jsonl'.length), 'subagents');
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir).filter((n) => n.startsWith('agent-') && n.endsWith('.jsonl')).sort();
+  } catch {
+    return out; // no sub-agents — the common case
+  }
+  if (names.length > MAX_SUBAGENT_FILES) {
+    const mtime = (n: string): number => { try { return fs.statSync(path.join(dir, n)).mtimeMs; } catch { return Infinity; } };
+    const byAge = names.map((n) => ({ n, t: mtime(n) })).sort((a, b) => a.t - b.t || (a.n < b.n ? -1 : 1));
+    debugLog('transcript', 'sub-agent file cap reached — usage of the newest files is not counted', {
+      dir, files: names.length, cap: MAX_SUBAGENT_FILES,
+    });
+    names = byAge.slice(0, MAX_SUBAGENT_FILES).map((x) => x.n);
+  }
+  for (const name of names) {
+    let raw: string;
+    try {
+      const file = path.join(dir, name);
+      const size = fs.statSync(file).size;
+      if (size > MAX_SUBAGENT_FILE_BYTES) {
+        debugLog('transcript', 'sub-agent file over the size cap — its usage is not counted', { file, size, cap: MAX_SUBAGENT_FILE_BYTES });
+        continue;
+      }
+      raw = fs.readFileSync(file, 'utf-8');
+    } catch {
+      continue;
+    }
+    for (const line of raw.split('\n')) {
+      // Most lines are tool results; only a usage-bearing one is worth parsing.
+      if (!line.includes('"usage"')) continue;
+      let entry: any;
+      try { entry = JSON.parse(line); } catch { continue; }
+      const usage = entry?.message?.usage;
+      if (!usage || typeof usage !== 'object') continue;
+      if (sinceMs > 0 && entry.timestamp) {
+        const t = Date.parse(entry.timestamp);
+        if (Number.isFinite(t) && t < sinceMs) continue;
+      }
+      const id = entry.message?.id || entry.uuid;
+      if (typeof id !== 'string' || !id) continue;
+      out.push({ id, model: realModelName(entry.message?.model), usage });
+    }
+  }
+  return out;
+}
+
 // ─── Parser ────────────────────────────────────────────────────────────────
 
 /**
@@ -516,6 +621,8 @@ export function parseTranscript(
   // Message ids of assistant turns that ran inside a Task sub-agent, so we can
   // total their tokens separately after the dedup pass.
   const sidechainMsgIds = new Set<string>();
+  // The model that produced each deduped usage record — see `modelUsage`.
+  const modelByMsgId = new Map<string, string>();
   let lastKeptPrompt: string | undefined;
   let cursorTranscript = false;
 
@@ -686,23 +793,75 @@ export function parseTranscript(
         const existing = seenMessageIds.get(msgId);
         if (!existing || (usage.output_tokens ?? 0) > (existing.output_tokens ?? 0)) {
           seenMessageIds.set(msgId, usage);
+          modelByMsgId.set(msgId, realModelName(entry.message?.model));
         }
         if (isSub && msgId) sidechainMsgIds.add(msgId);
       }
     }
   }
 
-  // Sum deduplicated token usage (track cache tokens separately for accurate cost)
-  for (const [msgId, usage] of seenMessageIds.entries()) {
-    result.inputTokens += usage.input_tokens ?? 0;
-    result.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
-    result.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
-    result.cacheCreation1hTokens += usage.cache_creation?.ephemeral_1h_input_tokens ?? 0;
-    result.outputTokens += usage.output_tokens ?? 0;
-    if (sidechainMsgIds.has(msgId)) {
-      result.subagentTokens += (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
+  // Task sub-agents. Claude Code no longer writes their turns into the parent
+  // transcript: each runs in `<transcript dir>/<session id>/subagents/agent-*.jsonl`
+  // and the parent file holds no `isSidechain` entry at all (0 across 163 local
+  // transcripts). Nothing read those files, so a session's sub-agent usage was
+  // not mispriced but MISSING — 7.3% of real cost across the 29 local sessions
+  // that spawned any, and more than the parent conversation in several.
+  //
+  // They go through the same id-keyed map as the parent's records, so a build
+  // that still inlines sidechain turns cannot be counted twice, and through the
+  // same `since` cutoff.
+  if (copilotConverted == null) {
+    // Ids the parent transcript holds as its OWN turns. A forked agent's file
+    // may replay them; they stay the parent's, counted once and not reported
+    // as sub-agent tokens.
+    const parentOwnIds = new Set([...seenMessageIds.keys()].filter((id) => !sidechainMsgIds.has(id)));
+    for (const usageRecord of readSubagentUsage(transcriptPath, sinceMs)) {
+      if (parentOwnIds.has(usageRecord.id)) continue;
+      const existing = seenMessageIds.get(usageRecord.id);
+      if (!existing || (usageRecord.usage.output_tokens ?? 0) > (existing.output_tokens ?? 0)) {
+        seenMessageIds.set(usageRecord.id, usageRecord.usage);
+        modelByMsgId.set(usageRecord.id, usageRecord.model);
+      }
+      sidechainMsgIds.add(usageRecord.id);
     }
   }
+
+  // Sum deduplicated token usage (track cache tokens separately for accurate cost)
+  const byModel = new Map<string, ModelUsage>();
+  for (const [msgId, usage] of seenMessageIds.entries()) {
+    const input = usage.input_tokens ?? 0;
+    const output = usage.output_tokens ?? 0;
+    const cacheRead = usage.cache_read_input_tokens ?? 0;
+    const cacheCreation = usage.cache_creation_input_tokens ?? 0;
+    const cacheCreation1h = usage.cache_creation?.ephemeral_1h_input_tokens ?? 0;
+    result.inputTokens += input;
+    result.cacheReadTokens += cacheRead;
+    result.cacheCreationTokens += cacheCreation;
+    result.cacheCreation1hTokens += cacheCreation1h;
+    result.outputTokens += output;
+    if (sidechainMsgIds.has(msgId)) {
+      result.subagentTokens += input + output;
+    }
+    if (input + output + cacheRead + cacheCreation === 0) continue;
+    // A record with no usable model name (absent, or Claude Code's
+    // `<synthetic>` placeholder) is the session's own: '' here, and
+    // estimateSessionCost prices it at the session model.
+    const model = modelByMsgId.get(msgId) || '';
+    let bucket = byModel.get(model);
+    if (!bucket) {
+      bucket = { model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0 };
+      byModel.set(model, bucket);
+    }
+    bucket.inputTokens += input;
+    bucket.outputTokens += output;
+    bucket.cacheReadTokens += cacheRead;
+    bucket.cacheCreationTokens += cacheCreation;
+    bucket.cacheCreation1hTokens += cacheCreation1h;
+  }
+  // Only when every token above came from a per-message record. Gemini's
+  // entries carry no model of their own, so a transcript with any keeps the
+  // single-model path rather than a split that does not cover its totals.
+  if (byModel.size > 0 && seenGeminiIds.size === 0) result.modelUsage = [...byModel.values()];
   // Same for Gemini JSONL entries — id-deduped, then summed.
   // `thoughts` is billed at the output rate so it folds into
   // outputTokens. `cached` maps to cacheReadTokens (Gemini's
@@ -2892,6 +3051,50 @@ export function estimateCost(
   const outputCost = (outputTokens / 1_000_000) * output;
 
   return parseFloat((inputCost + cacheReadCost + cacheCreationCost + outputCost).toFixed(4));
+}
+
+/**
+ * A session's cost, each model's tokens at that model's rates.
+ *
+ * `fallbackModel` prices a bucket that names no model, and the whole session
+ * when there is no split to use. The split is used ONLY when it accounts for
+ * the totals exactly: several callers replace a parsed transcript's token
+ * fields after the fact (Codex's rollout backfill, the prompt-length estimate,
+ * a heartbeat's own counts), and a split that no longer matches them describes
+ * different tokens than the ones being priced.
+ */
+export function estimateSessionCost(
+  usage: Pick<ParsedTranscript, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens' | 'cacheCreation1hTokens' | 'modelUsage'>,
+  fallbackModel: string,
+): number {
+  const split = usage.modelUsage;
+  if (split && split.length > 0 && modelUsageCovers(split, usage)) {
+    let total = 0;
+    for (const m of split) {
+      total += estimateCost(m.model || fallbackModel, m.inputTokens, m.outputTokens, m.cacheReadTokens, m.cacheCreationTokens, { cacheCreation1hTokens: m.cacheCreation1hTokens });
+    }
+    return parseFloat(total.toFixed(4));
+  }
+  return estimateCost(fallbackModel, usage.inputTokens, usage.outputTokens, usage.cacheReadTokens, usage.cacheCreationTokens, { cacheCreation1hTokens: usage.cacheCreation1hTokens });
+}
+
+/** True when the per-model buckets add up to exactly these totals. */
+export function modelUsageCovers(
+  split: readonly ModelUsage[],
+  totals: Pick<ParsedTranscript, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens'> & { cacheCreation1hTokens?: number },
+): boolean {
+  let input = 0, output = 0, cacheRead = 0, cacheCreation = 0, cacheCreation1h = 0;
+  for (const m of split) {
+    input += m.inputTokens; output += m.outputTokens;
+    cacheRead += m.cacheReadTokens; cacheCreation += m.cacheCreationTokens;
+    cacheCreation1h += m.cacheCreation1hTokens;
+  }
+  // The 1-hour tier too: it bills at 2x against the 5-minute tier's 1.25x, so a
+  // split that agrees on the cache-write total but not on its tier would price
+  // the same tokens differently from the columns it claims to describe.
+  return input === (totals.inputTokens || 0) && output === (totals.outputTokens || 0)
+    && cacheRead === (totals.cacheReadTokens || 0) && cacheCreation === (totals.cacheCreationTokens || 0)
+    && cacheCreation1h === (totals.cacheCreation1hTokens || 0);
 }
 
 // ─── Image attachment extraction ─────────────────────────────────────────

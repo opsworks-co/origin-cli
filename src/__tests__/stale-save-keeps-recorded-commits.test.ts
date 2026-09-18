@@ -90,6 +90,34 @@ describe('a tool hook that read the state before post-commit saved', () => {
   });
 });
 
+describe('a squash across turns recorded by another process', () => {
+  // The rescue runs in a backgrounded post-commit. What each turn made is
+  // written down at fold time and nowhere else — the fold then replaces the
+  // originals with the squash — so a stale save that dropped it would put the
+  // earliest turn back on the whole squash (session c98599c8 turn 12).
+  it('keeps what each turn made', () => {
+    const s = copy();
+    s.promptTurnIds = ['t_1', 't_2'];
+    s.sessionCommitShas = [A, B];
+    s.commitTurns = [
+      { sha: A, turnId: 't_1', at: '2026-09-18T12:56:23.000Z', via: 'post-commit' },
+      { sha: B, turnId: 't_2', at: '2026-09-18T13:36:24.000Z', via: 'post-commit' },
+    ];
+    saveSessionState(s, repo, TAG);
+    const stale = copy();
+    const rescue = copy();
+    applyRewritePairsToState(rescue, [{ from: A, to: REWRITE_OF_B }, { from: B, to: REWRITE_OF_B }]);
+    saveSessionState(rescue, repo, TAG);
+    saveSessionState(stale, repo, TAG);
+
+    const after = read();
+    expect(after.commitTurns?.map((c) => [c.sha, c.turnId])).toEqual([[REWRITE_OF_B, 't_1']]);
+    expect(after.preSquashCommitTurns?.map((c) => [c.sha, c.turnId, c.squash])).toEqual([
+      [A, 't_1', REWRITE_OF_B], [B, 't_2', REWRITE_OF_B],
+    ]);
+  });
+});
+
 describe('keepCommitRecordsSavedMeanwhile', () => {
   it('takes nothing from another session\'s file at the same address', () => {
     const state = { sessionId: 'new-session', sessionCommitShas: [] } as any;

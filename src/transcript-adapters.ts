@@ -31,6 +31,7 @@ import {
   extractPromptFileMappings,
   buildDiffFromEdits,
   readCopilotModel,
+  type ModelUsage,
   type ParsedTranscript,
 } from './transcript.js';
 import { readGeminiModel } from './agents/gemini.js';
@@ -78,6 +79,9 @@ export interface ParsedSession {
   // vs 1.25×). Claude Code writes 1h cache exclusively, so leaving this out
   // under-prices every cache write the watcher reports.
   cacheCreation1hTokens?: number;
+  // Per-model split of the counts above (ParsedTranscript.modelUsage). Absent
+  // for every adapter that reports no per-message usage.
+  modelUsage?: ModelUsage[];
   // True when the counts above are derived from text length (Cursor, Antigravity)
   // rather than reported by the agent. Rides the wire as `tokensEstimated` so
   // the dashboard can mark the cost "est." — the hook path has sent it since
@@ -436,6 +440,8 @@ function fromParsedTranscript(
     cacheReadTokens: p.cacheReadTokens,
     cacheCreationTokens: p.cacheCreationTokens,
     cacheCreation1hTokens: p.cacheCreation1hTokens,
+    // A token override replaces the counts this split describes.
+    ...(tokenOverride ? {} : { modelUsage: p.modelUsage }),
     // A token override is only ever the char-length estimate (Cursor records
     // no usage) — flag it so the server doesn't store it as measured.
     ...(tokenOverride ? { tokensEstimated: true } : {}),
