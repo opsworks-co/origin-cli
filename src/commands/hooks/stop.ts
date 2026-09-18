@@ -1071,7 +1071,7 @@ function enrichCursorTranscript({ agentSlug, parsed, input, state, displayTransc
   }
   return { displayTranscript };
 }
-function backfillCodexRollout({ codexData, parsed, state, displayTranscript }: { codexData: ReturnType<typeof discoverCodexSessionData> | null; parsed: ParsedTranscript; state: SessionState; displayTranscript: ReturnType<typeof formatTranscriptForDisplay> }): { displayTranscript: ReturnType<typeof formatTranscriptForDisplay> } {
+export function backfillCodexRollout({ codexData, parsed, state, displayTranscript }: { codexData: ReturnType<typeof discoverCodexSessionData> | null; parsed: ParsedTranscript; state: SessionState; displayTranscript: ReturnType<typeof formatTranscriptForDisplay> }): { displayTranscript: ReturnType<typeof formatTranscriptForDisplay> } {
   if (codexData) {
     debugLog('stop', 'supplementing with Codex data', {
       model: codexData.model,
@@ -1089,6 +1089,10 @@ function backfillCodexRollout({ codexData, parsed, state, displayTranscript }: {
       if (codexData.cacheReadTokens !== undefined) {
         parsed.cacheReadTokens = codexData.cacheReadTokens;
       }
+      // The SQLite-total fallback has no real split — carry its flag with the
+      // numbers it describes. Only inside this branch: when the transcript had
+      // its own usage, these counts were not adopted and the flag is not theirs.
+      if (codexData.tokensEstimated === true) parsed.tokensEstimated = true;
     }
     if (codexData.toolCalls > 0 && parsed.toolCalls === 0) {
       parsed.toolCalls = codexData.toolCalls;
@@ -1648,7 +1652,7 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
       // path that actually fires. Measured after that release, on this very
       // session: the stop sent 12 mappings of which indices 0-7 and 10-11
       // were empty, and the rows they landed on lost their file lists.
-      promptMappings = mergePromptMappings(previousMappings as any, promptMappings as any) as any;
+      promptMappings = mergePromptMappings(previousMappings as any, promptMappings as any, { openTurnIndex: currentPromptIdx }) as any;
     }
 
     // A committing turn that edits via a shell command (e.g. Copilot's
@@ -2646,6 +2650,7 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
             // Internal markers — `diffSource` is what travels.
             ledgerOwned: undefined,
             inheritedFiles: undefined,
+            emptiedOfInheritedFiles: undefined,
             promptText: (pm.promptText || '').slice(0, 1000),
             // The wire cap drops whole files; each one is named so the row
             // can say "diff covers N of M" instead of shrinking to N.
@@ -2974,6 +2979,19 @@ export function persistCompletedMappings({ promptMappings, state }: { promptMapp
             commitPatch: true,
             ...((pm as { contentAuthoritative?: boolean }).contentAuthoritative ? { contentAuthoritative: true } : {}),
           }
+          : {}),
+      // A row the inherited-files pass EMPTIED keeps its marker and, while it
+      // is still empty, the authority that makes the server replace the stale
+      // list it holds with `[]`. Authority used to ride only under
+      // `turnWindowCaptured` and `commitPatch`, so that blank went out `[]` +
+      // authoritative on the Stop that made it and `[]` WITHOUT authority on
+      // every Stop after, and the server's deferential-`[]` rule kept the
+      // stale list (prod 47b6f0e4 row 25: 44 files of the previous turn's
+      // commit, no diff, on a turn that wrote nothing, for seven hours).
+      // Nothing else gains authority here: #1672's rule stands.
+        ...((pm as { emptiedOfInheritedFiles?: boolean }).emptiedOfInheritedFiles
+          && (pm.filesChanged || []).length === 0 && !(pm.diff || '').trim() && !(pm.uncommittedDiff || '').trim()
+          ? { emptiedOfInheritedFiles: true, contentAuthoritative: true }
           : {}),
         ...((pm as { fileSetOnly?: boolean }).fileSetOnly ? { fileSetOnly: true } : {}),
       }, capturedNow);
@@ -3453,7 +3471,7 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     // real usage. Flagged into the payload so money/efficiency dashboards and
     // the benchmark "measured" subset can exclude/badge them — otherwise a
     // fabricated cost reads as exact spend and skews cross-agent comparisons.
-    let tokensEstimated = false;
+    let tokensEstimated = parsed.tokensEstimated === true;
 
     // Estimate tokens from prompt text when no real token data exists (Codex, agents without transcripts)
     if (parsed.tokensUsed === 0 && state.prompts.length > 0) {

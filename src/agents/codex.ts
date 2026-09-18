@@ -22,6 +22,10 @@ export interface CodexSessionData {
   inputTokens: number;     // NON-cached prompt tokens
   outputTokens: number;    // visible output + reasoning (both billed at output rate)
   cacheReadTokens?: number; // cached prompt portion — billed at the model's cached rate
+  // True when the split above was not read from the rollout but derived from
+  // SQLite's single `tokens_used` total (see codexSqliteTokenFallback). Stop
+  // forwards it as `tokensEstimated` so the cost is not stored as measured.
+  tokensEstimated?: boolean;
   toolCalls: number;
   prompt: string;
   prompts?: string[];   // all user prompts from the rollout, in order
@@ -103,6 +107,31 @@ export function isCodexInternalSubroutine(o: { model?: string | null; prompt?: s
   const systemStyle = /^(You are |You will |You'll be given |You are going to |Given the following)/i.test(p);
   if (isMini && systemStyle && (o.toolCalls ?? 0) === 0) return true;
   return false;
+}
+
+/**
+ * The token fields for a thread whose rollout could not be parsed, leaving only
+ * SQLite's `tokens_used` — ONE number, with no input/output/cached breakdown.
+ *
+ * The 70/30 split is an assumption, not a reading: output bills at 4-6x the
+ * input rate on the gpt-5.x family, so the 30% share decides most of the cost,
+ * and the cached portion (usually the bulk of a Codex session's input, billed
+ * at a tenth) is unknowable here. The numbers are kept — a session with some
+ * cost beats one with none — but they are flagged so the dashboard marks them
+ * "est." and the benchmark's measured-only metrics leave them out. Before this
+ * the flag was never set: Stop's chars/4 fallback only fires on tokensUsed === 0,
+ * and this path returns a non-zero total.
+ */
+export function codexSqliteTokenFallback(sqliteTokens: number): Pick<CodexSessionData, 'tokensUsed' | 'inputTokens' | 'outputTokens' | 'tokensEstimated'> {
+  const total = Number.isFinite(sqliteTokens) && sqliteTokens > 0 ? Math.floor(sqliteTokens) : 0;
+  return {
+    tokensUsed: total,
+    inputTokens: Math.round(total * 0.7),
+    outputTokens: Math.round(total * 0.3),
+    // Nothing to estimate from zero — leave the flag off so Stop's own
+    // prompt-length fallback (which sets it) stays the single owner of that case.
+    ...(total > 0 ? { tokensEstimated: true } : {}),
+  };
 }
 
 export function discoverCodexSessionData(
@@ -257,9 +286,7 @@ export function discoverCodexSessionData(
     debugLog('codex', 'rollout parse failed, using SQLite tokens_used', { sqliteTokens });
     return {
       model,
-      tokensUsed: sqliteTokens,
-      inputTokens: Math.round(sqliteTokens * 0.7),
-      outputTokens: Math.round(sqliteTokens * 0.3),
+      ...codexSqliteTokenFallback(sqliteTokens),
       toolCalls: 0,
       prompt,
       cwd: threadCwd || undefined,

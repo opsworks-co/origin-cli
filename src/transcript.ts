@@ -72,6 +72,10 @@ export interface ParsedTranscript {
   // a SUBSET, not an addition. 0 when the transcript predates the per-TTL
   // usage fields or the provider has only one tier.
   cacheCreation1hTokens: number;
+  // Set by a backfill whose token counts are an estimate rather than the
+  // agent's own usage report (Codex's SQLite-total fallback). The parser never
+  // sets it; Stop reads it when deciding the `tokensEstimated` wire flag.
+  tokensEstimated?: boolean;
   // How many real prompts `since` dropped — i.e. the NATIVE transcript index of
   // `prompts[0]`. 0 without a cutoff. The CLI adds this to a session-relative
   // turn number to get the index extractPromptFileMappings numbers rows by, so
@@ -2638,11 +2642,15 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   // the longest-substring match for "claude-haiku-4-5*" IDs. Known gap:
   // "claude-3-haiku" ($0.25/$1.25) also falls to the 'haiku' rate.
   'claude':    { input: 5,    output: 25 },  // bare brand → current Opus default
-  'sonnet':    { input: 3,    output: 15 },
+  'sonnet':    { input: 3,    output: 15 },  // Sonnet 4.x (also the unknown-model fallback)
+  'sonnet-5':  { input: 2,    output: 10 },  // Sonnet 5 — longer key wins over 'sonnet'
   'opus':      { input: 5,    output: 25 },  // Opus 4.5+
   'opus-4-1':  { input: 15,   output: 75 },  // legacy Opus 4.1
   '3-opus':    { input: 15,   output: 75 },  // legacy Claude 3 Opus
-  'fable':     { input: 10,   output: 50 },  // Claude Fable 5
+  'fable':     { input: 10,   output: 50 },  // Claude Fable 5 (cache reads 10% = $1/M)
+  // Fable 5.1: same $10/$50, cache reads $0.25/M (0.025×) — see the API table.
+  'fable-5-1': { input: 10,   output: 50, cachedInput: 0.25 },
+  'mythos':    { input: 10,   output: 50 },  // Mythos 5 / 5.1 — Fable's rate; cache rate unconfirmed
   'haiku':     { input: 0.80, output: 4  },  // legacy Haiku 3.5 / 4.0
   'haiku-4-5': { input: 1.00, output: 5  },  // Haiku 4.5
   // Google — pricing per 1M tokens (≤200K context tier where two tiers exist)
@@ -2661,6 +2669,9 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   'gemini-3.5-flash': { input: 0.15, output: 0.60 }, // Antigravity default
   'gemini-2.0-flash': { input: 0.10, output: 0.40 },
   'gemini-2.0': { input: 0.10, output: 0.40 },
+  // Bare brand stamped when the Gemini chat names no model. Was in
+  // BARE_BRAND_KEYS with no row → Sonnet default at Anthropic cache rates.
+  'gemini': { input: 1.25, output: 10 },
   // OpenAI (for Cursor users)
   'gpt-4o': { input: 2.50, output: 10 },
   'gpt-4o-mini': { input: 0.15, output: 0.60 },
@@ -2675,7 +2686,7 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   'gpt-5.3':     { input: 2.00,  output: 8.00 },
   'gpt-5.4':     { input: 3.00,  output: 12.00 },
   'gpt-5.5':     { input: 5.00,  output: 30.00, cachedInput: 0.50 },
-  'gpt-5.5-pro': { input: 30.00, output: 180.00 },
+  'gpt-5.5-pro': { input: 30.00, output: 180.00, cachedInput: 30.00 }, // no cache discount
   //   gpt-5.6 (GA 2026-07-09) — 3 tiers Sol/Terra/Luna, 90%-off cached input.
   //   Plain "gpt-5.6" = Sol (flagship), same rates as 5.5, per the
   //   plain-key = flagship convention (Codex's default). The tier keys win the

@@ -590,6 +590,13 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
     } catch (err: any) {
       debugLog('session-start', 'policy hook auto-install failed (non-fatal)', { message: err?.message });
     }
+    // An installed post-rewrite hook is never rewritten by an upgrade, and the
+    // ones written before the stdin fix deliver no rewrite pairs at all.
+    try {
+      const { repairInstalledPostRewriteHooks } = await import('../../post-rewrite-hook-stdin.js');
+      const repaired = await repairInstalledPostRewriteHooks(canonicalRepoPath);
+      if (repaired.length > 0) debugLog('session-start', 'repaired post-rewrite hooks that never read their stdin', { repaired });
+    } catch { /* non-fatal */ }
     // Heal missing local history from session start too (see
     // maybeSpawnHistorySync). Canonical path names the repo (and keys the
     // sync marker — same key the post-commit hook uses); the WORKING root is

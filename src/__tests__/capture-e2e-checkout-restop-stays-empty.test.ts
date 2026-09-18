@@ -20,7 +20,7 @@ import path from 'path';
 import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { WINDOWS_SLOWDOWN, isWindows } from './helpers/windows-e2e.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { foldStopRows } from './helpers/fold-stop-rows.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -139,7 +139,11 @@ function rows(): any[] {
 
 const UPSTREAM_FILES = ['upstream_a.py', 'upstream_b.py'];
 
-describe.skipIf(!haveDist || isWindows)('a re-Stop after a mid-turn checkout, through the built binary', () => {
+// Skipped on Windows at birth with no failure and no POSIX-only construct —
+// same audit as #1551 (`realpathSync.native`, inherited env, `path.join`,
+// `execFileSync`, Node's SIGTERM). Held files need a recorded Windows miss;
+// this one never had one. Timeouts already use WINDOWS_SLOWDOWN.
+describe.skipIf(!haveDist)('a re-Stop after a mid-turn checkout, through the built binary', () => {
   let tmp = '';
   let upstream = '';
 

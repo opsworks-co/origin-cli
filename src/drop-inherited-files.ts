@@ -45,6 +45,8 @@ export interface InheritedFilesRow {
   contentUnavailableFiles?: string[];
   chatOnly?: boolean;
   contentAuthoritative?: boolean;
+  /** This pass left the row with nothing. Persisted; never sent. */
+  emptiedOfInheritedFiles?: boolean;
   /** Files this pass removed, for trimWatchedEdits. Internal; never sent. */
   inheritedFiles?: string[];
 }
@@ -164,7 +166,16 @@ export function dropInheritedFilesFromTurns(
       pm.linesAdded = added;
       pm.linesRemoved = removed;
       const remaining = (pm.filesChanged as string[]).length;
-      if (remaining === 0 && !pm.diff.trim() && !String(pm.uncommittedDiff || '').trim()) pm.chatOnly = true;
+      if (remaining === 0 && !pm.diff.trim() && !String(pm.uncommittedDiff || '').trim()) {
+        pm.chatOnly = true;
+        // Survives the state round-trip (stop.ts persistCompletedMappings) and
+        // keeps the row its place in mergePromptMappings, so every LATER Stop
+        // re-sends the blank with the authority that makes the server drop its
+        // stale list. Its own marker, not `contentAuthoritative`: every
+        // chat-only turn already saves as `[]` + authoritative, and those must
+        // keep yielding to a fresh capture.
+        pm.emptiedOfInheritedFiles = true;
+      }
       pm.contentAuthoritative = true;
       pm.inheritedFiles = [...drop].sort();
       changed += 1;

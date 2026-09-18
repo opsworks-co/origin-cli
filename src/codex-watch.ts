@@ -822,6 +822,10 @@ export async function reconcileThread(
       tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
       inputTokens: parsed.inputTokens > 0 ? parsed.inputTokens : undefined,
       outputTokens: parsed.outputTokens > 0 ? parsed.outputTokens : undefined,
+      // The live parser subtracts cached input from inputTokens and reports it
+      // here; without this column the server recomputes cost as if none of the
+      // context was cached.
+      cacheReadTokens: (parsed.cacheReadTokens || 0) > 0 ? parsed.cacheReadTokens : undefined,
       toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
       promptChanges: promptChanges.length > 0 ? promptChanges : undefined,
       gitCapture,

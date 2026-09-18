@@ -74,6 +74,15 @@ export interface ParsedSession {
   // far cheaper than fresh input, so folding them into inputTokens overcharges).
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  // Of cacheCreationTokens, the portion on Anthropic's 1-hour tier (2× input
+  // vs 1.25×). Claude Code writes 1h cache exclusively, so leaving this out
+  // under-prices every cache write the watcher reports.
+  cacheCreation1hTokens?: number;
+  // True when the counts above are derived from text length (Cursor, Antigravity)
+  // rather than reported by the agent. Rides the wire as `tokensEstimated` so
+  // the dashboard can mark the cost "est." — the hook path has sent it since
+  // #866; the watcher never did, so its Cursor/agy sessions looked measured.
+  tokensEstimated?: boolean;
   toolCalls: number;
   // Per-tool counts keyed by the normalized label the UI colors chips by
   // (Read/Edit/Write/Bash/…). Optional — an adapter that can't break its count
@@ -426,6 +435,10 @@ function fromParsedTranscript(
     outputTokens: tokenOverride ? tokenOverride.outputTokens : p.outputTokens,
     cacheReadTokens: p.cacheReadTokens,
     cacheCreationTokens: p.cacheCreationTokens,
+    cacheCreation1hTokens: p.cacheCreation1hTokens,
+    // A token override is only ever the char-length estimate (Cursor records
+    // no usage) — flag it so the server doesn't store it as measured.
+    ...(tokenOverride ? { tokensEstimated: true } : {}),
     toolCalls: p.toolCalls,
     filePaths: uniqueFiles(p.filesChanged, p.filesRead),
     filesChanged: p.filesChanged,
@@ -1005,6 +1018,8 @@ export const antigravityAdapter: TranscriptAdapter = {
       tokensUsed: usage.totalTokens,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
+      // Antigravity reports no usage at all; every count above is chars/4.
+      tokensEstimated: true,
       // The transcript's own tool_calls, counted and labelled by the parser.
       // This was hardcoded to 0 — the count and the breakdown were computed on
       // every parse and then thrown away here, which is why an agy turn that

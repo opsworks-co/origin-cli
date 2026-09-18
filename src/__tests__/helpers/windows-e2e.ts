@@ -25,8 +25,7 @@
 // Two other files mention win32 but were never gated at the describe level:
 // enable-idempotency and ensure-policy-hook already RUN on Windows and guard
 // only their Unix permission-bit assertions (`statSync().mode & 0o777`) inline,
-// which is the correct shape and is left alone. With the skips below lifted,
-// no CLI test file is skipped wholesale on Windows any more.
+// which is the correct shape and is left alone.
 //
 // What is left is speed, not semantics. vitest.config.ts already documents the
 // reason its own timeout is 30s: every git call is a process spawn Defender
@@ -34,18 +33,20 @@
 // slower again under parallel worker load. These tests drive ~10 CLI spawns
 // plus git init/add/commit each, so they get the same allowance rather than a
 // Linux number.
-// Measured over three Windows runs of the sweep, per file:
+// Measured over three Windows runs of the original 15-file sweep, per file:
 //
 //   13 files                            pass / pass / pass / pass
-//   capture-e2e-real-binary             fail / fail / pass / FAIL  (#1570, held)
-//   capture-e2e-cursor-concurrent-start pass / pass / FAIL / -     (#1568, fixed)
+//   capture-e2e-real-binary             fail / fail / pass / FAIL  (#1570, closed)
+//   capture-e2e-cursor-concurrent-start pass / pass / FAIL / -     (#1568, open)
 //
-// All 15 are enabled now. The cursor start race returned after #1577; the
-// real-binary capture gate returned with exclusive journal writer ownership
-// and serialized append/compaction. The table above is historical evidence,
-// not a claim that the journal changes have passed Windows CI. Collect fresh
-// Windows runs before closing #1570: one green run previously hid another
-// failure, so it cannot establish that the intermittent loss is resolved.
+// #1570 closed with #1582. #1568's lock fix is on main (#1702) but the file
+// stays held: #1580 lifted it on one green run and it failed the next. Probe
+// with ORIGIN_WINDOWS_CAPTURE_PROBE=1; lifting wants several consecutive
+// native Windows greens.
+//
+// Three files added after the sweep that skipped Windows at birth, with no
+// recorded miss, now run: carried-row-sheds-inherited-files, checkout-restop-
+// stays-empty, mid-turn-pull. A hold needs a Windows failure of its own.
 export const isWindows = process.platform === 'win32';
 
 /** Multiply an explicit test/hook timeout by this. 1 everywhere but Windows. */

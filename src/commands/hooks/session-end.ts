@@ -2002,6 +2002,8 @@ export function promptMappingHasContent(m: {
 export function mergePromptMappings<T extends { promptIndex: number; filesChanged?: unknown; diff?: string; uncommittedDiff?: string }>(
   saved: T[],
   fromTranscript: T[],
+  /** `openTurnIndex`: the turn still in flight. Its saved row never outranks a fresh capture. */
+  opts?: { openTurnIndex?: number | null },
 ): T[] {
   const byIndex = new Map<number, T>();
   // Saved state can already contain the backfill and closing capture of the
@@ -2010,6 +2012,24 @@ export function mergePromptMappings<T extends { promptIndex: number; filesChange
     const prev = byIndex.get(m.promptIndex);
     // Transcript wins unless it is empty and the saved mapping is not.
     if (prev && !promptMappingHasContent(m) && promptMappingHasContent(prev)) continue;
+    // …or unless the inherited-files pass EMPTIED the saved mapping. That row
+    // carries `contentAuthoritative`, which is what makes the server replace
+    // the stale list it holds with `[]`. The transcript's empty reconstruction
+    // of the same turn carries nothing, and letting it win here stripped the
+    // marker: the row went out `[]` + authoritative once, then `[]` without
+    // authority on every later Stop, and the server's deferential-`[]` rule
+    // kept the stale list (prod 47b6f0e4 row 25: 44 files of the previous
+    // turn's commit, no diff, for seven hours).
+    //
+    // Keyed on the pass's OWN marker and never applied to the open turn.
+    // Every chat-only Stop saves its row as `[]` + chatOnly + authoritative
+    // too; keeping THAT row for a turn that Stops again leaves `chatOnly` set,
+    // which switches off Stop's shell-edit rescue — the turn's later
+    // `printf >> app.py` was lost and the blank went out authoritative
+    // (review of #1713, reproduced through the built binary).
+    if (prev && !promptMappingHasContent(m)
+      && (prev as { emptiedOfInheritedFiles?: boolean }).emptiedOfInheritedFiles === true
+      && m.promptIndex !== opts?.openTurnIndex) continue;
     // …or unless the saved mapping is the ledger's answer. The transcript is
     // a reconstruction of tool calls; the ledger observed the writes.
     if (prev && (prev as { diffSource?: string }).diffSource === 'ledger'

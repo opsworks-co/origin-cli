@@ -1023,6 +1023,7 @@ async function pushInflightCodexState(): Promise<void> {
         tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
         inputTokens: parsed.inputTokens > 0 ? parsed.inputTokens : undefined,
         outputTokens: parsed.outputTokens > 0 ? parsed.outputTokens : undefined,
+        cacheReadTokens: (parsed.cacheReadTokens || 0) > 0 ? parsed.cacheReadTokens : undefined,
         toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
         status: 'RUNNING',
       }),

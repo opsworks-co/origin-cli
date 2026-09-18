@@ -2531,7 +2531,10 @@ export async function reconcileSession(
 
   // Cost from the same estimator the hook path uses, so watcher and hook
   // sessions are priced identically. Cache tokens are passed separately because
-  // cache reads bill far cheaper than fresh input.
+  // cache reads bill far cheaper than fresh input. Every token that goes into
+  // this number ALSO goes on the wire below: /session/end re-derives cost from
+  // the stored token columns, so a cache count priced here but not sent meant
+  // the server's final figure never matched the one the watcher stamped.
   let costUsd = 0;
   try {
     costUsd = estimateCost(
@@ -2540,6 +2543,7 @@ export async function reconcileSession(
       parsed.outputTokens,
       parsed.cacheReadTokens || 0,
       parsed.cacheCreationTokens || 0,
+      { cacheCreation1hTokens: parsed.cacheCreation1hTokens || 0 },
     );
   } catch { /* pricing unavailable — leave 0 rather than guess */ }
 
@@ -2615,6 +2619,14 @@ export async function reconcileSession(
       tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
       inputTokens: parsed.inputTokens > 0 ? parsed.inputTokens : undefined,
       outputTokens: parsed.outputTokens > 0 ? parsed.outputTokens : undefined,
+      // Cache columns — the inputs to costUsd above. Omitted only when zero, so
+      // an adapter that reports no cache leaves any stored value alone.
+      cacheReadTokens: (parsed.cacheReadTokens || 0) > 0 ? parsed.cacheReadTokens : undefined,
+      cacheCreationTokens: (parsed.cacheCreationTokens || 0) > 0 ? parsed.cacheCreationTokens : undefined,
+      cacheCreation1hTokens: (parsed.cacheCreation1hTokens || 0) > 0 ? parsed.cacheCreation1hTokens : undefined,
+      // Explicit boolean only when the adapter says so: the server applies the
+      // flag on `typeof === 'boolean'`, and undefined leaves a stored value be.
+      tokensEstimated: parsed.tokensEstimated === true ? true : undefined,
       toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
       // Per-tool chips. Sent alongside the total so the two can't disagree;
       // omitted when the adapter can't break its count down.

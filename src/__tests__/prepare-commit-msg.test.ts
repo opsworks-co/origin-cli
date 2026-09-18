@@ -22,6 +22,18 @@ import { buildOriginTrailers, handlePrepareCommitMsg } from '../commands/hooks.j
 // ─── Unit tests for buildOriginTrailers ─────────────────────────────────
 
 describe('buildOriginTrailers', () => {
+  it('names the committing turn\'s row, which a re-launched session\'s count cannot', () => {
+    // Prod 47b6f0e4: third launch of one session, local prompt 4 = server row 27.
+    // "4 prompts" alone was read as the session's 4th row.
+    const [line] = buildOriginTrailers('47b6f0e4-923f-46a6-8ac0-069d6b259725', 'claude-opus-5', 4, null, 'claude-code', 0, 28);
+    expect(line).toBe('Origin-Session: 47b6f0e4-923 | Claude Code | 4 prompts | turn 28');
+    // Absent or nonsense → the trailer is exactly what it was.
+    expect(buildOriginTrailers('47b6f0e4-923f-46a6-8ac0-069d6b259725', 'claude-opus-5', 4, null, 'claude-code')[0])
+      .toBe('Origin-Session: 47b6f0e4-923 | Claude Code | 4 prompts');
+    expect(buildOriginTrailers('47b6f0e4-923f-46a6-8ac0-069d6b259725', 'claude-opus-5', 4, null, 'claude-code', 0, 0)[0])
+      .not.toContain('turn');
+  });
+
   it('produces a single Origin-Session trailer when no snapshot', () => {
     const out = buildOriginTrailers('abcdef1234567890', 'claude-sonnet-4', 3);
     expect(out).toEqual(['Origin-Session: abcdef123456 | Claude Code | 3 prompts']);
@@ -98,6 +110,7 @@ function writeActiveSession(repo: string, opts: {
   promptCount?: number;
   sessionTag?: string;
   claudeSessionId?: string;
+  promptIndexBase?: number;
 }) {
   const tag = opts.sessionTag || opts.sessionId.slice(0, 12);
   const state = {
@@ -113,6 +126,7 @@ function writeActiveSession(repo: string, opts: {
     prePromptSha: null,
     branch: null,
     sessionTag: tag,
+    ...(opts.promptIndexBase ? { promptIndexBase: opts.promptIndexBase } : {}),
   };
   fs.writeFileSync(
     path.join(repo, '.git', `origin-session-${tag}.json`),
@@ -143,6 +157,22 @@ describe('handlePrepareCommitMsg', () => {
 
     const out = fs.readFileSync(msgFile, 'utf-8');
     expect(out).toContain('Origin-Session: abcdef123456 | Claude Code | 2 prompts');
+  });
+
+  it('names the turn by its SERVER row: a re-launched session counts prompts from 1 again', async () => {
+    // Prod 47b6f0e4, third launch: the state's row base was 24 and the commit
+    // came in the launch's 4th prompt — row 27, page turn 28.
+    writeActiveSession(repo, { sessionId: '47b6f0e4923f46a6', model: 'claude-opus-5', promptCount: 4, promptIndexBase: 24 });
+    const msgFile = writeMsgFile(repo, 'Home hero: more visible\n');
+    await handlePrepareCommitMsg(msgFile, 'message');
+    expect(fs.readFileSync(msgFile, 'utf-8')).toContain('Origin-Session: 47b6f0e4923f | Claude Code | 4 prompts | turn 28');
+  });
+
+  it('a first launch names the same number twice over — and says so', async () => {
+    writeActiveSession(repo, { sessionId: 'abcdef1234567890', model: 'claude-sonnet-4', promptCount: 2 });
+    const msgFile = writeMsgFile(repo, 'Fix auth bug\n');
+    await handlePrepareCommitMsg(msgFile, 'message');
+    expect(fs.readFileSync(msgFile, 'utf-8')).toContain('| 2 prompts | turn 2');
   });
 
   it('does nothing when there is no active session', async () => {

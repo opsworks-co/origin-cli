@@ -1,4 +1,5 @@
 import { execSync } from 'child_process';
+import { CAPTURE_REWRITES, backgroundedWithRewrites, repairLocalPostRewriteScript } from './post-rewrite-hook-stdin.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -175,17 +176,24 @@ function installPostRewriteHook(hooksDir: string): void {
     // no-ops and rebase/amend loses attribution. Redirect so the backgrounded
     // child doesn't stall a `git commit --amend | tee` pipe.
     HOOK_PATH_SHIM,
-    'origin hooks git-post-rewrite "$@" >/dev/null 2>&1 &',
+    // The pairs arrive on stdin and `&` detaches stdin: read them in the
+    // foreground, pipe them in. See post-rewrite-hook-stdin.ts.
+    CAPTURE_REWRITES,
+    backgroundedWithRewrites('origin hooks git-post-rewrite "$@"'),
   ].join('\n') + '\n';
 
   if (fs.existsSync(hookPath)) {
     const existing = fs.readFileSync(hookPath, 'utf-8');
     if (existing.includes(ORIGIN_MARKER)) {
-      // Already installed
+      // Already installed — but a block written before the stdin fix never
+      // receives git's pairs. Repair it in place.
+      const repaired = repairLocalPostRewriteScript(existing);
+      if (repaired) fs.writeFileSync(hookPath, repaired);
       return;
     }
     // Append to existing hook
-    fs.appendFileSync(hookPath, '\n' + ORIGIN_MARKER + '\n' + HOOK_PATH_SHIM + '\n' + 'origin hooks git-post-rewrite "$@" >/dev/null 2>&1 &\n');
+    fs.appendFileSync(hookPath, '\n' + ORIGIN_MARKER + '\n' + HOOK_PATH_SHIM + '\n' + CAPTURE_REWRITES + '\n'
+      + backgroundedWithRewrites('origin hooks git-post-rewrite "$@"') + '\n');
   } else {
     fs.writeFileSync(hookPath, hookScript);
   }

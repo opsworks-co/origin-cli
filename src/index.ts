@@ -775,10 +775,14 @@ hooks.command('git-post-rewrite').description('Handle git post-rewrite hook (reb
   const { getGitRoot } = await import('./session-state.js');
   const repoPath = getGitRoot(process.cwd());
   if (!repoPath) return;
-  // Read old-sha new-sha pairs from stdin
+  // Read old-sha new-sha pairs from stdin. The imported `readFileSync`, not
+  // `require('fs')`: this package is ESM, `require` is undefined here, and the
+  // catch below swallowed the ReferenceError — so even a hook that delivered
+  // the pairs had them discarded on this line. Two breaks in series; see
+  // post-rewrite-hook-stdin.ts for the other one.
   let input = '';
   try {
-    input = require('fs').readFileSync(0, 'utf-8');
+    input = readFileSync(0, 'utf-8');
   } catch { /* no stdin */ }
   if (input) {
     const mappings = parseRewriteInput(input);

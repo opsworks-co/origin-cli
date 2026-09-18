@@ -3,6 +3,7 @@
 // Moved out of commands/hooks.ts mechanically: the text is unchanged, only its
 // home is. Shared helpers still live in hooks.ts and are imported from there.
 import { livePrompts } from '../../transcript.js';
+import { serverRowForLocalTurn } from '../../turn-index.js';
 import { replayInProgress } from '../../commit-replay.js';
 import { attributionPgrepChecks, resolveAgentDisplayName, sessionMatchesAgent } from '../../agents/registry.js';
 import { api } from '../../api.js';
@@ -744,11 +745,18 @@ export function buildOriginTrailers(
   latestSnapshotId?: string | null,
   agentSlug?: string,
   subagentCount = 0,
+  /** 1-based number of the committing turn's SERVER row (promptIndex + 1). */
+  turnNumber?: number | null,
 ): string[] {
   const shortId = sessionId.slice(0, 12);
   const agentName = resolveAgentDisplayName(model, agentSlug);
   const parts = [shortId, agentName];
   if (promptCount > 0) parts.push(promptCount === 1 ? '1 prompt' : `${promptCount} prompts`);
+  // `N prompts` counts THIS LAUNCH's prompts. The server read it as the
+  // session's ordinal, which holds only until the session is launched a second
+  // time: prod 47b6f0e4 committed in row 27 under a trailer saying "4 prompts"
+  // and the commit was anchored to row 3. The row itself needs no counting.
+  if (Number.isInteger(turnNumber) && (turnNumber as number) > 0) parts.push(`turn ${turnNumber}`);
   if (subagentCount > 0) parts.push(subagentCount === 1 ? '1 sub-agent' : `${subagentCount} sub-agents`);
   const trailers: string[] = [`Origin-Session: ${parts.join(' | ')}`];
   if (latestSnapshotId) trailers.push(`Origin-Snapshot: ${latestSnapshotId}`);
@@ -1024,6 +1032,9 @@ export async function handlePrepareCommitMsg(
       latestSnapshotId,
       state.agentSlug,
       state.subagentSpawns?.length || 0,
+      livePrompts(state).length > 0
+        ? serverRowForLocalTurn(livePrompts(state).length - 1, state.promptIndexBase) + 1
+        : null,
     );
 
     // Use git interpret-trailers to add the trailers in-place. This handles:

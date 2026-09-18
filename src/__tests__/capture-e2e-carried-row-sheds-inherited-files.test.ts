@@ -19,7 +19,7 @@ import path from 'path';
 import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { WINDOWS_SLOWDOWN, isWindows } from './helpers/windows-e2e.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 // ORIGIN_E2E_BIN runs the same scenario through another build — the installed
@@ -145,7 +145,11 @@ function lastSentRow(promptIndex: number): any {
 
 const UPSTREAM_FILES = ['upstream_a.py', 'upstream_b.py'];
 
-describe.skipIf(!haveDist || isWindows)('an earlier turn saved with another commit\'s files, through the built binary', () => {
+// Skipped on Windows at birth with no failure and no POSIX-only construct —
+// same audit as #1551 (`realpathSync.native`, inherited env, `path.join`,
+// `execFileSync`, Node's SIGTERM). Held files need a recorded Windows miss;
+// this one never had one. Timeouts already use WINDOWS_SLOWDOWN.
+describe.skipIf(!haveDist)('an earlier turn saved with another commit\'s files, through the built binary', () => {
   let tmp = '';
   let base = '';
   let upstream = '';
@@ -274,5 +278,37 @@ describe.skipIf(!haveDist || isWindows)('an earlier turn saved with another comm
     expect(t1.contentAuthoritative).toBe(true);
     expect(t1.inheritedFiles, 'an internal marker went out on the wire').toBeUndefined();
     expect(hooksLog()).toMatch(/inherited files dropped from an earlier turn \{"promptIndex":0/);
-  }, 120_000 * WINDOWS_SLOWDOWN);
+
+    // The emptied row must stay authoritative on every LATER Stop too. The
+    // state pick used to keep `contentAuthoritative` only under the
+    // turn-window and commit-patch markers, so the third Stop re-sent turn 1
+    // as `[]` WITHOUT authority — and the server's deferential-`[]` rule kept
+    // whatever stale list it held (prod 47b6f0e4 row 25: 44 files of the
+    // previous turn's commit, re-sent empty for seven hours to no effect).
+    const saved = JSON.parse(fs.readFileSync(sf, 'utf-8')).completedPromptMappings
+      .find((m: any) => m.promptIndex === 0);
+    expect(saved?.filesChanged || []).toEqual([]);
+    expect(saved?.contentAuthoritative, 'the saved row lost its authority on the state round-trip').toBe(true);
+    expect(saved?.emptiedOfInheritedFiles, 'the saved row lost the marker that keeps its place in the merge').toBe(true);
+
+    reply('Nothing changed.');
+    say('and now?');
+    expect((await run('user-prompt-submit', { prompt: 'and now?' })).code).toBe(0);
+    reply('Still nothing.');
+    // Only what the third STOP sends counts: the third submit's PATCH spreads
+    // the saved row too and would satisfy every assertion below on its own.
+    const beforeThirdStop = hits.length;
+    const third = await run('stop', { stop_hook_active: false });
+    expect(third.code, third.stderr).toBe(0);
+    const t1Again = hits.slice(beforeThirdStop)
+      .filter((h) => h.method === 'PATCH' && Array.isArray(h.body?.promptChanges))
+      .map((h) => h.body.promptChanges.find((p: any) => p.promptIndex === 0)).filter(Boolean).at(-1);
+    expect(t1Again, 'the third Stop sent no row for turn 1').toBeTruthy();
+    expect(t1Again.filesChanged || []).toEqual([]);
+    expect(t1Again.contentAuthoritative, 'a re-sent emptied row went out without authority').toBe(true);
+    expect(t1Again.emptiedOfInheritedFiles, 'an internal marker went out on the wire').toBeUndefined();
+    // Once emptied there is nothing left to drop: the authority came from the
+    // saved row, not from the pass firing again.
+    expect(hooksLog().match(/inherited files dropped from an earlier turn \{"promptIndex":0/g)?.length).toBe(1);
+  }, 180_000 * WINDOWS_SLOWDOWN);
 });

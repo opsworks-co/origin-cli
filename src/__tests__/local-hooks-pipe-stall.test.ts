@@ -57,7 +57,7 @@ describe('repo-local hooks: redirect + PATH shim', () => {
     installRewriteHooks(dir);
     const pr = hook('post-rewrite');
     const co = hook('post-checkout');
-    expect(pr).toMatch(/git-post-rewrite "\$@" >\/dev\/null 2>&1 &/);
+    expect(pr).toMatch(/git-post-rewrite "\$@"; \} >\/dev\/null 2>&1 &/);
     expect(pr).toContain('export PATH=');
     expect(co).toMatch(/git-post-checkout "\$@" >\/dev\/null 2>&1 &/);
     expect(co).toContain('export PATH=');

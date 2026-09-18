@@ -148,6 +148,6 @@ describe('global post-commit / post-rewrite hooks do not stall a pipe', () => {
     const pc = fs.readFileSync(path.join(dir, 'post-commit'), 'utf-8');
     const pr = fs.readFileSync(path.join(dir, 'post-rewrite'), 'utf-8');
     expect(pc).toMatch(/git-post-commit >\/dev\/null 2>&1 &/);
-    expect(pr).toMatch(/git-post-rewrite "\$@" >\/dev\/null 2>&1 &/);
+    expect(pr).toMatch(/git-post-rewrite "\$@"; \} >\/dev\/null 2>&1 &/);
   });
 });

@@ -390,6 +390,8 @@ export interface SessionState {
     diffSource?: 'ledger' | 'turn-window';
     turnWindowCaptured?: boolean;
     contentAuthoritative?: boolean;
+    /** The inherited-files pass left this row with nothing — see drop-inherited-files.ts. */
+    emptiedOfInheritedFiles?: boolean;
     // The diff is the turn's commit patch (preferCommitPatchForCommittedTurns).
     // Travels with every re-send, or the server treats the row as a rebuild.
     commitPatch?: boolean;

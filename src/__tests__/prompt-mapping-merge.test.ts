@@ -65,6 +65,46 @@ describe('mergePromptMappings', () => {
     expect(mergePromptMappings([m(2)], [m(2)])[0].filesChanged).toEqual([]);
   });
 
+  it('keeps a row the inherited-files pass EMPTIED over the transcript\'s empty copy', () => {
+    // That pass empties a carried row and marks it contentAuthoritative — the
+    // marker that makes the server replace its stale list with []. The
+    // transcript's empty reconstruction of the same turn used to win this
+    // merge and strip it, so every later Stop re-sent [] without authority and
+    // the server kept the stale list (prod 47b6f0e4 row 25, 44 files of the
+    // previous turn's commit).
+    const saved = [{ promptIndex: 0, promptText: 'go ahead', filesChanged: [], diff: '', uncommittedDiff: '', contentAuthoritative: true, chatOnly: true, emptiedOfInheritedFiles: true }];
+    const transcript = [{ promptIndex: 0, promptText: 'go ahead', filesChanged: [], diff: '', uncommittedDiff: '' }];
+    const out = mergePromptMappings(saved as any, transcript as any, { openTurnIndex: 1 });
+    expect(out).toHaveLength(1);
+    expect((out[0] as any).contentAuthoritative).toBe(true);
+    expect((out[0] as any).emptiedOfInheritedFiles).toBe(true);
+    // A transcript row that actually saw a write still wins.
+    const wrote = [{ promptIndex: 0, promptText: 'go ahead', filesChanged: ['a.ts'], diff: 'diff --git a/a.ts b/a.ts\n+x\n', uncommittedDiff: '' }];
+    expect((mergePromptMappings(saved as any, wrote as any, { openTurnIndex: 1 })[0] as any).contentAuthoritative).toBeUndefined();
+  });
+
+  it('never keeps it for the turn that is still OPEN', () => {
+    // Review of #1713, reproduced through the built binary: a turn Stops
+    // workless, continues with a shell write, and Stops again. Keeping the
+    // saved blank leaves `chatOnly` set, which switches off Stop's shell-edit
+    // rescue — the write was lost and the blank went out authoritative.
+    const saved = [{ promptIndex: 0, promptText: 'go ahead', filesChanged: [], diff: '', uncommittedDiff: '', contentAuthoritative: true, chatOnly: true, emptiedOfInheritedFiles: true }];
+    const transcript = [{ promptIndex: 0, promptText: 'go ahead', filesChanged: [], diff: '', uncommittedDiff: '' }];
+    const out = mergePromptMappings(saved as any, transcript as any, { openTurnIndex: 0 });
+    expect((out[0] as any).chatOnly).toBeUndefined();
+    expect((out[0] as any).contentAuthoritative).toBeUndefined();
+  });
+
+  it('an ordinary chat-only blank still yields, authoritative or not', () => {
+    // Every chat-only Stop saves `[]` + chatOnly + turnWindowCaptured +
+    // contentAuthoritative. Those are not this rule's business.
+    const saved = [{ promptIndex: 0, promptText: 'hi', filesChanged: [], diff: '', uncommittedDiff: '', contentAuthoritative: true, chatOnly: true, turnWindowCaptured: true }];
+    const transcript = [{ promptIndex: 0, promptText: 'hi', filesChanged: [], diff: '', uncommittedDiff: '' }];
+    const out = mergePromptMappings(saved as any, transcript as any, { openTurnIndex: 3 });
+    expect((out[0] as any).chatOnly).toBeUndefined();
+    expect((out[0] as any).turnWindowCaptured).toBeUndefined();
+  });
+
   it('keeps saved indices the transcript never mentions', () => {
     const out = mergePromptMappings([m(7, ['x.ts'])], [m(0)]);
     expect(out.map(x => x.promptIndex)).toEqual([0, 7]);

@@ -29,6 +29,7 @@ import {
   type ScannedTranscript,
   type ParsedSession,
 } from '../transcript-adapters.js';
+import { estimateCost, __resetActivePricingForTests } from '../transcript.js';
 
 let tmp = '';
 let stateDir = '';
@@ -40,6 +41,8 @@ beforeEach(() => {
   // The startSession cooloff is module state — a leak across tests would make
   // a later reconcile silently skip its API call.
   __resetStartSessionBackoff();
+  // Price with the compiled table, not a stale ~/.origin/pricing.json.
+  __resetActivePricingForTests();
 });
 
 afterEach(() => {
@@ -142,6 +145,43 @@ describe('session state persistence', () => {
 // ─── reconcileSession ───────────────────────────────────────────────────────────
 
 describe('reconcileSession', () => {
+  it('sends the cache columns and the estimated flag it priced the cost from', async () => {
+    // /session/end re-derives costUsd from the STORED token columns. The
+    // watcher priced cache reads and 1h writes but never sent them, so the
+    // server's final figure could not match the one stamped here — and a
+    // char-estimated Cursor/agy session was stored as measured.
+    const api = mockApi();
+    const adapter = fakeAdapter({
+      model: 'claude-opus-4-8',
+      inputTokens: 1_000, outputTokens: 2_000, tokensUsed: 3_000,
+      cacheReadTokens: 500_000, cacheCreationTokens: 250_000, cacheCreation1hTokens: 250_000,
+      tokensEstimated: true,
+    });
+    await reconcileSession(scanned(), adapter, baseDeps(api));
+
+    const wire = onTheWire(api.calls.update[0].data);
+    expect(wire.cacheReadTokens).toBe(500_000);
+    expect(wire.cacheCreationTokens).toBe(250_000);
+    expect(wire.cacheCreation1hTokens).toBe(250_000);
+    expect(wire.tokensEstimated).toBe(true);
+    // Priced on the 1h tier: 250k × $5 × 2.00 = $2.50 of cache writes, not the
+    // $1.5625 the 5-minute rate gives. Same estimator, same inputs, as the hook path.
+    const expected = estimateCost('claude-opus-4-8', 1_000, 2_000, 500_000, 250_000, { cacheCreation1hTokens: 250_000 });
+    expect(wire.costUsd).toBe(expected);
+    expect(expected).toBeGreaterThan(estimateCost('claude-opus-4-8', 1_000, 2_000, 500_000, 250_000));
+  });
+
+  it('leaves the cache columns and the estimated flag off the wire when the adapter has none', async () => {
+    const api = mockApi();
+    await reconcileSession(scanned(), fakeAdapter(), baseDeps(api));
+    const wire = onTheWire(api.calls.update[0].data);
+    expect('cacheReadTokens' in wire).toBe(false);
+    expect('cacheCreation1hTokens' in wire).toBe(false);
+    // Undefined, not false: a stored `true` from the hook path must survive a
+    // watcher poll that simply has no opinion.
+    expect('tokensEstimated' in wire).toBe(false);
+  });
+
   it('creates a session keyed on agentSessionId with the server agent slug and earliest start time', async () => {
     const api = mockApi();
     const deps = baseDeps(api);

@@ -55,6 +55,21 @@ describe('Anthropic Fable 5 pricing — $10/$50, not the bare-claude fallback', 
     expect(estimateCost('claude-fable-5', 0, ONE_MILLION)).toBeCloseTo(50, 4);
   });
 
+  it('Sonnet 5 is $2/$10 and Fable 5.1 cache reads are $0.25/M', () => {
+    expect(estimateCost('claude-sonnet-5', ONE_MILLION, ONE_MILLION)).toBeCloseTo(12, 4);
+    expect(estimateCost('claude-sonnet-4-6', ONE_MILLION, ONE_MILLION)).toBeCloseTo(18, 4);
+    expect(estimateCost('claude-fable-5-1', 0, 0, ONE_MILLION, 0)).toBeCloseTo(0.25, 4);
+    expect(estimateCost('claude-fable-5', 0, 0, ONE_MILLION, 0)).toBeCloseTo(1.0, 4);
+  });
+
+  it('bare "gemini" and gpt-5.5-pro cache reads price at their own rows', () => {
+    // 'gemini' had no row and fell to the Sonnet default with Anthropic cache rates.
+    expect(estimateCost('gemini', ONE_MILLION, ONE_MILLION)).toBeCloseTo(11.25, 4);
+    expect(estimateCost('gemini', 0, 0, ONE_MILLION, 0)).toBeCloseTo(0.3125, 4);
+    // gpt-5.5-pro has no cache discount — cached input is the full $30/M.
+    expect(estimateCost('gpt-5.5-pro', 0, 0, ONE_MILLION, 0)).toBeCloseTo(30, 4);
+  });
+
   it('charges cache reads at 10% of input ($1.00/M) and writes at 125% ($12.50/M)', () => {
     expect(estimateCost('claude-fable-5', 0, 0, ONE_MILLION, 0)).toBeCloseTo(1.0, 4);
     expect(estimateCost('claude-fable-5', 0, 0, 0, ONE_MILLION)).toBeCloseTo(12.5, 4);

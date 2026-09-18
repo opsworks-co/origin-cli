@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { syncNotesFromRemote } from '../git-notes.js';
+import { CAPTURE_REWRITES, backgroundedWithRewrites, withRewritesOnStdin } from '../post-rewrite-hook-stdin.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -2160,16 +2161,21 @@ export function writeGlobalPostRewriteHook(globalHooksDir: string): void {
 
 ${hookShimPreamble()}
 
+# git hands the rewritten "old new" pairs on STDIN, and a command backgrounded
+# with & reads /dev/null instead. Read them here, in the foreground, and pipe
+# them to everything that needs them — see post-rewrite-hook-stdin.ts.
+${CAPTURE_REWRITES}
+
 if [ -n "$ORIGIN_BIN" ]; then
   # Redirect so the backgrounded child doesn't hold git's stdout fd open
   # (same \`git commit | tee\` / pipe-stall reason as post-commit).
-  "$ORIGIN_BIN" hooks git-post-rewrite "$@" >/dev/null 2>&1 &
+  ${backgroundedWithRewrites('"$ORIGIN_BIN" hooks git-post-rewrite "$@"')}
 fi
 
 # Chain to local repo hooks if they exist
 LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/post-rewrite"
 if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
-  "$LOCAL_HOOK" "$@"
+  ${withRewritesOnStdin('"$LOCAL_HOOK" "$@"')}
 fi
 `;
   fs.writeFileSync(postRewritePath, postRewriteContent);
