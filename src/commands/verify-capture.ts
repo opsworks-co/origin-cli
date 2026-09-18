@@ -54,6 +54,12 @@ interface StoredSession {
    * decide `--fail-on-contradiction`. See the gating note in the command below.
    */
   alive: boolean;
+  /**
+   * The header was held back because this state file starts mid-conversation:
+   * its rows begin at `promptIndexBase`, and the rows before it are on the
+   * server only. See `collectSessions`.
+   */
+  earlierRowsElsewhere: boolean;
   source: string;
 }
 
@@ -99,13 +105,23 @@ function collectSessions(cwd?: string): StoredSession[] {
     // this exemption exists for has just had post-commit WRITE that file, so
     // the check it needs to pass is the one it cannot fail.
     const noMoreTurns = !isSessionAlive(d as unknown as SessionState, file);
+    // A RE-LAUNCHED conversation. session-start rebuilt this state file, so
+    // its rows begin at `promptIndexBase`; the rows of the launches before it
+    // were sent and are on the server, not here. The header is still the whole
+    // session's — its commit records survive the re-launch — so comparing the
+    // two is the subset comparison the `--since` rule below already declines:
+    // arithmetic, not a defect. Session ed0e33c8 (base 23, rows 23-24) read as
+    // 10 header files in no turn; 8 of them were rows 0-22's.
+    const base = Number.isInteger(d.promptIndexBase as number) ? (d.promptIndexBase as number) : 0;
+    const earlierRowsElsewhere = hasHeader && base > 0
+      && !turns.some((t) => Number.isInteger(t.promptIndex) && t.promptIndex < base);
     out.push({
       sessionId: d.sessionId,
       agentSlug: typeof d.agentSlug === 'string' ? d.agentSlug : undefined,
       repoPath: typeof d.repoPath === 'string' ? d.repoPath : undefined,
       startedAt: typeof d.startedAt === 'string' ? d.startedAt : undefined,
       status: typeof d.status === 'string' ? d.status : undefined,
-      header: hasHeader
+      header: hasHeader && !earlierRowsElsewhere
         ? {
             filesChanged: Array.isArray(d.filesChanged) ? (d.filesChanged as string[]) : null,
             linesAdded: Number.isFinite(d.linesAdded as number) ? (d.linesAdded as number) : null,
@@ -117,6 +133,7 @@ function collectSessions(cwd?: string): StoredSession[] {
       turns,
       fileSetRecords: rows.length - turns.length,
       alive: !noMoreTurns,
+      earlierRowsElsewhere,
       source: file,
     });
   };
@@ -447,6 +464,9 @@ export async function verifyCaptureCommand(opts: VerifyCaptureOptions = {}): Pro
   // file-set records are: an exclusion with no number beside it is
   // indistinguishable from a population that is passing.
   const headersNotChecked = results.filter((r) => isMidTurnHeader(r.session.header)).length;
+  // Held back for the other reason — counted apart, so neither number hides
+  // behind the other.
+  const headersRowsElsewhere = results.filter((r) => r.session.earlierRowsElsewhere).length;
 
   if (opts.waiver) {
     // Only what could GATE is waived. A live session's findings never blocked
@@ -468,6 +488,7 @@ export async function verifyCaptureCommand(opts: VerifyCaptureOptions = {}): Pro
         sessionsWithContradiction: dirtySessions.length,
         sessionsWithHeaderContradiction: headerDirtySessions.size,
         sessionsHeaderNotChecked: headersNotChecked,
+        sessionsHeaderRowsElsewhere: headersRowsElsewhere,
         unverifiableSessions: unverifiable.length,
         fileSetRecords: [...sessions, ...unverifiable].reduce((n, s) => n + s.fileSetRecords, 0),
         // Live sessions are reported but do not gate — their rows are not final.
@@ -511,6 +532,9 @@ export async function verifyCaptureCommand(opts: VerifyCaptureOptions = {}): Pro
   console.log(`  headers != their turns    ${headerDirtySessions.size}  ${chalk.dim(`(${pct(headerDirtySessions.size, results.length)})`)}`);
   if (headersNotChecked > 0) {
     console.log(`  headers not checked       ${headersNotChecked}  ${chalk.dim('(a turn is still open — Stop has not written its row yet)')}`);
+  }
+  if (headersRowsElsewhere > 0) {
+    console.log(`  headers not checked       ${headersRowsElsewhere}  ${chalk.dim('(a re-launched session — its earlier rows are on the server, not in this state file)')}`);
   }
   if (liveSessions.length > 0) {
     console.log(`  live, not gating          ${liveSessions.length}  ${chalk.dim(`(${liveWithFindings.length} with findings — rows are not final until the session ends)`)}`);

@@ -189,8 +189,8 @@ export function markTurn(journalPath: string, turnId: string, at = Date.now(), r
   } catch { /* best-effort, exactly like the writes */ }
 }
 
-export function fenceJournal(journalPath: string): void {
-  try { if (journalPath) mutateJournal(journalPath, () => fs.appendFileSync(journalPath, serializeFence(Date.now()))); } catch { /* best effort */ }
+export function fenceJournal(journalPath: string, from?: string, to?: string): void {
+  try { if (journalPath) mutateJournal(journalPath, () => fs.appendFileSync(journalPath, serializeFence(Date.now(), from, to))); } catch { /* best effort */ }
 }
 
 /**
@@ -449,7 +449,7 @@ export function compactJournal(journalPath: string, now = Date.now(), snapshotDi
       const out: string[] = [];
       for (const e of entries) {
         if (e.kind === 'turn') { out.push(serializeTurnMark(e)); continue; }
-        if (e.kind === 'fence') { out.push(serializeFence(e.at)); continue; }
+        if (e.kind === 'fence') { out.push(serializeFence(e.at, e.from, e.to)); continue; }
         const { kind: _k, ...rec } = e;
         if (keep.has(`${rec.file}\u0000${rec.at}`)) out.push(serializeRecord(rec));
       }

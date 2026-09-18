@@ -22,7 +22,7 @@ import { queueDevinBackfill } from '../../devin-backfill.js';
 import { discoverDevinCliSessionDataByPrompt, retagDevinFromProcess } from '../../devin-cli.js';
 import { readDevinLiveSession } from '../../devin-sessions-db.js';
 import { capDiff } from '../../diff-budget.js';
-import { MAX_PROMPT_DIFF_LEN, captureGitState, gitIgnoredFiles, readFileAtRev } from '../../git-capture.js';
+import { MAX_PROMPT_DIFF_LEN, captureGitState, changedFilesBetween, gitIgnoredFiles, readFileAtRev } from '../../git-capture.js';
 import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
 import { pushAcceptanceNotes, resolvePushRemote, writeGitNotes } from '../../git-notes.js';
 import { publishMemoryNotes } from '../../memory-transport.js';
@@ -2223,6 +2223,7 @@ export function applyLedgerCaptures(
     readEntries: readJournalEntries,
     readAtRev: repoPath ? (sha, file) => readFileAtRev(repoPath, sha, file) : undefined,
     ignoredFiles: repoPath ? (files) => gitIgnoredFiles(repoPath, files) : undefined,
+    changedFilesBetween: repoPath ? (from, to) => changedFilesBetween(repoPath, from, to) : undefined,
     // A checkout, pull, rebase or merge inside the turn's window rewrote files
     // on disk; the watcher saw writes and cannot tell whose they were.
     inheritedBefore: repoPath

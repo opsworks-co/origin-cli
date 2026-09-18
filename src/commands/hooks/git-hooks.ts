@@ -21,7 +21,7 @@ import { listSnapshots } from '../snapshot.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import { fenceJournal } from '../../write-journal-watch.js';
-import { RECENCY_TIEBREAK_MARGIN_MS, inFlightEditedFiles, listSessionsForGitHook, loneSessionMayOwnCommit, safePgrep, sameDir } from '../hooks.js';
+import { RECENCY_TIEBREAK_MARGIN_MS, inFlightEditedFiles, listSessionsForGitHook, loneSessionMayOwnCommit, safePgrep, sameDir, worksInAnotherTree } from '../hooks.js';
 
 
 // ─── Git Hook: Pre-Commit (Secret Scan) ──────────────────────────────────
@@ -156,8 +156,17 @@ export async function handleGitPostCheckout(prevHead: string, newHead: string, f
       return;
     }
 
+    // The two heads go with it: the fence's POSITION among the checkout's
+    // rewrites is a race with the watcher, so the reader settles which writes
+    // were the checkout's from what `prevHead..newHead` changed.
+    //
+    // Only sessions in THIS tree. Linked worktrees share one session list, and
+    // a checkout rewrites the files of the tree it ran in: session ed0e33c8's
+    // journal was fenced by its sibling's checkout in another worktree, for
+    // files that never moved on its own disk.
     for (const state of listActiveSessions(repoPath)) {
-      if (state.writeJournalPath) fenceJournal(state.writeJournalPath);
+      if (!state.writeJournalPath || worksInAnotherTree(state, repoPath)) continue;
+      fenceJournal(state.writeJournalPath, prevHead, newHead);
     }
 
     // No attribution note moves on a checkout. This used to copy the old

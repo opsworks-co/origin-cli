@@ -72,11 +72,14 @@ describe('captureTurnFromLedger', () => {
     expectSelfConsistent(cap);
   });
 
-  it('ends a turn at a checkout fence so Git rewrites are never credited', () => {
-    const log = t('T1', 1) + w('mine.ts', 2, put('mine\n'))
-      + serializeFence(3) + w('theirs.ts', 4, put('theirs\n'));
-    const cap = capture(log, 'T1')!;
+  it('a checkout fence does not end the turn: what it wrote after the checkout is still its own', () => {
+    // Session ed0e33c8: `git checkout -B <branch> origin/main`, then two edits.
+    // The span used to stop at the fence, so the edits belonged to no turn.
+    const log = t('T1', 1) + w('theirs.ts', 2, put('theirs\n'))
+      + serializeFence(3, 'aaaaaaa', 'bbbbbbb') + w('mine.ts', 4, put('mine\n'));
+    const cap = capture(log, 'T1', { beforeOverrides: new Map([['theirs.ts', 'theirs\n']]) })!;
     expect(cap.filesChanged).toEqual(['mine.ts']);
+    expect(cap.netZero).toEqual(['theirs.ts']);
     expect(cap.diff).not.toContain('theirs.ts');
   });
 
@@ -246,6 +249,65 @@ describe('applyLedgerToMappings', () => {
     expect(pm.linesRemoved).toBe(0);
     expect(pm.diffSource).toBe('ledger');
     expect(pm.ledgerOwned).toBe(true);
+  });
+
+  describe('a checkout inside the turn', () => {
+    const A = 'a'.repeat(40);
+    const B = 'b'.repeat(40);
+    /** The branch switch rewrote theirs.ts and shared.ts; the turn then edited shared.ts and mine.ts. */
+    const repo = {
+      changedFilesBetween: (from: string, to: string) => (from === A && to === B ? ['theirs.ts', 'shared.ts', 'unwritten.ts'] : []),
+      readAtRev: (sha: string, file: string) => (sha === B ? ({ 'theirs.ts': 'theirs\n', 'shared.ts': 'base\n' } as Record<string, string>)[file] ?? null : null),
+    };
+    const rewrites = () => w('theirs.ts', 2, put('theirs\n')) + w('shared.ts', 3, put('base\n'));
+    const edits = () => w('shared.ts', 6, put('base\nedited\n')) + w('mine.ts', 7, put('mine\n'));
+
+    it.each([
+      ['the watcher beat the hook (rewrites AHEAD of the fence)', () => t('T1', 1) + rewrites() + serializeFence(4, A, B) + edits()],
+      ['the hook beat the watcher (rewrites BEHIND the fence)', () => t('T1', 1) + serializeFence(2, A, B) + rewrites() + edits()],
+    ])('credits the turn with its edits and not the rewrites — %s', (_name, log) => {
+      const pm: Record<string, unknown> = { promptIndex: 0, filesChanged: [], diff: '' };
+      expect(applyLedgerToMappings(ledgerState(['T1']), [pm as never], { ...journal(log()), ...repo })).toBe(1);
+      expect(pm.filesChanged).toEqual(['shared.ts', 'mine.ts']);
+      expect(pm.diff).toContain('+edited');
+      expect(pm.diff).not.toContain('theirs');
+      expect([pm.linesAdded, pm.linesRemoved]).toEqual([2, 0]);
+    });
+
+    it('`git checkout -b` moves no file, so nothing is measured against it', () => {
+      const log = t('T1', 1) + serializeFence(2, A, A) + w('mine.ts', 3, put('mine\n'));
+      const pm: Record<string, unknown> = { promptIndex: 0 };
+      expect(applyLedgerToMappings(ledgerState(['T1']), [pm as never], journal(log))).toBe(1);
+      expect(pm.filesChanged).toEqual(['mine.ts']);
+    });
+
+    it('the inherited before-states win over the fence, file by file', () => {
+      const log = t('T1', 1) + rewrites() + serializeFence(4, A, B) + edits();
+      const pm: Record<string, unknown> = { promptIndex: 0 };
+      applyLedgerToMappings({ ...ledgerState(['T1']), prePromptSha: A }, [pm as never], {
+        ...journal(log), ...repo,
+        inheritedBefore: () => new Map([['shared.ts', 'base\nedited\n']]),
+      });
+      expect(pm.filesChanged).toEqual(['mine.ts']);
+    });
+
+    it('stands down when the checkout cannot be read: a fence without heads and no inherited answer', () => {
+      const log = t('T1', 1) + rewrites() + serializeFence(4) + edits();
+      const pm: Record<string, unknown> = { promptIndex: 0, filesChanged: ['kept.ts'], diff: 'kept' };
+      const seen: unknown[] = [];
+      expect(applyLedgerToMappings(ledgerState(['T1']), [pm as never], {
+        ...journal(log), ...repo, observe: (_i, o) => seen.push(o),
+      })).toBe(0);
+      expect(pm).toMatchObject({ filesChanged: ['kept.ts'], diff: 'kept' });
+      expect(seen).toEqual([{ source: 'ledger', outcome: 'declined', reason: 'a checkout inside the turn could not be read' }]);
+    });
+
+    it('the next turn still starts at its own mark', () => {
+      const log = t('T1', 1) + serializeFence(2, A, A) + w('one.ts', 3, put('one\n')) + t('T2', 4) + w('two.ts', 5, put('two\n'));
+      const rows = [{ promptIndex: 0 }, { promptIndex: 1 }] as Array<Record<string, unknown>>;
+      applyLedgerToMappings(ledgerState(['T1', 'T2']), rows as never, journal(log));
+      expect(rows.map((r) => r.filesChanged)).toEqual([['one.ts'], ['two.ts']]);
+    });
   });
 
   it('reports what it applied, and why it declined, to the resolver', () => {

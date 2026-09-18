@@ -37,7 +37,9 @@ describe('recoverJournalTurns', () => {
   it('keeps checkout fences inside recovered turns', () => {
     const log: JournalEntry[] = [...entries.slice(0, 3), { kind: 'fence', at: 35 }, entries[3]];
     const result = recoverJournalTurns(log, { ...state, promptShadows: state.promptShadows.slice(0, 2) });
-    expect(files(result, 1)).toEqual(['b']);
+    // The fence stays where it was, and no longer ends the turn around it:
+    // `c` was written after the checkout, by the same turn.
+    expect(files(result, 1)).toEqual(['b', 'c']);
     expect(result.entries).toContainEqual({ kind: 'fence', at: 35 });
   });
 

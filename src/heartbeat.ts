@@ -23,7 +23,7 @@ import { execFileSync, spawn } from 'child_process';
 import { getCurrentVersion, shouldRestartForUpgrade } from './version-check.js';
 import { transcriptIdleWindowMs, HOOK_DRIVEN_IDLE_MS, turnInProgress } from './heartbeat-liveness.js';
 import { pruneRetiredStateFiles } from './session-state.js';
-import { createShadowCommit, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN, captureGitState } from './git-capture.js';
+import { changedFilesBetween, createShadowCommit, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN, captureGitState } from './git-capture.js';
 import { combineApplyableTurnDiff, hasDuplicateFileSections } from './applyable-turn-diff.js';
 import { capDiff } from './diff-budget.js';
 import { applyLedgerToMappings } from './capture-from-ledger.js';
@@ -750,6 +750,9 @@ async function pushInflightDiff(): Promise<void> {
         : undefined,
       ignoredFiles: state.repoPath
         ? (files: string[]) => gitIgnoredFiles(state.repoPath as string, files)
+        : undefined,
+      changedFilesBetween: state.repoPath
+        ? (from: string, to: string) => changedFilesBetween(state.repoPath as string, from, to)
         : undefined,
       inheritedBefore: state.repoPath
         ? (baselineSha: string, localTurn: number) =>

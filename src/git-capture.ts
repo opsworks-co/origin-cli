@@ -1508,6 +1508,18 @@ export function readFileAtRev(repoPath: string, sha: string, relPath: string): s
 }
 
 /**
+ * Files whose content differs between two commits — what a checkout from one
+ * to the other rewrites on disk. Throws when git cannot answer, so a caller
+ * can tell "nothing changed" from "could not ask".
+ */
+export function changedFilesBetween(repoPath: string, from: string, to: string): string[] {
+  if (!HEX.test(from) || !HEX.test(to)) throw new Error('not a commit id');
+  return git(['diff', '--name-only', '--no-renames', '-z', from, to, '--'], {
+    cwd: repoPath, timeoutMs: 10_000, maxBuffer: 10 * 1024 * 1024,
+  }).split('\0').filter(Boolean);
+}
+
+/**
  * Repo-relative paths whose content differs between a shadow commit and the
  * CURRENT working tree (tracked + untracked). Answers "what has this session
  * actually touched since it started".

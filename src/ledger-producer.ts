@@ -20,7 +20,7 @@ import {
 } from './write-journal-watch.js';
 import { turnIdsInJournal } from './write-journal.js';
 import fs from 'fs';
-import { readFileAtRev, gitIgnoredFiles } from './git-capture.js';
+import { changedFilesBetween, readFileAtRev, gitIgnoredFiles } from './git-capture.js';
 import { debugLog } from './debug-log.js';
 import { listActiveSessions, type SessionState } from './session-state.js';
 import { detectLiveContention } from './checkout-contention.js';
@@ -230,6 +230,11 @@ export function applyLedgerToProducerRows(
       : undefined,
     ignoredFiles: inputs.workRoot
       ? (files) => gitIgnoredFiles(inputs.workRoot, files)
+      : undefined,
+    // The watchers have no inherited before-states; the fence's two heads are
+    // how a checkout's rewrites stay off their turns.
+    changedFilesBetween: inputs.workRoot
+      ? (from, to) => changedFilesBetween(inputs.workRoot, from, to)
       : undefined,
     log: (event, data) => debugLog('ledger', event, { via, ...data }),
     observe: opts.observe,

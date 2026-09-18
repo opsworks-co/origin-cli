@@ -24,9 +24,11 @@
 // same text, so the three cannot disagree — which is four of stage 0's six
 // violation classes made unreachable rather than fixed.
 import {
+  fencesInTurn,
   turnFileChanges,
   turnSpan,
   type JournalEntry,
+  type JournalFence,
 } from './write-journal.js';
 import { recoverJournalTurns } from './recover-journal-turns.js';
 import { getSnapshot } from './write-journal-store.js';
@@ -362,10 +364,51 @@ export interface ApplyLedgerDeps {
    * it needs the repo, and this module does no IO of its own.
    */
   inheritedBefore?: (baselineSha: string, localTurn: number) => Map<string, string | null>;
+  /** `git diff --name-only <from> <to>` — what a checkout between them rewrote. */
+  changedFilesBetween?: (from: string, to: string) => string[];
   /** Optional trace hook; never throws. */
   log?: (event: string, data: Record<string, unknown>) => void;
   /** What the ledger found for each row — see resolve-turn.ts. */
   observe?: (promptIndex: number, observation: TurnObservation) => void;
+}
+
+/**
+ * Before-states for the files a checkout INSIDE the turn rewrote, read off the
+ * journal's fences.
+ *
+ * A fence names the two heads of one checkout. A file that differs between
+ * them could not have been dirty when the checkout ran (git refuses), so from
+ * that moment it held `to`'s bytes: a file the turn only received cancels to
+ * netZero against them, and one it went on to edit reports that edit alone.
+ * A later fence overrides an earlier one, file by file.
+ *
+ * Only `files` — what the turn's own records name — are read, so the cost
+ * follows the turn and not the size of the branch switch.
+ *
+ * `unresolved` says some checkout could not be read this way: a fence written
+ * before the heads were recorded, or no repository to ask. The caller must
+ * then have another answer for those rewrites or stand down.
+ */
+export function fenceBeforeStates(
+  fences: readonly JournalFence[],
+  files: readonly string[],
+  deps: Pick<ApplyLedgerDeps, 'readAtRev' | 'changedFilesBetween'>,
+): { before: Map<string, string | null>; unresolved: boolean } {
+  const before = new Map<string, string | null>();
+  let unresolved = false;
+  const written = new Set(files);
+  for (const fence of fences) {
+    if (!fence.from || !fence.to) { unresolved = true; continue; }
+    // `git checkout -b <new>`: HEAD did not move, so no file did.
+    if (fence.from === fence.to) continue;
+    if (!deps.changedFilesBetween || !deps.readAtRev) { unresolved = true; continue; }
+    try {
+      for (const file of deps.changedFilesBetween(fence.from, fence.to)) {
+        if (written.has(file)) before.set(file, deps.readAtRev(fence.to, file));
+      }
+    } catch { unresolved = true; }
+  }
+  return { before, unresolved };
 }
 
 /**
@@ -449,6 +492,23 @@ export function applyLedgerToMappings(
           const m = deps.inheritedBefore(baselineSha, local);
           if (m && m.size > 0) beforeOverrides = m;
         } catch { /* unanswerable: the turn keeps the baseline it always had */ }
+      }
+      // A checkout inside the turn. The inherited before-states above are the
+      // fuller answer where they exist (they also see a pull or a merge, and
+      // anything that landed after the checkout), so they win file by file;
+      // the fences cover what they decline — a turn that committed on the
+      // branch it then left — and the producers that cannot ask them at all.
+      const fences = fencesInTurn(entries, turnId);
+      if (fences.length > 0) {
+        const fenced = fenceBeforeStates(fences, turnFileChanges(entries, turnId).map((c) => c.file), deps);
+        if (fenced.unresolved && !beforeOverrides) {
+          // The span holds a checkout's rewrites and nothing here can tell
+          // them from the turn's own writes. Wholesale or not at all.
+          deps.log?.('ledger declined: a checkout inside the turn could not be read', { promptIndex: pm.promptIndex, turnId });
+          declined(pm, 'a checkout inside the turn could not be read');
+          continue;
+        }
+        if (fenced.before.size > 0) beforeOverrides = new Map([...fenced.before, ...(beforeOverrides || [])]);
       }
       const cap = captureTurnFromLedger({
         entries, turnId, snapshotDir, baselineSha, priorBaselineSha,

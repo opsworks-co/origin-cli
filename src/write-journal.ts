@@ -94,7 +94,17 @@ export interface TurnMark {
    */
   reclaim?: string[];
 }
-export interface JournalFence { at: number; }
+/**
+ * A checkout moved HEAD at about this moment (post-checkout).
+ *
+ * It says WHAT happened, not WHERE the checkout's file rewrites sit: the
+ * watcher and the hook race, and session ed0e33c8 recorded all 36 rewrites
+ * AHEAD of the fence. So a fence never bounds a turn — see `turnSpan`. It
+ * names the two heads, and the reader cancels the rewrites by CONTENT: a file
+ * that differs between them started the rest of the turn holding `to`'s bytes.
+ * Both absent on a fence written before the heads were recorded.
+ */
+export interface JournalFence { at: number; from?: string; to?: string; }
 
 export type JournalEntry =
   | ({ kind: 'write' } & WriteRecord)
@@ -132,7 +142,11 @@ export function serializeTurnMark(mark: TurnMark): string {
   if (mark.reclaim && mark.reclaim.length > 0) o.c = mark.reclaim;
   return JSON.stringify(o) + '\n';
 }
-export function serializeFence(at: number): string { return JSON.stringify({ k: 'f', t: at }) + '\n'; }
+export function serializeFence(at: number, from?: string, to?: string): string {
+  const o: Record<string, unknown> = { k: 'f', t: at };
+  if (from && to) { o.p = from; o.n = to; }
+  return JSON.stringify(o) + '\n';
+}
 
 /**
  * Parse a journal into its ordered entries, skipping anything malformed rather
@@ -157,7 +171,12 @@ export function parseJournalEntries(text: string): JournalEntry[] {
         }
         continue;
       }
-      if (o.k === 'f' && typeof o.t === 'number' && Number.isFinite(o.t)) { out.push({ kind: 'fence', at: o.t }); continue; }
+      if (o.k === 'f' && typeof o.t === 'number' && Number.isFinite(o.t)) {
+        const fence: JournalEntry = { kind: 'fence', at: o.t };
+        if (typeof o.p === 'string' && o.p && typeof o.n === 'string' && o.n) { fence.from = o.p; fence.to = o.n; }
+        out.push(fence);
+        continue;
+      }
       if (typeof o.f === 'string' && o.f && typeof o.t === 'number' && Number.isFinite(o.t)) {
         const rec: JournalEntry = { kind: 'write', file: o.f, at: o.t };
         if (typeof o.h === 'string' && o.h) rec.hash = o.h;
@@ -297,6 +316,14 @@ export function trimJournal(records: readonly WriteRecord[], now: number, keepMs
  * A turn marked more than once (a re-fired hook, a resumed session) takes its
  * LAST mark. Re-marking means "the turn starts here now"; honouring the first
  * would re-admit writes the re-mark was issued to disown.
+ *
+ * A checkout FENCE does not end the span. It did once, to keep a checkout's
+ * rewrites off the turn, and that cost the turn everything it wrote AFTER the
+ * checkout: session ed0e33c8 ran `git checkout -B <branch> origin/main`, then
+ * edited two files, and its row was stored empty — the span held only the 36
+ * rewrites, which cancelled to nothing, and the two edits belonged to no turn.
+ * Which records are the checkout's is a question about content, answered where
+ * the repo can be read (`fenceBeforeStates`, the inherited before-states).
  */
 export function turnSpan(entries: readonly JournalEntry[], turnId: string): { start: number; end: number } | null {
   let start = -1;
@@ -307,9 +334,21 @@ export function turnSpan(entries: readonly JournalEntry[], turnId: string): { st
   if (start < 0) return null;
   let end = entries.length;
   for (let i = start; i < entries.length; i++) {
-    if (entries[i].kind === 'turn' || entries[i].kind === 'fence') { end = i; break; }
+    if (entries[i].kind === 'turn') { end = i; break; }
   }
   return { start, end };
+}
+
+/** The checkouts that landed inside a turn, in order. Empty for an unmarked turn. */
+export function fencesInTurn(entries: readonly JournalEntry[], turnId: string): JournalFence[] {
+  const span = turnSpan(entries, turnId);
+  if (!span) return [];
+  const out: JournalFence[] = [];
+  for (let i = span.start; i < span.end; i++) {
+    const e = entries[i];
+    if (e.kind === 'fence') { const { kind: _k, ...fence } = e; out.push(fence); }
+  }
+  return out;
 }
 
 /**
