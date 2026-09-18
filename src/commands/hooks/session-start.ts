@@ -26,6 +26,7 @@ import { buildRepoBriefContext, maybeSpawnBriefGeneration } from '../../repo-bri
 import { carryForwardTurnState, findDuplicateStateForSession, findSameTagStateForResume } from '../../session-dedup.js';
 import { pickWorktreeBootstrap, restampWorktreeBootstrap, type SessionStartBaseline } from '../../worktree-bootstrap.js';
 import { mergeAdoptedReservation, reservationAdoptedMeanwhile } from '../../reservation-adoption.js';
+import { samePath } from '../../paths.js';
 import { sendDesktopNotification } from '../../session-limits.js';
 import { clearSessionState, discoverAllGitRoots, discoverGitRoot, dropSessionMirror, findSessionByClaudeId, getBranch, getCanonicalRepoPath, getGitRoot, getHeadSha, getStatePath, getWorkingGitRoot, isProvisionalSessionId, isSessionAlive, listActiveSessions, loadSessionState, markSessionEnded, preferRegisteredSessionId, readStateAtTag, saveSessionState, sessionTagFor, stampCaptured, startHeartbeat, stopHeartbeat } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
@@ -1793,6 +1794,30 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
       });
     }
 
+    // A baseline is a shadow commit of the WHOLE working tree — 26.8s on this
+    // repo — so it must never run while the state save lock is held: every
+    // other hook for this session queues behind the holder, on hooks Codex
+    // kills at 10s. Capture it out here, keyed by the tree it describes, and
+    // let the locked fold only CONSUME what has already been captured.
+    const baselines = new Map<string, SessionStartBaseline>();
+    const baselineFor = (repo: string): SessionStartBaseline => {
+      let captured = baselines.get(repo);
+      if (!captured) {
+        captured = captureSessionStartBaseline(repo, sessionTag);
+        baselines.set(repo, captured);
+      }
+      return captured;
+    };
+    const anchorOn = (fresh: SessionStartBaseline): void => {
+      state.headShaAtStart = fresh.headShaAtStart;
+      state.sessionStartShadowSha = fresh.sessionStartShadowSha;
+      state.sessionStartDirtyFiles = fresh.sessionStartDirtyFiles;
+      if (!state.prePromptSha) {
+        state.prePromptSha = fresh.prePromptSha;
+        state.prePromptDirtyFiles = fresh.prePromptDirtyFiles;
+      }
+    };
+
     // The reservation may have been adopted while `api.startSession` was in
     // flight: a concurrent user-prompt-submit can call `ensureServerSession`
     // on it and promote the provisional id to a real one. If our own call then
@@ -1821,74 +1846,85 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
         state.sessionId = promoted;
       }
       if (reservedHere && onDisk && reservationAdoptedMeanwhile(state, onDisk)) {
-        const registeredBranch = state.branch;
-        const registeredChatId = state.agentSessionId;
         const merge = mergeAdoptedReservation(state, onDisk);
-        if (merge.needsBaseline && state.repoPath) {
-          // Moved to a tree we never captured; anchor it there, not on main.
-          const fresh = captureSessionStartBaseline(state.repoPath, sessionTag);
-          state.headShaAtStart = fresh.headShaAtStart;
-          state.sessionStartShadowSha = fresh.sessionStartShadowSha;
-          state.sessionStartDirtyFiles = fresh.sessionStartDirtyFiles;
-          if (!state.prePromptSha) {
-            state.prePromptSha = fresh.prePromptSha;
-            state.prePromptDirtyFiles = fresh.prePromptDirtyFiles;
-          }
-        }
+        // Moved to a tree we never captured; anchor it there, not on main.
+        if (merge.needsBaseline && state.repoPath) anchorOn(baselineFor(state.repoPath));
         debugLog('session-start', 'a concurrent hook adopted the reservation while session/start was in flight — keeping its turn and identity', {
           sessionId: state.sessionId, sessionTag,
           prompts: state.prompts?.length || 0,
           repoPath: state.repoPath, movedTree: merge.movedTree, rebaselined: merge.needsBaseline,
           agentSessionId: state.agentSessionId, branch: state.branch,
         });
-        const identity = {
-          ...(state.branch && state.branch !== registeredBranch && { branch: state.branch }),
-          ...(state.agentSessionId && state.agentSessionId !== registeredChatId && { agentSessionId: state.agentSessionId }),
-        };
-        if (connected && !isProvisionalSessionId(state.sessionId) && Object.keys(identity).length > 0) {
-          durableUpdate(state.sessionId, identity).catch(() => {});
-        }
       }
     } catch { /* best-effort — never block session start */ }
     // Registration is settled by here (real id, or local after a failed call),
     // so the row is no longer a placeholder.
     delete (state as unknown as { pendingRegistration?: boolean }).pendingRegistration;
 
-    // One last read immediately before the atomic save closes the other
-    // interleaving: session-start's first read can see its untouched
-    // reservation, then user-prompt-submit saves the first turn while this
-    // handler is preparing its final write. Without this retry the stale
-    // session-start row overwrites that prompt. This occurred intermittently
-    // on Windows, where process scheduling makes the interval wide enough to
-    // hit in the concurrent-start E2E.
-    try {
-      const justAdopted = readStateAtTag(saveCwd, sessionTag);
-      if (reservedHere && justAdopted && reservationAdoptedMeanwhile(state, justAdopted)) {
-        const merge = mergeAdoptedReservation(state, justAdopted);
-        if (merge.needsBaseline && state.repoPath) {
-          const fresh = captureSessionStartBaseline(state.repoPath, sessionTag);
-          state.headShaAtStart = fresh.headShaAtStart;
-          state.sessionStartShadowSha = fresh.sessionStartShadowSha;
-          state.sessionStartDirtyFiles = fresh.sessionStartDirtyFiles;
-          if (!state.prePromptSha) {
-            state.prePromptSha = fresh.prePromptSha;
-            state.prePromptDirtyFiles = fresh.prePromptDirtyFiles;
+    // The last read, the identity promotion and the merge run under the SAME
+    // lock as the write that follows them: a reread outside the lock still
+    // lets a prompt land between it and our rename, which is the loss this
+    // path exists to stop. Everything in the fold is a file read and an object
+    // merge — no shadow commit, no network. See `baselineOwed`.
+    let baselineOwed: string | null = null;
+    const foldLatestRow = (): void => {
+      baselineOwed = null;
+      try {
+        const justAdopted = readStateAtTag(saveCwd, sessionTag);
+        state.sessionId = preferRegisteredSessionId(state.sessionId, justAdopted?.sessionId);
+        if (reservedHere && justAdopted && reservationAdoptedMeanwhile(state, justAdopted)) {
+          const merge = mergeAdoptedReservation(state, justAdopted);
+          if (merge.needsBaseline && state.repoPath) {
+            // Ready when the adopter was already visible; when it arrived
+            // inside this very fold, owe it and take it after the release.
+            // The merge has already cleared the tree we started on, so the row
+            // never keeps main's anchor in the meantime.
+            const ready = baselines.get(state.repoPath);
+            if (ready) anchorOn(ready);
+            else baselineOwed = state.repoPath;
           }
+          // `mergeAdoptedReservation` does `Object.assign(ours, onDisk, keep)`,
+          // and `pendingRegistration` is not one of REGISTRATION_FIELDS — so the
+          // adopter's still-provisional row copies the flag straight back over
+          // the `delete` a few lines above. Re-clear it: registration HAS
+          // happened, and a row that says otherwise is treated as a placeholder
+          // by every later reader.
+          delete (state as unknown as { pendingRegistration?: boolean }).pendingRegistration;
+          debugLog('session-start', 'a concurrent hook adopted the reservation just before its final save — keeping its turn', {
+            sessionId: state.sessionId, sessionTag, prompts: state.prompts?.length || 0,
+          });
         }
-        // `mergeAdoptedReservation` does `Object.assign(ours, onDisk, keep)`,
-        // and `pendingRegistration` is not one of REGISTRATION_FIELDS — so the
-        // adopter's still-provisional row copies the flag straight back over
-        // the `delete` a few lines above. Re-clear it: registration HAS
-        // happened, and a row that says otherwise is treated as a placeholder
-        // by every later reader.
-        delete (state as unknown as { pendingRegistration?: boolean }).pendingRegistration;
-        debugLog('session-start', 'a concurrent hook adopted the reservation just before its final save — keeping its turn', {
-          sessionId: state.sessionId, sessionTag, prompts: state.prompts?.length || 0,
-        });
+      } catch { /* best-effort — never block session start */ }
+    };
+    // An adopter already on disk is the ordinary case, and the tree it moved
+    // the row to is knowable before the lock — warm that baseline here so the
+    // ordinary case still saves exactly once.
+    try {
+      const peek = readStateAtTag(saveCwd, sessionTag);
+      if (reservedHere && peek?.repoPath && state.repoPath && !peek.headShaAtStart
+        && reservationAdoptedMeanwhile(state, peek) && !samePath(peek.repoPath, state.repoPath)) {
+        baselineFor(peek.repoPath);
       }
-    } catch { /* best-effort — never block session start */ }
-
-    saveSessionState(state, saveCwd, sessionTag);
+    } catch { /* best-effort — a missed warm-up only costs a second save */ }
+    saveSessionState(state, saveCwd, sessionTag, foldLatestRow);
+    // Owed only when the adopter appeared inside the locked fold itself. The
+    // second save's fold finds the baseline in the map, so it cannot owe
+    // another one — there is no loop here to close.
+    if (baselineOwed) {
+      anchorOn(baselineFor(baselineOwed));
+      debugLog('session-start', 'captured the adopted tree\'s baseline outside the lock, saving again', {
+        sessionId: state.sessionId, sessionTag, repoPath: baselineOwed,
+      });
+      saveSessionState(state, saveCwd, sessionTag, foldLatestRow);
+    }
+    // The final locked fold may be the first point that sees the adopter.
+    if (connected && !isProvisionalSessionId(state.sessionId)) {
+      const identity = {
+        ...(state.branch && state.branch !== branch && { branch: state.branch }),
+        ...(state.agentSessionId && state.agentSessionId !== agentSessionId && { agentSessionId: state.agentSessionId }),
+      };
+      if (Object.keys(identity).length > 0) durableUpdate(state.sessionId, identity).catch(() => {});
+    }
     // The reservation's mirror is keyed by the provisional id, so the save
     // above (keyed by the real one) does not replace it — drop it, or it stays
     // listed as a live local session for good.

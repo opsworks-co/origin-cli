@@ -86,12 +86,12 @@ let turn = 0;
 /** One hook, Cursor's way: its verbatim key set on stdin, `session_id` rotating per turn. */
 function run(
   event: string,
-  opts: { cwd: string; roots: string[]; conversation: string; transcript: string; payload?: Record<string, unknown> },
+  opts: { cwd: string; roots: string[]; conversation: string; transcript: string; payload?: Record<string, unknown>; preload?: string; barrier?: string },
 ): Promise<{ code: number | null; stderr: string }> {
   turn += 1;
-  const child = spawn(process.execPath, [BIN, 'hooks', 'cursor', event], {
+  const child = spawn(process.execPath, [...(opts.preload ? ['--require', opts.preload] : []), BIN, 'hooks', 'cursor', event], {
     cwd: opts.cwd,
-    env: { ...process.env, ORIGIN_LIVE_CAPTURE: '1' },
+    env: { ...process.env, ORIGIN_LIVE_CAPTURE: '1', ...(opts.barrier ? { START_SAVE_BARRIER: opts.barrier } : {}) },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   let stderr = '';
@@ -172,7 +172,7 @@ function killDaemons(): void {
  * prompt hook launched as soon as the reservation is on disk — i.e. while
  * `session/start` is in flight.
  */
-async function raceOneChat(label: string, delayMs: number): Promise<{ sessionId: string; stateFile: string; wt: string; conv: string; transcript: string; logFrom: number }> {
+async function raceOneChat(label: string, delayMs: number, lateSave = false): Promise<{ sessionId: string; stateFile: string; wt: string; conv: string; transcript: string; logFrom: number }> {
   const COMPOSER = `c0c0c0c0-${label}-4000-8000-000000000001`;
   const CONV = `e2e2e2e2-${label}-4000-8000-000000000002`;
   const main = path.join(tmp, `repo-${label}`);
@@ -185,18 +185,54 @@ async function raceOneChat(label: string, delayMs: number): Promise<{ sessionId:
   const logFrom = hooksLog().length;
   startDelayMs = delayMs;
 
+  const barrier = path.join(tmp, `barrier-${label}`);
+  // Pause the real binary after serialization, immediately before rename.
+  // Before the fix the prompt can finish here and then be erased; with the
+  // lock it must wait until registration publishes, then adopt that id.
+  const preload = path.join(tmp, 'save-barrier.cjs');
+  if (lateSave) fs.writeFileSync(preload, `
+    const fs = require('node:fs');
+    const barrier = process.env.START_SAVE_BARRIER;
+    const rename = fs.renameSync;
+    const mkdir = fs.mkdirSync;
+    fs.mkdirSync = function(p, ...args) {
+      if (barrier && process.argv.includes('user-prompt-submit') && String(p).endsWith('.state-save-lock'))
+        fs.writeFileSync(barrier + '.contender', '');
+      return mkdir.call(this, p, ...args);
+    };
+    fs.renameSync = function(from, to) {
+      if (barrier && process.argv.includes('session-start') && String(to).includes('origin-session-')) {
+        const state = JSON.parse(fs.readFileSync(from, 'utf8'));
+        if (state.sessionId.startsWith('e2e-race-') && !state.prompts.length && !fs.existsSync(barrier + '.paused')) {
+          fs.writeFileSync(barrier + '.paused', '');
+          const deadline = Date.now() + ${30_000 * WINDOWS_SLOWDOWN};
+          while (!fs.existsSync(barrier + '.release')) {
+            if (Date.now() > deadline) throw new Error('save barrier timeout');
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+          }
+        }
+      }
+      return rename.call(this, from, to);
+    };
+  `);
   const startP = run('session-start', {
-    cwd: main, roots: [main], conversation: COMPOSER, transcript: transcriptFor(COMPOSER), payload: { source: 'startup' },
+    cwd: main, roots: [main], conversation: COMPOSER, transcript: transcriptFor(COMPOSER), payload: { source: 'startup' }, ...(lateSave ? { preload, barrier } : {}),
   });
   await waitFor(
     () => hooksLog().slice(logFrom).includes(`"sessionId":"local-`) && hooksLog().slice(logFrom).includes(`"sessionTag":"${COMPOSER.slice(0, 12)}"`),
     20_000,
     'session-start to publish its reservation',
   );
+  if (lateSave) await waitFor(() => fs.existsSync(barrier + '.paused'), 30_000 * WINDOWS_SLOWDOWN, 'registration paused at its final rename');
   say(transcript, 'hello from the worktree');
   const upsP = run('user-prompt-submit', {
-    cwd: wt, roots: [wt], conversation: CONV, transcript, payload: { prompt: 'hello from the worktree' },
+    cwd: wt, roots: [wt], conversation: CONV, transcript, payload: { prompt: 'hello from the worktree' }, ...(lateSave ? { preload, barrier } : {}),
   });
+  if (lateSave) {
+    try {
+      await Promise.race([upsP, waitFor(() => fs.existsSync(barrier + '.contender'), 20_000 * WINDOWS_SLOWDOWN, 'competing state save')]);
+    } finally { fs.writeFileSync(barrier + '.release', ''); }
+  }
   const [start, ups] = await Promise.all([startP, upsP]);
   expect(start.code, start.stderr).toBe(0);
   expect(ups.code, ups.stderr).toBe(0);
@@ -254,7 +290,9 @@ async function raceOneChat(label: string, delayMs: number): Promise<{ sessionId:
 // fix — paid for it with a red leg. Re-held so the Windows signal means
 // something again, NOT because the test is wrong: the assertion is a lost
 // prompt in the exact scenario this file is named for.
-describe.skipIf(!haveDist || isWindows)('cursor: session-start and the first prompt race, one session (built binary)', () => {
+// Explicit native-Windows probe; normal CI stays held until repeated evidence.
+// PowerShell: $env:ORIGIN_WINDOWS_CAPTURE_PROBE='1'; pnpm exec vitest run src/__tests__/capture-e2e-cursor-concurrent-start.test.ts
+describe.skipIf(!haveDist || (isWindows && process.env.ORIGIN_WINDOWS_CAPTURE_PROBE !== '1'))('cursor: session-start and the first prompt race, one session (built binary)', () => {
   beforeAll(async () => {
     await startFakeApi();
     tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-e2e-cursor-race-')));
@@ -305,5 +343,8 @@ describe.skipIf(!haveDist || isWindows)('cursor: session-start and the first pro
     expect(stop.code, stop.stderr).toBe(0);
     expect(startHits().length).toBe(2);
     expect(readState(r.stateFile).sessionId).toBe(r.sessionId);
+  }, 120_000 * WINDOWS_SLOWDOWN);
+  it('a prompt arriving after the final reread survives the registration rename', async () => {
+    await raceOneChat('cccc', 0, true);
   }, 120_000 * WINDOWS_SLOWDOWN);
 });

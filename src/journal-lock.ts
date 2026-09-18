@@ -93,7 +93,7 @@ const sleep = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArra
  * free-for-all. Null when the line cannot be joined; the caller then competes
  * unordered, which is how every mutation worked before there was a line.
  */
-function joinLine(line: string): string | null {
+export function joinLine(line: string): string | null {
   try {
     fs.mkdirSync(line, { recursive: true });
     let last = 0;
@@ -117,7 +117,7 @@ function alive(pid: number): boolean {
 }
 
 /** Is nobody still waiting ahead of `ticket`? Clears abandoned tickets it passes. */
-function frontOfLine(line: string, ticket: string): boolean {
+export function frontOfLine(line: string, ticket: string): boolean {
   let entries: string[];
   try { entries = fs.readdirSync(line); } catch { return true; }
   const now = Date.now();

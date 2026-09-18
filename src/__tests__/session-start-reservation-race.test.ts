@@ -29,7 +29,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { hooksSource } from './helpers/hooks-source.js';
+import { hookModuleSource, hooksSource } from './helpers/hooks-source.js';
 import {
   preferRegisteredSessionId,
   isProvisionalSessionId,
@@ -164,7 +164,7 @@ describe('the three halves are wired', () => {
   });
 
   it('session-start defers to an id a concurrent hook registered', () => {
-    const save = src.indexOf('saveSessionState(state, saveCwd, sessionTag);');
+    const save = src.indexOf('saveSessionState(state, saveCwd, sessionTag,');
     const prefer = src.lastIndexOf('preferRegisteredSessionId', save);
     expect(prefer).toBeGreaterThan(-1);
     expect(prefer).toBeLessThan(save);
@@ -193,7 +193,7 @@ describe('an adopted reservation is registered exactly once', () => {
   it('session-start folds an adopted reservation into its row before saving', () => {
     const call = src.indexOf("'calling api.startSession'");
     const merge = src.indexOf("'a concurrent hook adopted the reservation while session/start was in flight — keeping its turn and identity'");
-    const save = src.indexOf('saveSessionState(state, saveCwd, sessionTag);');
+    const save = src.indexOf('saveSessionState(state, saveCwd, sessionTag,');
     expect(merge).toBeGreaterThan(call);
     expect(merge).toBeLessThan(save);
     // Only a row THIS hook reserved — a re-fired start keeps its carry-forward.
@@ -233,5 +233,39 @@ describe('a pending reservation gets no server traffic on its placeholder id', (
     expect(guard).toBeGreaterThan(-1);
     expect(block).toBeGreaterThan(guard);
     expect(dispatch).toBeGreaterThan(block);
+  });
+});
+
+// Every writer of this session's state file takes the same lock, so whatever
+// the holder does, every other hook for the session waits for — on hooks Codex
+// kills at 10s. The final fold must be reads and merges only. session-start's
+// baseline is a shadow commit of the WHOLE working tree (26.8s on this repo)
+// and it ran inside the locked callback, on the very `needsBaseline` path the
+// Cursor worktree race produces.
+describe('the locked fold does no slow work', () => {
+  const src = hookModuleSource('session-start');
+
+  it('the baseline shadow commit is captured outside the state lock', () => {
+    const fold = src.indexOf('const foldLatestRow = ');
+    expect(fold, 'the locked fold is a named function so this guard can read its body').toBeGreaterThan(-1);
+    const save = src.indexOf('saveSessionState(state, saveCwd, sessionTag, foldLatestRow)', fold);
+    expect(save).toBeGreaterThan(fold);
+    expect(src.slice(fold, save), 'no shadow commit runs while the lock is held')
+      .not.toContain('captureSessionStartBaseline(');
+    // …and nothing else is passed as a beforeSave, so the capture cannot hide
+    // in an inline callback instead.
+    expect(src).not.toContain('saveSessionState(state, saveCwd, sessionTag, () =>');
+    // The tree the row moved to still gets its own baseline — after the release.
+    expect(src.slice(save), 'an owed baseline is taken once the lock is gone')
+      .toContain('anchorOn(baselineFor(baselineOwed))');
+  });
+
+  it('the fold still re-reads, promotes and merges under the lock', () => {
+    const fold = src.indexOf('const foldLatestRow = ');
+    const save = src.indexOf('saveSessionState(state, saveCwd, sessionTag, foldLatestRow)', fold);
+    const body = src.slice(fold, save);
+    expect(body).toContain('readStateAtTag(saveCwd, sessionTag)');
+    expect(body).toContain('preferRegisteredSessionId(state.sessionId');
+    expect(body).toContain('mergeAdoptedReservation(state, justAdopted)');
   });
 });

@@ -1332,7 +1332,23 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           }
         } catch { /* best-effort — never block the prompt on dedup */ }
 
-        saveSessionState(state, repoPath, autoTag);
+        // A FAILED WRITE IS NOT A FAILED REGISTRATION. The catch below is
+        // written for `api.startSession` throwing, and its answer is to mint a
+        // `local-<uuid>` row with `prompts: []` and save it under this very
+        // tag — a phantom session the server 404s, and this prompt filed under
+        // it. Registration has already happened by here: `sessionId` is the
+        // server's, `state` holds the carried history, and the handler's own
+        // final save will write it again. So let the write fail on its own
+        // terms rather than demoting a registered session.
+        // (The state lock never throws — see session-state-lock.ts — but
+        // nothing downstream should depend on that to keep the prompt.)
+        try {
+          saveSessionState(state, repoPath, autoTag);
+        } catch (saveErr: any) {
+          debugLog('user-prompt-submit', 'auto-create state save failed — keeping the registered session', {
+            sessionId, sessionTag: autoTag, message: saveErr?.message,
+          });
+        }
         sessionJustAutoCreated = true;
 
         // Start heartbeat for auto-created sessions so they don't get cleaned up as stale

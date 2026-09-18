@@ -16,6 +16,7 @@ import type { PromptEdit } from './prompt-capture/types.js';
 import { ensureOwnerStamp } from './session-owner.js';
 import { debugLog } from './debug-log.js';
 import { isManuallyEnded } from './manual-session-end.js';
+import { withSessionStateLock } from './session-state-lock.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -1479,7 +1480,17 @@ function keepCommitsRecordedSinceRead(state: SessionState, statePath: string): v
   } catch { /* no file yet, or unreadable — write as before */ }
 }
 
-export function saveSessionState(state: SessionState, cwd?: string, sessionTag?: string): void {
+/** beforeSave reconciles registration with the latest row under the cross-process write lock. */
+export function saveSessionState(state: SessionState, cwd?: string, sessionTag?: string, beforeSave?: () => void): void {
+  if (isManuallyEnded(state.sessionId)) return;
+  const statePath = getStatePath(cwd, sessionTag || state.sessionTag);
+  withSessionStateLock(statePath, () => {
+    beforeSave?.();
+    saveSessionStateLocked(state, statePath, cwd, sessionTag);
+  });
+}
+
+function saveSessionStateLocked(state: SessionState, statePath: string, cwd?: string, sessionTag?: string): void {
   if (isManuallyEnded(state.sessionId)) return;
   // First-write-wins ownership stamp so a later account switch can't pull this
   // session into a different account (see session-owner.ts).
@@ -1495,7 +1506,6 @@ export function saveSessionState(state: SessionState, cwd?: string, sessionTag?:
       from: adoption.from, to: adoption.to, sessionTag: sessionTag || state.sessionTag,
     });
   }
-  const statePath = getStatePath(cwd, sessionTag || state.sessionTag);
   keepCommitsRecordedSinceRead(state, statePath);
   try {
     const tmpStatePath = statePath + '.tmp.' + process.pid;
