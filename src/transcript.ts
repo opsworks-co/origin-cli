@@ -93,6 +93,13 @@ export interface ParsedTranscript {
   // an adopted session's turns append after the rows it never saw instead of
   // overwriting them.
   promptIndexBase: number;
+  /**
+   * Positions in `prompts` of the messages the user sent WHILE a turn was
+   * running and the turn absorbed (see `midTurnPromptAsUserEntry`). No Stop
+   * falls between such a prompt and the turn before it, so Stop needs to be
+   * told that the turn it is closing is this one.
+   */
+  midTurnPrompts?: number[];
   toolCalls: number;
   // Of `tokensUsed`, the portion incurred INSIDE Task sub-agents (isSidechain
   // turns). The session is still billed for it (it's a subset of the total),
@@ -633,6 +640,7 @@ export function parseTranscript(
     } catch {
       continue; // skip malformed lines
     }
+    entry = midTurnPromptAsUserEntry(entry);
 
     if (sinceMs > 0 && entry.timestamp) {
       const t = Date.parse(entry.timestamp);
@@ -672,6 +680,7 @@ export function parseTranscript(
       if (isCursorTranscriptUserEntry(entry)) cursorTranscript = true;
       const prompt = transcriptPromptIfNew(entry, lastKeptPrompt, cursorTranscript);
       if (prompt) {
+        if ((entry as any).absorbedMidTurn === true) (result.midTurnPrompts ||= []).push(result.prompts.length);
         result.prompts.push(prompt);
         lastKeptPrompt = prompt;
       }
@@ -1065,6 +1074,40 @@ function extractUserPrompt(entry: TranscriptLine): string | null {
   }
 
   return null;
+}
+
+/**
+ * A message the user sends WHILE a turn is running, as a user entry.
+ *
+ * Claude Code does not write such a message as a `user` entry. It queues it and,
+ * when the running turn absorbs it, records an ATTACHMENT:
+ *
+ *   {"type":"queue-operation","operation":"enqueue","content":"look into the 274a6cd2 session…"}
+ *   {"type":"attachment","attachment":{"type":"queued_command","prompt":"look into the 274a6cd2 session…",
+ *                                      "commandMode":"prompt","origin":{"kind":"human"}}}
+ *   {"type":"queue-operation","operation":"remove","reason":"absorbed_mid_turn"}
+ *
+ * UserPromptSubmit fires for it, so the hook's prompt list gains a turn; every
+ * reader here looked only at `user` entries and did not. From that prompt on the
+ * two numbered the conversation one apart: session ad95e766 stored row N with
+ * prompt N+1's text from row 10 onward, sent one edit under rows 19 AND 20, and
+ * the dashboard showed work a turn early.
+ *
+ * The same attachment carries task notifications (`commandMode:
+ * "task-notification"`) and other sessions' messages (`origin.kind: "peer"`) —
+ * 16 of the 17 in that transcript. Neither is something the user typed; the
+ * hook drops them too (cleanPrompt), so they stay what they were.
+ */
+export function midTurnPromptAsUserEntry<T>(entry: T): T {
+  const e = entry as any;
+  if (!e || e.type !== 'attachment') return entry;
+  const a = e.attachment;
+  if (!a || a.type !== 'queued_command' || a.commandMode !== 'prompt') return entry;
+  if (a.origin && typeof a.origin.kind === 'string' && a.origin.kind !== 'human') return entry;
+  const prompt = a.prompt;
+  const hasText = typeof prompt === 'string' ? prompt.trim().length > 0 : Array.isArray(prompt) && prompt.length > 0;
+  if (!hasText) return entry;
+  return { ...e, type: 'user', absorbedMidTurn: true, message: { role: 'user', content: prompt } } as T;
 }
 
 /**
@@ -1793,6 +1836,7 @@ export function extractPromptFileMappings(
     } catch {
       continue;
     }
+    entry = midTurnPromptAsUserEntry(entry);
 
     // Cursor's JSONL puts the role at the top level (`{"role":"user", ...}`);
     // Claude Code uses `{"type":"user", "message":{...}}` and an older shape
@@ -2455,6 +2499,7 @@ function formatJSONLMessages(raw: string, verbose: boolean): DisplayMessage[] {
     } catch {
       continue;
     }
+    entry = midTurnPromptAsUserEntry(entry);
 
     // Cursor's JSONL puts the role at the top level (`{"role":"user", ...}`);
     // Claude Code uses `{"type":"user", "message":{...}}` and an older shape
@@ -3215,6 +3260,7 @@ function extractClaudeCursorImages(lines: string[]): ExtractedImage[] {
     } catch {
       continue;
     }
+    entry = midTurnPromptAsUserEntry(entry);
     const type = entry.type || entry.role || entry.message?.role;
     if (type !== 'user') continue;
     // A sub-agent's dispatch prompts are not the user's, and parseTranscript

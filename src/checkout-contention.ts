@@ -43,6 +43,37 @@ export interface PeerSession {
   status?: string;
   /** Epoch ms of the peer's last observed activity. */
   lastSeenMs?: number;
+  /** See `neverRanATurn`. */
+  neverRanATurn?: boolean;
+}
+
+/**
+ * This launch of the session has not run a turn: no prompt, no open turn, no
+ * recorded edit, no captured row.
+ *
+ * The Claude desktop app, reusing a worktree for a new conversation, first
+ * RESUMES the conversation that last lived there — a SessionStart with
+ * `source: resume` and nothing after it — and only then starts the new one.
+ * Origin re-registers the old conversation (prompts: []), its state file is
+ * fresh and not ENDED, and the new session's first prompt found "another live
+ * session writing in this checkout". Session ad95e766 carried that mark from
+ * its first prompt (14:09:34Z, peer 274a6cd2, resumed 14:06:56Z and never
+ * prompted): ledger AND turn window declined on every Stop for three hours,
+ * and every row came from the fallback path.
+ *
+ * A session that never ran a turn has written nothing, so it is not a rival
+ * for any byte. The moment it takes a prompt it stops matching, and the live
+ * check at the next capture sees it. Anything not provably this shape — a
+ * state without a `prompts` array — still counts.
+ */
+export function neverRanATurn(state: {
+  prompts?: unknown; activeTurn?: unknown; liveEdits?: unknown;
+  completedPromptMappings?: unknown; writeTrees?: unknown;
+}): boolean {
+  if (!Array.isArray(state.prompts) || state.prompts.length > 0) return false;
+  if (state.activeTurn) return false;
+  const some = (v: unknown) => Array.isArray(v) && v.length > 0;
+  return !some(state.liveEdits) && !some(state.completedPromptMappings) && !some(state.writeTrees);
 }
 
 /**
@@ -74,6 +105,7 @@ export function detectContention(
     if (!p || !p.sessionId || p.sessionId === self.sessionId) continue;
     if (String(p.status || '').toUpperCase() === 'ENDED') continue;
     if (typeof p.lastSeenMs === 'number' && now - p.lastSeenMs > PEER_ACTIVE_WINDOW_MS) continue;
+    if (p.neverRanATurn) continue;
 
     // A peer contends only if it writes in the SAME tree. A sibling working in
     // its own worktree of the same repo is not a rival — that separation is
@@ -108,11 +140,57 @@ export function detectLiveContention(
     repoPath: p.repoPath,
     lastCwd: p.lastCwd,
     status: p.status,
-    lastSeenMs: (() => {
+    lastSeenMs: peerLastActivityMs(p as unknown as Record<string, unknown>, (() => {
       try { return fs.statSync((p as SessionState & { __statePath?: string }).__statePath || '').mtimeMs; } catch { return undefined; }
-    })(),
+    })()),
+    neverRanATurn: neverRanATurn(p),
   }));
   return detectContention(self, workTree, peers, now);
+}
+
+/**
+ * When a peer was last ACTIVE, from what it recorded about its own turns.
+ *
+ * The state file's mtime is not that. Anything that saves the file refreshes
+ * it, and not everything that saves it is the session: post-commit stamps the
+ * new `branch` on every session listed for the tree, so session 274a6cd2 —
+ * whose last own activity was 14:06Z — had its state rewritten by its
+ * neighbour's commits at 14:37Z and 16:03Z, and each rewrite made it "seen"
+ * again for ten minutes. A dead session in a shared checkout stays a rival for
+ * as long as the living one keeps committing.
+ *
+ * So: the newest timestamp the peer's OWN hooks wrote — a prompt, an open
+ * turn, a Stop, an edit, a sub-agent, a write in a tree. A state that carries none
+ * of them (agents whose producers do not record turn times) keeps the mtime,
+ * exactly as before.
+ */
+export function peerLastActivityMs(state: Record<string, unknown>, mtimeMs: number | undefined): number | undefined {
+  const seen: number[] = [];
+  const note = (v: unknown) => {
+    const ms = typeof v === 'number' ? v : typeof v === 'string' ? Date.parse(v) : NaN;
+    if (Number.isFinite(ms) && ms > 0) seen.push(ms);
+  };
+  const each = (list: unknown, ...keys: string[]) => {
+    if (!Array.isArray(list)) return;
+    for (const item of list) {
+      if (item && typeof item === 'object') for (const k of keys) note((item as Record<string, unknown>)[k]);
+      else note(item);
+    }
+  };
+  note(state.currentTurnStartedAt);
+  note(state.lastTurnClosedAt);
+  note(state.lastStopAt);
+  note((state.activeTurn as { openedAt?: unknown } | null | undefined)?.openedAt);
+  each(state.promptSubmittedAt);
+  each(state.promptShadows, 'capturedAt');
+  each(state.turnEndShadows, 'capturedAt');
+  each(state.liveEdits, 'capturedAt');
+  each(state.subagents, 'startedAt', 'endedAt');
+  each(state.writeTrees, 'at');
+  if (seen.length === 0) return mtimeMs;
+  const own = Math.max(...seen);
+  // Never later than the file says it was last written.
+  return typeof mtimeMs === 'number' ? Math.min(own, mtimeMs) : own;
 }
 
 /** One line for the user, or null when there is nothing to say. */

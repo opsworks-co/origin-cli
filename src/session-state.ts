@@ -804,6 +804,44 @@ export function currentTurnIndex(
 }
 
 /**
+ * The LOCAL turn a Stop is closing.
+ *
+ * Normally the open one (or, for a chat-only turn no tool hook ever opened, the
+ * list tail). Not when the user sent a message WHILE that turn ran and the turn
+ * absorbed it: submit appended the prompt, cut its shadow and marked the
+ * journal — a new turn for the ledger and the window — but left `activeTurn`
+ * where it was, because a submit must not steal a turn that is still running
+ * (#1133). No Stop falls between the two, so this Stop then closed the OLDER
+ * turn and stamped its end AFTER the newer turn's work; from the next Stop on
+ * the older row's window held both turns' files. E2E (three prompts, the second
+ * mid-turn): row 0 went out `f:1` at its own Stop and `f:2` at the following one.
+ *
+ * The transcript is the evidence that the prompt was absorbed rather than left
+ * waiting in the queue (`ParsedTranscript.midTurnPrompts`): the turn being
+ * closed is the last such prompt after the open turn. Matched by text, because
+ * the two lists are numbered by different producers.
+ */
+export function turnThisStopCloses(
+  state: { prompts?: string[]; activeTurn?: { index: number } | null },
+  parsed?: { prompts?: string[]; midTurnPrompts?: number[] } | null,
+): number {
+  const prompts = Array.isArray(state.prompts) ? state.prompts : [];
+  const last = Math.max(prompts.length - 1, 0);
+  const open = state.activeTurn && Number.isInteger(state.activeTurn.index) ? state.activeTurn.index : null;
+  if (open === null) return last;
+  let closing = open;
+  for (const pos of parsed?.midTurnPrompts || []) {
+    const key = promptKey(parsed?.prompts?.[pos] || '');
+    if (!key) continue;
+    for (let i = prompts.length - 1; i > closing; i--) {
+      const k = promptKey(prompts[i] || '');
+      if (k && (k === key || k.startsWith(key) || key.startsWith(k))) { closing = i; break; }
+    }
+  }
+  return closing;
+}
+
+/**
  * Stop finished the running turn. The next capture binds the following one.
  */
 export function closeTurn(

@@ -41,7 +41,7 @@ import { editSourceForAgent } from '../../prompt-capture/types.js';
 import { uploadPromptImages } from '../../prompt-images.js';
 import { promptHistoryPayload } from '../../prompt-history-payload.js';
 import { redactSecrets } from '../../redaction.js';
-import { clipMappingsToPromptHistory, closeTurn, discoverGitRoot, getBranch, getCanonicalRepoPath, getGitRoot, getHeadSha, getWorkingGitRoot, homePromptIndexByText, reconcilePromptHistory, samePromptText, saveSessionState, stampCaptured } from '../../session-state.js';
+import { clipMappingsToPromptHistory, closeTurn, turnThisStopCloses, discoverGitRoot, getBranch, getCanonicalRepoPath, getGitRoot, getHeadSha, getWorkingGitRoot, homePromptIndexByText, reconcilePromptHistory, samePromptText, saveSessionState, stampCaptured } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import type { ParsedTranscript } from '../../transcript.js';
 import { samePath, shellWindowTarget } from '../../session-worktree.js';
@@ -3692,7 +3692,9 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     // Prod bc4a1438 (vodka): turn 2 was a question, turn 3 wrote four files
     // and committed; the probe and the commit trailer both said turn 2, and
     // the state ended the four-turn session at lastClosedTurnIndex 1.
-    const closingTurn = state.activeTurn?.index ?? Math.max(state.prompts.length - 1, 0);
+    // …and when the turn absorbed a message sent while it ran, the turn that
+    // finished is that message's (turnThisStopCloses).
+    const closingTurn = turnThisStopCloses(state, parsed);
     closeTurn(state, closingTurn);
     // advanceTurnBaselines just cut the tree this Stop saw. It is where the
     // closed turn ENDS, which is not where the next turn starts when something

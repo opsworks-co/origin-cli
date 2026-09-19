@@ -10,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 import path from 'path';
 import os from 'os';
 import {
-  detectContention, detectLiveContention, contentionAdvice, PEER_ACTIVE_WINDOW_MS, type PeerSession,
+  detectContention, detectLiveContention, contentionAdvice, neverRanATurn, peerLastActivityMs, PEER_ACTIVE_WINDOW_MS, type PeerSession,
 } from '../checkout-contention.js';
 
 const SELF = { sessionId: 'self-1' };
@@ -83,10 +83,85 @@ describe('detectLiveContention', () => {
   it('uses the active state store view at capture time', () => {
     const r = detectLiveContention(SELF, TREE, [
       { ...SELF, repoPath: TREE, claudeSessionId: 'self', transcriptPath: '', model: '', startedAt: '', prompts: [] },
-      { ...peer(), claudeSessionId: 'peer', transcriptPath: '', model: '', startedAt: '', prompts: [] },
+      { ...peer(), claudeSessionId: 'peer', transcriptPath: '', model: '', startedAt: '', prompts: ['fix the bug'] },
     ] as any, NOW);
     expect(r.contested).toBe(true);
     expect(r.peers.map((p) => p.sessionId)).toEqual(['peer-1']);
+  });
+
+  it('a conversation the desktop app only RESUMED in this worktree is not a rival', () => {
+    // ad95e766 / 274a6cd2: `session-start {source: resume}` re-registered the
+    // worktree's previous conversation 2.5 minutes before the new session's
+    // first prompt. Fresh state file, not ENDED, same tree — and no turn, ever.
+    const resumedOnly = {
+      ...peer(), claudeSessionId: 'peer', transcriptPath: '', model: '', startedAt: '',
+      prompts: [], promptIndexBase: 1, status: 'RUNNING',
+    };
+    expect(detectLiveContention(SELF, TREE, [resumedOnly] as any, NOW).contested).toBe(false);
+  });
+});
+
+describe('peerLastActivityMs', () => {
+  const T = Date.parse('2026-09-18T14:06:00Z');
+  const LATER = T + 2 * 60 * 60 * 1000;
+
+  it('reads the peer\'s own turn times, not a state file someone else re-saved', () => {
+    // 274a6cd2: last own activity 14:06Z; its neighbour's post-commit stamped a
+    // new `branch` on it at 16:03Z, which is all the mtime knows.
+    const state = { prompts: ['go'], lastStopAt: new Date(T).toISOString(), promptSubmittedAt: [new Date(T - 60_000).toISOString()] };
+    expect(peerLastActivityMs(state, LATER)).toBe(T);
+  });
+
+  it('takes the newest of everything the session\'s hooks recorded', () => {
+    expect(peerLastActivityMs({
+      currentTurnStartedAt: T - 5000,
+      activeTurn: { index: 2, openedAt: new Date(T - 4000).toISOString() },
+      liveEdits: [{ capturedAt: new Date(T - 3000).toISOString() }, { capturedAt: new Date(T).toISOString() }],
+      subagents: [{ startedAt: new Date(T - 2000).toISOString() }],
+      writeTrees: [{ path: '/x', at: new Date(T - 1000).toISOString() }],
+    }, LATER)).toBe(T);
+  });
+
+  it('keeps the mtime for a state that records no turn times', () => {
+    expect(peerLastActivityMs({ prompts: ['go'], startedAt: new Date(T).toISOString() }, LATER)).toBe(LATER);
+    expect(peerLastActivityMs({}, undefined)).toBeUndefined();
+  });
+
+  it('is never later than the file\'s own last write, and ignores junk', () => {
+    expect(peerLastActivityMs({ lastStopAt: new Date(LATER).toISOString() }, T)).toBe(T);
+    expect(peerLastActivityMs({ lastStopAt: 'soon', lastTurnClosedAt: -1, liveEdits: [null, 7, {}] }, T)).toBe(7);
+  });
+
+  it('a session that went quiet two hours ago is not a rival, however fresh its file', () => {
+    const quiet = {
+      ...peer(), claudeSessionId: 'peer', transcriptPath: '', model: '', startedAt: '',
+      prompts: ['fix the bug'], lastStopAt: new Date(LATER - 2 * 60 * 60 * 1000).toISOString(),
+    };
+    // No __statePath here, so the mtime is unknown; the recorded Stop decides.
+    // (A real clock: the suite's NOW is 1e6 ms, and two hours before that is
+    // not a time anything could have recorded.)
+    expect(detectLiveContention(SELF, TREE, [quiet] as any, LATER).contested).toBe(false);
+    const busy = { ...quiet, lastStopAt: new Date(LATER - 60_000).toISOString() };
+    expect(detectLiveContention(SELF, TREE, [busy] as any, LATER).contested).toBe(true);
+  });
+});
+
+describe('neverRanATurn', () => {
+  it('is the resumed-and-untouched shape only', () => {
+    expect(neverRanATurn({ prompts: [] })).toBe(true);
+    expect(neverRanATurn({ prompts: [], liveEdits: [], completedPromptMappings: [], writeTrees: [], activeTurn: null })).toBe(true);
+  });
+
+  it.each([
+    ['it took a prompt', { prompts: ['go'] }],
+    ['a turn is open', { prompts: [], activeTurn: { index: 0 } }],
+    ['it recorded an edit', { prompts: [], liveEdits: [{ promptIndex: 0 }] }],
+    ['it captured a row', { prompts: [], completedPromptMappings: [{ promptIndex: 0 }] }],
+    ['it wrote in a tree', { prompts: [], writeTrees: [{ path: '/x' }] }],
+    ['its state has no prompts array to read — unknown still counts', {}],
+  ])('a peer still counts when %s', (_why, state) => {
+    expect(neverRanATurn(state)).toBe(false);
+    expect(detectContention(SELF, TREE, [peer({ neverRanATurn: neverRanATurn(state) })], NOW).contested).toBe(true);
   });
 });
 

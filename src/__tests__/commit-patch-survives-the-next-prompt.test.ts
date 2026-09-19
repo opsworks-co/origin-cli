@@ -23,7 +23,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { persistCompletedMappings } from '../commands/hooks/stop.js';
-import { previousMappingKept } from '../commands/hooks/user-prompt-submit.js';
+import { previousMappingKept, lateWriteRecordsForTurn } from '../commands/hooks/user-prompt-submit.js';
 import { preferCommitPatchForCommittedTurns } from '../commit-patch-for-committed-turn.js';
 import { turnClosedByStop } from '../restored-from-history.js';
 import { fitDiffToBudget } from '../diff-budget.js';
@@ -82,6 +82,73 @@ describe('the retroactive capture of the previous prompt', () => {
     // Never closed at all (no Stop fired): recovered, as today.
     expect(previousMappingKept({ diff: 'x', uncommittedDiff: '' }, rebuild, { activeTurn: null, lastClosedTurnIndex: 4 }, 5)).toBeNull();
     expect(previousMappingKept({ diff: 'x', uncommittedDiff: '' }, rebuild, { activeTurn: null }, 5)).toBeNull();
+  });
+
+  it('a chat-only verdict yields to a turn that went on after its Stop — with a write record', () => {
+    // Stop saved the turn blank + chatOnly. A background task then re-invoked
+    // the agent, it wrote a file through the shell, and the user typed the
+    // next prompt before another Stop. The blank used to be kept.
+    const blank = { diff: '', uncommittedDiff: '', chatOnly: true };
+    const late = { diff: 'diff --git a/app.py b/app.py\n+late\n', uncommittedDiff: '' };
+    const reopened = { activeTurn: { index: 5 }, lastClosedTurnIndex: 5 };
+    expect(previousMappingKept(blank, late, reopened, 5, true)).toBeNull();
+    // …also when the blank is the inherited-files pass's authoritative one.
+    expect(previousMappingKept({ ...blank, emptiedOfInheritedFiles: true, contentAuthoritative: true } as any, late, reopened, 5, true)).toBeNull();
+  });
+
+  it('re-opening alone is not enough: any tool re-opens a turn, a Read included', () => {
+    // Without a write record the capture's content is whatever the tree holds —
+    // another session's edits, a background job, a pull between turns. That is
+    // what the chat-only rule exists to keep off a turn that touched no code.
+    const blank = { diff: '', uncommittedDiff: '', chatOnly: true };
+    const dirt = { diff: '', uncommittedDiff: 'diff --git a/stranger.txt b/stranger.txt\n+x\n' };
+    const reopened = { activeTurn: { index: 5 }, lastClosedTurnIndex: 5 };
+    expect(previousMappingKept(blank, dirt, reopened, 5, false)).toBe('chat-only');
+    expect(previousMappingKept(blank, dirt, reopened, 5)).toBe('chat-only');
+    // A write record, but some OTHER turn is the open one: the verdict stands.
+    expect(previousMappingKept(blank, dirt, { activeTurn: { index: 6 }, lastClosedTurnIndex: 5 }, 5, true)).toBe('chat-only');
+    // Closed and never re-opened: Stop's row is final, as before.
+    expect(previousMappingKept(blank, dirt, { activeTurn: null, lastClosedTurnIndex: 5 }, 5, true)).toBe('closed by stop');
+  });
+
+  describe('what counts as a write record since the Stop', () => {
+    const STOP = Date.parse('2026-09-18T10:00:00.000Z');
+    const entry = (promptIndex: number, file: string, evidence: string, at: string) =>
+      ({ promptIndex, capturedAt: at, edits: [{ file, evidence }] });
+    const LATE = '2026-09-18T10:05:00.000Z';
+    const EARLY = '2026-09-18T09:55:00.000Z';
+
+    it('a shell write needs BOTH the write-shaped flag and its own probe window', () => {
+      expect([...lateWriteRecordsForTurn({ shellWriteTurns: [5], liveEdits: [entry(5, 'app.py', 'command_probe', LATE)] }, 5, STOP)]).toEqual(['app.py']);
+      expect(lateWriteRecordsForTurn({ shellWriteTurns: [], liveEdits: [entry(5, 'app.py', 'command_probe', LATE)] }, 5, STOP).size).toBe(0);
+      expect(lateWriteRecordsForTurn({ shellWriteTurns: [5], liveEdits: [] }, 5, STOP).size).toBe(0);
+      // Another turn's probe, or a journal sighting, says nothing about this turn.
+      expect(lateWriteRecordsForTurn({ shellWriteTurns: [5], liveEdits: [entry(4, 'app.py', 'command_probe', LATE)] }, 5, STOP).size).toBe(0);
+      expect(lateWriteRecordsForTurn({ shellWriteTurns: [5], liveEdits: [entry(5, 'stranger.txt', 'write_journal', LATE)] }, 5, STOP).size).toBe(0);
+    });
+
+    it('a tool edit or an edit hook is a record on its own', () => {
+      expect([...lateWriteRecordsForTurn({ liveEdits: [entry(5, 'a.ts', 'tool_call', LATE), entry(5, 'b.ts', 'edit_hook', LATE)] }, 5, STOP)].sort()).toEqual(['a.ts', 'b.ts']);
+    });
+
+    it('a record from BEFORE the Stop is not evidence of late work', () => {
+      // `printf >> b.py`, then `git checkout b.py`: Stop saves the turn
+      // chat-only, but the probe entry survives the revert. Re-opened, the
+      // turn used to be handed whatever happened to b.py next — a human's
+      // edit included (review of #1726, reproduced through the binary).
+      const state = { shellWriteTurns: [5], liveEdits: [entry(5, 'b.py', 'command_probe', EARLY), entry(5, 'c.ts', 'tool_call', EARLY)] };
+      expect(lateWriteRecordsForTurn(state, 5, STOP).size).toBe(0);
+      // The same records with no Stop time to beat (an older state file) still count.
+      expect([...lateWriteRecordsForTurn(state, 5, undefined)].sort()).toEqual(['b.py', 'c.ts']);
+    });
+
+    it('a commit attested to the turn after the Stop brings its files', () => {
+      const state = { promptTurnIds: ['t0', 't1', 't2', 't3', 't4', 't_five'], commitTurns: [
+        { sha: 'late000', turnId: 't_five', at: LATE }, { sha: 'early00', turnId: 't_five', at: EARLY }, { sha: 'other00', turnId: 't_other', at: LATE },
+      ] };
+      const files = (sha: string) => [`${sha}.ts`];
+      expect([...lateWriteRecordsForTurn(state, 5, STOP, files)]).toEqual(['late000.ts']);
+    });
   });
 
   it('replaces an ordinary mapping, as before', () => {

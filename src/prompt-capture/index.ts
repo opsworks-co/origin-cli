@@ -12,7 +12,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as fzstd from 'fzstd';
-import { convertCopilotEventsToClaude, cleanPrompt, isAgentInjectedEntry, isCursorTranscriptUserEntry, transcriptPromptIfNew } from '../transcript.js';
+import { convertCopilotEventsToClaude, cleanPrompt, isAgentInjectedEntry, isCursorTranscriptUserEntry, midTurnPromptAsUserEntry, transcriptPromptIfNew } from '../transcript.js';
 import { isInsideRepo, outOfRepoWrites, MAX_OUT_OF_REPO_FILES } from '../paths.js';
 import type { PromptCapture, PromptEdit, PromptEditOp, CaptureAgent } from './types.js';
 
@@ -824,6 +824,10 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
     } catch {
       continue;
     }
+    // A message sent while a turn was running is a turn here too — the same
+    // rule that numbers the rows (transcript.ts), or every edit after it is
+    // filed one prompt early.
+    entry = midTurnPromptAsUserEntry(entry);
     const type: string =
       entry.type ||
       (entry as any).role ||

@@ -27,9 +27,13 @@ describe('user-prompt-submit records the prompt before git capture', () => {
 
   it('pre-persists the prompt list to the retry queue before the previous-turn capture', () => {
     const persist = src.indexOf("'prompts persisted before git capture'");
-    const git = src.indexOf('captureGitState(repoPath, captureBaseline');
+    // The capture is measured from the inherited checkout baseline when there
+    // is one; resolving it is git work too, and also comes after the persist.
+    const inherited = src.indexOf('inheritedBaselineForTurn(repoPath, state as any, captureBaseline');
+    const git = src.indexOf('captureGitState(repoPath, measureFrom');
     expect(persist).toBeGreaterThan(-1);
-    expect(git).toBeGreaterThan(persist);
+    expect(inherited).toBeGreaterThan(persist);
+    expect(git).toBeGreaterThan(inherited);
     expect(src).toContain('persistUpdateBeforeWork(');
   });
 

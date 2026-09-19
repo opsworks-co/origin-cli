@@ -9,13 +9,13 @@ import { isSpecificModel, sessionMatchesAgent } from '../../agents/registry.js';
 import { api, readAuthStatus } from '../../api.js';
 import { buildAttributionContext } from '../../attribution.js';
 import { BUDGET_BLOCKING_AGENTS, buildBudgetWarningBanner } from '../../budget-breach.js';
-import { contentionAdvice, detectContention } from '../../checkout-contention.js';
+import { contentionAdvice, detectContention, neverRanATurn, peerLastActivityMs } from '../../checkout-contention.js';
 import { ensureConfigDir, isConnectedMode, loadAgentConfig, loadConfig, loadRepoConfig, saveAgentConfig } from '../../config.js';
 import { assembleRepoContext } from '../../context-injection.js';
 import { debugLog } from '../../debug-log.js';
 import { retagDevinFromProcess } from '../../devin-cli.js';
 import { capDiff } from '../../diff-budget.js';
-import { MAX_PROMPT_DIFF_LEN, captureGitState, createShadowCommit, getDirtyFiles } from '../../git-capture.js';
+import { MAX_PROMPT_DIFF_LEN, captureGitState, createShadowCommit, filesChangedSinceShadow, getDirtyFiles } from '../../git-capture.js';
 import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
 import { syncNotesForSessionStart } from '../../git-notes.js';
 import { buildHandoffContext } from '../../handoff.js';
@@ -41,13 +41,15 @@ import { withoutFiles } from '../../drop-inherited-files.js';
 import { filesTurnNamedByGitPathspec } from '../../git-pathspec-names.js';
 import { extendClosedTurnWithLateWork, filesRestoredFromHistory, settleTurnEndShadow, turnClosedByStop } from '../../restored-from-history.js';
 import { authoredFilesForTurn } from './stop.js';
+import { commitAuthoredDelta } from '../../history-backfill.js';
+import { WATCHED_ONLY_EVIDENCE } from '../../trim-watched-edits.js';
 import { execFileSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
-import { STABLE_SESSION_ID_AGENTS, captureStamp, currentSessionWorkTree, dropForeignCommitsFromCapture, durableUpdate, ensureServerSession, ensureWriteJournal, filterUncommittedDiff, findStateForHook, findStateForHookInput, getWorkingTreeSha, hookLookupSessionId, journalHasMark, normalizeWorkspaceRoot, resolveAutoAgentSessionId, resumeEndedConversationState, serverRowForLocalTurn, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, turnIdFor, uncommittedExcludeUnion } from '../hooks.js';
+import { STABLE_SESSION_ID_AGENTS, captureStamp, currentSessionWorkTree, dropForeignCommitsFromCapture, inheritedBaselineForTurn, durableUpdate, ensureServerSession, ensureWriteJournal, filterUncommittedDiff, findStateForHook, findStateForHookInput, getWorkingTreeSha, hookLookupSessionId, journalHasMark, normalizeWorkspaceRoot, resolveAutoAgentSessionId, resumeEndedConversationState, serverRowForLocalTurn, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, turnIdFor, uncommittedExcludeUnion } from '../hooks.js';
 
 
 export function retroactiveTurnFiles(
@@ -70,6 +72,60 @@ export function retroactiveTurnFiles(
 }
 
 /**
+ * Files a turn has a WRITE RECORD for, captured AFTER `sinceMs` — the time its
+ * Stop closed it. For the chat-only rule in previousMappingKept.
+ *
+ * A record is a live edit with authoring evidence (a tool call, an edit hook),
+ * a shell command's own before/after probe for a turn that ran a write-shaped
+ * command, or a commit attested to the turn. A probe alone is "watched only"
+ * (WATCHED_ONLY_EVIDENCE) — in a shared checkout somebody else can write during
+ * the window — but with the write-shaped flag it is the best record a
+ * `printf >> app.py` ever gets: no tool edit, no edit hook.
+ *
+ * AFTER the Stop, because a record can outlive the work it recorded. A write
+ * that a later command reverted keeps its probe entry (recordProbedShellEdits
+ * skips the net-zero file and returns before its upsert): `printf >> b.py`,
+ * `git checkout b.py`, Stop — chat-only, record intact. Re-opened, that turn
+ * would be handed whatever happened to b.py next, a human's edit included
+ * (review of #1726, reproduced). Stop judged everything up to the Stop; only
+ * what came after is new evidence.
+ */
+export function lateWriteRecordsForTurn(
+  state: {
+    shellWriteTurns?: number[];
+    liveEdits?: Array<{ promptIndex: number; capturedAt?: string; edits?: Array<{ file?: string; evidence?: string }> }>;
+    promptTurnIds?: string[];
+    commitTurns?: Array<{ sha?: string; turnId?: string; at?: string }>;
+  },
+  localIdx: number,
+  sinceMs: number | null | undefined,
+  commitFiles: (sha: string) => string[] = () => [],
+): Set<string> {
+  const out = new Set<string>();
+  const since = Number.isFinite(sinceMs as number) ? (sinceMs as number) : 0;
+  const after = (iso: string | undefined) => {
+    const t = iso ? Date.parse(iso) : NaN;
+    // No clock on the record: only believed when there is no Stop time to beat.
+    return Number.isFinite(t) ? t > since : since === 0;
+  };
+  const shellWrote = (state.shellWriteTurns || []).includes(localIdx);
+  for (const entry of state.liveEdits || []) {
+    if (entry.promptIndex !== localIdx || !after(entry.capturedAt)) continue;
+    for (const e of entry.edits || []) {
+      if (!e?.file) continue;
+      const watchedOnly = typeof e.evidence === 'string' && WATCHED_ONLY_EVIDENCE.has(e.evidence);
+      if (!watchedOnly || (e.evidence === 'command_probe' && shellWrote)) out.add(e.file);
+    }
+  }
+  const turnId = (state.promptTurnIds || [])[localIdx];
+  for (const ct of state.commitTurns || []) {
+    if (!turnId || ct?.turnId !== turnId || !ct.sha || !after(ct.at)) continue;
+    try { for (const f of commitFiles(ct.sha)) out.add(f); } catch { /* a commit a rebase removed */ }
+  }
+  return out;
+}
+
+/**
  * Why the retroactive capture of the previous prompt must NOT replace the
  * mapping Stop saved for it, or null when it may.
  */
@@ -78,6 +134,8 @@ export function previousMappingKept(
   incoming: { diff?: string; uncommittedDiff?: string },
   turnState?: { activeTurn?: { index: number } | null; lastClosedTurnIndex?: number },
   localIdx?: number,
+  /** The turn has a WRITE RECORD of its own for what `incoming` carries — see the chat-only rule. */
+  lateWrite?: boolean,
 ): 'closed by stop' | 'commit patch' | 'chat-only' | 'new diff was empty' | null {
   // Stop closed this turn and no agent activity re-opened it since (any tool
   // hook would have, via currentTurnIndex). Stop saw the turn's last action,
@@ -99,7 +157,31 @@ export function previousMappingKept(
   // Stop already marked this prompt as chat-only (no commits + no transcript
   // edits). Don't let the retroactive capture re-attribute pre-existing dirty
   // working-tree state to a turn the agent didn't actually touch code on.
-  if (existing.chatOnly === true) return 'chat-only';
+  //
+  // …unless the turn went on AFTER that Stop AND there is a record that it
+  // wrote. `chatOnly` is Stop's verdict on the turn up to that Stop; a tool
+  // hook that ran since re-opened the turn (activeTurn is this turn again),
+  // and a prompt typed before the next Stop makes it an interrupted turn.
+  // Keeping the blank lost the turn's late work outright: Stop, then a
+  // background task re-invokes the agent, it runs `printf >> app.py`, the
+  // user types the next prompt mid-run — app.py never reached a row (review of
+  // #1713, reproduced through the built binary; the same on main before it).
+  // Since #1713 such a blank can also carry `emptiedOfInheritedFiles`, which
+  // sent it AUTHORITATIVE and could wipe what a heartbeat had already written.
+  //
+  // Re-opening alone is NOT enough. A tool hook persists the re-open whenever
+  // it has something to save — a live edit, a shell probe, a write-shaped
+  // command noted — and that includes a command that touches nothing in the
+  // repo (`mkdir -p /tmp/x`). (A Read does not: it sets activeTurn in memory
+  // and saves nothing.) Such a turn would be handed to the retroactive
+  // capture, which replays the session's commits and the filtered working
+  // tree — exactly the "dirt on a turn that touched no code" this rule exists
+  // to stop. The caller narrows `incoming` to files the turn has a write
+  // record for since its Stop (lateWriteRecordsForTurn) and says here whether
+  // anything was left.
+  const reopenedSinceStop = !!turnState?.activeTurn && Number.isInteger(localIdx)
+    && turnState.activeTurn.index === localIdx;
+  if (existing.chatOnly === true && !(reopenedSinceStop && lateWrite === true)) return 'chat-only';
   // Don't overwrite a non-empty existing diff with an empty one — that happens
   // when STOP already captured the previous prompt's work and then set
   // prePromptDirtyFiles to those files, which causes filterUncommittedDiff to
@@ -1536,12 +1618,41 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           (s) => s.promptIndex === prevLocalIdx,
         );
         const captureBaseline = promptShadow?.shadowSha || state.prePromptSha;
+        // A checkout, pull, rebase or merge inside the turn moved the tree it
+        // worked on. Stop measures such a turn from the commit it INHERITED
+        // (inheritedBaselineForTurn — the ledger, the shell window, the commit
+        // patch all do); this re-capture still measured from the pre-checkout
+        // shadow, and it replaces Stop's row whenever the turn was re-opened.
+        //
+        // Session ad95e766 row 9 ran `git checkout -B x origin/main`, then made
+        // two one-line edits. Stop sent f:2 +2/-0. 34 s later this hook sent
+        // f:5 d:26005: `superseded-commits.ts +27/-0` — its one line plus 26
+        // of another session's #1720 the checkout had brought in — and three
+        // files of GitHub's squash of the session's OWN #1722, which carries
+        // its trailer and so passed for a commit of the turn's.
+        let inheritedBaseline: string | null = null;
+        try {
+          inheritedBaseline = inheritedBaselineForTurn(repoPath, state as any, captureBaseline, prevLocalIdx);
+        } catch { inheritedBaseline = null; }
+        const measureFrom = inheritedBaseline || captureBaseline;
+        // Re-baselining only ever NARROWS: it must never name a file the
+        // turn's own shadow shows unchanged (same guard as the shell window).
+        let shadowChanged: Set<string> | null = null;
+        if (inheritedBaseline) {
+          try { shadowChanged = new Set(filesChangedSinceShadow(repoPath, captureBaseline)); } catch { shadowChanged = null; }
+          debugLog('user-prompt-submit', 'previous prompt measured from the inherited checkout baseline', {
+            promptIndex: prevPromptIdx,
+            shadow: String(captureBaseline).slice(0, 12),
+            inherited: inheritedBaseline.slice(0, 12),
+            shadowChanged: shadowChanged?.size ?? null,
+          });
+        }
         // fullContext: per-prompt pc.diff feeds the blame route's
         // fallback path when sessionDiff doesn't cover the file (typical
         // for uncommitted work). Full-file context lets the replay
         // anchor every editsJson edit at an exact position instead of
         // falling through to content-keyed guessing.
-        const prevGitCapture = captureGitState(repoPath, captureBaseline, { fullContext: true });
+        const prevGitCapture = captureGitState(repoPath, measureFrom, { fullContext: true });
         // Scope `committedDiff` to commits THIS session authored. Walking
         // the session's own commit list keeps concurrent agents isolated:
         // a heartbeat in this session no longer picks up a foreign agent's
@@ -1549,7 +1660,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
         // Scoped to THIS TURN's window — `captureBaseline` is the prompt's
         // own shadow. Session-wide here is what made turns duplicate each
         // other's diffs (see sessionScopedCommittedDiff).
-        const sessionCommitted = sessionScopedCommittedDiff(repoPath, state, captureBaseline);
+        const sessionCommitted = sessionScopedCommittedDiff(repoPath, state, measureFrom);
         // Extract filesChanged from the TURN-SCOPED committed diff + diff
         // headers. `commitDetails` used to seed this, but that is the whole
         // commit's file list — on a `git commit -a` it names every file that
@@ -1602,7 +1713,8 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
             excluded: [...prevForeignFiles, ...excludeUnion],
             // captureGitState already diffed this turn's start shadow against
             // the live tree; reuse it instead of snapshotting the tree again.
-            windowDiff: promptShadow?.shadowSha ? (prevGitCapture.workingTreeDiff || '') : undefined,
+            // …unless it was re-baselined: that diff is no longer shadow → tree.
+            windowDiff: promptShadow?.shadowSha && !inheritedBaseline ? (prevGitCapture.workingTreeDiff || '') : undefined,
             log: (event, data) => debugLog('user-prompt-submit', event, { promptIndex: prevPromptIdx, ...data }),
           });
           if (late.length > 0 && stopRow) stampCaptured(stopRow);
@@ -1629,6 +1741,40 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
               }
             }
           } catch { /* answer nothing: today's capture */ }
+        }
+        if (shadowChanged) {
+          const inShadow = (f: string) => [...shadowChanged!].some((c) => c === f || c.endsWith(`/${f}`) || f.endsWith(`/${c}`));
+          for (const f of prevFilesChanged) if (!inShadow(f)) restoredDrop.add(f);
+          prevFilesChanged = prevFilesChanged.filter(inShadow);
+        }
+        // A turn Stop saved as chat-only and a tool hook re-opened since may
+        // be recovered below — but only for files it has a WRITE RECORD for,
+        // captured after that Stop: a tool call, an edit hook, its own commit,
+        // or a write-shaped shell command whose own window saw the file change
+        // (see lateWriteRecordsForTurn). Everything else this capture found
+        // is not the turn's:
+        // another session's edits in a shared checkout, a background job, a
+        // pull between turns. See previousMappingKept.
+        let lateWrite = false;
+        {
+          const savedPrev = (state.completedPromptMappings || []).find((m) => m.promptIndex === prevPromptIdx);
+          if (savedPrev?.chatOnly === true && state.activeTurn?.index === prevLocalIdx && !closedByStop) {
+            let authored = new Set<string>();
+            try {
+              authored = lateWriteRecordsForTurn(
+                state as any, prevLocalIdx, (state as { lastTurnClosedAt?: number }).lastTurnClosedAt,
+                (sha) => commitAuthoredDelta(state.repoPath || hookCwd, sha).filesChanged,
+              );
+            } catch { /* no record: keep the blank */ }
+            const wrote = (f: string) => [...authored].some((a) => a === f || a.endsWith(`/${f}`) || f.endsWith(`/${a}`));
+            const notMine = prevFilesChanged.filter((f) => !wrote(f));
+            for (const f of notMine) restoredDrop.add(f);
+            prevFilesChanged = prevFilesChanged.filter(wrote);
+            lateWrite = prevFilesChanged.length > 0;
+            debugLog('user-prompt-submit', 'chat-only turn re-opened since its Stop', {
+              promptIndex: prevPromptIdx, wrote: prevFilesChanged.slice(0, 20), withoutRecord: notMine.length,
+            });
+          }
         }
         if (prevGitCapture.diff || filteredUncommitted || prevFilesChanged.length > 0) {
           // Get the current checkout SHA + working-tree SHA for restore
@@ -1664,7 +1810,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           const existingIdx = state.completedPromptMappings.findIndex(m => m.promptIndex === prevPromptIdx);
           if (existingIdx >= 0) {
             const existing = state.completedPromptMappings[existingIdx];
-            const keep = previousMappingKept(existing, prevMapping, state, prevLocalIdx);
+            const keep = previousMappingKept(existing, prevMapping, state, prevLocalIdx, lateWrite);
             if (keep) {
               debugLog('user-prompt-submit', `kept existing previous-prompt mapping (${keep})`, {
                 promptIndex: prevPromptIdx,
@@ -2314,9 +2460,10 @@ export function noteCheckoutContention(state: SessionState): boolean {
       repoPath: p.repoPath,
       lastCwd: p.lastCwd,
       status: p.status,
-      lastSeenMs: (() => {
+      lastSeenMs: peerLastActivityMs(p, (() => {
         try { return fs.statSync(p.__statePath).mtimeMs; } catch { return undefined; }
-      })(),
+      })()),
+      neverRanATurn: neverRanATurn(p),
     }));
     const report = detectContention(state, tree, peers);
     if (!report.contested) return false;

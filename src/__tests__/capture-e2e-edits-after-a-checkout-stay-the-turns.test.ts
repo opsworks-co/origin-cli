@@ -278,4 +278,47 @@ describe.skipIf(!haveDist)('edits made after a mid-turn checkout, through the bu
     // And it is the LEDGER that says so — the producer that emptied the row.
     expect(hooksLog()).toMatch(/turn capture taken from the write journal \{"promptIndex":0,[^}]*"files":2,/);
   }, 120_000 * WINDOWS_SLOWDOWN);
+
+  // Session ad95e766 row 9, 34 seconds after a Stop that had sent the row
+  // right (f:2 +2/-0):
+  //
+  //   [user-prompt-submit] captured per-prompt diff for previous prompt {"promptIndex":9,"filesChanged":5,…,"payload":[{"i":9,"f":5,"d":26005}]}
+  //
+  // and the dashboard showed `superseded-commits.ts +27/-0`: the turn's one
+  // line plus 26 of the branch it had switched to. A background task's
+  // notification had woken the agent between that Stop and the next prompt —
+  // not a prompt, but its tool hooks re-open the turn Stop closed, so the
+  // next prompt's re-capture replaces Stop's row. It measured from the
+  // PRE-checkout shadow; every Stop-side producer measures from the commit
+  // the checkout left.
+  it('the next prompt\'s re-capture of that turn still holds the two edits alone', async () => {
+    // A write-shaped tool call with no prompt behind it — what re-opens a turn
+    // (a read-only `git status` does not). It touches a gitignored file only.
+    const peek = { command: 'git status --short > .probe' };
+    await run('pre-tool-use', { tool_name: 'Bash', tool_input: peek, tool_use_id: 'tu-9' });
+    fs.writeFileSync(path.join(repo, '.probe'), ' M app.py\n M viewer.py\n');
+    toolUse('tu-9', 'Bash', peek);
+    await run('post-tool-use', { tool_name: 'Bash', tool_input: peek, tool_use_id: 'tu-9', tool_response: { stdout: '', stderr: '', interrupted: false } });
+
+    say('thanks — now commit it');
+    const ups = await run('user-prompt-submit', { prompt: 'thanks — now commit it' });
+    expect(ups.code, ups.stderr).toBe(0);
+
+    // This scenario only means something if the re-capture really ran and was
+    // allowed to replace the row.
+    const log = hooksLog();
+    expect(log).toMatch(/captured per-prompt diff for previous prompt \{"promptIndex":0,/);
+    expect(log).not.toMatch(/kept existing previous-prompt mapping[^\n]*"promptIndex":0/);
+    expect(log).toMatch(/previous prompt measured from the inherited checkout baseline \{"promptIndex":0,/);
+
+    const row = rows().find((r: any) => r.promptIndex === 0);
+    expect([...(row.filesChanged || [])].sort()).toEqual(['app.py', 'viewer.py']);
+    for (const field of ['diff', 'uncommittedDiff']) {
+      const text = String(row[field] || '');
+      expect(text, field).not.toContain('+CAPTION');
+      for (const f of UPSTREAM_ONLY) expect(text, field).not.toContain(f);
+    }
+    const added = String(row.diff || '').split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'));
+    expect(added.sort()).toEqual(['+    print("new")', '+FRAME = "full"']);
+  }, 120_000 * WINDOWS_SLOWDOWN);
 });
