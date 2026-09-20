@@ -82,6 +82,14 @@ describe('filesChangedSinceShadow', () => {
     expect(filesChangedSinceShadow(repo, shadow)).not.toContain('rows.txt');
   });
 
+  // A `diff --git a/old b/new` section is keyed by the OLD path. With git's
+  // default rename detection only the new one was listed, and the heartbeat's
+  // open-turn scoping dropped the turn's `git mv` (review of #1725).
+  it('lists BOTH paths of a file the session moved', () => {
+    git(repo, ['mv', 'tracked.txt', 'moved.txt']);
+    expect(filesChangedSinceShadow(repo, shadow).sort()).toEqual(['moved.txt', 'tracked.txt']);
+  });
+
   it('returns [] for a missing or malformed shadow so callers fall back', () => {
     expect(filesChangedSinceShadow(repo, '')).toEqual([]);
     expect(filesChangedSinceShadow(repo, 'not-a-sha')).toEqual([]);

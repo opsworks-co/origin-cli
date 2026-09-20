@@ -56,8 +56,15 @@ describe('rebase-rewritten session commits', () => {
 
     // Both got recorded: post-commit saw the original, the later capture saw
     // the rewrite. This is the bug's exact input.
-    const state: any = { sessionCommitShas: [original, rewritten], repoPath: repo, sessionTag: 'test' };
+    const state: any = { sessionId: 's-rebase', sessionCommitShas: [original, rewritten], repoPath: repo, sessionTag: 'test' };
     expect(__testRescueCommitShas(repo, state)).toEqual([rewritten]);
+
+    // The swap names itself. It moves a turn's commit onto another sha, and it
+    // used to leave no line saying so (session ad95e766 row 4).
+    const log = fs.readFileSync(path.join(os.homedir(), '.origin', 'hooks.log'), 'utf-8');
+    const line = log.split('\n').filter((l) => l.includes('session commits replaced by their rewrites') && l.includes('s-rebase')).pop() || '';
+    expect(line).toContain(`${original.slice(0, 8)}→${rewritten.slice(0, 8)}`);
+    expect(line).toContain('"count":1');
   });
 
   it('collapses a rebase that also re-bumped a version file (patch-id moves)', () => {

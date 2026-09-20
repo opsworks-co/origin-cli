@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import ts from 'typescript';
 import { newCaptureStamp } from '../capture-stamp.js';
 import { turnIsClosed } from '../turn-commit-scope.js';
+import { scopeUncommittedToOpenTurn } from '../open-turn-uncommitted-scope.js';
 import { compareResolverWithPasses, createTurnObserver, observeReconstruction, onlyDifferences } from '../resolve-turn.js';
 
 // Exercise the actual daemon function without starting its timers or exiting
@@ -37,6 +38,8 @@ function harness(duringGit: (state: any) => void = () => {}) {
     applyLedgerToMappings: noop, stateLedgerIsContended: () => false,
     readJournalEntries: noop, preferShadowRangeForTurns: noop,
     preferCommitPatchForCommittedTurns: noop,
+    // The open-turn scoping is pure; no start shadow and no sibling here, so it narrows nothing.
+    scopeUncommittedToOpenTurn, filesChangedSinceShadowOrNull: () => null, filesClaimedByOtherLiveSessions: () => [],
     // The resolver's side-by-side run is pure; the real functions, like the stamp.
     createTurnObserver, observeReconstruction, compareResolverWithPasses, onlyDifferences, debugLog: noop,
     fetchWithTimeout: send, apiUrl: 'https://example.test', sessionId: 'session', apiKey: 'test',

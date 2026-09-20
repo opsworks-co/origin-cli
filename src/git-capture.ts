@@ -1535,17 +1535,30 @@ export function changedFilesBetween(repoPath: string, from: string, to: string):
  * back to their commit-based signal.
  */
 export function filesChangedSinceShadow(repoPath: string, shadowSha: string): string[] {
-  if (!shadowSha || !HEX.test(shadowSha)) return [];
+  return filesChangedSinceShadowOrNull(repoPath, shadowSha) || [];
+}
+
+/**
+ * `filesChangedSinceShadow`, but a read that FAILED is null rather than [].
+ * A caller that subtracts on this answer ("unchanged since the turn began, so
+ * not the turn's") must not read a git timeout as "nothing changed".
+ */
+export function filesChangedSinceShadowOrNull(repoPath: string, shadowSha: string): string[] | null {
+  if (!shadowSha || !HEX.test(shadowSha)) return null;
   const gitOpts = { cwd: repoPath, timeoutMs: 15_000, maxBuffer: 10 * 1024 * 1024 };
   const baseTree = gitOrNull(['rev-parse', `${shadowSha}^{tree}`], gitOpts);
-  if (!baseTree || !HEX.test(baseTree)) return [];
+  if (!baseTree || !HEX.test(baseTree)) return null;
   const curTree = writeWorkingTree(repoPath, gitOpts);
-  if (!curTree) return [];
+  if (!curTree) return null;
   try {
-    return git(['diff', '--name-only', baseTree, curTree], gitOpts)
+    // --no-renames: with git's default rename detection a moved file is listed
+    // under its NEW path only, while a `diff --git a/old b/new` section is
+    // keyed by the old one — so a caller matching sections against this list
+    // dropped the turn's `git mv`. Both paths moved; list both.
+    return git(['diff', '--name-only', '--no-renames', baseTree, curTree], gitOpts)
       .trim().split('\n').map((s) => s.trim()).filter(Boolean);
   } catch {
-    return [];
+    return null;
   }
 }
 

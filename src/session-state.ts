@@ -10,6 +10,7 @@ import crypto from 'crypto';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { processInfo } from './utils/process-detect.js';
+import { isHeartbeatFor, signalOwnDaemon } from './utils/signal-own-daemon.js';
 import { samePath } from './paths.js';
 import { keepWriteTreesSavedMeanwhile } from './session-write-trees.js';
 import type { WriteTree } from './session-write-trees.js';
@@ -1512,11 +1513,36 @@ function rememberOwnWrite(state: SessionState, file: string): void {
 }
 
 /** See keepCommitRecordsSavedMeanwhile. Never throws: a failed read keeps today's write. */
-function keepCommitsRecordedSinceRead(state: SessionState, statePath: string): void {
+/**
+ * The closed-turn marker Stop put on disk ahead of its own save
+ * (markTurnClosedOnDisk), when this state has not caught up with it. Returned
+ * for the WRITE only — never folded into `state`: Stop goes on reading its own
+ * `lastClosedTurnIndex` until `closeTurn`, and `currentTurnIndex` would bind
+ * the NEXT turn if the marker moved under it mid-capture.
+ *
+ * Every writer of the marker only moves it forward, so the larger of the two
+ * is never a turn that was re-opened. Another session's file is not ours to
+ * carry anything from.
+ */
+export function closedTurnMarkedMeanwhile(
+  state: Pick<SessionState, 'sessionId' | 'lastClosedTurnIndex'>,
+  onDisk: Partial<Pick<SessionState, 'sessionId' | 'lastClosedTurnIndex'>> | null | undefined,
+): number | null {
+  if (!onDisk || !state?.sessionId || onDisk.sessionId !== state.sessionId) return null;
+  const marked = onDisk.lastClosedTurnIndex;
+  if (!Number.isInteger(marked) || (marked as number) < 0) return null;
+  const mine = Number.isInteger(state.lastClosedTurnIndex) ? state.lastClosedTurnIndex as number : -1;
+  return (marked as number) > mine ? marked as number : null;
+}
+
+/** The on-disk closed-turn marker each in-memory state has been saved with. */
+const closedTurnCarriedByState = new WeakMap<object, number>();
+
+function keepCommitsRecordedSinceRead(state: SessionState, statePath: string): number | null {
   try {
     const st = fs.statSync(statePath);
     const mine = lastWriteByState.get(state);
-    if (mine && mine.file === statePath && mine.mtimeMs === st.mtimeMs && mine.size === st.size) return;
+    if (mine && mine.file === statePath && mine.mtimeMs === st.mtimeMs && mine.size === st.size) return null;
     const onDisk = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
     keepWriteTreesSavedMeanwhile(state, onDisk);
     const kept = keepCommitRecordsSavedMeanwhile(state, onDisk);
@@ -1525,7 +1551,8 @@ function keepCommitsRecordedSinceRead(state: SessionState, statePath: string): v
         sessionId: state.sessionId, shas: kept.shas.map((sha) => sha.slice(0, 8)), turns: kept.turns, pairs: kept.pairs,
       });
     }
-  } catch { /* no file yet, or unreadable — write as before */ }
+    return closedTurnMarkedMeanwhile(state, onDisk);
+  } catch { return null; /* no file yet, or unreadable — write as before */ }
 }
 
 /** beforeSave reconciles registration with the latest row under the cross-process write lock. */
@@ -1536,6 +1563,42 @@ export function saveSessionState(state: SessionState, cwd?: string, sessionTag?:
     beforeSave?.();
     saveSessionStateLocked(state, statePath, cwd, sessionTag);
   });
+}
+
+/**
+ * Record ON DISK that Stop is closing LOCAL turn `localTurn`, ahead of Stop's
+ * own save. Touches `lastClosedTurnIndex` and nothing else.
+ *
+ * Stop stamps its row when it sends it and saved the closed turn only at its
+ * very end: a second unloaded, ten and more on a busy host. A heartbeat tick
+ * that began inside that gap read a state saying the turn was still open and
+ * carried a NEWER stamp than Stop's, so its in-flight reconstruction replaced
+ * Stop's final row whichever of the two PATCHes landed first (local-ci
+ * 2026-09-18). Marked before Stop stamps, every tick either reads "closed"
+ * and sends nothing, or was stamped before Stop and loses the ordering.
+ *
+ * `activeTurn` stays as it is: `turnClosedByStop` needs both, so a Stop that
+ * dies after this has not claimed a row it never sent. False when the state
+ * is not where `getStatePath` says (the sandbox fallback) — today's behaviour.
+ */
+export function markTurnClosedOnDisk(cwd: string | undefined, sessionTag: string | undefined, localTurn: number): boolean {
+  if (!Number.isInteger(localTurn) || localTurn < 0) return false;
+  try {
+    const statePath = getStatePath(cwd, sessionTag);
+    return withSessionStateLock(statePath, () => {
+      const onDisk = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+      if (!onDisk || typeof onDisk !== 'object' || Array.isArray(onDisk)) return false;
+      const prev = Number.isInteger(onDisk.lastClosedTurnIndex) ? onDisk.lastClosedTurnIndex as number : -1;
+      if (prev >= localTurn) return true;
+      onDisk.lastClosedTurnIndex = localTurn;
+      const tmp = statePath + '.tmp.' + process.pid;
+      fs.writeFileSync(tmp, JSON.stringify(onDisk, null, 2), { mode: 0o600 });
+      fs.renameSync(tmp, statePath);
+      return true;
+    });
+  } catch {
+    return false;
+  }
 }
 
 function saveSessionStateLocked(state: SessionState, statePath: string, cwd?: string, sessionTag?: string): void {
@@ -1554,10 +1617,22 @@ function saveSessionStateLocked(state: SessionState, statePath: string, cwd?: st
       from: adoption.from, to: adoption.to, sessionTag: sessionTag || state.sessionTag,
     });
   }
-  keepCommitsRecordedSinceRead(state, statePath);
+  // Stop marks its turn closed on disk before it sends, then saves this state
+  // — read before the mark — several times on the way to `closeTurn`. Written
+  // as read, the first of those saves put the turn back to "open" a
+  // millisecond after the mark, for every turn that changed a file.
+  //
+  // Remembered per state object: after this process's own write the file is
+  // not re-read (keepCommitsRecordedSinceRead), and Stop's later saves — the
+  // budget signal, the images — would write the older number again.
+  const markedNow = keepCommitsRecordedSinceRead(state, statePath);
+  if (markedNow !== null) closedTurnCarriedByState.set(state, markedNow);
+  const carried = closedTurnCarriedByState.get(state);
+  const ownClosed = Number.isInteger(state.lastClosedTurnIndex) ? state.lastClosedTurnIndex as number : -1;
+  const toWrite = carried !== undefined && carried > ownClosed ? { ...state, lastClosedTurnIndex: carried } : state;
   try {
     const tmpStatePath = statePath + '.tmp.' + process.pid;
-    fs.writeFileSync(tmpStatePath, JSON.stringify(state, null, 2), { mode: 0o600 });
+    fs.writeFileSync(tmpStatePath, JSON.stringify(toWrite, null, 2), { mode: 0o600 });
     fs.renameSync(tmpStatePath, statePath);
     rememberOwnWrite(state, statePath);
   } catch (err: any) {
@@ -1569,7 +1644,7 @@ function saveSessionStateLocked(state: SessionState, statePath: string, cwd?: st
       const fb = getGlobalFallbackStatePath(cwd, sessionTag || state.sessionTag);
       if (fb !== statePath) {
         const tmpFb = fb + '.tmp.' + process.pid;
-        fs.writeFileSync(tmpFb, JSON.stringify(state, null, 2), { mode: 0o600 });
+        fs.writeFileSync(tmpFb, JSON.stringify(toWrite, null, 2), { mode: 0o600 });
         fs.renameSync(tmpFb, fb);
       }
     } else {
@@ -1583,7 +1658,7 @@ function saveSessionStateLocked(state: SessionState, statePath: string, cwd?: st
     const globalDir = path.join(os.homedir(), '.origin', 'sessions');
     fs.mkdirSync(globalDir, { recursive: true, mode: 0o700 });
     const globalPath = path.join(globalDir, `${state.sessionId.slice(0, 12)}.json`);
-    const globalState = { ...state, status: 'RUNNING' };
+    const globalState = { ...toWrite, status: 'RUNNING' };
     const tmpGlobalPath = globalPath + '.tmp.' + process.pid;
     fs.writeFileSync(tmpGlobalPath, JSON.stringify(globalState, null, 2), { mode: 0o600 });
     fs.renameSync(tmpGlobalPath, globalPath);
@@ -2673,9 +2748,9 @@ export function stopHeartbeat(sessionId: string): void {
   try {
     if (fs.existsSync(pidFile)) {
       const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
-      if (pid > 0) {
-        try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
-      }
+      // Only the heartbeat we started: a pid file outlives a SIGKILLed daemon,
+      // and the number is someone else's by then. See signal-own-daemon.ts.
+      signalOwnDaemon(pid, 'heartbeat', isHeartbeatFor(sessionId));
       fs.unlinkSync(pidFile);
     }
   } catch {

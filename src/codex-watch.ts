@@ -54,6 +54,7 @@ import { ensureInProcessJournal, stopJournalWatcher, applyLedgerToProducerRows }
 import { sessionTagFor } from './session-state.js';
 import { loadConfig, loadAgentConfig } from './config.js';
 import { debugLog, logSkipOnce } from './debug-log.js';
+import { isCliDaemon, signalOwnDaemon } from './utils/signal-own-daemon.js';
 import { writeWatchMeta, touchWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
 import { compareResolverWithPasses, createTurnObserver, observeReconstruction, onlyDifferences } from './resolve-turn.js';
 
@@ -1009,7 +1010,8 @@ export function restartCodexWatch(): { restarted: boolean; reason: string } {
       // Only kill a live, OTHER process — never signal ourselves, and treat a
       // dead/garbage pid as nothing to stop.
       if (Number.isFinite(pid) && pid > 0 && pid !== process.pid && isProcessAlive(pid)) {
-        try { process.kill(pid); } catch { /* already gone — fine */ }
+        // …and only the watcher itself: alive is not the same as ours.
+        signalOwnDaemon(pid, 'codex-watch', isCliDaemon('codex-watch'));
       }
       // Clear the pid file so the incumbent's slot is free; the fresh daemon
       // writes its own pid on startup (writeOwnPid).

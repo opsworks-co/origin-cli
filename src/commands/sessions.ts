@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { isHeartbeatFor, signalOwnDaemon } from '../utils/signal-own-daemon.js';
 import { listSessionIds, readSessionFile } from '../session-store.js';
 import fs from 'fs';
 import os from 'os';
@@ -548,8 +549,10 @@ export async function sessionEndCommand(id: string) {
           try {
             const pid = parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
             if (pid > 0) {
-              try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
-              console.log(chalk.gray(`  Killed heartbeat (pid ${pid}).`));
+              // Only the heartbeat itself — a stale pid file names a stranger.
+              const outcome = signalOwnDaemon(pid, 'heartbeat', isHeartbeatFor(sessionId));
+              if (outcome === 'signalled') console.log(chalk.gray(`  Killed heartbeat (pid ${pid}).`));
+              else if (outcome !== 'gone') console.log(chalk.gray(`  Heartbeat pid file named pid ${pid}, which is not the heartbeat — left alone.`));
             }
           } catch { /* ignore */ }
           try { fs.unlinkSync(pidPath); } catch { /* ignore */ }

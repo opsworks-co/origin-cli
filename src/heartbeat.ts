@@ -23,13 +23,14 @@ import { execFileSync, spawn } from 'child_process';
 import { getCurrentVersion, shouldRestartForUpgrade } from './version-check.js';
 import { transcriptIdleWindowMs, HOOK_DRIVEN_IDLE_MS, turnInProgress } from './heartbeat-liveness.js';
 import { pruneRetiredStateFiles } from './session-state.js';
-import { changedFilesBetween, createShadowCommit, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN, captureGitState } from './git-capture.js';
+import { changedFilesBetween, createShadowCommit, filesChangedSinceShadow, filesChangedSinceShadowOrNull, readFileAtRev, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN, captureGitState } from './git-capture.js';
 import { combineApplyableTurnDiff, hasDuplicateFileSections } from './applyable-turn-diff.js';
 import { capDiff } from './diff-budget.js';
 import { applyLedgerToMappings } from './capture-from-ledger.js';
 import { preferCommitPatchForCommittedTurns } from './commit-patch-for-committed-turn.js';
 import { preferShadowRangeForTurns } from './prefer-shadow-range.js';
-import { inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn } from './commands/hooks.js';
+import { filesClaimedByOtherLiveSessions, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn } from './commands/hooks.js';
+import { scopeUncommittedToOpenTurn } from './open-turn-uncommitted-scope.js';
 import { readJournalEntries, journalPathsForTag } from './write-journal-watch.js';
 import { ensureInProcessJournal, stateLedgerIsContended } from './ledger-producer.js';
 import { stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
@@ -645,6 +646,23 @@ async function pushInflightDiff(): Promise<void> {
     };
     committedDiff = stripFiles(committedDiff);
     uncommittedDiff = stripFiles(uncommittedDiff);
+    // `git diff HEAD` is everything dirty, not what THIS turn did: the earlier
+    // turns' uncommitted work and another live session's files ride along. The
+    // shadow-window pass below settles that for a session alone in its
+    // checkout and declines in a shared one, so there this tick sent a turn
+    // that only said "thanks" as +8 across its own earlier file and the
+    // sibling's new one. It lasts only until Stop's row replaces it, unless
+    // the tick's PATCH lands after Stop's, which a slow host makes likely.
+    if (uncommittedDiff) {
+      uncommittedDiff = scopeUncommittedToOpenTurn(uncommittedDiff, {
+        changedSinceTurnStart: currentShadow?.shadowSha && isHex(currentShadow.shadowSha)
+          ? filesChangedSinceShadowOrNull(repoPath, currentShadow.shadowSha)
+          : null,
+        claimedByOthers: (() => {
+          try { return filesClaimedByOtherLiveSessions(state as any); } catch { return []; }
+        })(),
+      });
+    }
 
     // Drop Origin's OWN bookkeeping files (CLAUDE.md, .devin/rules/origin.md,
     // AGENTS.md …) and user-ignored paths. The excludeSet above can't catch

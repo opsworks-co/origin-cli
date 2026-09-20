@@ -51,9 +51,110 @@ describe.skipIf(!haveDist || isWindows)('what the next prompt adds to a closed t
       expect(String(zero?.diff || '')).not.toContain(SIB);
       expect(String(zero?.uncommittedDiff || '')).not.toContain(SIB);
       expect([zero?.linesAdded, zero?.linesRemoved]).toEqual([1, 0]);
-      // Turn 1 may name the session's files with no lines (as on main); it
-      // carries none of the sibling's content.
-      expect(String(one?.diff || '')).not.toContain('+sib_');
+      // Turn 1 only said thanks: no file, no line, in either direction. It
+      // used to pass `not.toContain('+sib_')` while holding the REVERSED
+      // text (-mine_new, src/sib.py deleted, -8): Stop read `shadow..HEAD` as
+      // the turn's work.
+      expect(one?.filesChanged || []).toEqual([]);
+      expect(String(one?.diff || '')).toBe('');
+      expect(String(one?.uncommittedDiff || '')).toBe('');
+      expect([one?.linesAdded || 0, one?.linesRemoved || 0]).toEqual([0, 0]);
+    } finally {
+      await h.close();
+    }
+  }, T);
+
+  it('a heartbeat tick inside the open turn sends none of the sibling\'s file or the earlier turn\'s work', async () => {
+    // The daemon's in-flight row is `git diff HEAD` + untracked. In a shared
+    // checkout the shadow-window pass declines, so nothing scoped it to the
+    // turn: a tick inside turn 1 sent [src/mine.py, src/sib.py] +8, and on a
+    // slow host that PATCH landed after Stop's and became the stored row
+    // (local-ci 2026-09-18). The tick fires every 30s; hold the turn open
+    // past one.
+    const h = await createHarness('e2e-late-tick-0004', 'e2e-late-tick-srv-4');
+    const SIB = 'src/sib.py';
+    try {
+      commitFiles(h, { [MINE]: numbered('mine', 5) }, 'base');
+
+      await h.startSession('make my change');
+      await h.agentWrites('tu-1', MINE, numbered('mine', 5) + 'mine_new = 1\n');
+      h.reply('Done.');
+      const beforeWorkStop = h.hits.length;
+      await h.stop();
+      // A turn that WROTE A FILE is closed on disk when its row arrives too.
+      // Stop saves its state — read before the mark — as soon as a journal or
+      // shell pass records the turn's edit, and that save used to put the turn
+      // back to "open" before the row was stamped. Only a turn with no work,
+      // like "thanks" below, kept the mark (review of #1725).
+      const workSends = h.hits.slice(beforeWorkStop).filter((x) => x.method === 'PATCH'
+        && x.url.startsWith('/api/mcp/session/e2e-late-tick-srv-4')
+        && Array.isArray(x.body?.promptChanges) && x.body.promptChanges.some((pc: any) => pc.promptIndex === 0));
+      expect(workSends.length).toBeGreaterThan(0);
+      for (const send of workSends) expect(send.closedOnDisk).toBe(0);
+
+      const sib = await h.sibling('e2e-sibtick-0005');
+      await sib.submit('add the sibling module');
+      await sib.agentWrites('s-1', SIB, numbered('sib', 7));
+      sib.reply('Added.');
+      await sib.stop();
+
+      const before = h.hits.length;
+      await h.submit('thanks');
+      await sleep(36_000);
+      const inFlight = h.hits.slice(before)
+        .filter((x) => x.method === 'PATCH' && x.url.startsWith('/api/mcp/session/e2e-late-tick-srv-4'))
+        .flatMap((x) => (Array.isArray(x.body?.promptChanges) ? x.body.promptChanges : []))
+        .filter((pc: any) => pc.promptIndex === 1);
+      for (const pc of inFlight) {
+        expect(pc.filesChanged || []).toEqual([]);
+        expect(String(pc.diff || '') + String(pc.uncommittedDiff || '')).not.toMatch(/sib_|mine_new/);
+      }
+
+      h.reply('You are welcome.');
+      const beforeStop = h.hits.length;
+      await h.stop();
+      const one = h.rows().find((r: any) => r.promptIndex === 1);
+      expect(one?.filesChanged || []).toEqual([]);
+      expect(String(one?.diff || '')).toBe('');
+
+      // Stop's row for turn 1 arrives with the turn ALREADY closed on disk. It
+      // used to be recorded only in Stop's final save, after the send: a tick
+      // starting in between read "open", out-stamped Stop, and won.
+      const stopSends = h.hits.slice(beforeStop).filter((x) => x.method === 'PATCH'
+        && x.url.startsWith('/api/mcp/session/e2e-late-tick-srv-4')
+        && Array.isArray(x.body?.promptChanges) && x.body.promptChanges.some((pc: any) => pc.promptIndex === 1));
+      expect(stopSends.length).toBeGreaterThan(0);
+      for (const send of stopSends) expect(send.closedOnDisk).toBe(1);
+    } finally {
+      await h.close();
+    }
+  }, T);
+
+  it('a turn Stop never closed: the next prompt saves the new turn before it sends the old one\'s row', async () => {
+    // The other half of the ordering above. The heartbeat's tick works on the
+    // LAST prompt in the state file and stamps itself before it reads that
+    // file. The submit hook saves the new prompt and only then stamps and
+    // sends the previous turn's row, so a tick either read the old state and
+    // carries the older stamp, or reads the new one and works on the new
+    // turn. Send-before-save would reopen the gap Stop had; this pins it.
+    const h = await createHarness('e2e-late-nostop-0006', 'e2e-late-nostop-srv-6');
+    try {
+      commitFiles(h, { [MINE]: numbered('mine', 5) }, 'base');
+
+      await h.startSession('make my change');
+      await h.agentWrites('tu-1', MINE, numbered('mine', 5) + 'mine_new = 1\n');
+      h.reply('Done.');
+      // No Stop: an interrupt, a crash, a hook the agent killed.
+
+      const before = h.hits.length;
+      await h.submit('next thing');
+      const sends = h.hits.slice(before).filter((x) => x.method === 'PATCH'
+        && x.url.startsWith('/api/mcp/session/e2e-late-nostop-srv-6')
+        && Array.isArray(x.body?.promptChanges) && x.body.promptChanges.some((pc: any) => pc.promptIndex === 0));
+      expect(sends.length).toBeGreaterThan(0);
+      for (const send of sends) expect(send.promptsOnDisk).toBe(2);
+      const zero = sends[sends.length - 1].body.promptChanges.find((pc: any) => pc.promptIndex === 0);
+      expect(zero.filesChanged).toEqual([MINE]);
     } finally {
       await h.close();
     }

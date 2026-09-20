@@ -656,6 +656,17 @@ export function uncommittedExcludeUnion(state: SessionState): string[] {
   const set = new Set<string>();
   for (const f of state.prePromptDirtyFiles || []) set.add(f);
   for (const f of state.sessionStartDirtyFiles || []) set.add(f);
+  for (const f of filesClaimedByOtherLiveSessions(state)) set.add(f);
+  return Array.from(set);
+}
+
+/**
+ * Files another live session in this checkout claims and we do not: part (c)
+ * of `uncommittedExcludeUnion`, on its own for a caller that applies its own
+ * pre-existing-dirt rule (the heartbeat's in-flight row). Repo-relative.
+ */
+export function filesClaimedByOtherLiveSessions(state: SessionState): string[] {
+  const set = new Set<string>();
   // (c) Other-session-touched files. Iterate the active session registry on
   // this repo, gather their filesChanged / commit-derived filename lists,
   // and add any file we ourselves haven't touched. "Touched by us" is
@@ -1403,6 +1414,15 @@ function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
   // pairs found across several Stops (and by the post-rewrite hook), and a
   // reading mapped through only the newest pair stopped on an intermediate
   // copy that itself had been rewritten — the same session kept two of them.
+  // Name the swap. It moves a turn's commit onto another sha and nothing said
+  // so: session ad95e766 row 4 went dd191f59 → 81eda7e7 (GitHub's squash of its
+  // own one-commit PR, same patch-id) and the only trace was one Stop's
+  // commit-patch line naming the old sha and the next naming the new one.
+  debugLog('rescue', 'session commits replaced by their rewrites', {
+    sessionId: state.sessionId,
+    pairs: [...replacements].slice(0, 20).map(([from, to]) => `${from.slice(0, 8)}→${to.slice(0, 8)}`),
+    count: replacements.size,
+  });
   applyRewritePairsToState(state, [...replacements].map(([from, to]) => ({ from, to })));
   try {
     saveSessionState(state, state.repoPath || '', state.sessionTag);

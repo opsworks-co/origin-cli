@@ -66,6 +66,7 @@ import { registerLogonAutoStart, type LogonAutoStartResult } from './utils/logon
 import { api } from './api.js';
 import { loadConfig, loadAgentConfig } from './config.js';
 import { debugLog, logSkipOnce } from './debug-log.js';
+import { isCliDaemon, signalOwnDaemon } from './utils/signal-own-daemon.js';
 import { ADAPTERS, countDiffLines, type TranscriptAdapter, type ScannedTranscript, type ParsedSession } from './transcript-adapters.js';
 import { writeWatchMeta, touchWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
 import { finalHunksForCaptures, computeFileLineMaps, type FileLineMap } from './final-state-blame.js';
@@ -3117,7 +3118,8 @@ export function restartTranscriptWatch(): { restarted: boolean; reason: string }
       // Only kill a live, OTHER process — never signal ourselves; a dead/garbage
       // pid is nothing to stop.
       if (Number.isFinite(pid) && pid > 0 && pid !== process.pid && isProcessAlive(pid)) {
-        try { process.kill(pid); } catch { /* already gone — fine */ }
+        // …and only the watcher itself: alive is not the same as ours.
+        signalOwnDaemon(pid, 'transcript-watch', isCliDaemon('transcript-watch'));
       }
       // Free the incumbent's slot; the fresh daemon writes its own pid on start.
       try { fs.unlinkSync(pidFile); } catch { /* ignore */ }

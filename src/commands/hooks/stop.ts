@@ -58,7 +58,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { localTurnForServerRow, serverRowForLocalTurn, turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
-import { applyRewritePairsToState, finalRewriteOf, firstUnanchoredPrompt, markSkippedPromptBaselines, recordPromptShadow } from '../../session-state.js';
+import { applyRewritePairsToState, finalRewriteOf, firstUnanchoredPrompt, markSkippedPromptBaselines, markTurnClosedOnDisk, recordPromptShadow } from '../../session-state.js';
 import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, commitsThisSessionMayNote, gitCommonDirOnce, readCommitOwnershipFactsBatch, type CommitOwnershipFacts, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
 
 
@@ -1606,9 +1606,12 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
         // files that were already dirty when the session started (another
         // session's leftovers, e.g. `popcorn`/`utils.js`), inflating the
         // turn's file + line counts and crediting it with foreign work.
-        const useWorkingTreeDiff = gitCapture.baselineIsShadow && gitCapture.workingTreeDiff;
+        // On the shadow ALONE, not "and the working-tree diff is non-empty":
+        // an empty one is the answer (nothing moved since the turn began), and
+        // falling through to `committedDiff` stored that reversed text.
+        const useWorkingTreeDiff = gitCapture.baselineIsShadow;
         const filteredWorkingTree = useWorkingTreeDiff
-          ? filterUncommittedDiff(gitCapture.workingTreeDiff, turnExcludeFiles)
+          ? filterUncommittedDiff(gitCapture.workingTreeDiff || '', turnExcludeFiles)
           : '';
         if (useWorkingTreeDiff) {
           // Pull file list out of the FILTERED working-tree diff (which is
@@ -1678,7 +1681,22 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
           filterUncommittedDiff(gitCapture.workingTreeDiff || '', turnExcludeFiles).trim() ||
           filterUncommittedDiff(gitCapture.uncommittedDiff || '', turnExcludeFiles).trim()
         );
-        const gitHasWork = !!((gitCapture.committedDiff || '').trim()) || uncommittedWork;
+        // Against a SHADOW baseline `committedDiff` is `shadow..HEAD`: every
+        // file the shadow staged that HEAD does not hold, reversed. It is
+        // non-empty whenever the turn began on a dirty tree, so reading it as
+        // "git shows work" dropped the correct empty mapping of a turn that
+        // only said "thanks", and the safety net below stored the reversal:
+        // -8 across the session's earlier file and a sibling session's new one
+        // (capture-e2e-late-work-respects-siblings). Alone in a checkout the
+        // shadow-window pass repairs the row; in a shared one it declines.
+        //
+        // There the working-tree diff alone answers (it is shadow tree to live
+        // tree, so it holds what the turn committed too). Not the commit list
+        // either: a turn that commits what an earlier turn wrote changed no
+        // content, and dropping its empty mapping for that stamped the commit
+        // on the earlier turn's row (worktree-bootstrap golden).
+        const committedWork = !gitCapture.baselineIsShadow && !!((gitCapture.committedDiff || '').trim());
+        const gitHasWork = committedWork || uncommittedWork;
         // A REBASE is not authorship. It replaces an earlier turn's commit
         // with a new sha inside whatever turn ran it, so `baseline..HEAD`
         // reports a diff this turn did not write — and the empty transcript
@@ -1737,7 +1755,8 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
       const filteredUncommitted = filterUncommittedDiff(
         gitCapture.uncommittedDiff || '', turnExcludeFiles,
       );
-      const useWorkingTreeDiff = gitCapture.baselineIsShadow && gitCapture.workingTreeDiff;
+      // The shadow alone decides — see the synthesis branch above.
+      const useWorkingTreeDiff = gitCapture.baselineIsShadow;
       const filteredWorkingTree = gitCapture.workingTreeDiff
         ? filterUncommittedDiff(gitCapture.workingTreeDiff, turnExcludeFiles)
         : '';
@@ -3669,6 +3688,15 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     // through to changes.json. Populated inside the connected block;
     // stays null when offline or when capture fails.
     let promptEditsByIndex: Map<number, string> | null = null;
+    // Closed on disk BEFORE the row is stamped and sent, so no heartbeat tick
+    // can both read this turn as open and out-stamp Stop's row. The state
+    // itself is saved at the end, as before. See markTurnClosedOnDisk.
+    //
+    // The SAME turn `closeTurn` names below (turnThisStopCloses): when the turn
+    // absorbed a message sent while it ran, that is the message's turn — the
+    // list tail, which is the one a heartbeat tick works on. Marking the older
+    // open turn instead would leave exactly that tick free to out-stamp Stop.
+    markTurnClosedOnDisk(found!.saveCwd, state.sessionTag, turnThisStopCloses(state, parsed));
     // Phase: sendStopCapture.
     ({ promptEditsByIndex, model } = await sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, model, parsed, costUsd, promptMappings, filesChanged, turnExcludeFiles, promptBaseline, found, input, codexData, gitCapture, promptEditsByIndex, joinedPrompt, displayTranscript, sessionFilesChanged, tokensEstimated, durationMs, devinPromptTimes, prePersisted }));
     // Phase: writeCommitNotes.

@@ -27,7 +27,13 @@ export async function waitFor(cond: () => boolean, timeoutMs: number, what: stri
   throw new Error(`timed out waiting for ${what}`);
 }
 
-type Hit = { method: string; url: string; body: any };
+type Hit = {
+  method: string; url: string; body: any;
+  /** `lastClosedTurnIndex` in the primary session's state file when this request ARRIVED (null: none yet). */
+  closedOnDisk?: number | null;
+  /** How many prompts that state file held at the same moment (null: none yet). */
+  promptsOnDisk?: number | null;
+};
 
 export interface Harness {
   repo: string;
@@ -72,7 +78,14 @@ export async function createHarness(sessionId: string, serverSession: string): P
     req.on('end', () => {
       let body: any = null;
       try { body = raw ? JSON.parse(raw) : null; } catch { body = raw; }
-      hits.push({ method: req.method || '', url: req.url || '', body });
+      let closedOnDisk: number | null = null;
+      let promptsOnDisk: number | null = null;
+      try {
+        const st = JSON.parse(fs.readFileSync(path.join(repo, '.git', `origin-session-${sessionId.slice(0, 12)}.json`), 'utf-8'));
+        if (Number.isInteger(st?.lastClosedTurnIndex)) closedOnDisk = st.lastClosedTurnIndex;
+        if (Array.isArray(st?.prompts)) promptsOnDisk = st.prompts.length;
+      } catch { /* no state yet */ }
+      hits.push({ method: req.method || '', url: req.url || '', body, closedOnDisk, promptsOnDisk });
       res.setHeader('content-type', 'application/json');
       const u = req.url || '';
       if (req.method === 'POST' && u.startsWith('/api/mcp/session/start')) {

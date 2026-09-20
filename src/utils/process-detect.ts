@@ -189,7 +189,10 @@ export function processInfo(pid: number): { ppid: number; command: string } | nu
     const row = windowsProcessRows().find((r) => r.pid === pid);
     return row ? { ppid: row.ppid, command: row.cmd } : null;
   }
-  const r = runDetailed('ps', ['-p', String(pid), '-o', 'ppid=,command='], { timeoutMs: 3_000 });
+  // -ww: procps honours an exported COLUMNS even into a pipe and cuts the
+  // command line there; what a caller matches on (a session id after a long
+  // …/dist/heartbeat.js path) is at the far end of it.
+  const r = runDetailed('ps', ['-ww', '-p', String(pid), '-o', 'ppid=,command='], { timeoutMs: 3_000 });
   if (r.status !== 0) return null;
   const line = r.stdout.trim();
   if (!line) return null;
