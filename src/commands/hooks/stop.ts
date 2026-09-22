@@ -10,6 +10,7 @@ import { api } from '../../api.js';
 import { preferCommitPatchForCommittedTurns } from '../../commit-patch-for-committed-turn.js';
 import { preferShadowRangeForTurns } from '../../prefer-shadow-range.js';
 import { WATCHED_ONLY_EVIDENCE, trimWatchedEditsForTurns } from '../../trim-watched-edits.js';
+import { dropVanishedWatchedAdds } from '../../vanished-watched-files.js';
 import { dropInheritedFilesFromTurns } from '../../drop-inherited-files.js';
 import { filesPutBackAcrossTheGap, recordTurnEndShadow } from '../../restored-from-history.js';
 import { fileNamedByGitPathspec } from '../../git-pathspec-names.js';
@@ -59,7 +60,7 @@ import os from 'os';
 import path from 'path';
 import { localTurnForServerRow, serverRowForLocalTurn, turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
 import { applyRewritePairsToState, finalRewriteOf, firstUnanchoredPrompt, markSkippedPromptBaselines, markTurnClosedOnDisk, recordPromptShadow } from '../../session-state.js';
-import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, commitsThisSessionMayNote, gitCommonDirOnce, readCommitOwnershipFactsBatch, type CommitOwnershipFacts, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts } from '../hooks.js';
+import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, inheritedBaselineForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, commitsThisSessionMayNote, gitCommonDirOnce, readCommitOwnershipFactsBatch, type CommitOwnershipFacts, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts, sessionAbandonedCommits, liveCommitTurns, liveSessionCommitShas, abandonedOnlyFiles, sessionAuthoredNothing } from '../hooks.js';
 
 
 // ─── Debug Logger ─────────────────────────────────────────────────────────
@@ -2100,6 +2101,7 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
       diff?: string; linesAdded?: number; linesRemoved?: number;
       commitDetails: CommitDetailWire[];
       snapshot?: true;
+      abandonedCommits?: string[];
     } | undefined;
     // Cursor's git commits don't reliably fire .git/hooks/post-commit
     // (sandbox / worktree isolation — same comment as in enable.ts). On
@@ -2196,7 +2198,8 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
           const ownedDetails = fillMissingCommitPatches(
             state.repoPath,
             ownedFromWalk,
-            rescuableShas(state, ownedFromWalk.map((d) => d.sha)),
+            rescuableShas(state, ownedFromWalk.map((d) => d.sha))
+              .filter((sha) => !authored.abandonedCommits.some((a) => sameSha(a, sha))),
           );
           rememberRescued(state, ownedDetails, ownedFromWalk);
           if (authored.diff) {
@@ -2213,6 +2216,8 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
               linesRemoved: authored.linesRemoved,
               commitDetails: ownedDetails,
               snapshot: true,
+              // Commits the session reset away: the server takes them off it.
+              ...(authored.abandonedCommits.length > 0 ? { abandonedCommits: authored.abandonedCommits } : {}),
             };
             debugLog('stop', 'session-level gitCapture snapshot built', {
               diffLen: sessionGitCapture.diff?.length ?? 0,
@@ -2239,8 +2244,12 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
     // carries a diff (even '') at the session baseline makes the server REPLACE
     // the stored session diff (mcp.ts same-baseline rule); omit the field.
     if (state.repoPath) {
+      // A commit the session reset away is never rescued: `git show` still
+      // reads it, and its patch would put it back on the session.
+      const abandoned = sessionAbandonedCommits(state.repoPath, state);
+      const notAbandoned = (shas: string[]) => shas.filter((sha) => !abandoned.some((a) => sameSha(a, sha)));
       if (!sessionGitCapture) {
-        const extra = rescuableShas(state, []);
+        const extra = notAbandoned(rescuableShas(state, []));
         if (extra.length > 0) {
           const details = fillMissingCommitPatches(state.repoPath, [], extra);
           if (details.length > 0) {
@@ -2258,7 +2267,7 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
           }
         }
       } else {
-        const attested = attestedCommitShas(state);
+        const attested = notAbandoned(attestedCommitShas(state));
         const fromWalk = sessionGitCapture.commitDetails || [];
         const details = fillMissingCommitPatches(
           state.repoPath,
@@ -2301,6 +2310,35 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
             message: patchErr instanceof Error ? patchErr.message : String(patchErr),
           });
         }
+      }
+    }
+
+    // A session that reset its commits away and left a clean tree has no
+    // snapshot to send, yet the server still holds what post-commit ingested.
+    // The abandonment then rides on its own: no `diff` field, so the stored
+    // SessionDiff is left as it is (mcp.ts), and no files or counts are made
+    // up to carry it.
+    //
+    // One case says more: git proves the session authored NOTHING — no live
+    // commit, and the tree identical to the session's start. Then the stored
+    // session diff (post-commit's snapshot of the commit, before the reset)
+    // is wrong, and an empty snapshot is the true answer. Anything short of
+    // that proof, pre-session dirt included, sends the metadata-only carrier.
+    if (state.repoPath && !sessionGitCapture?.abandonedCommits) {
+      const abandoned = sessionAbandonedCommits(state.repoPath, state);
+      if (abandoned.length > 0) {
+        const provenEmpty = !sessionGitCapture && sessionAuthoredNothing(state.repoPath, state);
+        sessionGitCapture = sessionGitCapture
+          ? { ...sessionGitCapture, abandonedCommits: abandoned }
+          : {
+              ...rewrittenCommitsPayload(state),
+              headBefore: state.headShaAtStart || gitCapture.headBefore || '',
+              headAfter: gitCapture.headAfter || state.headShaAtStart || '',
+              commitShas: [],
+              commitDetails: [],
+              ...(provenEmpty ? { diff: '', linesAdded: 0, linesRemoved: 0, snapshot: true as const } : {}),
+              abandonedCommits: abandoned,
+            };
       }
     }
 
@@ -2402,11 +2440,11 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
           repoPath: state.repoPath,
           transcriptPath: capTranscript,
           codexPrompts: codexPromptsForCapture,
-          sessionCommitShas: state.sessionCommitShas || [],
+          sessionCommitShas: liveSessionCommitShas(state.repoPath || hookCwd, state),
           // Attestation from post-commit: which turn each commit landed under.
           // Lets the owner resolution below use what was observed instead of
           // falling back to "the highest-index turn that claims the sha".
-          commitTurns: state.commitTurns || [],
+          commitTurns: liveCommitTurns(state.repoPath || hookCwd, state),
           promptTurnIds: state.promptTurnIds || [],
           headShaAtStart: state.headShaAtStart || undefined,
           headShaAtEnd: gitCapture.headAfter || undefined,
@@ -2562,7 +2600,7 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
     // commit's files — a mid-turn fast-forward puts the range on the mapping
     // (session 761adbe8: 41 files / +2615 under a badge of 4 / +589).
     const fromCommits = preferCommitPatchForCommittedTurns(
-      state, promptMappings as any, state.repoPath || hookCwd,
+      { ...state, commitTurns: liveCommitTurns(state.repoPath || hookCwd, state) }, promptMappings as any, state.repoPath || hookCwd,
       {
         inheritedBaseline: (shadowSha, localTurn) => inheritedBaselineForTurn(
           state.repoPath || hookCwd, state, shadowSha, localTurn,
@@ -2585,9 +2623,26 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
     // The passes scoped each row; editsJson still carries every write the
     // journal saw, a mid-turn checkout's rewrites included. Keep only the
     // watched writes the row names — see trim-watched-edits.ts.
+    // A file a background job created after a turn closed and then removed
+    // again belongs to no turn — see vanished-watched-files.ts. Before the
+    // trim below, so the watched edits of a dropped file go with it.
+    dropVanishedWatchedAdds(state.repoPath || hookCwd, promptMappings as any, {
+      editsByIndex: promptEditsByIndex,
+      commitShas: liveSessionCommitShas(state.repoPath || hookCwd, state),
+      // A file whose only life was a commit this session reset away is gone by
+      // the session's own hand, so the command that named it does not keep it.
+      abandonedFiles: abandonedOnlyFiles(state.repoPath || hookCwd, state),
+      log: (event, data) => debugLog('stop', event, data),
+    });
+    // A file that existed only inside a commit the session reset away is no
+    // turn's work, and a row emptied by the passes above names nothing to trim
+    // its ledger against. Live session ccd07b34: every row came out empty, and
+    // turn 1 still shipped the journal's `delete only_wip.txt` — the reset
+    // taking the file off disk — which the read path rendered as a card of -1.
     trimWatchedEditsForTurns(
       promptEditsByIndex, promptMappings as any,
       (event, data) => debugLog('stop', event, data),
+      abandonedOnlyFiles(state.repoPath || hookCwd, state),
     );
 
     // The server can HARD-DELETE this row out from under us between the
@@ -2615,7 +2670,10 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
       model: isSpecificModel(model)
         ? model
         : ((agentSlug || state.agentSlug) === 'devin' && (!model || model === 'claude') ? 'devin' : undefined),
-      filesChanged: sessionFilesChanged.length > 0 ? sessionFilesChanged : undefined,
+      // Empty is sent as [] only when reset-away files were taken out: the
+      // server keeps a stored list the payload omits.
+      filesChanged: sessionFilesChanged.length > 0 || abandonedOnlyFiles(state.repoPath || hookCwd, state).length > 0
+        ? sessionFilesChanged : undefined,
       tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
       // Only assert estimated-or-not when we actually have tokens to describe
       // (send the explicit boolean so a later real-token update can clear a
@@ -2658,8 +2716,8 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
       // poll thought was active), which is exactly the field that goes stale.
       // An observation is a different kind of thing, and `via` grades it so
       // the server can tell the two apart.
-      ...(Array.isArray(state.commitTurns) && state.commitTurns.length > 0
-        ? { commitTurns: state.commitTurns.map((ct) => ({
+      ...(liveCommitTurns(state.repoPath || hookCwd, state).length > 0
+        ? { commitTurns: liveCommitTurns(state.repoPath || hookCwd, state).map((ct) => ({
             sha: ct.sha, turnId: ct.turnId, at: ct.at, via: ct.via,
           })) }
         : {}),
@@ -3682,6 +3740,9 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     let sessionFilesChanged = filesChanged;
     // Phase: sessionFilesAcrossRepos.
     sessionFilesChanged = (sessionFilesAcrossRepos({ state, sessionFilesChanged, promptBaseline, parsed })).sessionFilesChanged;
+    // A file only a reset-away commit changed is not one the session changed.
+    const abandonedFiles = abandonedOnlyFiles(state.repoPath || hookCwd, state);
+    if (abandonedFiles.length > 0) sessionFilesChanged = sessionFilesChanged.filter((f) => !abandonedFiles.includes(f));
 
     // Hoisted out of `if (connected)` so writeSessionFiles below (which
     // runs in both connected + disconnected modes) can pass editsJson
@@ -3850,7 +3911,18 @@ export function recordProbedShellEdits(
       evidence: opts?.evidence
         ?? (fileNamedInCommand(opts?.command || '', file, tree) ? 'command_named' : 'command_probe'),
     };
-    if (editContentBytes(edit) > LIVE_EDIT_CONTENT_MAX) continue;
+    if (editContentBytes(edit) > LIVE_EDIT_CONTENT_MAX) {
+      // Say so. A file over the cap produced NO entry and NO line, so when it
+      // was the only file the caller saw a bare `false` and could not tell
+      // "nothing changed" from "changed, too big to carry" — which is how
+      // 2ecac40a turn 2 lost a 153 KB `session-state.ts` without a trace.
+      // Callers that can name the file anyway should (see
+      // `contentUnavailableFiles`); this at least makes the next one findable.
+      debugLog('post-tool-use', 'edit too large for the ledger — content dropped', {
+        promptIndex, file, bytes: editContentBytes(edit), cap: LIVE_EDIT_CONTENT_MAX,
+      });
+      continue;
+    }
     edits.push(edit);
   }
   if (edits.length === 0) return false;

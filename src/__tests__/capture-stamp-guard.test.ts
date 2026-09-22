@@ -59,12 +59,25 @@ function payloadBuilders(): Array<{ name: string; src: string }> {
   return judgedUnits().filter(({ src }) => {
     if (!/promptChanges\s*[:=]/.test(src)) return false;
     // A builder constructs rows: it sets promptIndex on an object literal.
-    if (!/promptIndex[,:]/.test(src)) return false;
+    //
+    // ...or FORWARDS rows it read off disk. `commands/sessions.ts` replays
+    // `completedPromptMappings` verbatim and never writes a promptIndex, so
+    // the constructor test alone could not see it — and that is exactly where
+    // an unstamped payload hid: the queued-session replay, retried on every
+    // later `sessions sync`, arbitrarily long after Stop improved the rows it
+    // carries. A forwarder needs provenance for the same reason a builder
+    // does, so the guard has to recognise both shapes.
+    const forwards = /completedPromptMappings/.test(src);
+    if (!/promptIndex[,:]/.test(src) && !forwards) return false;
     // ...and SENDS them. commands/explain.ts assembles a promptChanges-shaped
     // object purely to render locally; it writes nothing, so provenance is
     // meaningless there. Requiring a send keeps the guard honest without an
     // exemption list — the thing an exemption list always rots into.
-    return /updateSession\(|method:\s*'PATCH'/.test(src);
+    // Case-insensitive on the call name: the queued-session replay sends
+    // through `durableUpdateSession(`, whose capital U meant the lowercase
+    // literal never matched — so the one forwarder in the tree looked like it
+    // sent nothing and fell out of the guard entirely.
+    return /updateSession\(/i.test(src) || /method:\s*'PATCH'/.test(src);
   });
 }
 
@@ -80,6 +93,10 @@ describe('capture stamp guard', () => {
     // stamp is asserted by capture-stamp-advances-during-hook.test.ts.)
     for (const f of ['commands/hooks/after-file-edit.ts', 'commands/hooks/antigravity.ts']) expect(names).toContain(f);
     expect(names).toContain('transcript-watch.ts');
+    // The replay forwarder. It constructs no rows, so it is in scope only
+    // through the forwarding branch above — if this drops out, that branch
+    // has rotted and an unstamped replay can ship again.
+    expect(names).toContain('commands/sessions.ts');
   });
 
   it('every promptChanges producer stamps captureId and capturedAt', () => {
@@ -87,7 +104,12 @@ describe('capture stamp guard', () => {
       // Either spread a stamp helper, or set both fields outright.
       const spreadsStamp = /\.\.\.\s*(captureStamp\b|newCaptureStamp\([^)]*\))/.test(src);
       const setsBoth = /captureId:/.test(src) && /capturedAt:/.test(src);
-      return !(spreadsStamp || setsBoth);
+      // A replay path hands each row to the shared helper instead of spreading
+      // inline: it has to keep the time the content was CAPTURED, not the time
+      // of the replay, and that decision belongs in one place rather than
+      // copied per caller. The helper always emits both fields.
+      const usesReplayHelper = /stampReplayedMapping\(/.test(src);
+      return !(spreadsStamp || setsBoth || usesReplayHelper);
     });
 
     expect(

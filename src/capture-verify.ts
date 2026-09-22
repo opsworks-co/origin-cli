@@ -579,9 +579,34 @@ export function verifyTurn(turn: VerifiableTurn): CaptureViolation[] {
     const anyContentless = content.files.some((f) => f.contentless);
     const declaredA = turn.linesAdded ?? 0;
     const declaredR = turn.linesRemoved ?? 0;
-    // A binary or mode-only file has no countable lines, so a mismatch there
-    // says nothing. Only compare when every file in the diff carries hunks.
-    if (!anyContentless && (declaredA !== t.added || declaredR !== t.removed)) {
+    // A file the row DECLARED it could not carry is absent from the text by
+    // design: the budget drops whole sections and names them, precisely so the
+    // row can say "this changed and its bytes are not here" instead of quietly
+    // shrinking (see diff-budget.ts). The counts still describe the whole
+    // change, so the text necessarily totals LESS — that is the design working,
+    // not a row contradicting itself.
+    //
+    // The file-set check above already exempts these; this one did not, and
+    // that gap is a release blocker rather than a cosmetic one. Session
+    // 4ab4eea1 turn 2 committed 8 files at +761/-108, the budget kept 3 of them
+    // (6 KB of a patch whose full-context form ran past the cap) and named the
+    // other 5 in `contentUnavailableFiles` — an honest row, graded a
+    // contradiction, and a stored contradiction blocks every CLI release until
+    // the window moves past it.
+    //
+    // Deliberately ONE-SIDED, not an exemption. Declared may exceed the text,
+    // because the missing sections are real work; declared BELOW the text is
+    // still a contradiction — no amount of dropped content can make a row
+    // undercount what it does store. That costs some strength: a genuine mosaic
+    // on a row that also dropped a file is no longer caught from above. The
+    // alternative needs the dropped files' own line counts, which nothing
+    // stores. Same one-sided reasoning as verifyHeader's total check below.
+    const droppedForBudget = [...unavailable]
+      .some((u) => !inDiff.some((d) => sameFile(u, d)));
+    const disagrees = droppedForBudget
+      ? (declaredA < t.added || declaredR < t.removed)
+      : (declaredA !== t.added || declaredR !== t.removed);
+    if (!anyContentless && disagrees) {
       add('line_counts_disagree_with_diff', 'contradiction',
         `row says +${declaredA}/-${declaredR}, stored diff contains +${t.added}/-${t.removed}`);
     }

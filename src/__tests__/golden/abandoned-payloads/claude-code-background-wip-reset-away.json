@@ -1,0 +1,745 @@
+{
+ "note": "Recorded by packages/cli capture-e2e-reset-away-commits-leave-the-session with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api session-reset-away-commits-real-db.test.ts.",
+ "roots": [
+  "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/background",
+  "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU"
+ ],
+ "roles": {
+  "base": "577ceb59aa8bc4419801ed899afb659e07e8969b",
+  "a": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+  "wip": "e3ed5396a6de61285f435ffbb473d262f82cc31c"
+ },
+ "marker": "WIP_ONLY_MARKER",
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "src/alpha.ts"
+    ],
+    "branch": "main",
+    "gitCapture": {
+     "headBefore": "577ceb59aa8bc4419801ed899afb659e07e8969b",
+     "headAfter": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+     "commitShas": [
+      "1aa66392e76d36099a80f3b55c03ea08cf0d47af"
+     ],
+     "commitDetails": [
+      {
+       "sha": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+       "message": "feat: alpha\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/alpha.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "turnId": "t_cffbd5170af84aaf",
+      "createdAt": "2026-09-21T10:09:59.635Z",
+      "captureId": "c_9779d291d49544c3",
+      "capturedAt": 1789985402056,
+      "promptText": "change alpha and gamma, commit alpha",
+      "filesChanged": [
+       "src/alpha.ts"
+      ],
+      "diff": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;",
+      "commitPatch": true,
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "commitSha": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+      "commitMessage": "feat: alpha"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "577ceb59aa8bc4419801ed899afb659e07e8969b",
+     "headAfter": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+     "commitShas": [
+      "1aa66392e76d36099a80f3b55c03ea08cf0d47af"
+     ],
+     "commitDetails": [
+      {
+       "sha": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+       "message": "feat: alpha\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/alpha.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;"
+      }
+     ],
+     "diff": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;",
+     "diffTruncated": false,
+     "linesAdded": 1,
+     "linesRemoved": 0,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change alpha and gamma, commit alpha",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change alpha and gamma, commit alpha",
+      "turnId": "t_cffbd5170af84aaf",
+      "createdAt": "2026-09-21T10:09:59.635Z"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "577ceb59aa8bc4419801ed899afb659e07e8969b",
+     "headAfter": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+     "commitShas": [
+      "1aa66392e76d36099a80f3b55c03ea08cf0d47af"
+     ],
+     "commitDetails": [
+      {
+       "sha": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+       "message": "feat: alpha\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/alpha.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;",
+       "committedAt": 1789985401000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change alpha and gamma, commit alpha",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "src/alpha.ts",
+     "src/gamma.ts"
+    ],
+    "tokensUsed": 36,
+    "tokensEstimated": true,
+    "inputTokens": 9,
+    "outputTokens": 27,
+    "toolCalls": 3,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 2
+     },
+     {
+      "name": "Bash",
+      "count": 1
+     }
+    ],
+    "durationMs": 3796,
+    "costUsd": 0.0007,
+    "gitCapture": {
+     "headBefore": "577ceb59aa8bc4419801ed899afb659e07e8969b",
+     "headAfter": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+     "commitShas": [
+      "1aa66392e76d36099a80f3b55c03ea08cf0d47af"
+     ],
+     "diff": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;\ndiff --git a/src/gamma.ts b/src/gamma.ts\nnew file mode 100644\nindex 0000000..e28e566\n--- /dev/null\n+++ b/src/gamma.ts\n@@ -0,0 +1 @@\n+export const GAMMA_MARKER = 1;",
+     "linesAdded": 2,
+     "linesRemoved": 0,
+     "commitDetails": [
+      {
+       "sha": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+       "message": "feat: alpha\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/alpha.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;",
+       "committedAt": 1789985401000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ],
+     "snapshot": true
+    },
+    "commitTurns": [
+     {
+      "sha": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+      "turnId": "t_cffbd5170af84aaf",
+      "at": "2026-09-21T10:10:01.939Z",
+      "via": "post-commit"
+     }
+    ],
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change alpha and gamma, commit alpha",
+      "filesChanged": [
+       "src/alpha.ts",
+       "src/gamma.ts"
+      ],
+      "diff": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;\ndiff --git a/src/gamma.ts b/src/gamma.ts\nnew file mode 100644\nindex 0000000..e28e566\n--- /dev/null\n+++ b/src/gamma.ts\n@@ -0,0 +1 @@\n+export const GAMMA_MARKER = 1;",
+      "edits": [
+       {
+        "file": "src/alpha.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/background/src/alpha.ts",
+         "content": "export const ALPHA_MARKER = 1;\n"
+        }
+       },
+       {
+        "file": "src/gamma.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/background/src/gamma.ts",
+         "content": "export const GAMMA_MARKER = 1;\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add src/alpha.ts && git commit -m \"feat: alpha\""
+      ],
+      "uncommittedDiff": "",
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change alpha and gamma, commit alpha\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/alpha.ts\",\"op\":\"write\",\"newContent\":\"export const ALPHA_MARKER = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/gamma.ts\",\"op\":\"write\",\"newContent\":\"export const GAMMA_MARKER = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/alpha.ts\",\"op\":\"create\",\"newContent\":\"export const ALPHA_MARKER = 1;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/gamma.ts\",\"op\":\"create\",\"newContent\":\"export const GAMMA_MARKER = 1;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"1aa66392e76d36099a80f3b55c03ea08cf0d47af\"],\"finalHunks\":[{\"file\":\"src/alpha.ts\",\"start\":1,\"lines\":[\"export const ALPHA_MARKER = 1;\"]}]}",
+      "turnId": "t_cffbd5170af84aaf",
+      "createdAt": "2026-09-21T10:09:59.635Z",
+      "captureId": "c_b12b99d3011f49d0",
+      "capturedAt": 1789985404267
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "src/bg_only.ts",
+     "src/gamma.ts"
+    ],
+    "branch": "main",
+    "gitCapture": {
+     "headBefore": "577ceb59aa8bc4419801ed899afb659e07e8969b",
+     "headAfter": "e3ed5396a6de61285f435ffbb473d262f82cc31c",
+     "commitShas": [
+      "e3ed5396a6de61285f435ffbb473d262f82cc31c"
+     ],
+     "commitDetails": [
+      {
+       "sha": "e3ed5396a6de61285f435ffbb473d262f82cc31c",
+       "message": "wip\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/bg_only.ts",
+        "src/gamma.ts"
+       ],
+       "linesAdded": 2,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/bg_only.ts b/src/bg_only.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/bg_only.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;\ndiff --git a/src/gamma.ts b/src/gamma.ts\nnew file mode 100644\nindex 0000000..e28e566\n--- /dev/null\n+++ b/src/gamma.ts\n@@ -0,0 +1 @@\n+export const GAMMA_MARKER = 1;"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "turnId": "t_cffbd5170af84aaf",
+      "createdAt": "2026-09-21T10:09:59.635Z",
+      "captureId": "c_d69440451af74249",
+      "capturedAt": 1789985405327,
+      "promptText": "change alpha and gamma, commit alpha",
+      "filesChanged": [
+       "src/bg_only.ts",
+       "src/gamma.ts"
+      ],
+      "diff": "diff --git a/src/bg_only.ts b/src/bg_only.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/bg_only.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;\ndiff --git a/src/gamma.ts b/src/gamma.ts\nnew file mode 100644\nindex 0000000..e28e566\n--- /dev/null\n+++ b/src/gamma.ts\n@@ -0,0 +1 @@\n+export const GAMMA_MARKER = 1;",
+      "commitPatch": true,
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "commitSha": "e3ed5396a6de61285f435ffbb473d262f82cc31c",
+      "commitMessage": "wip"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "577ceb59aa8bc4419801ed899afb659e07e8969b",
+     "headAfter": "e3ed5396a6de61285f435ffbb473d262f82cc31c",
+     "commitShas": [
+      "e3ed5396a6de61285f435ffbb473d262f82cc31c"
+     ],
+     "commitDetails": [
+      {
+       "sha": "e3ed5396a6de61285f435ffbb473d262f82cc31c",
+       "message": "wip\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/bg_only.ts",
+        "src/gamma.ts"
+       ],
+       "linesAdded": 2,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/bg_only.ts b/src/bg_only.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/bg_only.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;\ndiff --git a/src/gamma.ts b/src/gamma.ts\nnew file mode 100644\nindex 0000000..e28e566\n--- /dev/null\n+++ b/src/gamma.ts\n@@ -0,0 +1 @@\n+export const GAMMA_MARKER = 1;"
+      }
+     ],
+     "diff": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;\ndiff --git a/src/bg_only.ts b/src/bg_only.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/bg_only.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;\ndiff --git a/src/gamma.ts b/src/gamma.ts\nnew file mode 100644\nindex 0000000..e28e566\n--- /dev/null\n+++ b/src/gamma.ts\n@@ -0,0 +1 @@\n+export const GAMMA_MARKER = 1;",
+     "diffTruncated": false,
+     "linesAdded": 3,
+     "linesRemoved": 0,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change alpha and gamma, commit alpha\n\n---\n\nnow beta",
+    "filesChanged": [
+     "src/alpha.ts",
+     "src/gamma.ts"
+    ],
+    "tokensUsed": 44,
+    "inputTokens": 11,
+    "outputTokens": 33,
+    "toolCalls": 3,
+    "durationMs": 7915,
+    "costUsd": 0.0009,
+    "status": "RUNNING",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change alpha and gamma, commit alpha",
+      "filesChanged": [
+       "src/alpha.ts",
+       "src/gamma.ts"
+      ],
+      "contentUnavailableFiles": [],
+      "diffSource": "turn-window",
+      "ledgerOwned": true,
+      "diff": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;\ndiff --git a/src/gamma.ts b/src/gamma.ts\nnew file mode 100644\nindex 0000000..e28e566\n--- /dev/null\n+++ b/src/gamma.ts\n@@ -0,0 +1 @@\n+export const GAMMA_MARKER = 1;",
+      "uncommittedDiff": "",
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "capturedAt": 1789985406914,
+      "turnId": "t_cffbd5170af84aaf",
+      "createdAt": "2026-09-21T10:09:59.635Z",
+      "captureId": "c_0a7ea036d3e24636",
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change alpha and gamma, commit alpha\n\n---\n\nnow beta",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change alpha and gamma, commit alpha",
+      "turnId": "t_cffbd5170af84aaf",
+      "createdAt": "2026-09-21T10:09:59.635Z"
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "now beta",
+      "turnId": "t_ef34fd66e2224cfd",
+      "createdAt": "2026-09-21T10:10:06.806Z"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "577ceb59aa8bc4419801ed899afb659e07e8969b",
+     "headAfter": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+     "commitShas": [
+      "1aa66392e76d36099a80f3b55c03ea08cf0d47af"
+     ],
+     "commitDetails": [
+      {
+       "sha": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+       "message": "feat: alpha\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/alpha.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;",
+       "committedAt": 1789985401000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change alpha and gamma, commit alpha\n\n---\n\nnow beta",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "src/alpha.ts"
+    ],
+    "tokensUsed": 44,
+    "tokensEstimated": true,
+    "inputTokens": 11,
+    "outputTokens": 33,
+    "toolCalls": 4,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 3
+     },
+     {
+      "name": "Bash",
+      "count": 1
+     }
+    ],
+    "durationMs": 8949,
+    "costUsd": 0.0009,
+    "gitCapture": {
+     "headBefore": "577ceb59aa8bc4419801ed899afb659e07e8969b",
+     "headAfter": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+     "commitShas": [
+      "1aa66392e76d36099a80f3b55c03ea08cf0d47af"
+     ],
+     "diff": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;\ndiff --git a/src/beta.ts b/src/beta.ts\nnew file mode 100644\nindex 0000000..0167b65\n--- /dev/null\n+++ b/src/beta.ts\n@@ -0,0 +1 @@\n+export const BETA_MARKER = 1;\ndiff --git a/src/gamma.ts b/src/gamma.ts\nnew file mode 100644\nindex 0000000..e28e566\n--- /dev/null\n+++ b/src/gamma.ts\n@@ -0,0 +1 @@\n+export const GAMMA_MARKER = 1;",
+     "linesAdded": 3,
+     "linesRemoved": 0,
+     "commitDetails": [
+      {
+       "sha": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+       "message": "feat: alpha\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/alpha.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;",
+       "committedAt": 1789985401000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ],
+     "snapshot": true,
+     "abandonedCommits": [
+      "e3ed5396a6de61285f435ffbb473d262f82cc31c"
+     ]
+    },
+    "commitTurns": [
+     {
+      "sha": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+      "turnId": "t_cffbd5170af84aaf",
+      "at": "2026-09-21T10:10:01.939Z",
+      "via": "post-commit"
+     }
+    ],
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change alpha and gamma, commit alpha",
+      "filesChanged": [
+       "src/alpha.ts",
+       "src/gamma.ts"
+      ],
+      "diff": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;\ndiff --git a/src/gamma.ts b/src/gamma.ts\nnew file mode 100644\nindex 0000000..e28e566\n--- /dev/null\n+++ b/src/gamma.ts\n@@ -0,0 +1 @@\n+export const GAMMA_MARKER = 1;",
+      "edits": [
+       {
+        "file": "src/alpha.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/background/src/alpha.ts",
+         "content": "export const ALPHA_MARKER = 1;\n"
+        }
+       },
+       {
+        "file": "src/gamma.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/background/src/gamma.ts",
+         "content": "export const GAMMA_MARKER = 1;\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add src/alpha.ts && git commit -m \"feat: alpha\""
+      ],
+      "uncommittedDiff": "",
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change alpha and gamma, commit alpha\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/alpha.ts\",\"op\":\"write\",\"newContent\":\"export const ALPHA_MARKER = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/gamma.ts\",\"op\":\"write\",\"newContent\":\"export const GAMMA_MARKER = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/alpha.ts\",\"op\":\"create\",\"newContent\":\"export const ALPHA_MARKER = 1;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/gamma.ts\",\"op\":\"create\",\"newContent\":\"export const GAMMA_MARKER = 1;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"1aa66392e76d36099a80f3b55c03ea08cf0d47af\"],\"finalHunks\":[{\"file\":\"src/alpha.ts\",\"start\":1,\"lines\":[\"export const ALPHA_MARKER = 1;\"]}]}",
+      "turnId": "t_cffbd5170af84aaf",
+      "createdAt": "2026-09-21T10:09:59.635Z",
+      "captureId": "c_e52d4569fd154ae3",
+      "capturedAt": 1789985410298
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "now beta",
+      "filesChanged": [
+       "src/beta.ts"
+      ],
+      "diff": "diff --git a/src/beta.ts b/src/beta.ts\nnew file mode 100644\nindex 0000000..0167b65\n--- /dev/null\n+++ b/src/beta.ts\n@@ -0,0 +1 @@\n+export const BETA_MARKER = 1;",
+      "edits": [
+       {
+        "file": "src/beta.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/background/src/beta.ts",
+         "content": "export const BETA_MARKER = 1;\n"
+        }
+       }
+      ],
+      "ranCommit": false,
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now beta\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/beta.ts\",\"op\":\"write\",\"newContent\":\"export const BETA_MARKER = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/beta.ts\",\"op\":\"create\",\"newContent\":\"export const BETA_MARKER = 1;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
+      "turnId": "t_ef34fd66e2224cfd",
+      "createdAt": "2026-09-21T10:10:06.806Z",
+      "captureId": "c_e52d4569fd154ae3",
+      "capturedAt": 1789985410324
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change alpha and gamma, commit alpha\n\n---\n\nnow beta",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change alpha and gamma, commit alpha",
+      "turnId": "t_cffbd5170af84aaf",
+      "createdAt": "2026-09-21T10:09:59.635Z"
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "now beta",
+      "turnId": "t_ef34fd66e2224cfd",
+      "createdAt": "2026-09-21T10:10:06.806Z"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "577ceb59aa8bc4419801ed899afb659e07e8969b",
+     "headAfter": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+     "commitShas": [
+      "1aa66392e76d36099a80f3b55c03ea08cf0d47af"
+     ],
+     "commitDetails": [
+      {
+       "sha": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+       "message": "feat: alpha\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/alpha.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;",
+       "committedAt": 1789985401000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "change alpha and gamma, commit alpha\n\n---\n\nnow beta",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "src/alpha.ts"
+    ],
+    "tokensUsed": 44,
+    "tokensEstimated": true,
+    "inputTokens": 11,
+    "outputTokens": 33,
+    "toolCalls": 4,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 3
+     },
+     {
+      "name": "Bash",
+      "count": 1
+     }
+    ],
+    "durationMs": 12058,
+    "costUsd": 0.0009,
+    "gitCapture": {
+     "headBefore": "577ceb59aa8bc4419801ed899afb659e07e8969b",
+     "headAfter": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+     "commitShas": [
+      "1aa66392e76d36099a80f3b55c03ea08cf0d47af"
+     ],
+     "diff": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;\ndiff --git a/src/beta.ts b/src/beta.ts\nnew file mode 100644\nindex 0000000..0167b65\n--- /dev/null\n+++ b/src/beta.ts\n@@ -0,0 +1 @@\n+export const BETA_MARKER = 1;\ndiff --git a/src/gamma.ts b/src/gamma.ts\nnew file mode 100644\nindex 0000000..e28e566\n--- /dev/null\n+++ b/src/gamma.ts\n@@ -0,0 +1 @@\n+export const GAMMA_MARKER = 1;",
+     "linesAdded": 3,
+     "linesRemoved": 0,
+     "commitDetails": [
+      {
+       "sha": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+       "message": "feat: alpha\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/alpha.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;",
+       "committedAt": 1789985401000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      }
+     ],
+     "snapshot": true,
+     "abandonedCommits": [
+      "e3ed5396a6de61285f435ffbb473d262f82cc31c"
+     ]
+    },
+    "commitTurns": [
+     {
+      "sha": "1aa66392e76d36099a80f3b55c03ea08cf0d47af",
+      "turnId": "t_cffbd5170af84aaf",
+      "at": "2026-09-21T10:10:01.939Z",
+      "via": "post-commit"
+     }
+    ],
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "change alpha and gamma, commit alpha",
+      "filesChanged": [
+       "src/alpha.ts",
+       "src/gamma.ts"
+      ],
+      "diff": "diff --git a/src/alpha.ts b/src/alpha.ts\nnew file mode 100644\nindex 0000000..e06b7ae\n--- /dev/null\n+++ b/src/alpha.ts\n@@ -0,0 +1 @@\n+export const ALPHA_MARKER = 1;\ndiff --git a/src/gamma.ts b/src/gamma.ts\nnew file mode 100644\nindex 0000000..e28e566\n--- /dev/null\n+++ b/src/gamma.ts\n@@ -0,0 +1 @@\n+export const GAMMA_MARKER = 1;",
+      "edits": [
+       {
+        "file": "src/alpha.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/background/src/alpha.ts",
+         "content": "export const ALPHA_MARKER = 1;\n"
+        }
+       },
+       {
+        "file": "src/gamma.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/background/src/gamma.ts",
+         "content": "export const GAMMA_MARKER = 1;\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add src/alpha.ts && git commit -m \"feat: alpha\""
+      ],
+      "uncommittedDiff": "",
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"change alpha and gamma, commit alpha\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/alpha.ts\",\"op\":\"write\",\"newContent\":\"export const ALPHA_MARKER = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/gamma.ts\",\"op\":\"write\",\"newContent\":\"export const GAMMA_MARKER = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/alpha.ts\",\"op\":\"create\",\"newContent\":\"export const ALPHA_MARKER = 1;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/gamma.ts\",\"op\":\"create\",\"newContent\":\"export const GAMMA_MARKER = 1;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"1aa66392e76d36099a80f3b55c03ea08cf0d47af\"],\"finalHunks\":[{\"file\":\"src/alpha.ts\",\"start\":1,\"lines\":[\"export const ALPHA_MARKER = 1;\"]}]}",
+      "turnId": "t_cffbd5170af84aaf",
+      "createdAt": "2026-09-21T10:09:59.635Z",
+      "captureId": "c_3dd31b4e1ec14bb1",
+      "capturedAt": 1789985413389
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "now beta",
+      "filesChanged": [
+       "src/beta.ts"
+      ],
+      "diff": "diff --git a/src/beta.ts b/src/beta.ts\nnew file mode 100644\nindex 0000000..0167b65\n--- /dev/null\n+++ b/src/beta.ts\n@@ -0,0 +1 @@\n+export const BETA_MARKER = 1;",
+      "edits": [
+       {
+        "file": "src/beta.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/background/src/beta.ts",
+         "content": "export const BETA_MARKER = 1;\n"
+        }
+       }
+      ],
+      "ranCommit": false,
+      "uncommittedDiff": "",
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"now beta\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/beta.ts\",\"op\":\"write\",\"newContent\":\"export const BETA_MARKER = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/beta.ts\",\"op\":\"create\",\"newContent\":\"export const BETA_MARKER = 1;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
+      "turnId": "t_ef34fd66e2224cfd",
+      "createdAt": "2026-09-21T10:10:06.806Z",
+      "captureId": "c_3dd31b4e1ec14bb1",
+      "capturedAt": 1789985413389
+     }
+    ]
+   }
+  }
+ ]
+}

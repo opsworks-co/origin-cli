@@ -1,4 +1,4 @@
-import { newCaptureStamp } from './capture-stamp.js';
+import { newCaptureStamp, stampReplayedMapping } from './capture-stamp.js';
 import { serverRowForLocalTurn, turnIdForServerRow, turnStartForServerRow } from './turn-index.js';
 
 /**
@@ -30,15 +30,21 @@ export function promptChangesForSessionEnd(stateData: {
   const prompts: string[] = Array.isArray(stateData.prompts) ? stateData.prompts : [];
   const saved = stateData.completedPromptMappings;
   if (Array.isArray(saved) && saved.length > 0) {
+    const replayStamp = newCaptureStamp('hb');
     return saved.map((m) => {
       if (!m || typeof m !== 'object') return m;
       // The row's start time travels with it, so this replay cannot leave a
       // turn's createdAt at the time of its first write (see promptSubmittedAt).
       const createdAt = m.createdAt ? undefined : turnStartForServerRow(stateData, m.promptIndex);
       const withStart = createdAt ? { ...m, createdAt } : m;
-      if (typeof m.turnId === 'string' && m.turnId) return withStart;
+      // Persisted mappings use an ISO timestamp so the release gate can grade
+      // them. The API ordering contract uses epoch milliseconds. Preserve the
+      // time the content was actually captured; only an unstamped legacy row
+      // falls back to the time of this final replay.
+      const withStamp = stampReplayedMapping(withStart, replayStamp);
+      if (typeof m.turnId === 'string' && m.turnId) return withStamp;
       const turnId = turnIdForServerRow(stateData, m.promptIndex);
-      return turnId ? { ...withStart, turnId } : withStart;
+      return turnId ? { ...withStamp, turnId } : withStamp;
     });
   }
   if (prompts.length === 0) return null;

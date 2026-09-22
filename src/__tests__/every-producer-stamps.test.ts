@@ -28,10 +28,15 @@ describe('the afterFileEdit live PATCH', () => {
     expect(rows[0].captureId).toBe(rows[1].captureId);
   });
 
-  it('never lets a stored row\'s stale stamp override the send\'s', () => {
-    const rows = buildLiveEditPromptChanges([{ promptIndex: 0, captureId: 'old_1', capturedAt: 1, diff: '' }]);
-    expect(rows[0].captureId).toBe('old_1');   // a row that names its capture keeps it …
-    expect(rows[0].capturedAt).toBe(1);        // … the spread order is stamp first, row second
+  it('never lets a stored row\'s ISO stamp override the send\'s numeric stamp', () => {
+    const rows = buildLiveEditPromptChanges([{
+      promptIndex: 0,
+      captureId: 'old_1',
+      capturedAt: '2026-09-01T00:00:00.000Z',
+      diff: '',
+    }]);
+    expect(String(rows[0].captureId)).toMatch(/^afe_/);
+    expect(typeof rows[0].capturedAt).toBe('number');
   });
 });
 
@@ -48,6 +53,7 @@ describe('session-start\'s reattach re-send', () => {
     const block = src.slice(at, at + 1200);
     expect(block).toContain("newCaptureStamp('ss')");
     expect(block).toMatch(/capturedAt: Number\.isFinite\(startedAtMs\)/);
+    expect(block.indexOf('...pm,')).toBeLessThan(block.indexOf('...reattachStamp,'));
     expect(block).toContain('...reattachStamp,');
   });
 });

@@ -7,6 +7,7 @@ import path from 'path';
 import { isConnectedMode, loadAgentConfig } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot, listActiveSessions, listAllActiveSessions, clearSessionState, stopHeartbeat, isHeartbeatAlive, sessionLastSignMs, hasHealthyHeartbeat, isSessionAlive } from '../session-state.js';
+import { newCaptureStamp, stampReplayedMapping } from '../capture-stamp.js';
 import { git, gitOrNull } from '../utils/exec.js';
 import { currentOwner, isForeignSession, listForeignQueuedSessions, reportForeignSessionCount } from '../session-owner.js';
 import { resolveAgentDisplayName } from '../agents/registry.js';
@@ -1152,9 +1153,25 @@ export async function sessionsSyncCommand(opts: { quiet?: boolean; markImported?
       // Everything here comes from the state file, which is what the hooks
       // persisted; nothing is recomputed from git, so a session whose repo has
       // moved on still replays exactly what was captured at the time.
-      const mappings: any[] = Array.isArray(state.completedPromptMappings)
+      // Stamp the replay, the way every other producer does.
+      //
+      // These mappings come off disk with an ISO-string `capturedAt` (that is
+      // what the release gate grades) and no captureId at all. The server
+      // reads the stamp with `Number(pc.capturedAt)`, so a string lands as
+      // NaN, is nulled, and the payload becomes EXEMPT from the staleness
+      // check — it then outranks every properly stamped producer. This is the
+      // most literal replay path in the CLI: a queued session is retried on
+      // every later `sessions sync`, arbitrarily long after the rows it
+      // carries were improved by Stop, the watcher or `origin recapture`.
+      //
+      // Spread the stamp AFTER the mapping so the mapping cannot overwrite it,
+      // and keep the real capture time — only a legacy row with no readable
+      // stamp falls back to the time of this replay.
+      const syncStamp = newCaptureStamp('sy');
+      const mappings: any[] = (Array.isArray(state.completedPromptMappings)
         ? state.completedPromptMappings
-        : [];
+        : []
+      ).map((m: any) => (m && typeof m === 'object' ? stampReplayedMapping(m, syncStamp) : m));
       // A session that never reached Stop's session-level rollup has the files
       // only on its per-turn rows — the union is the session's own file list,
       // which is what Stop falls back to as well. Without this the recovered

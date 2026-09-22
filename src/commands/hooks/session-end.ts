@@ -16,6 +16,7 @@ import { dropInheritedFilesFromTurns } from '../../drop-inherited-files.js';
 import { filesPutBackAcrossTheGap } from '../../restored-from-history.js';
 import { authoredFilesForTurn, dropForeignCommitsFromCapture } from './stop.js';
 import { trimWatchedEditsForTurns } from '../../trim-watched-edits.js';
+import { dropVanishedWatchedAdds } from '../../vanished-watched-files.js';
 import { isConnectedMode, loadAgentConfig, loadConfig } from '../../config.js';
 import { debugLog } from '../../debug-log.js';
 import { queueDevinBackfill } from '../../devin-backfill.js';
@@ -61,7 +62,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { localTurnForServerRow, rebaseToServerRows, turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
-import { applyAuthoredTotals, commitsThisSessionMayNote, currentSessionWorkTree, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFileSourcesForTurn, inheritedFilesForTurn, windowInheritsCommitsForTurn, filterUncommittedDiff, findStateForHookInput, liveCaptureEnabled, normalizeWorkspaceRoot, recordShellWindowEdits, sessionAuthoredSnapshot, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
+import { applyAuthoredTotals, commitsThisSessionMayNote, currentSessionWorkTree, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFileSourcesForTurn, inheritedFilesForTurn, windowInheritsCommitsForTurn, filterUncommittedDiff, findStateForHookInput, liveCaptureEnabled, normalizeWorkspaceRoot, recordShellWindowEdits, sessionAuthoredSnapshot, liveCommitTurns, liveSessionCommitShas, abandonedOnlyFiles, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
 import { compareResolverWithPasses, createTurnObserver, observeReconstruction, type TurnObservation } from '../../resolve-turn.js';
 
 
@@ -969,8 +970,12 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
     // Whether commitShas is the authored list. Without it the sha list and
     // commit details are still the range walk — see the filter below.
     let commitListIsAuthored = false;
+    // Commits the session reset away, sent with the snapshot so the server
+    // takes them off the session (abandoned-commits.ts).
+    let endAbandoned: string[] = [];
     try {
       const authoredEnd = sessionAuthoredSnapshot(state.repoPath, state, { uncommittedDiff: gitCapture.uncommittedDiff || '' });
+      endAbandoned = authoredEnd.abandonedCommits;
       if (authoredEnd.source !== 'none') {
         gitCapture.diff = authoredEnd.diff;
         gitCapture.linesAdded = authoredEnd.linesAdded;
@@ -1200,7 +1205,7 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
     // without this, session-end re-sends baseline..HEAD with the newest stamp.
     try {
       const fromCommits = preferCommitPatchForCommittedTurns(
-        state, promptMappings as any, state.repoPath || '',
+        { ...state, commitTurns: liveCommitTurns(state.repoPath, state) }, promptMappings as any, state.repoPath || '',
         {
           inheritedBaseline: (shadowSha, localTurn) => inheritedBaselineForTurn(
             state.repoPath || '', state, shadowSha, localTurn,
@@ -1298,11 +1303,11 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
             repoPath: state.repoPath,
             transcriptPath: state.transcriptPath,
             codexPrompts: codexPromptsForCapture,
-            sessionCommitShas: state.sessionCommitShas || [],
+            sessionCommitShas: liveSessionCommitShas(state.repoPath, state),
             // Attestation from post-commit: which turn each commit landed under.
             // Lets the owner resolution below use what was observed instead of
             // falling back to "the highest-index turn that claims the sha".
-            commitTurns: state.commitTurns || [],
+            commitTurns: liveCommitTurns(state.repoPath, state),
             promptTurnIds: state.promptTurnIds || [],
             headShaAtStart: state.headShaAtStart || undefined,
             headShaAtEnd: gitCapture.headAfter || undefined,
@@ -1334,11 +1339,22 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
             }
             promptEditsByIndex.set(cap.promptIndex, JSON.stringify(cap));
           }
+          // Same two passes as Stop: the files a background job created and
+          // removed again go first, then the watched edits that named them.
+          dropVanishedWatchedAdds(state.repoPath, promptMappings as any, {
+            editsByIndex: promptEditsByIndex,
+            commitShas: liveSessionCommitShas(state.repoPath, state),
+            abandonedFiles: abandonedOnlyFiles(state.repoPath, state),
+            log: (event, data) => debugLog('session-end', event, data),
+          });
           // The git passes above already scoped each row; the edits still
           // carry every write the journal saw. Same trim as Stop.
           trimWatchedEditsForTurns(
             promptEditsByIndex, promptMappings as any,
             (event, data) => debugLog('session-end', event, data),
+            // A file only a reset-away commit ever held is no turn's work, and
+            // an emptied row names nothing to trim its ledger against.
+            abandonedOnlyFiles(state.repoPath, state),
           );
           debugLog('session-end', 'capturePromptEdits ok', {
             agent: captureAgent,
@@ -1357,8 +1373,8 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
         // Attestation, sent again at end because this is where it is COMPLETE:
         // every commit the session made has landed by now, including ones made
         // after the last Stop. See the same field on the Stop payload.
-        ...(Array.isArray(state.commitTurns) && state.commitTurns.length > 0
-          ? { commitTurns: state.commitTurns.map((ct) => ({
+        ...(liveCommitTurns(state.repoPath, state).length > 0
+          ? { commitTurns: liveCommitTurns(state.repoPath, state).map((ct) => ({
               sha: ct.sha, turnId: ct.turnId, at: ct.at, via: ct.via,
             })) }
           : {}),
@@ -1371,7 +1387,13 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
         // shows "Claude · Claude" instead of "Claude · Opus 4.8". Only send
         // a specific model so we never downgrade a real value to the brand.
         model: isSpecificModel(model) ? model : undefined,
-        filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
+        // Files only a reset-away commit changed are not the session's; an
+        // emptied list is sent as [] so the server drops the stored one.
+        filesChanged: (() => {
+          const gone = abandonedOnlyFiles(state.repoPath, state);
+          const kept = gone.length > 0 ? filesChanged.filter((f) => !gone.includes(f)) : filesChanged;
+          return kept.length > 0 || gone.length > 0 ? kept : undefined;
+        })(),
         tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
         // Cursor's tokens are always chars-estimated (agents/cursor.ts) — flag
         // so money dashboards and the benchmark measured-subset don't treat them
@@ -1396,7 +1418,18 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
         agentSessionName: resolveAgentSessionName(state) || undefined,
         durationMs: durationMs > 0 ? durationMs : undefined,
         costUsd: costUsd > 0 ? costUsd : undefined,
-        gitCapture: gitCapture.diff ? { ...gitCapture, ...(endIsAuthoredSnapshot ? { snapshot: true } : {}) } : undefined,
+        gitCapture: gitCapture.diff ? {
+          ...gitCapture,
+          ...(endIsAuthoredSnapshot ? { snapshot: true } : {}),
+          ...(endAbandoned.length > 0 ? { abandonedCommits: endAbandoned } : {}),
+        } : endAbandoned.length > 0 ? {
+          // Nothing left to snapshot, but commits to take off the session. No
+          // `diff` field: the stored SessionDiff text is not this payload's.
+          headBefore: gitCapture.headBefore,
+          headAfter: gitCapture.headAfter,
+          commitShas: [],
+          abandonedCommits: endAbandoned,
+        } : undefined,
         promptChanges: promptMappings.length > 0
           ? promptMappings.map(withDerivedLineCounts).map((pm, _i, all) => ({
               ...pm,

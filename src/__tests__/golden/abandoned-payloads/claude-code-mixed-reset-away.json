@@ -1,0 +1,666 @@
+{
+ "note": "Recorded by packages/cli capture-e2e-reset-away-commits-leave-the-session with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api session-reset-away-commits-real-db.test.ts.",
+ "roots": [
+  "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/mixed",
+  "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU"
+ ],
+ "roles": {
+  "base": "a4945ce2969ae798494dcd94109258c8d35e7177",
+  "a": "d9118a76bf442762e5a1bb9928d158a9348a084f",
+  "wip": "022de22532d51b5b6bcf2d866dc66bc279730c08",
+  "b": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7"
+ },
+ "marker": "WIP_ONLY_MARKER",
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "src/a.ts"
+    ],
+    "branch": "main",
+    "gitCapture": {
+     "headBefore": "a4945ce2969ae798494dcd94109258c8d35e7177",
+     "headAfter": "d9118a76bf442762e5a1bb9928d158a9348a084f",
+     "commitShas": [
+      "d9118a76bf442762e5a1bb9928d158a9348a084f"
+     ],
+     "commitDetails": [
+      {
+       "sha": "d9118a76bf442762e5a1bb9928d158a9348a084f",
+       "message": "feat: a\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/a.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..cca13da\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const A_MARKER = 1;"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "turnId": "t_ddc1daeb63dd44fa",
+      "createdAt": "2026-09-21T10:10:15.472Z",
+      "captureId": "c_1e58120699e54bf6",
+      "capturedAt": 1789985417351,
+      "promptText": "add a and b",
+      "filesChanged": [
+       "src/a.ts"
+      ],
+      "diff": "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..cca13da\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const A_MARKER = 1;",
+      "commitPatch": true,
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "commitSha": "d9118a76bf442762e5a1bb9928d158a9348a084f",
+      "commitMessage": "feat: a"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "a4945ce2969ae798494dcd94109258c8d35e7177",
+     "headAfter": "d9118a76bf442762e5a1bb9928d158a9348a084f",
+     "commitShas": [
+      "d9118a76bf442762e5a1bb9928d158a9348a084f"
+     ],
+     "commitDetails": [
+      {
+       "sha": "d9118a76bf442762e5a1bb9928d158a9348a084f",
+       "message": "feat: a\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/a.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..cca13da\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const A_MARKER = 1;"
+      }
+     ],
+     "diff": "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..cca13da\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const A_MARKER = 1;",
+     "diffTruncated": false,
+     "linesAdded": 1,
+     "linesRemoved": 0,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "src/b.ts",
+     "src/wip_only.ts"
+    ],
+    "branch": "main",
+    "gitCapture": {
+     "headBefore": "a4945ce2969ae798494dcd94109258c8d35e7177",
+     "headAfter": "022de22532d51b5b6bcf2d866dc66bc279730c08",
+     "commitShas": [
+      "022de22532d51b5b6bcf2d866dc66bc279730c08"
+     ],
+     "commitDetails": [
+      {
+       "sha": "022de22532d51b5b6bcf2d866dc66bc279730c08",
+       "message": "wip\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/b.ts",
+        "src/wip_only.ts"
+       ],
+       "linesAdded": 2,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..59c6189\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FIRST = 1;\ndiff --git a/src/wip_only.ts b/src/wip_only.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/wip_only.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "turnId": "t_ddc1daeb63dd44fa",
+      "createdAt": "2026-09-21T10:10:15.472Z",
+      "captureId": "c_9ab6246e75af46df",
+      "capturedAt": 1789985419742,
+      "promptText": "add a and b",
+      "filesChanged": [
+       "src/b.ts",
+       "src/wip_only.ts"
+      ],
+      "diff": "diff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..59c6189\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FIRST = 1;\ndiff --git a/src/wip_only.ts b/src/wip_only.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/wip_only.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;",
+      "commitPatch": true,
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "commitSha": "022de22532d51b5b6bcf2d866dc66bc279730c08",
+      "commitMessage": "wip"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "a4945ce2969ae798494dcd94109258c8d35e7177",
+     "headAfter": "022de22532d51b5b6bcf2d866dc66bc279730c08",
+     "commitShas": [
+      "022de22532d51b5b6bcf2d866dc66bc279730c08"
+     ],
+     "commitDetails": [
+      {
+       "sha": "022de22532d51b5b6bcf2d866dc66bc279730c08",
+       "message": "wip\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/b.ts",
+        "src/wip_only.ts"
+       ],
+       "linesAdded": 2,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..59c6189\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FIRST = 1;\ndiff --git a/src/wip_only.ts b/src/wip_only.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/wip_only.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;"
+      }
+     ],
+     "diff": "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..cca13da\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const A_MARKER = 1;\ndiff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..59c6189\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FIRST = 1;\ndiff --git a/src/wip_only.ts b/src/wip_only.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/wip_only.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;",
+     "diffTruncated": false,
+     "linesAdded": 3,
+     "linesRemoved": 0,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "src/b.ts"
+    ],
+    "branch": "main",
+    "gitCapture": {
+     "headBefore": "a4945ce2969ae798494dcd94109258c8d35e7177",
+     "headAfter": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+     "commitShas": [
+      "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7"
+     ],
+     "commitDetails": [
+      {
+       "sha": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+       "message": "wip\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/b.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..c2ba5bc\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FINAL = 2;"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "turnId": "t_ddc1daeb63dd44fa",
+      "createdAt": "2026-09-21T10:10:15.472Z",
+      "captureId": "c_86e6e667bdbd4365",
+      "capturedAt": 1789985422377,
+      "promptText": "add a and b",
+      "filesChanged": [
+       "src/b.ts"
+      ],
+      "diff": "diff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..c2ba5bc\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FINAL = 2;",
+      "commitPatch": true,
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "commitSha": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+      "commitMessage": "wip"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "a4945ce2969ae798494dcd94109258c8d35e7177",
+     "headAfter": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+     "commitShas": [
+      "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7"
+     ],
+     "commitDetails": [
+      {
+       "sha": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+       "message": "wip\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/b.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..c2ba5bc\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FINAL = 2;"
+      }
+     ],
+     "diff": "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..cca13da\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const A_MARKER = 1;\ndiff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..c2ba5bc\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FINAL = 2;",
+     "diffTruncated": false,
+     "linesAdded": 2,
+     "linesRemoved": 0,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "add a and b",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "add a and b",
+      "turnId": "t_ddc1daeb63dd44fa",
+      "createdAt": "2026-09-21T10:10:15.472Z"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "a4945ce2969ae798494dcd94109258c8d35e7177",
+     "headAfter": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+     "commitShas": [
+      "d9118a76bf442762e5a1bb9928d158a9348a084f",
+      "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7"
+     ],
+     "commitDetails": [
+      {
+       "sha": "d9118a76bf442762e5a1bb9928d158a9348a084f",
+       "message": "feat: a\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/a.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..cca13da\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const A_MARKER = 1;",
+       "committedAt": 1789985416000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      },
+      {
+       "sha": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+       "message": "wip\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/b.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..c2ba5bc\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FINAL = 2;",
+       "committedAt": 1789985421000
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "add a and b",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "src/a.ts",
+     "src/b.ts"
+    ],
+    "tokensUsed": 12,
+    "tokensEstimated": true,
+    "inputTokens": 3,
+    "outputTokens": 9,
+    "toolCalls": 8,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 4
+     },
+     {
+      "name": "Bash",
+      "count": 4
+     }
+    ],
+    "durationMs": 8350,
+    "costUsd": 0.0002,
+    "gitCapture": {
+     "headBefore": "a4945ce2969ae798494dcd94109258c8d35e7177",
+     "headAfter": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+     "commitShas": [
+      "d9118a76bf442762e5a1bb9928d158a9348a084f",
+      "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7"
+     ],
+     "diff": "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..cca13da\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const A_MARKER = 1;\ndiff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..c2ba5bc\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FINAL = 2;",
+     "linesAdded": 2,
+     "linesRemoved": 0,
+     "commitDetails": [
+      {
+       "sha": "d9118a76bf442762e5a1bb9928d158a9348a084f",
+       "message": "feat: a\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/a.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..cca13da\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const A_MARKER = 1;",
+       "committedAt": 1789985416000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      },
+      {
+       "sha": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+       "message": "wip\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/b.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..c2ba5bc\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FINAL = 2;",
+       "committedAt": 1789985421000
+      }
+     ],
+     "snapshot": true,
+     "abandonedCommits": [
+      "022de22532d51b5b6bcf2d866dc66bc279730c08"
+     ]
+    },
+    "commitTurns": [
+     {
+      "sha": "d9118a76bf442762e5a1bb9928d158a9348a084f",
+      "turnId": "t_ddc1daeb63dd44fa",
+      "at": "2026-09-21T10:10:17.239Z",
+      "via": "post-commit"
+     },
+     {
+      "sha": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+      "turnId": "t_ddc1daeb63dd44fa",
+      "at": "2026-09-21T10:10:22.153Z",
+      "via": "post-commit"
+     }
+    ],
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "add a and b",
+      "filesChanged": [
+       "src/a.ts",
+       "src/b.ts"
+      ],
+      "diff": "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..cca13da\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const A_MARKER = 1;\ndiff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..c2ba5bc\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FINAL = 2;",
+      "edits": [
+       {
+        "file": "src/a.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/mixed/src/a.ts",
+         "content": "export const A_MARKER = 1;\n"
+        }
+       },
+       {
+        "file": "src/b.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/mixed/src/b.ts",
+         "content": "export const B_FIRST = 1;\n"
+        }
+       },
+       {
+        "file": "src/wip_only.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/mixed/src/wip_only.ts",
+         "content": "export const WIP_ONLY_MARKER = 1;\n"
+        }
+       },
+       {
+        "file": "src/b.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/mixed/src/b.ts",
+         "content": "export const B_FINAL = 2;\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add src/a.ts && git commit -m \"feat: a\"",
+       "git add -A src && git commit -m wip",
+       "git add src/b.ts && git commit -m wip"
+      ],
+      "wroteViaShell": true,
+      "uncommittedDiff": "",
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "commitPatch": true,
+      "commitSha": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"add a and b\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/a.ts\",\"op\":\"write\",\"newContent\":\"export const A_MARKER = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/b.ts\",\"op\":\"write\",\"newContent\":\"export const B_FIRST = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/wip_only.ts\",\"op\":\"write\",\"newContent\":\"export const WIP_ONLY_MARKER = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/b.ts\",\"op\":\"write\",\"newContent\":\"export const B_FINAL = 2;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/a.ts\",\"op\":\"create\",\"newContent\":\"export const A_MARKER = 1;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/b.ts\",\"op\":\"create\",\"newContent\":\"export const B_FINAL = 2;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/b.ts\",\"op\":\"write\",\"newContent\":\"export const B_FINAL = 2;\\n\",\"source\":\"tool_call\",\"oldContent\":\"export const B_FIRST = 1;\\n\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"d9118a76bf442762e5a1bb9928d158a9348a084f\"],\"finalHunks\":[{\"file\":\"src/a.ts\",\"start\":1,\"lines\":[\"export const A_MARKER = 1;\"]},{\"file\":\"src/b.ts\",\"start\":1,\"lines\":[\"export const B_FINAL = 2;\"]}]}",
+      "turnId": "t_ddc1daeb63dd44fa",
+      "createdAt": "2026-09-21T10:10:15.472Z",
+      "captureId": "c_b8aab0cc4418437f",
+      "capturedAt": 1789985425787
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "add a and b",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "add a and b",
+      "turnId": "t_ddc1daeb63dd44fa",
+      "createdAt": "2026-09-21T10:10:15.472Z"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "a4945ce2969ae798494dcd94109258c8d35e7177",
+     "headAfter": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+     "commitShas": [
+      "d9118a76bf442762e5a1bb9928d158a9348a084f",
+      "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7"
+     ],
+     "commitDetails": [
+      {
+       "sha": "d9118a76bf442762e5a1bb9928d158a9348a084f",
+       "message": "feat: a\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/a.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..cca13da\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const A_MARKER = 1;",
+       "committedAt": 1789985416000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      },
+      {
+       "sha": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+       "message": "wip\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/b.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..c2ba5bc\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FINAL = 2;",
+       "committedAt": 1789985421000
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "add a and b",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "src/a.ts",
+     "src/b.ts"
+    ],
+    "tokensUsed": 12,
+    "tokensEstimated": true,
+    "inputTokens": 3,
+    "outputTokens": 9,
+    "toolCalls": 8,
+    "toolBreakdown": [
+     {
+      "name": "Write",
+      "count": 4
+     },
+     {
+      "name": "Bash",
+      "count": 4
+     }
+    ],
+    "durationMs": 11733,
+    "costUsd": 0.0002,
+    "gitCapture": {
+     "headBefore": "a4945ce2969ae798494dcd94109258c8d35e7177",
+     "headAfter": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+     "commitShas": [
+      "d9118a76bf442762e5a1bb9928d158a9348a084f",
+      "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7"
+     ],
+     "diff": "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..cca13da\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const A_MARKER = 1;\ndiff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..c2ba5bc\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FINAL = 2;",
+     "linesAdded": 2,
+     "linesRemoved": 0,
+     "commitDetails": [
+      {
+       "sha": "d9118a76bf442762e5a1bb9928d158a9348a084f",
+       "message": "feat: a\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/a.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..cca13da\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const A_MARKER = 1;",
+       "committedAt": 1789985416000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      },
+      {
+       "sha": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+       "message": "wip\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/b.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..c2ba5bc\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FINAL = 2;",
+       "committedAt": 1789985421000
+      }
+     ],
+     "snapshot": true,
+     "abandonedCommits": [
+      "022de22532d51b5b6bcf2d866dc66bc279730c08"
+     ]
+    },
+    "commitTurns": [
+     {
+      "sha": "d9118a76bf442762e5a1bb9928d158a9348a084f",
+      "turnId": "t_ddc1daeb63dd44fa",
+      "at": "2026-09-21T10:10:17.239Z",
+      "via": "post-commit"
+     },
+     {
+      "sha": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+      "turnId": "t_ddc1daeb63dd44fa",
+      "at": "2026-09-21T10:10:22.153Z",
+      "via": "post-commit"
+     }
+    ],
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "add a and b",
+      "filesChanged": [
+       "src/a.ts",
+       "src/b.ts"
+      ],
+      "diff": "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..cca13da\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const A_MARKER = 1;\ndiff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..c2ba5bc\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const B_FINAL = 2;",
+      "edits": [
+       {
+        "file": "src/a.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/mixed/src/a.ts",
+         "content": "export const A_MARKER = 1;\n"
+        }
+       },
+       {
+        "file": "src/b.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/mixed/src/b.ts",
+         "content": "export const B_FIRST = 1;\n"
+        }
+       },
+       {
+        "file": "src/wip_only.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/mixed/src/wip_only.ts",
+         "content": "export const WIP_ONLY_MARKER = 1;\n"
+        }
+       },
+       {
+        "file": "src/b.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/mixed/src/b.ts",
+         "content": "export const B_FINAL = 2;\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add src/a.ts && git commit -m \"feat: a\"",
+       "git add -A src && git commit -m wip",
+       "git add src/b.ts && git commit -m wip"
+      ],
+      "wroteViaShell": true,
+      "uncommittedDiff": "",
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "commitPatch": true,
+      "commitSha": "3a44f46e61e5332e9d335ec3b9285bf94cc6e7c7",
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"add a and b\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/a.ts\",\"op\":\"write\",\"newContent\":\"export const A_MARKER = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/b.ts\",\"op\":\"write\",\"newContent\":\"export const B_FIRST = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/wip_only.ts\",\"op\":\"write\",\"newContent\":\"export const WIP_ONLY_MARKER = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/b.ts\",\"op\":\"write\",\"newContent\":\"export const B_FINAL = 2;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/a.ts\",\"op\":\"create\",\"newContent\":\"export const A_MARKER = 1;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/b.ts\",\"op\":\"create\",\"newContent\":\"export const B_FINAL = 2;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/b.ts\",\"op\":\"write\",\"newContent\":\"export const B_FINAL = 2;\\n\",\"source\":\"tool_call\",\"oldContent\":\"export const B_FIRST = 1;\\n\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"d9118a76bf442762e5a1bb9928d158a9348a084f\"],\"finalHunks\":[{\"file\":\"src/a.ts\",\"start\":1,\"lines\":[\"export const A_MARKER = 1;\"]},{\"file\":\"src/b.ts\",\"start\":1,\"lines\":[\"export const B_FINAL = 2;\"]}]}",
+      "turnId": "t_ddc1daeb63dd44fa",
+      "createdAt": "2026-09-21T10:10:15.472Z",
+      "captureId": "c_dd8eefc34eb7481b",
+      "capturedAt": 1789985429015
+     }
+    ]
+   }
+  }
+ ]
+}

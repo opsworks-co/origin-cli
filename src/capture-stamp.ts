@@ -47,3 +47,31 @@ function mint(prefix: string): CaptureStamp {
 export function newCaptureStamp(prefix = 'c'): CaptureStamp {
   return mint(prefix);
 }
+
+/**
+ * Stamp a mapping that is being REPLAYED from disk.
+ *
+ * Persisted mappings carry an ISO-string `capturedAt` — that is the form the
+ * release gate grades — while the server's ordering contract is epoch
+ * milliseconds and reads the field with `Number()`. A string therefore lands
+ * as NaN, is nulled, and the whole payload becomes EXEMPT from the staleness
+ * check: it outranks every producer that stamps properly. That is the
+ * fdf299d3 shape described above, reached from a different direction.
+ *
+ * So: keep the time the content was really captured, and fall back to the
+ * replay's own stamp only for a legacy row with nothing readable. The stamp
+ * spreads AFTER the mapping so a stale field on disk cannot overwrite it.
+ */
+export function stampReplayedMapping<T extends Record<string, any>>(
+  mapping: T,
+  stamp: CaptureStamp,
+): T & CaptureStamp {
+  const savedAt = typeof mapping.capturedAt === 'number'
+    ? mapping.capturedAt
+    : (typeof mapping.capturedAt === 'string' ? Date.parse(mapping.capturedAt) : NaN);
+  return {
+    ...mapping,
+    ...stamp,
+    capturedAt: Number.isFinite(savedAt) && savedAt > 0 ? Math.floor(savedAt) : stamp.capturedAt,
+  };
+}

@@ -67,6 +67,12 @@ export interface ReflogRewrites {
   rebases: RebaseRun[];
   /** Commits a cherry-pick made. */
   cherryPicks: string[];
+  /**
+   * Every `reset:` entry that moved a ref: the reflog it is in (`HEAD`, a linked
+   * worktree's `worktrees/<id>/HEAD`, or a branch's short name), the sha it left
+   * and the sha it landed on.
+   */
+  resets: Array<{ ref: string; from: string; to: string }>;
   commits: Map<string, ReflogCommit>;
 }
 
@@ -87,7 +93,7 @@ function rebaseTag(message: string): string {
 }
 
 const emptyRewrites = (): ReflogRewrites => ({
-  amendNext: new Map(), rebaseDerived: new Set(), rebases: [], cherryPicks: [], commits: new Map(),
+  amendNext: new Map(), rebaseDerived: new Set(), rebases: [], cherryPicks: [], resets: [], commits: new Map(),
 });
 
 const realpath = (p: string): string => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
@@ -154,6 +160,10 @@ export function readReflogRewrites(repoPath: string): ReflogRewrites {
         if (!oldSha || oldSha === newSha || parentsOf(oldSha) === null || parentsOf(oldSha) !== parentsOf(newSha)) return;
         if (!result.amendNext.has(oldSha)) result.amendNext.set(oldSha, new Set());
         result.amendNext.get(oldSha)!.add(newSha);
+        return;
+      }
+      if (message.startsWith('reset:')) {
+        if (oldSha && oldSha !== newSha) result.resets.push({ ref, from: oldSha, to: newSha });
         return;
       }
       if (/^(?:commit \(cherry-pick\)|cherry-pick):/.test(message)) {

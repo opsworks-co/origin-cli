@@ -556,6 +556,51 @@ export function preferCommitPatchForCommittedTurns(
         if (patchAcrossBranches(repoPath, pm, turnId, chains, stranded, deps, stampFor)) replaced++;
         continue;
       }
+      // The host SQUASH-MERGED the turn's branch and deleted it, and the
+      // session never saw a rewrite to record — the squash happened on the
+      // forge, not in this checkout. The chain then stands `carried`: HEAD
+      // does not reach the commit, but the squash put its bytes there.
+      //
+      // Nothing is reachable to build a range from and no branch holds it, so
+      // this declined and the row kept the watcher's rendering. Meanwhile the
+      // session HEADER — written by post-commit while the commit was still
+      // live — still counts the commit's files. The two then disagree forever:
+      // live session 92f14dfb turn 10 committed seven files (+345/-16), two of
+      // them created there, and after #1754 was squashed the row held three
+      // unrelated files at +105/-6 and no sha, so those two files appeared in
+      // NO turn at all. The release gate reports it as
+      // `header_file_unclaimed_by_turns`.
+      //
+      // `carried` is itself the proof the work survived, and `git show` reads
+      // the object whatever the refs say, so the commit's own patch is exact.
+      // Only when nothing of the turn is reachable: a reachable chain means
+      // the single range below already describes the turn. `superseded` chains
+      // stay out — an amended-away original is not carried work, and its
+      // replacement is what the turn made.
+      // The label alone is NOT the proof. `chainStanding` answers `carried`
+      // for an empty file list too, and `filesOfCommits` swallows a failed
+      // `git show` as an empty list — a timeout under load, an object briefly
+      // unreadable during a concurrent gc — so that branch returns BEFORE the
+      // content check ever runs. While `carried` only ever declined, the
+      // conflation was harmless; acting on it is not. A reset-away commit
+      // reaches `chainStanding` by the same road, and crediting one here would
+      // undo exactly what #1761 removes. So prove carriage again, from the
+      // commit's own files, and fail closed on anything git cannot answer.
+      if (shas.length === 0) {
+        const carried = originalChains.filter((c) => {
+          if (standing.get(c) !== 'carried') return false;
+          const files = filesOfCommits(repoPath, c.members);
+          return files.length > 0 && git(repoPath, ['diff', '--quiet', c.tip, 'HEAD', '--', ...files]).ok;
+        });
+        if (carried.length > 0) {
+          deps.log?.('turn commits squash-merged away — sending each chain\'s own patch', {
+            promptIndex: pm.promptIndex, turnId, carried: carried.length,
+            commits: carried.map((c) => c.tip.slice(0, 8)),
+          });
+          if (patchAcrossBranches(repoPath, pm, turnId, carried, 0, deps)) replaced++;
+          continue;
+        }
+      }
     }
     // Earlier passes can empty a committed turn after a checkout. Its
     // attested commit and baseline still prove what it authored; recovering

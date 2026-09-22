@@ -1135,8 +1135,10 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
               const startedAtMs = Date.parse(existing.startedAt || '');
               const reattachStamp = { ...newCaptureStamp('ss'), capturedAt: Number.isFinite(startedAtMs) && startedAtMs > 0 ? startedAtMs : 1 };
               return {
-                ...reattachStamp,
                 ...pm,
+                // Local mappings carry an ISO `capturedAt`; the API expects
+                // epoch milliseconds. Keep this replay deliberately old.
+                ...reattachStamp,
                 promptText: (pm.promptText || '').slice(0, 1000),
                 diff: capDiff(pm.diff, MAX_PROMPT_DIFF_LEN),
                 uncommittedDiff: capDiff(pm.uncommittedDiff, MAX_PROMPT_DIFF_LEN),

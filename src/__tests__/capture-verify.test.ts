@@ -255,6 +255,58 @@ describe('verifyTurn', () => {
     expect(hit?.detail).toMatch(/\+0\/-0.*\+2\/-1/);
   });
 
+  it('lets the counts exceed the text when the row NAMED what it could not carry', () => {
+    // Prod 4ab4eea1 turn 2, which blocked the cli-v0.20260922.846 release. The
+    // turn committed 8 files at +761/-108; the budget kept 3 of them and named
+    // the other 5 in `contentUnavailableFiles` — exactly what that field is
+    // for, and exactly what the file-set check above already exempts. Grading
+    // it a contradiction makes an honest row block every future release.
+    expect(codes({
+      promptIndex: 0,
+      filesChanged: ['src/a.ts', 'src/huge.json'],
+      contentUnavailableFiles: ['src/huge.json'],
+      diff: MODIFY,
+      linesAdded: 761,
+      linesRemoved: 108,
+    })).toEqual([]);
+  });
+
+  it('still catches a row that counts LESS than the text it stores', () => {
+    // One-sided, not an exemption. Dropped sections can only make the text
+    // total less than the change; they can never explain a row that
+    // undercounts what it does hold.
+    const v = verifyTurn({
+      promptIndex: 0,
+      filesChanged: ['src/a.ts', 'src/huge.json'],
+      contentUnavailableFiles: ['src/huge.json'],
+      diff: MODIFY,
+      linesAdded: 0,
+      linesRemoved: 0,
+    });
+    expect(v.find((x) => x.code === 'line_counts_disagree_with_diff')?.detail)
+      .toMatch(/\+0\/-0.*\+2\/-1/);
+  });
+
+  it('does not exempt a row whose named file IS in the diff', () => {
+    // The exemption is about content that is genuinely absent. A row naming a
+    // file it did carry gets the exact comparison, or the declaration becomes
+    // a way to switch the check off.
+    // Counts chosen so ONLY the exact comparison can catch this: both are >=
+    // the text (+2/-1), so a one-sided check would pass it. Getting that wrong
+    // is how the previous version of this test passed against a mutant that
+    // exempted on `contentUnavailableFiles` being non-empty at all.
+    const v = verifyTurn({
+      promptIndex: 0,
+      filesChanged: ['src/a.ts'],
+      contentUnavailableFiles: ['src/a.ts'],
+      diff: MODIFY,
+      linesAdded: 99,
+      linesRemoved: 1,
+    });
+    expect(v.find((x) => x.code === 'line_counts_disagree_with_diff')?.detail)
+      .toMatch(/\+99\/-1.*\+2\/-1/);
+  });
+
   it('does not double-count a row whose uncommittedDiff repeats its diff', () => {
     // The hook path stores the COMBINED committed+uncommitted text in `diff`
     // and repeats the uncommitted half in `uncommittedDiff`. Summing the two

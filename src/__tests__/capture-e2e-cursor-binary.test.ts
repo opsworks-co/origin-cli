@@ -24,7 +24,10 @@ import { foldStopRows } from './helpers/fold-stop-rows.js';
 import { expectGoldenTurns, trackTestFailures } from './helpers/golden-turns.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const BIN = path.join(cliRoot, 'dist', 'index.js');
+// ORIGIN_E2E_BIN runs the same scenario through another build — the installed
+// one — so a release can be proved on the artifact users actually get, not
+// only on the worktree's dist. Same convention as the other capture-e2e files.
+const BIN = process.env.ORIGIN_E2E_BIN || path.join(cliRoot, 'dist', 'index.js');
 const haveDist = fs.existsSync(BIN);
 
 type Hit = { method: string; url: string; body: any };
@@ -59,6 +62,13 @@ function startFakeApi(): Promise<void> {
     });
   });
 }
+
+// ~60KB each, so one edit's old+new content is ~120KB — over
+// LIVE_EDIT_CONTENT_MAX (96KB), which is what made recordProbedShellEdits
+// decline silently on prod 2ecac40a's `session-state.ts` (153KB).
+const BIG_FILLER = Array.from({ length: 1500 }, (_, i) => `# filler line ${i} ${'x'.repeat(20)}`).join('\n');
+const BIG_BEFORE = `VALUE = "before"\n${BIG_FILLER}\n`;
+const BIG_AFTER = `VALUE = "after"\n${BIG_FILLER}\n`;
 
 let repo = '';
 let transcript = '';
@@ -172,6 +182,9 @@ describe.skipIf(!haveDist)('cursor capture end to end through the built binary',
     git(['config', 'user.email', 'e2e@example.com']);
     fs.writeFileSync(path.join(repo, '.gitignore'), '.probe\n');
     fs.writeFileSync(path.join(repo, 'app.py'), 'def main():\n    print("old")\n\n\nmain()\n');
+    // A file too big for the ledger's content cap (old + new > 96KB), so the
+    // edit-hook evidence path declines on it — see turn 4.
+    fs.writeFileSync(path.join(repo, 'big.py'), BIG_BEFORE);
     git(['add', '.']);
     git(['commit', '-q', '-m', 'base']);
   }, 60_000 * WINDOWS_SLOWDOWN);
@@ -317,6 +330,49 @@ describe.skipIf(!haveDist)('cursor capture end to end through the built binary',
     // Stop may or may not repeat the sha (the server keeps the stamped one);
     // it must never contradict it.
     if (t3.commitSha) expect(t3.commitSha).toBe(sha);
+  }, 120_000 * WINDOWS_SLOWDOWN);
+
+  it('turn 4: the write that REVEALS an unannounced turn is not lost when it is too big for the ledger', async () => {
+    // Prod 2ecac40a turn 2 (Cursor). Its first write was `session-state.ts`,
+    // 153KB. afterFileEdit discovered the unannounced turn, cut its shadow
+    // from a tree that ALREADY held that write, and the turn's own window came
+    // back empty — `no diff against shadow, skipping`, and the mapping was
+    // never written. The two things meant to survive that both declined: the
+    // edit-hook evidence refuses any file whose old+new content is over
+    // LIVE_EDIT_CONTENT_MAX, and this session had no ledger at all. So the turn
+    // committed five files while claiming four, and the file it dropped was the
+    // one that made the commit look only partly captured — which is what let
+    // the server's pc heal copy the whole commit onto a later chat turn.
+    turnSessionId = 4;
+    say('bump the value in the big file');   // no beforeSubmitPrompt, as Cursor does
+    const before = writesIn();
+    fs.writeFileSync(path.join(repo, 'big.py'), BIG_AFTER);
+    wrote('big.py', BIG_AFTER);
+    await waitFor(() => writesIn() > before, 10_000, 'the journal to record the big write');
+    const afe = await run('after-file-edit', { file_path: path.join(repo, 'big.py'), edits: [] });
+    expect(afe.code, afe.stderr).toBe(0);
+
+    const stateDir = path.join(os.homedir(), '.origin', 'sessions');
+    const stateFile = fs.readdirSync(stateDir).map((f) => path.join(stateDir, f))
+      .find((f) => f.endsWith('.json') && fs.readFileSync(f, 'utf-8').includes('e2e-cursor-session-0001'));
+    const state = JSON.parse(fs.readFileSync(stateFile!, 'utf-8'));
+    const mapping = (state.completedPromptMappings || []).find((m: any) => m.promptIndex === 3);
+    expect(mapping, 'after-file-edit wrote no mapping for the turn it discovered').toBeTruthy();
+    expect(mapping.filesChanged, 'the revealing write is missing from its own turn').toContain('big.py');
+    // Recovered against the tree the write actually changed, not merely named:
+    // the row carries the edit, and nothing that belongs to an earlier turn.
+    expect(mapping.diff).toContain('+VALUE = "after"');
+    expect(mapping.diff).toContain('-VALUE = "before"');
+    expect(mapping.diff).not.toContain('lib/helper.py');
+    expect(mapping.diff).not.toContain('notes.md');
+
+    const stop = await run('stop', { status: 'completed' });
+    expect(stop.code, stop.stderr).toBe(0);
+    const t4 = lastRows().find((r: any) => r.promptIndex === 3);
+    expect(t4, 'no row for turn 4').toBeTruthy();
+    expect(t4.filesChanged).toContain('big.py');
+    expect(t4.linesAdded).toBe(1);
+    expect(t4.linesRemoved).toBe(1);
   }, 120_000 * WINDOWS_SLOWDOWN);
 
   it('golden: the final turn rows match the recorded baseline', () => {

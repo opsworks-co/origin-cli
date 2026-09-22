@@ -15,7 +15,7 @@ import { readDevinDesktopSessions, selectDevinSessionForRepo } from '../../devin
 import type { DevinDesktopSession } from '../../devin-desktop.js';
 import { capDiff, fitDiffToBudget } from '../../diff-budget.js';
 import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
-import { MAX_PROMPT_DIFF_LEN, capCommitMessage, captureGitState, commitLineCounts } from '../../git-capture.js';
+import { MAX_PROMPT_DIFF_LEN, capCommitMessage, captureGitState, commitLineCounts, sameSha } from '../../git-capture.js';
 import { writeGitNotes } from '../../git-notes.js';
 import { commitReplayKind } from '../../commit-replay.js';
 import { BACKFILL_TIMEOUT_MS, COMMIT_INGEST_TIMEOUT_MS, RECENT_SHAS_LIMIT, acquireBackfillLock, backfillUnknownCommits, commitAuthoredDelta, extractCommitDiff, listRecentShas, releaseBackfillLock, shouldAdvertiseHistory, writeSyncMarker } from '../../history-backfill.js';
@@ -36,7 +36,7 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { serverRowForLocalTurn, turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
-import { applyLedgerCaptures, buildMemoryEntry, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitTrailerBelongsToSession, durableUpdate, isInsideRepo, ownedRangeCommitShas, rewrittenCommitsPayload, sameDir, scheduleMemoryBriefRefresh, scopedCommitForTurn, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, trailerNamesAKnownSession, turnIdFor, withDerivedLineCounts } from '../hooks.js';
+import { applyLedgerCaptures, buildMemoryEntry, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitTrailerBelongsToSession, durableUpdate, isInsideRepo, ownedRangeCommitShas, rewrittenCommitsPayload, sameDir, scheduleMemoryBriefRefresh, scopedCommitForTurn, sessionAbandonedCommits, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, trailerNamesAKnownSession, turnIdFor, withDerivedLineCounts } from '../hooks.js';
 
 
 /**
@@ -167,6 +167,12 @@ export interface SessionAuthoredSnapshot {
   /** The commits the committed side was rendered from. */
   commitShas: string[];
   /**
+   * Recorded commits git proves the session reset away (abandoned-commits.ts).
+   * Not in `commitShas`; sent as `gitCapture.abandonedCommits` so the server
+   * takes them off the session.
+   */
+  abandonedCommits: string[];
+  /**
    * `owned`   — rendered from the session's recorded commits.
    * `trailer` — no commit was recorded (a hook was missed) but the range
    *             since session start holds commits whose trailer names this
@@ -230,6 +236,10 @@ export function sessionAuthoredSnapshot(
       commitShas = trailerOwned;
     }
   }
+  // The same list the committed render above left out, so the shas, the diff,
+  // the files and the counts all describe one set of commits.
+  const abandonedCommits = sessionAbandonedCommits(repoPath, state);
+  commitShas = commitShas.filter((s) => !abandonedCommits.some((a) => sameSha(a, s)));
   const uncommitted = (opts.uncommittedDiff || '').trim();
   // Do not reintroduce duplicate file sections at the session layer when a
   // file was committed and then edited again before this snapshot. The
@@ -244,6 +254,7 @@ export function sessionAuthoredSnapshot(
     linesAdded: countDiffSignLines(diff, '+'),
     linesRemoved: countDiffSignLines(diff, '-'),
     commitShas,
+    abandonedCommits,
     source,
   };
 }
@@ -496,13 +507,14 @@ export function pickIdleOwnerByFileEvidence(
 
 export function listSessionsForGitHookUnscoped(
   hookCwd: string,
-  opts?: { commitFiles?: string[] },
+  opts?: { commitFiles?: string[]; failOnReadError?: boolean },
 ): SessionState[] {
-  let sessions = listActiveSessions(hookCwd);
+  const readOpts = opts?.failOnReadError ? { failOnReadError: true } : undefined;
+  let sessions = listActiveSessions(hookCwd, undefined, readOpts);
   if (sessions.length === 0) {
     const mainRepo = getGitRoot(hookCwd); // collapses linked worktree → main repo
     if (mainRepo && !sameDir(mainRepo, hookCwd)) {
-      sessions = listActiveSessions(mainRepo);
+      sessions = listActiveSessions(mainRepo, undefined, readOpts);
       if (sessions.length > 0) {
         debugLog('git-hook-sessions', 'worktree fallback to repo-level sessions', {
           hookCwd, mainRepo, count: sessions.length,
@@ -521,7 +533,7 @@ export function listSessionsForGitHookUnscoped(
   //
   // The mirror lives in ~/.origin/sessions and survives that.
   if (sessions.length === 0) {
-    sessions = listMirroredSessionsForTree(hookCwd);
+    sessions = listMirroredSessionsForTree(hookCwd, readOpts);
     if (sessions.length > 0) {
       debugLog('git-hook-sessions', 'recovered session from the durable mirror — repo state was missing', {
         hookCwd, count: sessions.length, sessionIds: sessions.map((s) => s.sessionId),

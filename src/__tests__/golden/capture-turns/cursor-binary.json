@@ -53,5 +53,22 @@
     "commits": [
       "commit: add helper"
     ]
+  },
+  {
+    "promptIndex": 3,
+    "diffSource": "ledger",
+    "chatOnly": false,
+    "filesChanged": [
+      "big.py"
+    ],
+    "linesAdded": 1,
+    "linesRemoved": 1,
+    "diff": "diff --git a/big.py b/big.py\n--- a/big.py\n+++ b/big.py\n@@ -1,4 +1,4 @@\n-VALUE = \"before\"\n+VALUE = \"after\"\n # filler line 0 xxxxxxxxxxxxxxxxxxxx\n # filler line 1 xxxxxxxxxxxxxxxxxxxx\n # filler line 2 xxxxxxxxxxxxxxxxxxxx\n",
+    "uncommittedDiff": "",
+    "editedFiles": [
+      "big.py"
+    ],
+    "contentUnavailableFiles": [],
+    "commits": []
   }
 ]

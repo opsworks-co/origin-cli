@@ -471,6 +471,11 @@ export interface SessionState {
   // call cannot leave a permanent claim, and capped so a long session cannot
   // grow it without bound.
   pendingWrites?: Array<{ file: string; at: string }>;
+  // The shell call this session is running RIGHT NOW is about to make a commit
+  // (`git commit`, merge, cherry-pick…). Set at pre-tool-use, cleared at that
+  // call's post-tool-use; the commit hooks read it to name the committing
+  // session before they weigh any file. See commit-command-in-flight.ts.
+  commitCommandInFlight?: { at: string; toolCallId?: string; cwd?: string; turn?: number } | null;
   // Prompt indexes whose turn ran a WRITE-SHAPED shell command (a heredoc,
   // `sed -i`, `cp`, an interpreter invocation…). The post-tool-use hook sets
   // this; Stop reads it to decide whether to derive that turn's shell writes
@@ -1551,8 +1556,42 @@ function keepCommitsRecordedSinceRead(state: SessionState, statePath: string): n
         sessionId: state.sessionId, shas: kept.shas.map((sha) => sha.slice(0, 8)), turns: kept.turns, pairs: kept.pairs,
       });
     }
+    keepCommitClaimSavedMeanwhile(state, onDisk);
     return closedTurnMarkedMeanwhile(state, onDisk);
   } catch { return null; /* no file yet, or unreadable — write as before */ }
+}
+
+/** States whose `commitCommandInFlight` was set or cleared by the tool hooks in THIS process. */
+const commitClaimWrittenHere = new WeakSet<object>();
+
+/**
+ * Set or clear the "this session's shell is running a commit" claim. The tool
+ * hooks are its only writers; see keepCommitClaimSavedMeanwhile.
+ */
+export function setCommitCommandInFlight(state: SessionState, claim: SessionState['commitCommandInFlight']): void {
+  state.commitCommandInFlight = claim ?? null;
+  commitClaimWrittenHere.add(state);
+}
+
+/**
+ * Every saver but the tool hooks takes the claim as it is ON DISK.
+ *
+ * post-commit runs in the background: it loads every session's state while the
+ * committing shell call is still running — claim set — and saves those objects
+ * seconds later, after that call's post-tool-use has cleared it. Written as
+ * read, the claim came back and stood until it aged out, so "is committing
+ * now" meant "committed in the last ten minutes" (review of #1740). The other
+ * way round, a saver that read the state before the claim was made erased it
+ * ahead of prepare-commit-msg.
+ */
+export function keepCommitClaimSavedMeanwhile(
+  state: Pick<SessionState, 'sessionId' | 'commitCommandInFlight'>,
+  onDisk: Partial<Pick<SessionState, 'sessionId' | 'commitCommandInFlight'>> | null | undefined,
+): void {
+  if (commitClaimWrittenHere.has(state)) return;
+  if (!onDisk || !state?.sessionId || onDisk.sessionId !== state.sessionId) return;
+  const theirs = onDisk.commitCommandInFlight;
+  state.commitCommandInFlight = theirs && typeof theirs === 'object' && typeof theirs.at === 'string' ? theirs : null;
 }
 
 /** beforeSave reconciles registration with the latest row under the cross-process write lock. */
@@ -1891,16 +1930,32 @@ export function adoptRegisteredReservation(
  * Deliberately strict about ownership: the mirror is global, so matching must
  * be on THIS tree (repoPath or the last cwd), never "any running session".
  */
-export function listMirroredSessionsForTree(tree: string): SessionState[] {
+export function listMirroredSessionsForTree(
+  tree: string,
+  opts?: { failOnReadError?: boolean },
+): SessionState[] {
   if (!tree) return [];
   const dir = path.join(os.homedir(), '.origin', 'sessions');
   let entries: string[];
-  try { entries = fs.readdirSync(dir); } catch { return []; }
+  try {
+    entries = fs.readdirSync(dir);
+  } catch (err: any) {
+    // A machine that has never created the mirror has no peers to report.
+    // Any other failure makes the list incomplete, which safety-sensitive
+    // callers must be able to distinguish from a genuinely empty list.
+    if (opts?.failOnReadError && err?.code !== 'ENOENT') throw err;
+    return [];
+  }
   const out: SessionState[] = [];
   for (const entry of entries) {
     if (!entry.endsWith('.json')) continue;
     let st: SessionState | null = null;
-    try { st = JSON.parse(fs.readFileSync(path.join(dir, entry), 'utf-8')); } catch { continue; }
+    try {
+      st = JSON.parse(fs.readFileSync(path.join(dir, entry), 'utf-8'));
+    } catch (err) {
+      if (opts?.failOnReadError) throw err;
+      continue;
+    }
     if (!st || !st.sessionId) continue;
     if ((st as any).status === 'ENDED' || st.endedAt) continue;
     // samePath, never raw identity — see paths.ts and the comparison guard.
@@ -2346,6 +2401,7 @@ export function listActiveSessions(
   // turn window asks this once per commit and the answer cannot change inside
   // it. Omitted, it is looked up here.
   gitCommonDir?: string | null,
+  opts?: { failOnReadError?: boolean },
 ): SessionState[] {
   const sessions: SessionState[] = [];
   // A session whose own state file says ENDED is not active. This function
@@ -2376,10 +2432,16 @@ export function listActiveSessions(
             if (isEnded(state)) continue;
             Object.defineProperty(state, '__statePath', { value: fullPath, enumerable: false });
             sessions.push(state);
-          } catch { /* skip corrupt files */ }
+          } catch (err) {
+            if (opts?.failOnReadError) throw err;
+            /* skip corrupt files */
+          }
         }
       }
-    } catch { /* ignore */ }
+    } catch (err) {
+      if (opts?.failOnReadError) throw err;
+      /* ignore */
+    }
     return sessions;
   }
 
@@ -2398,10 +2460,16 @@ export function listActiveSessions(
           if (isEnded(state)) continue;
           Object.defineProperty(state, '__statePath', { value: fullPath, enumerable: false });
           sessions.push(state);
-        } catch { /* skip */ }
+        } catch (err) {
+          if (opts?.failOnReadError) throw err;
+          /* skip */
+        }
       }
     }
-  } catch { /* ignore */ }
+  } catch (err: any) {
+    if (opts?.failOnReadError && err?.code !== 'ENOENT') throw err;
+    /* ignore */
+  }
 
   return sessions;
 }

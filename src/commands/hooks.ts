@@ -49,6 +49,7 @@ import {
 import { capCommitMessage, captureGitState, captureAgyDiff, getDirtyFiles, createShadowCommit, commitCombiningTips, commitWithInheritedFiles, mergeTreeOf, commitDiffScopedToPrompt, filesChangedSinceShadow, readFileAtRev, isUnsafeGitShowPath, gitIgnoredFiles, sameSha, MAX_DIFF_SIZE, MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
 import { capDiff, fitDiffToBudget } from '../diff-budget.js';
 import { proveReplays, readReflogRewrites, replayedInto, rewriteReaches, type ReflogRewrites, type ReplayProof } from '../rewrite-proof.js';
+import { provenAbandonedCommits } from '../abandoned-commits.js';
 import { finalHunksForCaptures } from '../final-state-blame.js';
 import { parseAntigravityTranscript, estimateAntigravityUsage, agyArgs } from '../antigravity-transcript.js';
 import { claudeSessionName, cursorSessionName } from '../agent-session-name.js';
@@ -176,7 +177,8 @@ import {
   SHELL_WINDOW_SOURCE,
 } from '../shell-write-capture.js';
 import { isOriginAutoManagedPath, shouldIgnoreFile, stripIgnoredSectionsFromDiff } from '../ignore-patterns.js';
-import { ORIGIN_MANAGED_MARKER, PREAMBLE_VISIBLE_ANCHOR } from '../managed-block-diff.js';
+import { repoEntryExists } from '../vanished-watched-files.js';
+import { ORIGIN_MANAGED_MARKER, PREAMBLE_VISIBLE_ANCHOR, stripOriginManagedBlock } from '../managed-block-diff.js';
 import { normalizeToolHookPayload } from '../hook-payload.js';
 import { skipManuallyEndedHook } from '../manual-session-end.js';
 import {
@@ -1578,6 +1580,116 @@ function ownedCommitPaths(repoPath: string, shas: string[]): string[] {
   return [...paths];
 }
 
+// The recorded commits git proves the session reset away (abandoned-commits.ts).
+// Asked twice in one hook run — by the session-level render below and by
+// sessionAuthoredSnapshot, which sends the list — so it is kept per state
+// object until the recorded list or the rewrite pairs change.
+const abandonedMemo = new WeakMap<object, { key: string; shas: string[] }>();
+export function sessionAbandonedCommits(repoPath: string, state: SessionState): string[] {
+  const key = JSON.stringify([repoPath, state.sessionCommitShas || [], state.rewrittenCommits || []]);
+  const hit = abandonedMemo.get(state);
+  if (hit && hit.key === key) return hit.shas;
+  let shas: string[] = [];
+  try {
+    shas = provenAbandonedCommits(
+      repoPath, state.sessionCommitShas || [], state.rewrittenCommits || [], () => readReflogRewrites(repoPath),
+    );
+  } catch { shas = []; }
+  abandonedMemo.set(state, { key, shas });
+  return shas;
+}
+
+// The session's records without the commits it reset away. Every producer that
+// hands a commit to a turn — the attestation the server re-badges from, the
+// per-turn commit patch, the edit reconstruction — reads these, so a commit
+// that is gone is no turn's work.
+export function liveCommitTurns(repoPath: string | null | undefined, state: SessionState): NonNullable<SessionState['commitTurns']> {
+  const turns = state.commitTurns || [];
+  if (!repoPath || turns.length === 0) return turns;
+  const gone = sessionAbandonedCommits(repoPath, state);
+  return gone.length === 0 ? turns : turns.filter((c) => !gone.some((g) => sameSha(g, c.sha)));
+}
+export function liveSessionCommitShas(repoPath: string | null | undefined, state: SessionState): string[] {
+  const shas = state.sessionCommitShas || [];
+  if (!repoPath || shas.length === 0) return shas;
+  const gone = sessionAbandonedCommits(repoPath, state);
+  return gone.length === 0 ? shas : shas.filter((sha) => !gone.some((g) => sameSha(g, sha)));
+}
+
+// Files only a commit the session reset away ever changed: named by an
+// abandoned commit, by none of the session's live ones, and not changed in the
+// tree against the session's start. The transcript still lists them as
+// written, so the session's file list would keep naming work that is gone.
+// Fails closed (keeps every file) when the start is unknown or git cannot say.
+const abandonedFilesMemo = new WeakMap<object, { key: string; files: string[] }>();
+export function abandonedOnlyFiles(repoPath: string | null | undefined, state: SessionState): string[] {
+  if (!repoPath || !state.headShaAtStart) return [];
+  const gone = sessionAbandonedCommits(repoPath, state);
+  if (gone.length === 0) return [];
+  const key = JSON.stringify([repoPath, gone, state.sessionCommitShas || []]);
+  const hit = abandonedFilesMemo.get(state);
+  if (hit && hit.key === key) return hit.files;
+  const opts = { windowsHide: true, cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 10000, maxBuffer: 64 * 1024 * 1024 };
+  const lines = (args: string[]): Set<string> | null => {
+    try {
+      return new Set(execFileSync('git', args, opts).toString().split('\n').map((l) => l.trim()).filter(Boolean));
+    } catch { return null; }
+  };
+  let files: string[] = [];
+  const touched = lines(['show', '--name-only', '--no-renames', '--format=', ...gone]);
+  const live = liveSessionCommitShas(repoPath, state).filter((sha) => /^[a-fA-F0-9]{7,40}$/.test(sha));
+  const kept = live.length > 0 ? lines(['show', '--name-only', '--no-renames', '--format=', ...live]) : new Set<string>();
+  if (touched && touched.size > 0 && kept) {
+    const candidates = [...touched].filter((f) => !kept.has(f));
+    const changed = candidates.length > 0 ? lines(['diff', '--name-only', state.headShaAtStart, '--', ...candidates]) : new Set<string>();
+    const untracked = candidates.length > 0 ? lines(['ls-files', '--others', '--exclude-standard', '--', ...candidates]) : new Set<string>();
+    // git's untracked list is not "is it there": `ls-files --others
+    // --exclude-standard` never names an IGNORED file. A path force-added into
+    // the WIP commit (`git add -f`), reset away, and then written again by the
+    // agent is on disk and invisible to that command — and everything fed by
+    // this list treats it as proof, down to dropping a `tool_call` edit of it.
+    // So the filesystem answers too, with the same three-valued rule as
+    // vanished-watched-files: only a proven absence is an absence.
+    if (changed && untracked) {
+      files = candidates.filter((f) => !changed.has(f) && !untracked.has(f) && repoEntryExists(repoPath, f) === false);
+    }
+  }
+  abandonedFilesMemo.set(state, { key, files });
+  return files;
+}
+
+// True only when git proves the session authored nothing: no commit of it
+// renders, and the tree — committed and uncommitted — is its start's.
+// Pre-session dirt, an unknown start or any git failure answers false.
+export function sessionAuthoredNothing(repoPath: string | null | undefined, state: SessionState): boolean {
+  if (!repoPath || !state.headShaAtStart) return false;
+  try {
+    const authored = sessionAuthoredSnapshot(repoPath, state);
+    if (authored.source !== 'none' || authored.diff) return false;
+    const opts = { windowsHide: true, cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 10000 };
+    // Exit 0 from `git diff --quiet <start>`: HEAD and the tracked tree match the start.
+    execFileSync('git', ['diff', '--quiet', state.headShaAtStart], opts);
+    const untracked = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], opts)
+      .toString().split('\n').map((l) => l.trim()).filter(Boolean);
+    // Origin's OWN context file is not the session's work. session-start writes
+    // CLAUDE.md / AGENTS.md / … into the repo, so in a repo that does not track
+    // one this list is never empty and the proof was unobtainable in real life
+    // (RCCE-423, live session cd52a877: the SessionDiff post-commit wrote
+    // BEFORE the reset survived, and the page kept the thrown-away file).
+    //
+    // Only a file that is ENTIRELY our block passes: whatever a person or the
+    // agent wrote around it is work, and so is any other untracked path. A file
+    // we cannot read is dirt too — absence of evidence is not evidence of
+    // absence, and this proof is what empties a stored session diff.
+    return untracked.every((file) => {
+      if (!isOriginAutoManagedPath(file)) return false;
+      try {
+        return stripOriginManagedBlock(fs.readFileSync(path.join(repoPath, file), 'utf-8')) === '';
+      } catch { return false; }
+    });
+  } catch { return false; }
+}
+
 // Compute the committed-side diff scoped to commits THIS session authored.
 // Replaces `git diff prePromptSha...HEAD`, which picks up commits made by
 // concurrently-running sessions once HEAD moves past this session's commits.
@@ -1606,6 +1718,15 @@ export function sessionScopedCommittedDiff(
 ): string {
   rescueAmendedCommitShas(repoPath, state);
   let shas = state.sessionCommitShas || [];
+  // The SESSION-level render replays every recorded sha, and `git show` still
+  // reads a commit the session reset away. Its work is not the session's: drop
+  // it before rendering, so the diff, files and counts describe the same
+  // commits the sha list names. Asked after the rescue, which has already made
+  // every rewrite git proves into a pair. A turn's window cannot reach one.
+  if (!sinceSha && shas.length > 0) {
+    const gone = sessionAbandonedCommits(repoPath, state);
+    if (gone.length > 0) shas = shas.filter((sha) => !gone.some((g) => sameSha(g, sha)));
+  }
   if (shas.length === 0) return '';
   // The newest commit of the turn's window, and whether EVERY commit in that
   // window is one of ours — both needed by the baseline-relative render below.

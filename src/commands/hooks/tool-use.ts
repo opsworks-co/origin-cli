@@ -11,12 +11,13 @@ import { normalizeToolHookPayload } from '../../hook-payload.js';
 import { isMemoryReadCommand, isMemoryReadToolName } from '../../memory.js';
 import { anchorEditPositions, extractEditsFromToolCall } from '../../prompt-capture/index.js';
 import { redactSecrets } from '../../redaction.js';
-import { currentTurnIndex, getBranch, getGitCommonDir, getGitRoot, getHeadSha, getWorkingGitRoot, resolveSessionBranch, saveSessionState } from '../../session-state.js';
+import { currentTurnIndex, getBranch, getGitCommonDir, getGitRoot, getHeadSha, getWorkingGitRoot, resolveSessionBranch, saveSessionState, setCommitCommandInFlight } from '../../session-state.js';
 import type { SessionState, ToolCallRecord } from '../../session-state.js';
 import { candidateDirsFromCommand, samePath, worktreesAmongCandidates } from '../../session-worktree.js';
 import { probeTree, touchedSince } from '../../shell-command-probe.js';
 import type { TreeProbe } from '../../shell-command-probe.js';
 import { commandWritesFiles, isShellTool, shellCommandText } from '../../shell-write-capture.js';
+import { commandMakesCommit } from '../../commit-command-in-flight.js';
 import { recordGitPathspecs } from '../../git-pathspec-names.js';
 import { isSubagentSpawnTool } from '../../subagent-tools.js';
 import { recordWriteTree } from '../../session-write-trees.js';
@@ -287,6 +288,31 @@ export async function handlePreToolUse(rawInput: Record<string, any>, agentSlug?
       try { saveSessionState(state, saveCwd, state.sessionTag); } catch { /* non-fatal */ }
     }
   } catch { /* claiming is best-effort — never block a tool call on it */ }
+
+  // ── Say who is about to commit ──────────────────────────────────────────
+  // git runs prepare-commit-msg, not the agent, so that hook has to work out
+  // the committing session from the outside — and a command that writes a file
+  // and commits it in one call gets there before this session's ledger holds
+  // the file. The command itself is visible here, before it runs. On disk NOW
+  // for the same reason as the claim above. See commit-command-in-flight.ts.
+  try {
+    if (isShellTool(input.tool_name || '') && commandMakesCommit(shellCommandText(toolInput))) {
+      setCommitCommandInFlight(state, {
+        at: new Date().toISOString(),
+        ...(input.tool_call_id || input.tool_use_id ? { toolCallId: String(input.tool_call_id || input.tool_use_id) } : {}),
+        cwd: hookCwd,
+        // currentTurnIndex OPENS the turn when no tool hook has yet; the reader
+        // only believes a claim whose turn is the one still open.
+        // The turn this call belongs to, READ and not opened: currentTurnIndex
+        // opens the turn as a side effect, and a turn that only commits then
+        // captured differently (worktree-bootstrap golden). An unopened turn
+        // is the one after the last Stop closed.
+        turn: Number.isInteger(state.activeTurn?.index) ? state.activeTurn!.index : (state.lastClosedTurnIndex ?? -1) + 1,
+      });
+      debugLog('pre-tool-use', 'commit command in flight', { tool: input.tool_name, cwd: hookCwd });
+      try { saveSessionState(state, saveCwd, state.sessionTag); } catch { /* non-fatal */ }
+    }
+  } catch { /* best-effort — never block a tool call on it */ }
 
   // ── Lazy multi-repo attach ──────────────────────────────────────────────
   // If the agent touches a file in a sibling repo, attach it now instead of
@@ -637,6 +663,18 @@ export async function handlePostToolUse(rawInput: Record<string, any>, agentSlug
     debugLog('post-tool-use', 'lastCwd updated', { from: state.lastCwd, to: hookCwd });
     state.lastCwd = hookCwd;
     saveSessionState(state, saveCwd, state.sessionTag);
+  }
+
+  // The commit command this session announced at pre-tool-use has returned.
+  // Only its own call clears it: parallel tool calls finish in any order. A
+  // call that never reports back is dropped by age (COMMIT_COMMAND_TTL_MS).
+  if (state.commitCommandInFlight) {
+    const mine = state.commitCommandInFlight.toolCallId;
+    const done = input.tool_call_id || input.tool_use_id;
+    if (!mine || !done || String(done) === mine) {
+      setCommitCommandInFlight(state, null);
+      try { saveSessionState(state, saveCwd, state.sessionTag); } catch { /* non-fatal */ }
+    }
   }
 
   if (state.subagents && state.subagents.length > 0) {

@@ -88,15 +88,26 @@ describe('a turn whose commits were squash-merged and checked out from main', ()
     expect((mapping as { contentUnavailableFiles?: string[] }).contentUnavailableFiles).toEqual([]);
   });
 
-  it('still stands down when no commit of the turn is reachable and no rewrite is known', () => {
+  // REVERSED 2026-09-21. This used to stand down, and the reason given was
+  // "nothing to end the range at" — true of a range off HEAD, and the only
+  // shape this pass then had. But the squash put the commits' bytes in HEAD
+  // (`carried`), and each chain can be diffed from its OWN first parent to its
+  // own tip, which needs no reachable endpoint at all. Standing down left the
+  // row on a ledger the capture had narrowed, while the session header — post-
+  // commit's, written before the merge — kept counting the commits' files;
+  // they then disagreed forever (live session 92f14dfb, release gate
+  // `header_file_unclaimed_by_turns`). See commit-patch-survives-a-squash-merge.
+  it('sends each squashed-away chain\'s own patch when no rewrite is known', () => {
     const { c1, c2, state, mapping } = squashedTurn();
-    // Only the squashed-away commits on record: nothing to end the range at.
+    // Only the squashed-away commits on record: no range endpoint, but their
+    // content is in HEAD and their objects still read.
     state.commitTurns = [{ sha: c1, turnId: 't_0' }, { sha: c2, turnId: 't_0' }];
-    const before = { ...mapping };
     const log: string[] = [];
-    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo, { log: (e) => log.push(e) })).toBe(0);
-    expect(mapping).toEqual(before);
-    expect(log).toContain('commit patch declined: no commit of the turn, nor a rewrite of one, is reachable from HEAD');
+    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo, { log: (e) => log.push(e) })).toBe(1);
+    // The turn's real work — a.ts, b.ts, c.ts — instead of the narrowed
+    // ledger's single d.ts.
+    expect([...(mapping.filesChanged as string[])].sort()).toEqual(['a.ts', 'b.ts', 'c.ts']);
+    expect(log).not.toContain('commit patch declined: no commit of the turn, nor a rewrite of one, is reachable from HEAD');
   });
 
   it('ends the range at the recorded rewrite when the originals are gone from HEAD', () => {

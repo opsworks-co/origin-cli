@@ -70,11 +70,19 @@ describe('the daemon session-end rows', () => {
       promptTurnIds: ['t_a', 't_b'],
       promptSubmittedAt: ['2026-09-15T20:00:00.000Z', SUBMIT],
       promptIndexBase: 1,
-      completedPromptMappings: [{ promptIndex: 1 }, { promptIndex: 2, turnId: 't_b' }],
+      completedPromptMappings: [
+        { promptIndex: 1, capturedAt: '2026-09-15T20:01:00.000Z' },
+        { promptIndex: 2, turnId: 't_b', capturedAt: '2026-09-15T20:25:00.000Z' },
+      ],
     })!;
     expect(rows[0]).toMatchObject({ promptIndex: 1, turnId: 't_a', createdAt: '2026-09-15T20:00:00.000Z' });
     // A mapping that already names its turn still gets the time.
     expect(rows[1]).toMatchObject({ promptIndex: 2, turnId: 't_b', createdAt: SUBMIT });
+    // Saved mappings use ISO strings locally; the API's staleness ordering
+    // accepts epoch milliseconds only.
+    expect(rows[0].capturedAt).toBe(Date.parse('2026-09-15T20:01:00.000Z'));
+    expect(rows[1].capturedAt).toBe(Date.parse('2026-09-15T20:25:00.000Z'));
+    expect(String(rows[0].captureId)).toMatch(/^hb_/);
   });
 
   it('keep a createdAt the mapping already carries', () => {

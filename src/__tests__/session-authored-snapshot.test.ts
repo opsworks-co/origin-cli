@@ -18,6 +18,7 @@ import os from 'os';
 import path from 'path';
 import { commitAuthoredDelta, renderAuthoredCommits } from '../history-backfill.js';
 import { sessionAuthoredSnapshot, applyAuthoredTotals } from '../commands/hooks/post-commit.js';
+import { sessionAuthoredNothing } from '../commands/hooks.js';
 import { hasDuplicateFileSections } from '../applyable-turn-diff.js';
 
 let repo: string;
@@ -259,5 +260,114 @@ describe('the header drops what the turn rows never count', () => {
     } finally {
       git('checkout', '-q', 'main');
     }
+  });
+});
+
+// RCCE-423 (874ff028): a commit the session reset away is not what it
+// authored. Dropping it from `commitShas` alone left its patch in the session
+// diff, files and counts, because the session-level render replays every
+// recorded sha and `git show` still reads the orphan.
+describe('a commit the session reset away is not in the snapshot', () => {
+  let r = '';
+  const g = (...a: string[]) => execFileSync('git', a, { cwd: r, encoding: 'utf-8' }).trim();
+  const commitFile = (file: string, body: string, msg: string) => {
+    fs.writeFileSync(path.join(r, file), body);
+    g('add', '-A'); g('commit', '-q', '-m', msg);
+    return g('rev-parse', 'HEAD');
+  };
+  let base = '';
+  const stateAt = (shas: string[]) => ({
+    sessionId: 'sess-abandoned', sessionTag: 'abandoned', agentSlug: 'claude-code',
+    repoPath: r, headShaAtStart: base, startedAt: new Date(Date.now() - 60_000).toISOString(),
+    prompts: [], sessionCommitShas: shas,
+  }) as any;
+
+  beforeAll(() => {
+    r = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-authored-abandoned-')));
+    execFileSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: r });
+    g('config', 'user.email', 'a@b.c'); g('config', 'user.name', 'T'); g('config', 'commit.gpgsign', 'false');
+    base = commitFile('base.ts', 'export const BASE = 1;\n', 'base');
+  });
+  afterAll(() => { try { fs.rmSync(r, { recursive: true, force: true }); } catch { /* ignore */ } });
+
+  it('a session whose only commit was reset away has no committed side at all', () => {
+    const wip = commitFile('wip-only.ts', 'export const WIP_ONLY_MARKER = 1;\n', 'wip');
+    g('reset', '-q', '--hard', 'HEAD~1');
+    const snap = sessionAuthoredSnapshot(r, stateAt([wip]));
+    expect(snap.abandonedCommits).toEqual([wip]);
+    expect(snap.commitShas).not.toContain(wip);
+    expect(snap.committedDiff).toBe('');
+    expect(snap.diff).not.toContain('WIP_ONLY_MARKER');
+    expect(snap.diff).not.toContain('wip-only.ts');
+    expect(snap.filesChanged).not.toContain('wip-only.ts');
+    expect([snap.linesAdded, snap.linesRemoved]).toEqual([0, 0]);
+    expect(snap.source).toBe('none');
+  });
+
+  it('git proves a fully reset session authored nothing — and refuses the proof on any dirt', () => {
+    g('reset', '-q', '--hard', base);
+    const wip = commitFile('wip-only.ts', 'export const WIP_ONLY_MARKER = 1;\n', 'wip');
+    g('reset', '-q', '--hard', 'HEAD~1');
+    expect(sessionAuthoredNothing(r, stateAt([wip]))).toBe(true);
+    fs.writeFileSync(path.join(r, 'stray.ts'), 'dirt\n');
+    expect(sessionAuthoredNothing(r, stateAt([wip])), 'an untracked file is not nothing').toBe(false);
+    fs.rmSync(path.join(r, 'stray.ts'));
+    fs.writeFileSync(path.join(r, 'base.ts'), 'export const BASE = 2;\n');
+    expect(sessionAuthoredNothing(r, stateAt([wip])), 'a tracked edit is not nothing').toBe(false);
+    g('checkout', '--', 'base.ts');
+    expect(sessionAuthoredNothing(r, { ...stateAt([wip]), headShaAtStart: undefined }), 'no start, no proof').toBe(false);
+  });
+
+  // Origin writes its OWN context file into the repo at session start
+  // (CLAUDE.md, carrying the `<!-- origin-managed -->` block). In a repo that
+  // does not track that file it is untracked on every run, so
+  // `ls-files --others` was never empty and the proof was unobtainable in real
+  // life: live session cd52a877 kept the SessionDiff post-commit had written
+  // BEFORE the reset, and the page went on showing the thrown-away file.
+  //
+  // Origin's own bookkeeping is not the session's work. Anything the agent
+  // wrote around the block is, and so is any other untracked file.
+  it("Origin's own untracked context file does not defeat the proof — the agent's lines in it do", () => {
+    g('reset', '-q', '--hard', base);
+    const wip = commitFile('wip-only.ts', 'export const WIP_ONLY_MARKER = 1;\n', 'wip');
+    g('reset', '-q', '--hard', 'HEAD~1');
+    const claude = path.join(r, 'CLAUDE.md');
+    const block = '<!-- origin-managed -->\nOrigin: Session tracking active\n<!-- origin-managed -->\n';
+    try {
+      fs.writeFileSync(claude, block);
+      expect(sessionAuthoredNothing(r, stateAt([wip])), "Origin's own file counted as the session's work").toBe(true);
+
+      fs.writeFileSync(claude, `${block}\nA rule the agent wrote below the block\n`);
+      expect(sessionAuthoredNothing(r, stateAt([wip])), 'a line outside the block is work').toBe(false);
+
+      fs.writeFileSync(claude, block);
+      fs.writeFileSync(path.join(r, 'notes.md'), 'someone else\n');
+      expect(sessionAuthoredNothing(r, stateAt([wip])), 'another untracked file is still dirt').toBe(false);
+    } finally {
+      fs.rmSync(path.join(r, 'notes.md'), { force: true });
+      fs.rmSync(claude, { force: true });
+    }
+  });
+
+  it('A survives, a WIP is reset away, B survives: only A and B, by sha and by content', () => {
+    g('reset', '-q', '--hard', base);
+    const a = commitFile('a.ts', 'export const A_MARKER = 1;\n', 'feat: a');
+    fs.writeFileSync(path.join(r, 'b.ts'), 'export const B_FIRST = 1;\n');
+    const wip = commitFile('wip-only.ts', 'export const WIP_ONLY_MARKER = 1;\n', 'wip');
+    g('reset', '-q', '--hard', 'HEAD~1');
+    // The same file the WIP touched, changed again by the surviving commit.
+    const b = commitFile('b.ts', 'export const B_FINAL = 2;\n', 'wip');
+    const snap = sessionAuthoredSnapshot(r, stateAt([a, wip, b]));
+    expect(snap.abandonedCommits).toEqual([wip]);
+    expect(snap.commitShas).toEqual([a, b]);
+    expect(snap.source).toBe('owned');
+    expect(snap.filesChanged.sort()).toEqual(['a.ts', 'b.ts']);
+    for (const text of [snap.committedDiff, snap.diff]) {
+      expect(text).toContain('A_MARKER');
+      expect(text).toContain('B_FINAL');
+      expect(text).not.toContain('WIP_ONLY_MARKER');
+      expect(text).not.toContain('B_FIRST');
+    }
+    expect([snap.linesAdded, snap.linesRemoved]).toEqual([2, 0]);
   });
 });

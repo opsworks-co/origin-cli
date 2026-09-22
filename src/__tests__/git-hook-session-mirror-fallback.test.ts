@@ -16,7 +16,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { listMirroredSessionsForTree } from '../session-state.js';
+import { listActiveSessions, listMirroredSessionsForTree } from '../session-state.js';
 import { fileURLToPath } from 'url';
 import { hooksSource } from './helpers/hooks-source.js';
 
@@ -34,7 +34,7 @@ beforeEach(() => {
   tree = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-mirror-tree-'));
 });
 afterEach(() => {
-  for (const f of ['t-live', 't-other', 't-ended', 't-bycwd']) {
+  for (const f of ['t-live', 't-other', 't-ended', 't-bycwd', 't-bad']) {
     try { fs.rmSync(path.join(dir, `${f}.json`)); } catch { /* ignore */ }
   }
   try { fs.rmSync(tree, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -80,6 +80,22 @@ describe('listMirroredSessionsForTree', () => {
     write('t-live', { repoPath: tree, status: 'RUNNING' });
     expect(listMirroredSessionsForTree('')).toEqual([]);
   });
+
+  it('distinguishes an unreadable peer list from an empty one when asked', () => {
+    fs.writeFileSync(path.join(dir, 't-bad.json'), '{not json');
+    expect(listMirroredSessionsForTree(tree)).toEqual([]);
+    expect(() => listMirroredSessionsForTree(tree, { failOnReadError: true })).toThrow();
+  });
+});
+
+describe('strict in-repo session reads', () => {
+  it('distinguishes a corrupt state file from no active sessions', () => {
+    const gitDir = path.join(tree, '.git');
+    fs.mkdirSync(gitDir);
+    fs.writeFileSync(path.join(gitDir, 'origin-session-bad.json'), '{not json');
+    expect(listActiveSessions(tree, gitDir)).toEqual([]);
+    expect(() => listActiveSessions(tree, gitDir, { failOnReadError: true })).toThrow();
+  });
 });
 
 // Both halves are required and neither works alone: without the early
@@ -90,10 +106,10 @@ describe('the two halves are wired', () => {
   const src = hooksSource();
 
   it('git hooks consult the mirror after the in-repo lookups', () => {
-    const active = src.indexOf('let sessions = listActiveSessions(hookCwd);');
+    const active = src.indexOf('let sessions = listActiveSessions(hookCwd, undefined, readOpts);');
     // Searched from the in-repo lookup onward: the shared helpers ahead of the
     // git-hook path consult the mirror too, and that earlier call is not this one.
-    const mirror = src.indexOf('listMirroredSessionsForTree(hookCwd)', active);
+    const mirror = src.indexOf('listMirroredSessionsForTree(hookCwd, readOpts)', active);
     expect(active).toBeGreaterThan(-1);
     expect(mirror).toBeGreaterThan(active);
   });

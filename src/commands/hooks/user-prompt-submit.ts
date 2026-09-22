@@ -19,6 +19,7 @@ import { MAX_PROMPT_DIFF_LEN, captureGitState, createShadowCommit, filesChangedS
 import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
 import { syncNotesForSessionStart } from '../../git-notes.js';
 import { buildHandoffContext } from '../../handoff.js';
+import { applyLateRegistrationClaim, DEFAULT_CLAIM_MAX_AGE_MS } from '../../claim-commits-made-before-registration.js';
 import { listRecentShas } from '../../history-backfill.js';
 import { matchIgnoredRepo } from '../../ignore-repos.js';
 import { buildMemoryBriefContext, buildMemoryContext, buildMemoryEscalationContext, buildMemoryPointerContext, buildPromptScopedMemoryContext, buildStartupCheckContext } from '../../memory.js';
@@ -1384,6 +1385,63 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           activePolicies,
           enforcementRules,
         };
+        // ── Commits made while Origin was still blind ───────────────────
+        // We only got here because no session state existed a moment ago. If
+        // the conversation already had turns, those turns could have COMMITTED
+        // with nothing to record them: post-commit's only safe branch when it
+        // finds no state is to write nothing at all. That commit is then
+        // unowned forever, and the next rebase or amend over it is refused by
+        // post-rewrite — `owns()` asks whether we hold the OLD sha, which we
+        // never did — so the rewritten copy lands on whatever turn happens to
+        // be running and bills it for work it did not do.
+        //
+        // Gated on a LATE attach, and on the files those turns were SEEN to
+        // edit. The gate and the bookkeeping live in
+        // `applyLateRegistrationClaim` so the safety property is a function
+        // something can test, not an `if` in the middle of this hook.
+        //
+        // The file list is what makes this a claim rather than a grab: every
+        // other signal the walk has answers "has Origin recorded this commit?",
+        // and during the blind window that is no for our commit and for a
+        // stranger's alike.
+        {
+          // Scoped to the claim's own window, NOT to the whole transcript.
+          // `lateAttach.mappings` spans every turn the file holds, and on a
+          // resumed conversation that reaches back days — `extractPromptFileMappings`
+          // says so itself. Yesterday's edit to a file would then vouch for a
+          // commit somebody made to that file this morning, which is the
+          // over-claim the file gate exists to prevent, wearing the gate's own
+          // evidence. A second parse is the price; it only runs on a late
+          // attach, which is rare by construction.
+          //
+          // `carriedPrompts` is deliberately NOT a late attach here. When
+          // prompts are carried, `lateAttach` is the empty literal above, so
+          // there is no file evidence for that path and a claim is impossible
+          // anyway — treating it as late would only read as live code that
+          // cannot fire.
+          const claimEditedFiles = lateAttach.prompts.length > 0
+            ? Array.from(new Set(
+              extractPromptFileMappings(input.transcript_path || '', {
+                repoRoots: [repoPath, hookCwd],
+                since: new Date(Date.now() - DEFAULT_CLAIM_MAX_AGE_MS),
+              }).flatMap((m) => m?.filesChanged || []),
+            ))
+            : [];
+          const claimed = applyLateRegistrationClaim(hookCwd, state, sessionId, {
+            isLateAttach: lateAttach.prompts.length > 0,
+            editedFiles: claimEditedFiles,
+            onNoEvidence: () => debugLog('user-prompt-submit',
+              'late attach: no file evidence in the claim window, claiming nothing', {
+                sessionId, recoveredPrompts: lateAttach.prompts.length,
+              }),
+          });
+          if (claimed.length > 0) {
+            debugLog('user-prompt-submit', 'claimed commits made before the session registered', {
+              sessionId, claimed: claimed.map((c) => c.slice(0, 8)), startedAt: state.startedAt,
+              editedFiles: claimEditedFiles.length,
+            });
+          }
+        }
         // ONE state file per server session — the same guard session-start
         // runs, which this path lacked entirely.
         //

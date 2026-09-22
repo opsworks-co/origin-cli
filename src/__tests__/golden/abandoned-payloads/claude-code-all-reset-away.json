@@ -1,0 +1,242 @@
+{
+ "note": "Recorded by packages/cli capture-e2e-reset-away-commits-leave-the-session with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api session-reset-away-commits-real-db.test.ts.",
+ "roots": [
+  "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/all-reset",
+  "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU"
+ ],
+ "roles": {
+  "base": "d2c5ef06fca53336d47d4236fb0dd0bad03749d6",
+  "wip": "382f6866ba97e2a54b8863066ce9f3670a885ccb"
+ },
+ "marker": "WIP_ONLY_MARKER",
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "src/wip_only.ts"
+    ],
+    "branch": "main",
+    "gitCapture": {
+     "headBefore": "d2c5ef06fca53336d47d4236fb0dd0bad03749d6",
+     "headAfter": "382f6866ba97e2a54b8863066ce9f3670a885ccb",
+     "commitShas": [
+      "382f6866ba97e2a54b8863066ce9f3670a885ccb"
+     ],
+     "commitDetails": [
+      {
+       "sha": "382f6866ba97e2a54b8863066ce9f3670a885ccb",
+       "message": "wip\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/wip_only.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/wip_only.ts b/src/wip_only.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/wip_only.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "turnId": "t_8db4b038da5f4ab0",
+      "createdAt": "2026-09-21T10:09:51.499Z",
+      "captureId": "c_c880e03806524ae0",
+      "capturedAt": 1789985393607,
+      "promptText": "try something",
+      "filesChanged": [
+       "src/wip_only.ts"
+      ],
+      "diff": "diff --git a/src/wip_only.ts b/src/wip_only.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/wip_only.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;",
+      "commitPatch": true,
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "commitSha": "382f6866ba97e2a54b8863066ce9f3670a885ccb",
+      "commitMessage": "wip"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "d2c5ef06fca53336d47d4236fb0dd0bad03749d6",
+     "headAfter": "382f6866ba97e2a54b8863066ce9f3670a885ccb",
+     "commitShas": [
+      "382f6866ba97e2a54b8863066ce9f3670a885ccb"
+     ],
+     "commitDetails": [
+      {
+       "sha": "382f6866ba97e2a54b8863066ce9f3670a885ccb",
+       "message": "wip\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/wip_only.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/wip_only.ts b/src/wip_only.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/wip_only.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;"
+      }
+     ],
+     "diff": "diff --git a/src/wip_only.ts b/src/wip_only.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/wip_only.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;",
+     "diffTruncated": false,
+     "linesAdded": 1,
+     "linesRemoved": 0,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "try something",
+    "agentSlug": "claude-code",
+    "filesChanged": [],
+    "tokensUsed": 12,
+    "tokensEstimated": true,
+    "inputTokens": 3,
+    "outputTokens": 9,
+    "toolCalls": 3,
+    "toolBreakdown": [
+     {
+      "name": "Bash",
+      "count": 2
+     },
+     {
+      "name": "Write",
+      "count": 1
+     }
+    ],
+    "durationMs": 4122,
+    "costUsd": 0.0002,
+    "gitCapture": {
+     "headBefore": "d2c5ef06fca53336d47d4236fb0dd0bad03749d6",
+     "headAfter": "d2c5ef06fca53336d47d4236fb0dd0bad03749d6",
+     "commitShas": [],
+     "commitDetails": [],
+     "diff": "",
+     "linesAdded": 0,
+     "linesRemoved": 0,
+     "snapshot": true,
+     "abandonedCommits": [
+      "382f6866ba97e2a54b8863066ce9f3670a885ccb"
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "try something",
+      "filesChanged": [],
+      "diff": "",
+      "edits": [
+       {
+        "file": "src/wip_only.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/all-reset/src/wip_only.ts",
+         "content": "export const WIP_ONLY_MARKER = 1;\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add src/wip_only.ts && git commit -m wip"
+      ],
+      "wroteViaShell": true,
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "chatOnly": true,
+      "contentUnavailableFiles": [],
+      "commitSha": null,
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "diffSource": "turn-window",
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"try something\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/wip_only.ts\",\"op\":\"write\",\"newContent\":\"export const WIP_ONLY_MARKER = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
+      "turnId": "t_8db4b038da5f4ab0",
+      "createdAt": "2026-09-21T10:09:51.499Z",
+      "captureId": "c_b743ea1eeda34282",
+      "capturedAt": 1789985396098
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "try something",
+    "agentSlug": "claude-code",
+    "filesChanged": [],
+    "tokensUsed": 12,
+    "tokensEstimated": true,
+    "inputTokens": 3,
+    "outputTokens": 9,
+    "toolCalls": 3,
+    "toolBreakdown": [
+     {
+      "name": "Bash",
+      "count": 2
+     },
+     {
+      "name": "Write",
+      "count": 1
+     }
+    ],
+    "durationMs": 5830,
+    "costUsd": 0.0002,
+    "gitCapture": {
+     "headBefore": "d2c5ef06fca53336d47d4236fb0dd0bad03749d6",
+     "headAfter": "d2c5ef06fca53336d47d4236fb0dd0bad03749d6",
+     "commitShas": [],
+     "commitDetails": [],
+     "diff": "",
+     "linesAdded": 0,
+     "linesRemoved": 0,
+     "snapshot": true,
+     "abandonedCommits": [
+      "382f6866ba97e2a54b8863066ce9f3670a885ccb"
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "try something",
+      "filesChanged": [],
+      "diff": "",
+      "edits": [
+       {
+        "file": "src/wip_only.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/cv/2bqkvx8s6gzbkw597ylvnbym0000gn/T/origin-e2e-reset-away-IT7pZU/all-reset/src/wip_only.ts",
+         "content": "export const WIP_ONLY_MARKER = 1;\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add src/wip_only.ts && git commit -m wip"
+      ],
+      "wroteViaShell": true,
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "chatOnly": true,
+      "contentUnavailableFiles": [],
+      "commitSha": null,
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "diffSource": "turn-window",
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"try something\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/wip_only.ts\",\"op\":\"write\",\"newContent\":\"export const WIP_ONLY_MARKER = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
+      "turnId": "t_8db4b038da5f4ab0",
+      "createdAt": "2026-09-21T10:09:51.499Z",
+      "captureId": "c_8d44534e01594cf5",
+      "capturedAt": 1789985397726
+     }
+    ]
+   }
+  }
+ ]
+}

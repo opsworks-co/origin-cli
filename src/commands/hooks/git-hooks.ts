@@ -17,6 +17,7 @@ import { decidePushBlock } from '../../push-block.js';
 import { isNonSecretAssignmentValue, isSkippedScanPath } from '../../secret-rules.js';
 import { getGitRoot, getWorkingGitRoot, gitDirFilePath, listActiveSessions, saveSessionState } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
+import { sessionRunningTheCommit } from '../../commit-command-in-flight.js';
 import { listSnapshots } from '../snapshot.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
@@ -860,6 +861,20 @@ export function pickActiveSessionForCommit(hookCwd: string): SessionState | null
     // fell through to process detection, and mostly went unattributed
     // (production session 5606d120: zero FK-linked commits).
     const staged = new Set(stagedFiles);
+    // The session whose shell is running the commit is the one committing —
+    // said by its own pre-tool-use hook before the command ran, so it holds
+    // when the files do not: a command that edits and commits in one call is
+    // here before its ledger has the edit, and the overlap rule below then
+    // found the staged file in the finished turns of yesterday's conversation
+    // in the same worktree (6b770703 / ff9131bd, 2026-09-20). See
+    // sessionRunningTheCommit for when it declines.
+    const committing = sessionRunningTheCommit(activeSessions, hookCwd, staged, (s) => inFlightEditedFiles(s as any));
+    if (committing.session) {
+      debugLog('prepare-commit-msg', 'attributed by the commit command in flight', {
+        session: committing.session.sessionId.slice(0, 12), staged: staged.size, ofActive: activeSessions.length,
+      });
+      return committing.session;
+    }
     if (staged.size > 0) {
       // A session MID-TURN whose in-flight writes are being committed is the
       // one committing. Completed mappings say who wrote these files at some

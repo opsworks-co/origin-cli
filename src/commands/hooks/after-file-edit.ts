@@ -105,9 +105,14 @@ export function resolveAfterFileEditCwd(input: Record<string, any>): string {
  * A turn discovered late also has nobody to have anchored its baseline, so we
  * anchor one now. The new turn's window starts HERE rather than at the
  * previous turn's shadow, which is what stops it re-claiming work already
- * attributed. The edit that revealed the boundary falls inside that shadow,
- * but the caller reads it against the OLD baseline and records it as edit-hook
- * evidence first, so it is not lost.
+ * attributed. The edit that revealed the boundary falls inside that shadow, so
+ * the caller reads it against the OLD baseline twice: once as edit-hook
+ * evidence, and once — when the window comes back empty, as it must on this
+ * path — to build the mapping itself. Evidence alone was not enough. It
+ * declines for a file too large for the ledger's content cap, and the mapping
+ * was then never written at all: prod 2ecac40a turn 2 lost `session-state.ts`,
+ * the 153 KB file it opened with, and committed five files while claiming four.
+ * See rescueRevealingWrite.
  */
 export function adoptUnannouncedPrompts(
   state: SessionState,
@@ -217,8 +222,11 @@ export function buildLiveEditPromptChanges(
     const diff = capDiff(pm.diff, MAX_PROMPT_DIFF_LEN);
     const { linesAdded, linesRemoved } = countDiffLines(diff);
     return {
-      ...captureStamp,
       ...pm,
+      // Persisted mappings use an ISO `capturedAt` for the release gate.
+      // The wire contract is epoch milliseconds, so the stamp for THIS send
+      // must win over anything the saved row carries.
+      ...captureStamp,
       promptText: (pm.promptText || '').slice(0, 1000),
       diff,
       uncommittedDiff: capDiff(pm.uncommittedDiff, MAX_PROMPT_DIFF_LEN),
@@ -241,6 +249,47 @@ export function buildLiveEditPromptChanges(
  * means nothing was committed during the turn, and a HEAD outside its
  * ancestry (a checkout elsewhere) is no commit of this turn's either.
  */
+/** The `diff --git` sections of `diffText` covering `files`, in order. */
+export function diffSectionsFor(diffText: string, files: ReadonlySet<string>): string {
+  if (!diffText || files.size === 0) return '';
+  const kept: string[] = [];
+  for (const section of diffText.split(/^(?=diff --git )/m)) {
+    const m = section.split('\n', 1)[0]?.match(/^diff --git a\/(.*?) b\/(.+)$/);
+    if (!m) continue;
+    if (files.has(m[2]) || files.has(m[1])) kept.push(section.trimEnd());
+  }
+  return kept.join('\n').trim();
+}
+
+/**
+ * The turn's first write, recovered from the tree it actually changed.
+ *
+ * When this hook is the thing that DISCOVERS a turn, `adoptUnannouncedPrompts`
+ * cuts that turn's shadow from the working tree — which already holds the write
+ * that revealed it. The turn's own window is then empty by construction, and
+ * the caller used to return on that, so the file never reached the mapping at
+ * all. Prod 2ecac40a turn 2 opened by editing `session-state.ts`; the hook
+ * logged `no diff against shadow, skipping`, and that file alone of the turn's
+ * five was missing from `filesChanged` when the turn committed all five.
+ *
+ * `editBaseline` is the tree that was open when Cursor wrote the file — the
+ * before-state this content actually changed, and the same baseline the
+ * evidence call on this branch already trusts. Scoped to the named files, so
+ * nothing else that happens to differ between the two baselines rides along.
+ */
+export function rescueRevealingWrite(
+  editBaseline: string | undefined,
+  files: readonly string[],
+  capture: (baseline: string) => { workingTreeDiff?: string | null; uncommittedDiff?: string | null },
+): string {
+  if (!editBaseline || files.length === 0) return '';
+  try {
+    const against = capture(editBaseline);
+    const scope = new Set(files);
+    return diffSectionsFor(against.workingTreeDiff || against.uncommittedDiff || '', scope);
+  } catch { return ''; }
+}
+
 export function headCommitMadeSince(repoPath: string, baselineSha: string | null | undefined): string | null {
   if (!repoPath || !baselineSha || !/^[a-fA-F0-9]{7,40}$/.test(baselineSha)) return null;
   const git = (args: string[]): string => execFileSync('git', args, {
@@ -383,12 +432,34 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
     // +125 plus turn 1's committed +119 — and the Stop that followed just
     // re-sent that mapping.
     const sessionCommitted = sessionScopedCommittedDiff(state.repoPath, state, captureBaseline);
-    const fullDiff = combineApplyableTurnDiff({
+    let fullDiff = combineApplyableTurnDiff({
       committedDiff: sessionCommitted,
       uncommittedDiff: filteredUncommitted,
       workingTreeDiff: capture.workingTreeDiff || '',
     });
-    if (!fullDiff) {
+    // An empty window on the invocation that DISCOVERED this turn is not "no
+    // work" — it is the shadow we just cut swallowing the write that revealed
+    // the turn. Recover it against the tree it actually changed rather than
+    // returning; see rescueRevealingWrite. Any other empty window really is
+    // nothing to file.
+    const shadowSwallowedThisWrite = promptIdx > announcedIdx && announcedIdx >= 0;
+    let contentUnavailable: string[] = [];
+    if (!fullDiff && shadowSwallowedThisWrite && edited.length > 0) {
+      fullDiff = rescueRevealingWrite(
+        editBaseline, edited,
+        (baseline) => captureGitState(state.repoPath!, baseline),
+      );
+      // Still nothing recoverable — a file too large for the content path, or
+      // a baseline git cannot read. The hook NAMED it, so the turn changed it:
+      // say so and say the bytes are missing, which is what
+      // `contentUnavailableFiles` is for. Dropping it is how the turn came to
+      // look like it had never touched the file at all.
+      if (!fullDiff) contentUnavailable = [...edited];
+      debugLog('after-file-edit', 'window swallowed the revealing write', {
+        promptIndex: promptIdx, files: edited, recovered: fullDiff.length,
+      });
+    }
+    if (!fullDiff && contentUnavailable.length === 0) {
       debugLog('after-file-edit', 'no diff against shadow, skipping');
       return;
     }
@@ -419,14 +490,20 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
     }
 
     const promptText = (state.prompts?.[promptIdx] || '').slice(0, 1000);
+    // The rescued write is an uncommitted working-tree change; the window it
+    // was recovered from produced none, so the row would otherwise carry a
+    // diff with no uncommitted half to match it.
+    const uncommitted = (!filteredUncommitted && shadowSwallowedThisWrite)
+      ? fullDiff : filteredUncommitted;
     const mapping = {
       promptIndex: promptIdx,
       promptText,
       filesChanged: Array.from(filesChanged),
       diff: fullDiff.slice(0, 200_000),
-      uncommittedDiff: filteredUncommitted.slice(0, 200_000),
+      uncommittedDiff: uncommitted.slice(0, 200_000),
       commitSha,
       treeSha,
+      ...(contentUnavailable.length > 0 ? { contentUnavailableFiles: contentUnavailable } : {}),
     };
     const existingIdx = state.completedPromptMappings.findIndex((m) => m.promptIndex === promptIdx);
     if (existingIdx >= 0) {
