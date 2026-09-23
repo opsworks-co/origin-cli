@@ -1791,6 +1791,22 @@ export async function handlePostCommit(): Promise<void> {
     debugLog('post-commit', 'SKIP recording: the commit is a replay, not this turn\'s work', {
       commitSha: commitSha.slice(0, 8), replay: replayed, pickedSession: state?.sessionId,
     });
+    // RECORD the verdict, don't just act on it. This is the only moment it can
+    // be observed: `commitReplayKind` reads the reflog of the worktree the
+    // replay ran in, and a throwaway worktree takes its reflog with it. Skipping
+    // the credit here kept the sha off THIS hook's payload but not off Stop's
+    // gitCapture, and the server's back-attribution then stamped it on whichever
+    // turn was running — correctly by its own rule, on a commit the CLI had
+    // already judged to be somebody else's (prod f5556085 turn 28).
+    if (state) {
+      if (!Array.isArray(state.replayedCommits)) state.replayedCommits = [];
+      if (!state.replayedCommits.some((sha) => sha.toLowerCase() === commitSha.toLowerCase())) {
+        state.replayedCommits.push(commitSha);
+        try {
+          if (state.sessionTag) saveSessionState(state, state.repoPath || hookCwd, state.sessionTag);
+        } catch { /* non-fatal — the verdict is a refinement, not the capture */ }
+      }
+    }
   }
   const commitIsAnotherSessions = trailerNamesAnotherLiveSession || !!replayed;
   if (state && state.sessionTag && !commitIsAnotherSessions) {

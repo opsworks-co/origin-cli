@@ -228,6 +228,21 @@ export function rewrittenCommitsPayload(state: SessionState): { rewrittenCommits
   return Array.isArray(r) && r.length > 0 ? { rewrittenCommits: r } : {};
 }
 
+/**
+ * The replay verdicts post-commit recorded, for the outgoing gitCapture.
+ *
+ * A function rather than an inline spread so the wire link itself is testable:
+ * the whole defect was a verdict that existed and never travelled, and an
+ * attachment buried in `sendStopCapture` can only be reached by driving Stop
+ * end to end. Empty state sends no key at all — the server's parser treats an
+ * absent list and an empty one alike, and omitting it keeps payloads from
+ * sessions that replayed nothing byte-identical to before.
+ */
+export function replayedCommitsPayload(state: Pick<SessionState, 'replayedCommits'>): { replayedCommits?: string[] } {
+  const r = state.replayedCommits;
+  return Array.isArray(r) && r.length > 0 ? { replayedCommits: [...r] } : {};
+}
+
 const HEX_SHA = /^[a-fA-F0-9]{7,40}$/;
 
 /**
@@ -2102,6 +2117,7 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
       commitDetails: CommitDetailWire[];
       snapshot?: true;
       abandonedCommits?: string[];
+      replayedCommits?: string[];
     } | undefined;
     // Cursor's git commits don't reliably fire .git/hooks/post-commit
     // (sandbox / worktree isolation — same comment as in enable.ts). On
@@ -2340,6 +2356,20 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
               abandonedCommits: abandoned,
             };
       }
+    }
+
+    // Commits this tree REPLAYED, carried so the server can refuse them the
+    // way post-commit already did. The verdict cannot be recomputed here:
+    // `commitReplayKind` reads the reflog of the worktree that replayed, and a
+    // throwaway deploy worktree takes its reflog with it. So post-commit
+    // records it on the state and this only forwards it.
+    //
+    // Attached to whatever capture the routes above produced, rather than
+    // building one: with no capture there are no commitDetails, and nothing to
+    // back-attribute from.
+    const replayedPayload = replayedCommitsPayload(state);
+    if (sessionGitCapture && replayedPayload.replayedCommits) {
+      sessionGitCapture = { ...sessionGitCapture, ...replayedPayload };
     }
 
     // ─── Shell writes → real edits ────────────────────────────────────

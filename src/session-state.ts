@@ -520,6 +520,17 @@ export interface SessionState {
   // with what it had, and the orphan's Commit row stayed linked to the
   // session, so the same work counted twice however well the CLI deduped.
   rewrittenCommits?: Array<{ from: string; to: string }>;
+  /**
+   * Commits this session's tree REPLAYED rather than authored — a cherry-pick,
+   * a rebase copy, a `git am`. post-commit already refuses to credit them
+   * (`commitReplayKind`), but that verdict has to be RECORDED here rather than
+   * recomputed later: it reads the reflog of the worktree the replay ran in,
+   * and a throwaway worktree takes its reflog with it when it is removed.
+   * Prod f5556085 is exactly that — six cherry-picks in a deploy worktree that
+   * no longer exists, so nothing downstream could re-derive what post-commit
+   * saw at the time. Shipped to the server as `gitCapture.replayedCommits`.
+   */
+  replayedCommits?: string[];
   // policyId/ruleId/policyName ride along (sent by session/start since the
   // audit-reporting change) so hook-level blocks can report WHICH policy
   // fired; older state files lack them and degrade to type-only reports.
@@ -2150,8 +2161,8 @@ function foldCommitRecordsToSurvivors(
  * Returns what was added, or null when nothing was. Does not save.
  */
 export function keepCommitRecordsSavedMeanwhile(
-  state: Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits' | 'preSquashCommitTurns'>,
-  onDisk: Partial<Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits' | 'preSquashCommitTurns'>> | null | undefined,
+  state: Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits' | 'preSquashCommitTurns' | 'replayedCommits'>,
+  onDisk: Partial<Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits' | 'preSquashCommitTurns' | 'replayedCommits'>> | null | undefined,
 ): { shas: string[]; turns: number; pairs: number } | null {
   if (!onDisk || !state?.sessionId || onDisk.sessionId !== state.sessionId) return null;
   const same = (a: string, b: string) => {
@@ -2173,6 +2184,15 @@ export function keepCommitRecordsSavedMeanwhile(
   const addPre = (Array.isArray(onDisk.preSquashCommitTurns) ? onDisk.preSquashCommitTurns : []).filter((c) =>
     c?.sha && c.turnId && c.squash && !ownPre.some((own) => own?.sha && same(own.sha, c.sha)));
   if (addPre.length > 0) state.preSquashCommitTurns = [...ownPre, ...addPre];
+  // Same reasoning as preSquashCommitTurns, and merged BEFORE the early return
+  // for the same reason: a replay verdict is observed once, by whichever
+  // post-commit was running in the worktree that replayed it. A save carrying
+  // only that must not be dropped because no sha, pair or turn came with it —
+  // a replay is precisely the case where post-commit records no sha.
+  const ownReplayed = Array.isArray(state.replayedCommits) ? state.replayedCommits : [];
+  const addReplayed = (Array.isArray(onDisk.replayedCommits) ? onDisk.replayedCommits : []).filter((sha) =>
+    typeof sha === 'string' && sha.length > 0 && !ownReplayed.some((own) => typeof own === 'string' && same(own, sha)));
+  if (addReplayed.length > 0) state.replayedCommits = [...ownReplayed, ...addReplayed];
   if (addPairs.length === 0 && addShas.length === 0 && addTurns.length === 0) return null;
   const pairs = [...ownPairs, ...addPairs];
   if (addPairs.length > 0) state.rewrittenCommits = pairs;
