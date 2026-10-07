@@ -123,5 +123,7 @@ describe('sessionsSyncCommand idempotent start', () => {
     expect(r).toMatchObject({ synced: 1, failed: 0 });
     expect(startSession).toHaveBeenCalledTimes(1);
     expect(fs.existsSync(path.join(SESSIONS_DIR, 'c.json'))).toBe(false);
+    // The queued session's commits carry its local id in their trailers.
+    expect(startSession.mock.calls[0][0].localSessionId).toBe('local-c');
   });
 });

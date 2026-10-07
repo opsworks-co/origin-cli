@@ -36,7 +36,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { api } from './api.js';
-import { DEFAULT_FETCH_TIMEOUT_MS, timeoutForPayload } from './fetch-timeout.js';
+import { DEFAULT_FETCH_TIMEOUT_MS, timeoutForPayload, wireBytes } from './fetch-timeout.js';
 import { fitSessionUpdateForServer } from './session-update-size.js';
 
 export type QueueKind = 'updateSession' | 'endSession' | 'ingestCommits';
@@ -358,6 +358,20 @@ function spawnBackgroundDrain(deferred: number, log: Log): void {
 const BEHIND_DEFERRED = { message: 'queued behind a larger update of this session left for the background drain' };
 
 /**
+ * Largest session update, in bytes ON THE WIRE (gzipped), a hook sends itself.
+ *
+ * A hook sends with the 8s fast-fail (it is killed at ~10s, and a kill skips
+ * the enqueue). Past this size the send usually cannot finish in 8s from a home
+ * connection, so the hook spent 8s on a doomed attempt, queued the payload, and
+ * the NEXT hook handed it to the background drain, about a minute late.
+ * Session daf2d1ca, 2026-09-25: a 3MB Stop update aborted at 8s at 20:04:19;
+ * the background drain then sent it in ~1s, and an 8.9MB one in ~3s, at 20:05.
+ * 256KB gzipped is about 1MB of session JSON, which has been landing in under 1s.
+ */
+export const HOOK_SEND_MAX_WIRE_BYTES = 256 * 1024;
+const TOO_LARGE_FOR_HOOK = { message: 'too large to send inside a hook — handed to the background drain' };
+
+/**
  * Write-ahead copy of a session PATCH, taken BEFORE work that might kill this
  * process (a slow `captureGitState`, a shadow commit waiting on index.lock).
  * `durableUpdateSession` only enqueues after a failed fetch; a SIGKILL during
@@ -403,7 +417,7 @@ export async function durableUpdateSession(
   sessionId: string,
   data: any,
   log: Log = noop,
-  opts: { supersedes?: string | null; logEvent?: string; snapshot?: boolean } = {},
+  opts: { supersedes?: string | null; logEvent?: string; snapshot?: boolean; deferLarge?: boolean } = {},
 ): Promise<any | null> {
   // The write-ahead copy this payload replaces (persistUpdateBeforeWork).
   // Removed BEFORE the drain so it is neither replayed ahead of this send
@@ -425,6 +439,21 @@ export async function durableUpdateSession(
       if (opts.snapshot) dropSupersededSnapshots(sessionId, queued, sentAt, log);
       spawnBackgroundDrain(deferred, log);
       return null;
+    }
+  }
+  if (opts.deferLarge) {
+    // A hook's send: one too large to land in its 8s goes straight to the
+    // background drain, which sends it with a timeout sized to its payload.
+    let wire = 0;
+    try { wire = wireBytes(JSON.stringify(data)); } catch { /* unmeasurable — just send it */ }
+    if (wire > HOOK_SEND_MAX_WIRE_BYTES) {
+      const queued = writeQueueEntry('updateSession', sessionId, data, TOO_LARGE_FOR_HOOK, log, { snapshot: opts.snapshot });
+      if (queued) {
+        if (opts.snapshot) dropSupersededSnapshots(sessionId, queued, sentAt, log);
+        log(opts.logEvent || 'queue', 'session update too large for a hook — sending from the background', { sessionId, wireBytes: wire });
+        spawnBackgroundDrain(1, log);
+        return null;
+      }
     }
   }
   for (let attempt = 0; ; attempt++) {

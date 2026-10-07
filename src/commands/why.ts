@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { withOpenedPrompts } from '../note-seal.js';
 import path from 'path';
 import { getGitRoot, getWorkingGitRoot } from '../session-state.js';
 import { ProvenanceRoots, provenanceRoots, resolveQueryTarget } from '../session-worktree.js';
@@ -153,7 +154,9 @@ async function showLineWhy(roots: ProvenanceRoots, filePath: string, lineNum: nu
     : '—';
 
   // Step 3: check git notes for Origin session
-  const note = readOriginNote(repoPath, commitSha);
+  // Sealed prompts open here when this user can still get the key (note-seal.ts).
+  const rawNote = readOriginNote(repoPath, commitSha);
+  const note = rawNote ? await withOpenedPrompts(rawNote) : null;
 
   if (!note?.sessionId) {
     // Human-written or Origin wasn't tracking
@@ -231,6 +234,13 @@ async function showLineWhy(roots: ProvenanceRoots, filePath: string, lineNum: nu
   // Local-only: show what we know from git notes
   if (note.promptSummary) {
     console.log(chalk.green(`  Prompt: "${note.promptSummary}"`));
+  } else if (note.promptTextWithheld === true) {
+    // Metadata-only note (the default): the prompt lives in the permissioned
+    // Origin record, not in the repository.
+    const where = typeof note.originUrl === 'string' && /^https?:\/\//.test(note.originUrl) ? ` — ${note.originUrl}` : '';
+    console.log(chalk.gray(note.sealed
+      ? `  Prompt: sealed in git notes — no key for this user (needs repo access in Origin)${where}`
+      : `  Prompt: not stored in git notes${where}`));
   }
   const cost = note.costUsd ? `$${note.costUsd.toFixed(2)}` : '';
   const tokens = note.tokensUsed ? `${(note.tokensUsed / 1000).toFixed(1)}k tokens` : '';
@@ -370,6 +380,18 @@ async function resolveOriginRepoId(repoPath: string): Promise<{ id: string } | n
 // Ask the server which session + prompt authored this line. Returns null on any
 // failure so the caller falls back to the local git-notes path.
 async function tryServerWhy(roots: ProvenanceRoots, relPath: string, sha: string, lineContent: string): Promise<any | null> {
+  // First by the repo's remote, resolved by the server in the org this user's
+  // captures for it go to. The id lookup below lists only the KEY's org: with
+  // a key from the personal workspace and the repo assigned in a team org, it
+  // found nothing and every squash on main read "no Origin session" (TODO
+  // 75f06eff). A server without the endpoint answers 404 and the id lookup
+  // runs as before.
+  try {
+    const { api } = await import('../api.js');
+    const remote = gitOrNull(['remote', 'get-url', 'origin'], { cwd: roots.canonicalRoot }) || '';
+    const card = await api.getWhyByRemote({ sha, remote, path: roots.canonicalRoot, file: relPath, content: lineContent });
+    if (card) return card;
+  } catch { /* older server, or not found there — try the key's org */ }
   // Repo IDENTITY is the canonical root's job — `resolveOriginRepoId` falls
   // back to the directory basename, which in a worktree is the worktree's
   // name (`session-reuse-old-agent-f7056f`), matching no repo on the server.

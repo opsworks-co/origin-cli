@@ -129,3 +129,18 @@ describe('a turn that writes inside a linked worktree', () => {
     expect(out.edits.map((e) => e.file)).toContain('d.ts');
   });
 });
+
+describe('recordPromptWorkTreeShadow', () => {
+  it("keeps each prompt's worktree start, first write wins", async () => {
+    const { recordPromptWorkTreeShadow } = await import('../session-state.js');
+    const state: { promptWorkTreeShadows?: Array<{ promptIndex: number; path: string; shadowSha: string }> } = {};
+    recordPromptWorkTreeShadow(state, 2, '/wt', 'aaa');
+    recordPromptWorkTreeShadow(state, 2, '/wt', 'bbb');
+    recordPromptWorkTreeShadow(state, 3, '/wt', 'ccc');
+    recordPromptWorkTreeShadow(state, 4, '/wt', null);
+    expect(state.promptWorkTreeShadows).toEqual([
+      { promptIndex: 2, path: '/wt', shadowSha: 'aaa' },
+      { promptIndex: 3, path: '/wt', shadowSha: 'ccc' },
+    ]);
+  });
+});

@@ -1,43 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { recoverCommittedTurnProofs, rehomeGitOnlyCommitStamp } from '../rehome-git-only-commit-stamp.js';
+import { recoverCommittedTurnProofs } from '../rehome-git-only-commit-stamp.js';
 
 const SHA = '04ad8136fe90dd0c1dc976e411adb84e4d78d5f1';
-
-describe('rehomeGitOnlyCommitStamp', () => {
-  it('moves the SHA from an empty "open PR" turn onto the authoring turn', () => {
-    const mappings = [
-      {
-        promptIndex: 2,
-        filesChanged: ['apps/api/src/utils/pricing.ts'],
-        diff: 'diff --git a/apps/api/src/utils/pricing.ts b/apps/api/src/utils/pricing.ts\n+x\n',
-        commitSha: null,
-      },
-      {
-        promptIndex: 3,
-        filesChanged: [] as string[],
-        diff: '',
-        commitSha: SHA,
-      },
-    ];
-    expect(rehomeGitOnlyCommitStamp(mappings, [
-      { sha: SHA, filesChanged: ['apps/api/src/utils/pricing.ts'] },
-    ])).toBe(true);
-    expect(mappings[0].commitSha).toBe(SHA);
-    expect(mappings[1].commitSha).toBeNull();
-  });
-
-  it('leaves a capture-failure stamp in place when no author overlaps (#1174)', () => {
-    const mappings = [
-      { promptIndex: 0, filesChanged: ['src/a.ts'], diff: '+x', commitSha: null },
-      { promptIndex: 1, filesChanged: [] as string[], diff: '', commitSha: SHA },
-    ];
-    expect(rehomeGitOnlyCommitStamp(mappings, [
-      { sha: SHA, filesChanged: ['src/z.ts'] },
-    ])).toBe(false);
-    expect(mappings[1].commitSha).toBe(SHA);
-    expect(mappings[0].commitSha).toBeNull();
-  });
-});
 
 describe('recoverCommittedTurnProofs', () => {
   it('recovers a missed commit attestation only from an exact file-set match', () => {

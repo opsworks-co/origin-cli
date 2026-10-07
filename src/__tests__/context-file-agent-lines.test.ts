@@ -287,6 +287,6 @@ describe('context-file lines in the other capture paths', () => {
     const scoped = scopedCommitForTurn(repo, state, 3, shadow, sha, ['CLAUDE.md']);
     const unit = commitTurnContentUnit(scoped, ['CLAUDE.md'], '');
     // On main this was {filesChanged: [], diff: '', +N/-M}: lines with no file.
-    expect(unit).toEqual({ filesChanged: [], diff: '', linesAdded: 0, linesRemoved: 0 });
+    expect(unit).toEqual({ filesChanged: [], diff: '', linesAdded: 0, linesRemoved: 0, contentUnavailableFiles: [] });
   });
 });

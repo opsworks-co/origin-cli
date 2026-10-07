@@ -2,12 +2,14 @@
 //
 // Moved out of commands/hooks.ts mechanically: the text is unchanged, only its
 // home is. Shared helpers still live in hooks.ts and are imported from there.
+import { HISTORY_SEARCH_NOTE, variantAllowsHistorySearchNote, variantAllowsRepoContext } from '../../context-variant.js';
 import { findCodexRolloutByCwd } from '../../agents/codex.js';
 import { getCursorModelFromDb } from '../../agents/cursor.js';
 import { discoverGeminiTranscriptPath, readGeminiModel } from '../../agents/gemini.js';
 import { isSpecificModel, sessionMatchesAgent } from '../../agents/registry.js';
 import { api } from '../../api.js';
 import { buildAttributionContext } from '../../attribution.js';
+import { isBenchmarkClonePath } from '../../benchmark-clone.js';
 import { buildBudgetBanner, buildBudgetWarningBanner, clearBudgetLockNotice, writeBudgetLockNotice } from '../../budget-breach.js';
 import { buildCodexThreadByCwdQuery } from '../../codex-thread-query.js';
 import { ensureConfigDir, isConnectedMode, loadAgentConfig, loadConfig, loadRepoConfig, saveAgentConfig } from '../../config.js';
@@ -15,6 +17,7 @@ import { assembleRepoContext } from '../../context-injection.js';
 import { debugLog } from '../../debug-log.js';
 import { retagDevinFromProcess } from '../../devin-cli.js';
 import { capDiff } from '../../diff-budget.js';
+import { rowLineCounts } from '../../turn-row-counts.js';
 import { MAX_PROMPT_DIFF_LEN, captureGitState, createShadowCommit, getDirtyFiles } from '../../git-capture.js';
 import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
 import { syncNotesForSessionStart } from '../../git-notes.js';
@@ -28,7 +31,7 @@ import { pickWorktreeBootstrap, restampWorktreeBootstrap, type SessionStartBasel
 import { mergeAdoptedReservation, reservationAdoptedMeanwhile } from '../../reservation-adoption.js';
 import { samePath } from '../../paths.js';
 import { sendDesktopNotification } from '../../session-limits.js';
-import { clearSessionState, discoverAllGitRoots, discoverGitRoot, dropSessionMirror, findSessionByClaudeId, getBranch, getCanonicalRepoPath, getGitRoot, getHeadSha, getStatePath, getWorkingGitRoot, isProvisionalSessionId, isSessionAlive, listActiveSessions, loadSessionState, markSessionEnded, preferRegisteredSessionId, readStateAtTag, saveSessionState, sessionTagFor, stampCaptured, startHeartbeat, stopHeartbeat } from '../../session-state.js';
+import { clearSessionState, discoverAllGitRoots, discoverGitRoot, dropSessionMirror, findSessionByClaudeId, getBranch, getCanonicalRepoPath, getGitRoot, getHeadSha, getStatePath, getWorkingGitRoot, isProvisionalSessionId, isSessionAlive, listActiveSessions, loadSessionState, markSessionEnded, preferRegisteredSessionId, readStateAtTag, rememberLocalSessionId, saveSessionState, sessionTagFor, stampCaptured, startHeartbeat, stopHeartbeat } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import { memorySummaryMode } from '../../session-summary.js';
 import { makeSyncBlock } from '../../sync-block.js';
@@ -40,8 +43,10 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { PREAMBLE_VISIBLE_ANCHOR, SESSION_START_RECENT_SHAS, agentRulesTarget, buildContextInjectionPayload, buildOriginFrameworkGuidance, conversationAnchorId, cursorSessionReusable, durableUpdate, filterUncommittedDiff, getWorkingTreeSha, hookLookupSessionId, normalizeWorkspaceRoot, recordFullContextInjection, serverRowForLocalTurn, sessionScopedCommittedDiff, spawnMemoryBriefChild, uncommittedExcludeUnion, writeAgentRulesFile } from '../hooks.js';
+import { PREAMBLE_VISIBLE_ANCHOR, SESSION_START_RECENT_SHAS, agentRulesTarget, claudeLoadsAgentsMd, buildContextInjectionPayload, buildOriginFrameworkGuidance, conversationAnchorId, cursorSessionReusable, durableUpdate, filterUncommittedDiff, getWorkingTreeSha, hookLookupSessionId, normalizeWorkspaceRoot, recordFullContextInjection, serverRowForLocalTurn, sessionScopedCommittedDiff, spawnMemoryBriefChild, uncommittedExcludeUnion, writeAgentRulesFile } from '../hooks.js';
+import { ORIGIN_ONLY_CLAUDE_MD_WARNING, originOnlyClaudeMdHidesAgentsMd } from '../../managed-block-diff.js';
 import { newCaptureStamp } from '../../capture-stamp.js';
+import { budgetRowDiffs, withCutFiles } from '../../budgeted-row-diff.js';
 
 
 /**
@@ -105,11 +110,35 @@ export function agentReadsContextFromHook(agentSlug: string | undefined): boolea
 export function agentFileCarriesFramework(agentSlug: string | undefined, repoPath: string): boolean {
   if (!agentSlug || !agentReadsContextFromHook(agentSlug)) return false;
   const own = agentRulesTarget(agentSlug, repoPath);
-  if (!own) return false;
+  if (!own) return agentsMdCarries(agentSlug, repoPath, ORIGIN_FRAMEWORK_MARKER);
   try {
     return fs.readFileSync(own.target, 'utf-8').includes(ORIGIN_FRAMEWORK_MARKER);
   } catch {
     return false; // missing or unreadable — send it over the hook
+  }
+}
+
+/** First words of the startup check — present in a rules file that carries the repo context. */
+export const ORIGIN_STARTUP_CHECK_MARKER = 'Origin startup check —';
+
+/**
+ * Has Claude already read `marker` out of the repo's AGENTS.md this session?
+ *
+ * A claude-code session in a repo with AGENTS.md and no CLAUDE.md has no file
+ * of its own, but Claude Code (2.1.277+) loads that AGENTS.md as its
+ * instructions — and when Codex also works in the repo, AGENTS.md carries
+ * Origin's FULL block, which Codex needs. Sending the same framework and
+ * repo context over the hook as well puts both in Claude's context twice.
+ * AGENTS.md cannot be trimmed (it is Codex's only channel), so the hook copy
+ * is the one dropped — but only when claudeLoadsAgentsMd is sure the file was
+ * loaded; any doubt keeps the hook copy.
+ */
+export function agentsMdCarries(agentSlug: string | undefined, repoPath: string, marker: string): boolean {
+  if (agentSlug !== 'claude-code' || !claudeLoadsAgentsMd(repoPath)) return false;
+  try {
+    return fs.readFileSync(path.join(repoPath, 'AGENTS.md'), 'utf-8').includes(marker);
+  } catch {
+    return false;
   }
 }
 
@@ -255,6 +284,12 @@ export function resolveCodexThreadId(repoPath: string): string | null {
 // hook backgrounds the CLI with `&`.)
 export function maybeSpawnHistorySync(repoPath: string, workRoot: string): void {
   try {
+    // A replay arm's clone: its history is a copy of a repo the server
+    // already has, and is never uploaded (benchmark-clone.ts).
+    if (isBenchmarkClonePath(workRoot) || isBenchmarkClonePath(repoPath)) {
+      debugLog('session-start', 'history sync skipped — benchmark clone', { workRoot });
+      return;
+    }
     // Strict standalone gate (marker keyed by the WORKING root, matching
     // syncRepoHistory): the post-commit gate's +1-commit slack would let a
     // single pulled commit read as "in-sync" here, where no live ingest
@@ -774,9 +809,10 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
       syncNotesForSessionStart(repoPath);
     } catch {}
     try {
-      const attributionCtx = buildAttributionContext(repoPath);
+      const attributionCtx = variantAllowsRepoContext() ? buildAttributionContext(repoPath) : null;
       if (attributionCtx) systemMsg += '\n\n' + attributionCtx;
     } catch {}
+    if (variantAllowsHistorySearchNote()) systemMsg += '\n\n' + HISTORY_SEARCH_NOTE;
     // Framework guidance — same as the fresh-session path. Resumed
     // sessions still benefit from the [Origin: …] marker convention,
     // and re-emitting on resume is harmless (the model will see the
@@ -1079,14 +1115,16 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
               uncommittedDiff: filteredUncommitted,
               workingTreeDiff: prevCapture.workingTreeDiff || '',
             });
+            const budgeted = budgetRowDiffs(reuseDiff, filteredUncommitted);
             const mapping = {
               promptIndex: prevPromptIdx,
               promptText: (existing.prompts[prevLocalIdx] || '').slice(0, 1000),
-              filesChanged: prevFiles,
-              diff: reuseDiff.slice(0, 200_000),
-              uncommittedDiff: filteredUncommitted.slice(0, 200_000),
+              filesChanged: [...new Set([...prevFiles, ...budgeted.cutFiles])],
+              diff: budgeted.diff,
+              uncommittedDiff: budgeted.uncommittedDiff,
               commitSha: mappingCommitSha,
               treeSha: mappingTreeSha,
+              ...withCutFiles([], budgeted.cutFiles),
             };
             if (existingIdx >= 0) {
               // Don't clobber a non-empty mapping with an empty diff —
@@ -1131,7 +1169,6 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
             // a row a later Stop or watcher wrote is left alone. Unstamped, they
             // were exempt from that ordering and overwrote fresher content.
             promptChanges: existing.completedPromptMappings.map(pm => {
-              const dl = (pm.diff || '').split('\n');
               const startedAtMs = Date.parse(existing.startedAt || '');
               const reattachStamp = { ...newCaptureStamp('ss'), capturedAt: Number.isFinite(startedAtMs) && startedAtMs > 0 ? startedAtMs : 1 };
               return {
@@ -1142,8 +1179,9 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
                 promptText: (pm.promptText || '').slice(0, 1000),
                 diff: capDiff(pm.diff, MAX_PROMPT_DIFF_LEN),
                 uncommittedDiff: capDiff(pm.uncommittedDiff, MAX_PROMPT_DIFF_LEN),
-                linesAdded: dl.filter((l: string) => l.startsWith('+') && !l.startsWith('+++')).length,
-                linesRemoved: dl.filter((l: string) => l.startsWith('-') && !l.startsWith('---')).length,
+                // The row's own counts, never a recount of its capped text
+                // (see rowLineCounts).
+                ...rowLineCounts(pm),
                 aiPercentage: 100,
                 checkpointType: 'auto',
                 commitSha: (pm as any).commitSha || null,
@@ -1392,6 +1430,10 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
   // Only a row THIS hook reserved can have been adopted mid-registration. A
   // re-fired start over an existing file takes the carry-forward paths below.
   let reservedHere = false;
+  // The local id an already-promoted row at this tag ran under before it
+  // reached the server; the row rebuilt below must keep it (see
+  // `rememberLocalSessionId`).
+  let carriedLocalSessionId: string | undefined;
   try {
     const reservationCwd = allRepoPaths ? hookCwd : repoPath;
     // NEVER overwrite state that already exists at this tag. A re-fired
@@ -1411,6 +1453,7 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
       // below keeps the conversation on the id it already has instead of
       // renaming it.
       reservedSessionId = existingAtTag.sessionId;
+      if (isProvisionalSessionId(existingAtTag.localSessionId)) carriedLocalSessionId = existingAtTag.localSessionId;
       debugLog('session-start', 'not reserving — state already exists at this tag', {
         sessionTag, existing: existingAtTag.sessionId,
         prompts: (existingAtTag.prompts as unknown[] | undefined)?.length || 0,
@@ -1484,6 +1527,10 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
           branch: branch || undefined,
           hostname: agentConfig.hostname || undefined,
           additionalRepoPaths: allRepoPaths ? allRepoPaths.filter(p => p !== repoPath) : undefined,
+          // The provisional id this start reserved (or an earlier failed
+          // start's local id it is re-firing for): a commit made under it
+          // carries it in its trailer.
+          localSessionId: reservedSessionId.startsWith('local-') ? reservedSessionId : undefined,
           // Use the unified `agentSessionId` (= claudeSessionId || stdinSessionId
           // || cursor conversation_id) rather than `claudeSessionId` alone.
           // For Cursor this is the conversation_id captured from
@@ -1658,7 +1705,11 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
       verboseCapture,
       previousSessionId,
       previousSessionStartedAt,
+      ...(carriedLocalSessionId && { localSessionId: carriedLocalSessionId }),
     };
+    // Registered over a provisional id (the reservation, or an earlier failed
+    // start's local id): commits made under it are trailered with it.
+    rememberLocalSessionId(state, reservedSessionId);
 
     // Hard budget cap breached at start (server-reported budget payload,
     // or a legacy 429 refusal) — the session still tracks, but flagged
@@ -1853,6 +1904,7 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
           ours: state.sessionId, theirs: promoted, sessionTag,
         });
         state.sessionId = promoted;
+        rememberLocalSessionId(state, reservedSessionId);
       }
       if (reservedHere && onDisk && reservationAdoptedMeanwhile(state, onDisk)) {
         const merge = mergeAdoptedReservation(state, onDisk);
@@ -1881,6 +1933,7 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
       try {
         const justAdopted = readStateAtTag(saveCwd, sessionTag);
         state.sessionId = preferRegisteredSessionId(state.sessionId, justAdopted?.sessionId);
+        rememberLocalSessionId(state, reservedSessionId);
         if (reservedHere && justAdopted && reservationAdoptedMeanwhile(state, justAdopted)) {
           const merge = mergeAdoptedReservation(state, justAdopted);
           if (merge.needsBaseline && state.repoPath) {
@@ -2011,7 +2064,9 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
     // agentReadsContextFromHook.
     let injectedRepoContext: string | null = null;
     try {
-      const repoContext = assembleRepoContext({
+      // A context bake-off arm may be told to go without it — see
+      // context-variant.ts.
+      const repoContext = !variantAllowsRepoContext() ? null : assembleRepoContext({
         brief: safeCtx(() => buildRepoBriefContext(repoPath)),
         attribution: safeCtx(() => buildAttributionContext(repoPath)),
         // Prefer the LLM continuation brief (what recent sessions DID + what's
@@ -2038,6 +2093,9 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
     } catch {
       // Non-fatal — repo context is best-effort.
     }
+    // A `search` bake-off arm is handed no memory, only word that it can look
+    // the history up itself — see context-variant.ts.
+    if (variantAllowsHistorySearchNote()) systemMsg += '\n\n' + HISTORY_SEARCH_NOTE;
     // P1: if the brief is missing/stale, generate it in the BACKGROUND for the
     // next session (debounced, gated, non-blocking — never runs the LLM here).
     try { maybeSpawnBriefGeneration(repoPath); } catch { /* best-effort */ }
@@ -2057,9 +2115,35 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
     // it. `systemMsg` stays canonical for what we write to disk below —
     // subtracting it there too would delete the copy we are choosing to keep.
     const frameworkInFile = agentFileCarriesFramework(finalAgentSlug || agentSlug, repoPath);
-    const hookMsg = frameworkInFile
+    let hookMsg = frameworkInFile
       ? systemMsg.split('\n\n' + frameworkGuidance).join('').replace(/\n{3,}/g, '\n\n').trim()
       : systemMsg;
+    // Same for the repo context, when Claude read it out of AGENTS.md — see
+    // agentsMdCarries. That copy was written by the last session start; one
+    // slightly older digest beats two that disagree.
+    const repoContextInAgentsMd = !!injectedRepoContext
+      && agentsMdCarries(finalAgentSlug || agentSlug, repoPath, ORIGIN_STARTUP_CHECK_MARKER);
+    if (repoContextInAgentsMd) {
+      hookMsg = hookMsg.split('\n\n' + injectedRepoContext).join('').replace(/\n{3,}/g, '\n\n').trim();
+    }
+    // Both omissions above rest on a PREDICTION that Claude read AGENTS.md
+    // (claudeLoadsAgentsMd). Keep what was left out, so the prompt hook can
+    // deliver it once the transcript shows the file was not loaded after all.
+    // With no CLAUDE.md, a framework found "in the file" can only be AGENTS.md's.
+    if ((finalAgentSlug || agentSlug) === 'claude-code' && claudeLoadsAgentsMd(repoPath)) {
+      const omitted = [frameworkInFile ? frameworkGuidance : '', repoContextInAgentsMd ? injectedRepoContext : '']
+        .filter(Boolean).join('\n\n');
+      if (omitted) {
+        state.agentsMdOmission = { text: omitted };
+        try { saveSessionState(state, saveCwd, sessionTag, foldLatestRow); } catch { /* no fallback this session */ }
+      }
+    }
+    // A CLAUDE.md an older Origin created, holding only its block, hides the
+    // repo's AGENTS.md from Claude. Say so on the session's first screen; the
+    // file is the user's to delete — Origin never removes it.
+    if ((finalAgentSlug || agentSlug) === 'claude-code' && originOnlyClaudeMdHidesAgentsMd(repoPath)) {
+      hookMsg += '\n\n' + ORIGIN_ONLY_CLAUDE_MD_WARNING;
+    }
     debugLog('session-start', 'framework guidance injected', {
       overHook: !frameworkInFile, savedChars: systemMsg.length - hookMsg.length,
     });

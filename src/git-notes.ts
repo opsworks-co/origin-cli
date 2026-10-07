@@ -1,13 +1,13 @@
 import { execFileSync } from 'child_process';
+import { cachedWriteKey, seal, type SealedPromptFields } from './note-seal.js';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { redactSecrets } from './redaction.js';
 import { api } from './api.js';
-import { loadConfig, loadRepoConfig } from './config.js';
 import type { OriginMarkers } from './origin-markers.js';
-import { gitIdentityEnv } from './utils/exec.js';
+import { cachedGitIdentity, gitIdentityEnv, identityEnvFor, recordGitIdentity } from './utils/exec.js';
 import { debugLog } from './debug-log.js';
 import {
   foldRemoteMemory,
@@ -15,6 +15,17 @@ import {
   reconcileMemoryWithRemote,
   reconcileMemoryBriefWithRemote,
 } from './memory.js';
+import {
+  ATTRIBUTION_RECORD_NOTE_KEY,
+  buildAttributionRecordForCommit,
+  type AttributionRecordSource,
+} from './attribution-note.js';
+import { cliVersion } from './cli-version.js';
+import { mergeSessionNoteOverRewrite } from './history-rewrite.js';
+import { withNoteWriteLock, type NoteLease } from './note-write-lock.js';
+import { isPromptHash, provablePromptHash } from './prompt-hash.js';
+import { shouldIncludePromptText } from './prompt-privacy.js';
+import { EDITS_TRUNCATED_MARKER, scrubNoteObject } from './note-scrub.js';
 
 function redact(text: string): string {
   return redactSecrets(text || '').redacted;
@@ -56,10 +67,11 @@ export interface GitNoteData {
   model: string;
   agentSlug?: string;
   promptCount: number;
+  // Prompt text: serialized only with the explicit notesIncludePrompts opt-in.
   promptSummary: string;
-  // Untruncated last prompt (post-redaction, capped at ~8KB). Lets the next
-  // agent reading blame see the actual intent behind a commit, not a 200-char
-  // teaser. Stored separately from promptSummary so older readers keep working.
+  // The last prompt, whole and unredacted as the hooks captured it. The note
+  // stores it redacted and capped at ~8KB, and only with the opt-in; its
+  // `promptHash` (see prompt-hash.ts) is written either way when provable.
   fullPrompt?: string;
   // Pointer to the previous Origin session in this repo, captured at
   // session-start from refs/notes/origin-memory. Lets readers walk a chain of
@@ -71,18 +83,23 @@ export interface GitNoteData {
   filesRead?: string[];
   // Per-prompt attribution that travels with the repo. Each entry records
   // who/what wrote a prompt's work — anyone who clones the repo and fetches
-  // refs/notes/origin can see this without an Origin DB account. Capped
-  // per-prompt to keep notes under push-friendly size limits.
+  // refs/notes/origin can see this without an Origin DB account, so an
+  // entry's text travels only with the opt-in. Capped per-prompt to keep
+  // notes under push-friendly size limits.
   prompts?: PromptNoteEntry[];
   // The agent's own `[Origin: Intent/Decision/Open/Verify]` markers, parsed
   // from this session's transcript. This is the "why" behind the change —
   // the single most valuable thing for the NEXT agent (it stops a later
-  // agent "fixing" something that was deliberate). Session-level (not
-  // per-prompt): every commit from the session carries the same markers.
+  // agent "fixing" something that was deliberate). Only what the turn that
+  // made the commit wrote — writers pass `markersForCommit` for that.
   // Treated as prompt text for privacy: withheld when notes are metadata-only.
   markers?: OriginMarkers;
+  // Per commit instead of `markers`: the markers of the turn that made it. A
+  // session's markers are not every commit's — see committed-markers.ts.
+  markersForCommit?: (sha: string) => OriginMarkers | undefined;
   // Origin web URL where the full session can be inspected (for users in
-  // the same org).
+  // the same org) — the permissioned home of the prompts a note no longer
+  // carries by default.
   originUrl: string;
   // Session telemetry. OPTIONAL because not every writer knows it: the
   // post-commit hook writes the note before the transcript is parsed, and it
@@ -105,13 +122,19 @@ export interface GitNoteData {
   // honest "N sub-agents" record. Each entry names the configured sub-agent
   // type and the parent turn it ran under. Empty/absent when none were used.
   subagents?: Array<{ type: string | null; promptIndex: number; files?: string[] }>;
+  // Source of the canonical v1 record embedded next to `origin` (see
+  // attribution-note.ts). Absent: the note is legacy-only.
+  attribution?: AttributionRecordSource;
 }
 
 // Per-prompt attribution row stored inside the commit note. Optional fields
 // are dropped when empty to keep the serialized JSON compact.
 export interface PromptNoteEntry {
   index: number;
-  text: string;                     // post-redaction, capped per PROMPT_TEXT_MAX_BYTES
+  text: string;                     // serialized redacted, capped per PROMPT_TEXT_MAX_BYTES, opt-in only
+  /** Canonical hash of this prompt's permissioned record, when provable
+   *  (buildPromptNoteEntries / prompt-hash.ts). Written with or without text. */
+  promptHash?: string;
   agent?: string;                   // codex, claude, cursor, gemini
   model?: string;                   // gpt-5.5, claude-opus, ...
   authorName?: string;
@@ -137,8 +160,6 @@ const PROMPTS_MAX = 50;
 // entries get a marker; consumers parse the JSON prefix and fall back to
 // pc.diff when parsing fails.
 const EDITS_JSON_MAX_BYTES = 16 * 1024;
-const EDITS_TRUNCATED_MARKER =
-  '\n/* [origin: editsJson truncated for note portability] */';
 
 function capEditsJsonForNote(raw: string | null | undefined): string | undefined {
   if (typeof raw !== 'string' || raw.length === 0) return undefined;
@@ -175,11 +196,35 @@ function sanitizeMarkersForNote(markers: OriginMarkers | undefined): OriginMarke
 
 // Build the serialized note payload. Pure — exported for tests. When
 // `includePromptText` is false (the default), all prompt-text carriers
-// are withheld: promptSummary, fullPrompt, per-prompt `text`, and the
-// promptText embedded inside each editsJson capture. Metadata that makes
+// are withheld: promptSummary, fullPrompt, per-prompt `text`, markers, and
+// the promptText embedded inside each editsJson capture. Metadata that makes
 // blame work — model, agent, files, counts, line stats, tree/commit
-// pointers, the code edits themselves — always travels.
+// pointers, the code edits themselves, originUrl and provable prompt hashes —
+// always travels.
 export function buildNotePayload(data: GitNoteData, includePromptText: boolean): string {
+  return JSON.stringify(buildNoteObject(data, includePromptText), null, 2);
+}
+
+/**
+ * The note for one annotated commit: the legacy `origin` object, plus the
+ * canonical v1 record for exactly this commit when one can be built. Pure
+ * apart from reading the schema. `reason` says why a record was left out.
+ */
+export function buildNoteEnvelopeForCommit(
+  legacy: { origin: Record<string, unknown> },
+  sha: string,
+  source: AttributionRecordSource | undefined,
+  opts: { recordedAt: Date; producerVersion: string },
+): { payload: string; reason?: string } {
+  if (!source) return { payload: JSON.stringify(legacy, null, 2), reason: 'no record source' };
+  const built = buildAttributionRecordForCommit(sha, source, opts);
+  if (!built.record) return { payload: JSON.stringify(legacy, null, 2), reason: built.reason };
+  return {
+    payload: JSON.stringify({ ...legacy, [ATTRIBUTION_RECORD_NOTE_KEY]: built.record }, null, 2),
+  };
+}
+
+function buildNoteObject(data: GitNoteData, includePromptText: boolean): { origin: Record<string, unknown> } {
   const summarySource = redact(data.promptSummary || '');
   const promptSummary =
     summarySource.length > 200 ? summarySource.slice(0, 200) + '...' : summarySource;
@@ -196,6 +241,7 @@ export function buildNotePayload(data: GitNoteData, includePromptText: boolean):
     ? data.prompts.slice(0, PROMPTS_MAX).map((p) => {
         const out: Record<string, unknown> = { index: p.index };
         if (includePromptText && p.text) out.text = redactAndCap(p.text, PROMPT_TEXT_MAX_BYTES);
+        if (isPromptHash(p.promptHash)) out.promptHash = p.promptHash;
         if (p.agent) out.agent = p.agent;
         if (p.model) out.model = p.model;
         if (p.authorName) out.authorName = p.authorName;
@@ -216,11 +262,13 @@ export function buildNotePayload(data: GitNoteData, includePromptText: boolean):
       })
     : undefined;
 
-  return JSON.stringify(
+  // Round-trip through JSON so undefined keys are dropped exactly as the
+  // serialized note always dropped them.
+  return JSON.parse(JSON.stringify(
     {
       origin: {
         // Stays at 1 — the new fields (fullPrompt, previousSessionId,
-        // filesRead, prompts, promptTextWithheld) are purely additive.
+        // filesRead, prompts, promptTextWithheld, promptHash) are purely additive.
         // Existing readers look up keys by name and ignore unknowns, so
         // no version bump is needed.
         version: 1,
@@ -228,6 +276,8 @@ export function buildNotePayload(data: GitNoteData, includePromptText: boolean):
         model: data.model,
         agent: data.agentSlug || undefined,
         promptCount: data.promptCount,
+        // The prompt `fullPrompt` stands for, by identity only.
+        promptHash: provablePromptHash(data.fullPrompt),
         promptSummary: includePromptText ? promptSummary : undefined,
         fullPrompt: includePromptText ? fullPrompt : undefined,
         promptTextWithheld: includePromptText ? undefined : true,
@@ -252,78 +302,42 @@ export function buildNotePayload(data: GitNoteData, includePromptText: boolean):
         timestamp: new Date().toISOString(),
       },
     },
-    null,
-    2,
-  );
+  ));
 }
 
-// Scrub prompt text from an ALREADY-WRITTEN note object (parsed JSON).
-// Used by `origin scrub-notes` to retroactively clean notes written
-// before the metadata-only default existed. Returns whether anything
-// changed so the command can rewrite only dirty notes. Fail-closed on
-// editsJson: when the embedded capture can't be parsed (truncated for
-// portability), the whole blob is dropped rather than risking text
-// surviving inside an unparseable payload.
-export function scrubNoteObject(note: any): { changed: boolean; scrubbed: any } {
-  if (!note || typeof note !== 'object' || !note.origin || typeof note.origin !== 'object') {
-    return { changed: false, scrubbed: note };
-  }
-  const origin = { ...note.origin };
-  let changed = false;
-  if (typeof origin.promptSummary === 'string' && origin.promptSummary.length > 0) {
-    delete origin.promptSummary;
-    changed = true;
-  }
-  if (typeof origin.fullPrompt === 'string' && origin.fullPrompt.length > 0) {
-    delete origin.fullPrompt;
-    changed = true;
-  }
-  // Markers are agent commentary — drop them under the metadata-only gate.
-  if (origin.markers && typeof origin.markers === 'object') {
-    delete origin.markers;
-    changed = true;
-  }
-  if (Array.isArray(origin.prompts)) {
-    origin.prompts = origin.prompts.map((p: any) => {
-      if (!p || typeof p !== 'object') return p;
-      const np = { ...p };
-      if (typeof np.text === 'string' && np.text.length > 0) {
-        delete np.text;
-        changed = true;
-      }
-      if (typeof np.editsJson === 'string' && np.editsJson.length > 0) {
-        const scrubbed = scrubEditsJsonString(np.editsJson);
-        if (scrubbed !== np.editsJson) {
-          if (scrubbed) np.editsJson = scrubbed;
-          else delete np.editsJson;
-          changed = true;
-        }
-      }
-      return np;
-    });
-  }
-  if (changed) origin.promptTextWithheld = true;
-  return { changed, scrubbed: { ...note, origin } };
+/**
+ * A metadata-only note plus the prompt text it withheld, encrypted under the
+ * repo's key for the month (note-seal.ts). The clear fields stay exactly as a
+ * metadata-only note has them (`promptTextWithheld: true` — readers without a
+ * key see an ordinary withheld note); `sealed` holds summary, full prompt,
+ * markers and per-prompt text. Nothing to seal → the note is unchanged.
+ * Pure apart from the cipher's random nonce; exported for tests.
+ */
+export function withSealedPrompts(
+  metadataOnly: { origin: Record<string, unknown> },
+  data: GitNoteData,
+  key: { kid: string; key: Buffer },
+): { origin: Record<string, unknown> } {
+  const full = buildNoteObject(data, true).origin as Record<string, any>;
+  const prompts = Array.isArray(full.prompts)
+    ? full.prompts.filter((p: any) => typeof p?.text === 'string' && p.text).map((p: any) => ({ index: p.index, text: p.text }))
+    : [];
+  const fields: SealedPromptFields = {};
+  if (full.promptSummary) fields.promptSummary = full.promptSummary;
+  if (full.fullPrompt) fields.fullPrompt = full.fullPrompt;
+  if (full.markers) fields.markers = full.markers;
+  if (prompts.length > 0) fields.prompts = prompts;
+  if (Object.keys(fields).length === 0) return metadataOnly;
+  return { ...metadataOnly, origin: { ...metadataOnly.origin, sealed: seal(fields, key) } };
 }
 
-// Content gate for note contents. Default INCLUDES prompt text: blame
-// with the prompt that produced each line is Origin's core promise, and
-// it must survive cloning the repo without an Origin account. Privacy-
-// sensitive teams opt OUT per repo (.origin.json:
-// notesIncludePrompts: false) or per machine (~/.origin/config.json) —
-// notes then carry attribution metadata only — and can retroactively
-// clean existing notes with `origin scrub-notes --push`.
-export function shouldIncludePromptText(repoPath: string): boolean {
-  try {
-    const repoCfg = loadRepoConfig(repoPath);
-    if (typeof repoCfg?.notesIncludePrompts === 'boolean') return repoCfg.notesIncludePrompts;
-  } catch { /* unreadable repo config → fall through */ }
-  try {
-    const cfg = loadConfig();
-    if (typeof cfg?.notesIncludePrompts === 'boolean') return cfg.notesIncludePrompts;
-  } catch { /* unreadable global config → fall through */ }
-  return true;
-}
+// Scrubbing an ALREADY-WRITTEN note (`origin scrub-notes`) lives in
+// note-scrub.ts; re-exported here, where callers have always imported it from.
+export { scrubNoteObject };
+
+// The prompt-publication policy lives in prompt-privacy.ts; re-exported here,
+// where every caller has always imported it from.
+export { shouldIncludePromptText };
 
 // ─── Notes auto-sync ─────────────────────────────────────────────────────
 //
@@ -650,8 +664,8 @@ export function foldStagedNotes(repoPath: string): boolean {
  * Push Origin's memory notes to `remote`. Gated by the SAME privacy switch
  * that governs attribution notes and the origin-sessions branch
  * (notesIncludePrompts): memory holds session summaries, per-file notes and
- * decision text, so anyone who opted out of sharing prompt-derived content
- * stays opted out here too.
+ * decision text, so it leaves the machine only for someone who opted in to
+ * sharing prompt-derived content. Off by default; local memory is unaffected.
  *
  * Best-effort and silent — a memory push must never fail a commit or a
  * session end. On a non-fast-forward (another machine pushed since we last
@@ -699,7 +713,8 @@ export function resolvePushRemote(repoPath: string): string {
  * switch means "don't publish my prompt text", and an acceptance note carries
  * none: {sessionId, computedAt, addedLines, survivingLines, acceptanceRate}.
  * That is strictly less than refs/notes/origin already publishes for the same
- * commit with the switch off (which still pushes, just without prompt text). If
+ * commit with the switch off, the default (which still pushes, just without
+ * prompt text). If
  * this ever grows a prompt-derived field, it must move behind the gate.
  *
  * Best-effort and silent — never fails a commit, a push, or a session end.
@@ -917,10 +932,294 @@ function scrubEditsJsonString(raw: string | null | undefined): string | undefine
   return undefined;
 }
 
+// A v1 record names its revision in full; an abbreviated sha from a caller is
+// resolved once here. Anything that does not resolve is passed through, and
+// the record builder then leaves the record out.
+function fullCommitSha(repoPath: string, sha: string): string {
+  if (/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return sha;
+  try {
+    return execFileSync('git', ['rev-parse', '--verify', '--quiet', `${sha}^{commit}`], {
+      windowsHide: true, cwd: repoPath, stdio: 'pipe' as const, timeout: 5_000, encoding: 'utf-8' as const,
+    }).trim().toLowerCase() || sha;
+  } catch {
+    return sha;
+  }
+}
+
+// ─── Publishing refs/notes/origin ────────────────────────────────────────
+//
+// ONE publisher for the attribution notes ref, shared by the pre-push hook,
+// `origin push-metadata` and the best-effort auto-push after a note write, so
+// the three cannot disagree about how metadata reaches a remote:
+//
+//   1. Nothing to do without a local refs/notes/origin.
+//   2. Push without force (`refs/notes/origin:refs/notes/origin`, no `+`) and
+//      with --no-verify, so the push never re-enters the pre-push hook.
+//   3. Rejected: fetch the remote's ref into the staging namespace, merge it
+//      with `git notes merge -s ours` (notes on different commits union; on the
+//      SAME commit the local note stays — this machine wrote it), and retry.
+//   4. Bounded: at most NOTES_PUSH_MAX_ATTEMPTS pushes, never a loop.
+//
+// A forced rewrite of the remote ref is `origin scrub-notes --push` (OR-49),
+// never this path.
+
+export const NOTES_PUSH_MAX_ATTEMPTS = 3;
+
+export type NotesPublishResult =
+  | { status: 'pushed'; remote: string; attempts: number; merged: boolean }
+  | { status: 'no-notes' }
+  | { status: 'no-remote'; remote: string }
+  | { status: 'failed'; remote: string; attempts: number; reason: string };
+
+/**
+ * Hide credentials a remote URL (or a git error quoting one) may carry:
+ * `https://user:token@host/x` → `https://***@host/x`. Everything the transport
+ * logs or prints about a remote goes through this.
+ */
+export function redactRemoteCredentials(text: string): string {
+  return (text || '').replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/@\s]+@/g, '$1***@');
+}
+
+/** A log-safe summary of a publish result. */
+export function describePublishResult(result: NotesPublishResult): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...result };
+  if ('remote' in result) out.remote = redactRemoteCredentials(result.remote);
+  if (result.status === 'failed') out.reason = redactRemoteCredentials(result.reason);
+  return out;
+}
+
+/** True when `remote` is not a configured name but a URL/path git can push to directly. */
+function looksLikeRemoteUrl(remote: string): boolean {
+  // `git push <url>` passes the URL as the hook's remote name. A URL, an scp
+  // form or an existing path is still a destination.
+  return /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(remote)
+    || /^[^/\s]+@[^:\s]+:/.test(remote)
+    || fs.existsSync(remote);
+}
+
+function lastLine(err: unknown): string {
+  const e = err as { stderr?: string | Buffer; message?: string };
+  const text = (e?.stderr ? String(e.stderr) : '') || e?.message || String(err);
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  return lines.slice(-2).join(' | ').slice(0, 400);
+}
+
+/**
+ * Wall-clock budget for one whole publish (every push, fetch and merge it
+ * runs), not per command. The hook paths run inside a user's `git push` or
+ * right after a commit, and metadata must never hold those up for minutes:
+ * push → fetch → merge → push → fetch → merge → push at 30s a command would.
+ */
+export const HOOK_PUBLISH_BUDGET_MS = 20_000;
+/** `origin push-metadata`: a person is waiting for the answer, so longer — still finite. */
+export const INTERACTIVE_PUBLISH_BUDGET_MS = 120_000;
+/** Never start a command with less than this left; it could only time out. */
+const MIN_COMMAND_MS = 1_000;
+/** Ceiling for any single network command inside the budget. */
+const PUBLISH_COMMAND_TIMEOUT_MS = 30_000;
+
+export interface PublishOptions {
+  /** Total budget for the whole publish. Default: HOOK_PUBLISH_BUDGET_MS. */
+  budgetMs?: number;
+  /**
+   * Push attempts, 1..NOTES_PUSH_MAX_ATTEMPTS (see normalizeMaxAttempts). 1 means no fetch-merge-retry:
+   * the auto-push after a note write runs inside an agent's Stop hook, where
+   * each round trip is latency the agent waits for; a rejected push is left to
+   * the next pre-push, which merges and retries. Default: the maximum.
+   */
+  maxAttempts?: number;
+  /** Test seams: the clock and the command runner. */
+  now?: () => number;
+  exec?: typeof execFileSync;
+}
+
+/**
+ * What one git command inside the publish budget came to. The four outcomes
+ * are kept apart because they mean different things to the caller: an
+ * ordinary non-zero exit is an answer ("no such ref", "not an ancestor", "no
+ * such remote"); a command that never started, or was killed by its timeout,
+ * is no answer at all and must surface as the deadline.
+ */
+type GitRun =
+  | { kind: 'ok'; out: string }
+  | { kind: 'failed'; message: string }
+  | { kind: 'not-started' }
+  | { kind: 'timeout' };
+
+function isTimeout(err: unknown): boolean {
+  const e = err as { code?: string };
+  return e?.code === 'ETIMEDOUT';
+}
+
+/**
+ * Push attempts for a publish: an integer in 1..NOTES_PUSH_MAX_ATTEMPTS.
+ * Anything that is not a finite number (undefined, NaN, ±Infinity) means the
+ * default, the maximum; a finite value is truncated and clamped, so 0 and
+ * negatives mean one attempt. Never zero attempts, never more than the ceiling.
+ */
+export function normalizeMaxAttempts(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return NOTES_PUSH_MAX_ATTEMPTS;
+  return Math.min(NOTES_PUSH_MAX_ATTEMPTS, Math.max(1, Math.trunc(value)));
+}
+
+/**
+ * Publish local refs/notes/origin to `remote`. Never throws; the result says
+ * what happened so a hook can log it and `origin push-metadata` can report it.
+ *
+ * Bounded twice: at most NOTES_PUSH_MAX_ATTEMPTS pushes, and one deadline for
+ * the whole operation. EVERY child process runs through one runner — the
+ * committer-identity probe a notes merge needs included — so each gets only
+ * the time that is left, none starts once less than MIN_COMMAND_MS remains,
+ * and a spent or timed-out budget is reported as `deadline exceeded`, never as
+ * an earlier git error or a "no notes"/"no remote" answer.
+ */
+export function publishAttributionNotes(
+  repoPath: string,
+  remote: string,
+  opts: PublishOptions = {},
+): NotesPublishResult {
+  const now = opts.now ?? Date.now;
+  const exec = opts.exec ?? execFileSync;
+  const deadline = now() + (opts.budgetMs ?? HOOK_PUBLISH_BUDGET_MS);
+  const live = 'refs/notes/origin';
+  const staging = STAGED_NOTES.attribution.staging;
+  let attempts = 0;
+  const failed = (reason: string): NotesPublishResult =>
+    ({ status: 'failed', remote, attempts, reason: redactRemoteCredentials(reason) });
+  const outOfTime = (r: { kind: 'not-started' } | { kind: 'timeout' }, step: string): NotesPublishResult =>
+    failed(r.kind === 'timeout'
+      ? `deadline exceeded: the publish budget ran out while ${step}`
+      : `deadline exceeded: the publish budget ran out before ${step}`);
+
+  const run = (args: string[], cap: number, env?: NodeJS.ProcessEnv): GitRun => {
+    const left = deadline - now();
+    if (left < MIN_COMMAND_MS) return { kind: 'not-started' };
+    try {
+      const out = exec('git', args, {
+        windowsHide: true, cwd: repoPath, stdio: 'pipe', encoding: 'utf-8',
+        timeout: Math.min(cap, left), ...(env ? { env } : {}),
+      });
+      return { kind: 'ok', out: String(out ?? '').trim() };
+    } catch (err) {
+      return isTimeout(err) ? { kind: 'timeout' } : { kind: 'failed', message: lastLine(err) };
+    }
+  };
+
+  try {
+    // 1. Local notes. An ordinary non-zero exit is the answer "no such ref".
+    const liveProbe = run(['rev-parse', '--verify', '--quiet', live], 5_000);
+    if (liveProbe.kind === 'not-started' || liveProbe.kind === 'timeout') return outOfTime(liveProbe, 'checking the local notes');
+    if (liveProbe.kind === 'failed' || !liveProbe.out) return { status: 'no-notes' };
+
+    // 2. The destination: a configured name, or a URL/path git can push to.
+    if (!remote) return { status: 'no-remote', remote };
+    const named = run(['remote', 'get-url', remote], 5_000);
+    if (named.kind === 'not-started' || named.kind === 'timeout') return outOfTime(named, 'resolving the remote');
+    if (named.kind === 'failed' && !looksLikeRemoteUrl(remote)) return { status: 'no-remote', remote };
+
+    let merged = false;
+    let lastError = '';
+    const maxAttempts = normalizeMaxAttempts(opts.maxAttempts);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const push = run(['push', '--no-verify', '--quiet', remote, `${live}:${live}`], PUBLISH_COMMAND_TIMEOUT_MS);
+      if (push.kind === 'ok') return { status: 'pushed', remote, attempts: attempt, merged };
+      if (push.kind === 'not-started') return outOfTime(push, `push attempt ${attempt}`);
+      attempts = attempt;
+      if (push.kind === 'timeout') return outOfTime(push, `push attempt ${attempt} was running`);
+      lastError = push.message;
+      if (attempt === maxAttempts) break;
+
+      // Most rejections are a non-fast-forward: another clone published notes
+      // this one has not folded yet. Bring them in and retry.
+      const fetch = run(['fetch', '--no-tags', '--quiet', remote, `+${live}:${staging}`], PUBLISH_COMMAND_TIMEOUT_MS);
+      // The deadline outranks the push rejection it interrupted.
+      if (fetch.kind === 'not-started' || fetch.kind === 'timeout') return outOfTime(fetch, 'fetching the remote notes');
+      // Unreachable remote, no permission, or no notes ref there at all — a
+      // merge cannot fix any of those; the push error says why.
+      if (fetch.kind === 'failed') return failed(lastError || fetch.message);
+
+      const localSha = run(['rev-parse', '--verify', '--quiet', live], 5_000);
+      if (localSha.kind === 'not-started' || localSha.kind === 'timeout') return outOfTime(localSha, 'reading the local notes');
+      const remoteSha = run(['rev-parse', '--verify', '--quiet', staging], 5_000);
+      if (remoteSha.kind === 'not-started' || remoteSha.kind === 'timeout') return outOfTime(remoteSha, 'reading the fetched notes');
+      if (localSha.kind === 'ok' && remoteSha.kind === 'ok' && localSha.out && remoteSha.out) {
+        // Exit 0: we already contain the remote's notes, so the rejection was
+        // not a non-fast-forward (a protected ref, a hook, a quota) and a retry
+        // would fail the same way. Exit 1 is the plain answer "not an
+        // ancestor": merge and retry.
+        const contained = run(['merge-base', '--is-ancestor', remoteSha.out, localSha.out], 5_000);
+        if (contained.kind === 'not-started' || contained.kind === 'timeout') return outOfTime(contained, 'comparing the notes histories');
+        if (contained.kind === 'ok') return failed(lastError);
+      }
+
+      // `notes merge` writes a commit and needs a committer. Probe for the
+      // user's own identity inside the budget, like every other command; only
+      // a real "no identity" answer falls back to Origin's.
+      let hasIdentity = cachedGitIdentity(repoPath);
+      if (hasIdentity === undefined) {
+        const probe = run(['var', 'GIT_COMMITTER_IDENT'], 5_000);
+        if (probe.kind === 'not-started' || probe.kind === 'timeout') return outOfTime(probe, 'checking the git identity');
+        hasIdentity = probe.kind === 'ok';
+        recordGitIdentity(repoPath, hasIdentity);
+      }
+      const merge = run(['notes', `--ref=${live}`, 'merge', '-s', 'ours', staging], PUBLISH_COMMAND_TIMEOUT_MS,
+        { ...process.env, ...identityEnvFor(hasIdentity) });
+      if (merge.kind === 'not-started' || merge.kind === 'timeout') return outOfTime(merge, 'merging the remote notes');
+      if (merge.kind === 'failed') return failed(merge.message);
+      merged = true;
+    }
+    return failed(lastError);
+  } catch (err) {
+    // An injected runner or an fs call misbehaving: still never throw.
+    return failed(lastLine(err));
+  }
+}
+
+/**
+ * The only remote refs/notes/origin is ever published to without being named:
+ * the configured `origin`, or '' when there is none. Used by the pre-push hook,
+ * the auto-push after a note write and `origin push-metadata` with no
+ * argument.
+ *
+ * Deliberately no fallback to the first remote or the branch's upstream: the
+ * ref can hold redacted prompt text — with the opt-in, and in older notes
+ * whatever the current setting says — and a repo whose only remote is a public
+ * `upstream` must not receive it as a side effect. Publishing anywhere else
+ * takes an explicit `origin push-metadata <remote>`.
+ */
+export function resolveAutoPublishRemote(repoPath: string): string {
+  try {
+    execFileSync('git', ['remote', 'get-url', 'origin'], {
+      windowsHide: true, cwd: repoPath, stdio: 'pipe' as const, timeout: 5_000, encoding: 'utf-8' as const,
+    });
+    return 'origin';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * How long a session event (Stop, SessionEnd) waits for the note-write lock,
+ * for ALL the commits it writes together — not per commit. The session's next
+ * event writes the same commits again, so a short wait loses nothing; a long
+ * one would hold up the agent. post-commit keeps the default wait (20 s,
+ * ORIGIN_NOTE_LOCK_WAIT_MS): it writes one commit in the background, it is the
+ * writer an amend's rewrite races, and nothing may write that commit again.
+ */
+export const SESSION_EVENT_NOTE_LOCK_WAIT_MS = 2_000;
+/** `git notes add` under the lock: its timeout, and what must be left of the lease before it starts. */
+const NOTE_WRITE_TIMEOUT_MS = 10_000;
+
+export interface WriteGitNotesOptions {
+  /** Total wait for the note-write lock across every commit of this call. Default: the lock's own default. */
+  lockWaitMs?: number;
+}
+
 export function writeGitNotes(
   repoPath: string,
   commitShas: string[],
   data: GitNoteData,
+  opts: WriteGitNotesOptions = {},
 ): void {
   const execOpts = {
     windowsHide: true,
@@ -930,13 +1229,72 @@ export function writeGitNotes(
     encoding: 'utf-8' as const,
   };
 
-  const notePayload = buildNotePayload(data, shouldIncludePromptText(repoPath));
-  for (const sha of commitShas) {
+  const includePromptText = shouldIncludePromptText(repoPath);
+  // Sealed prompts (note-seal.ts): with the repo's opt-in and a cached key,
+  // the prompt text rides encrypted. A clear-text opt-in in the same
+  // .origin.json wins — sealing a note that already carries the text would be
+  // pointless; a machine-wide one does not apply to a sealing repo
+  // (shouldIncludePromptText).
+  // No key → a metadata-only note, never clear text.
+  const sealKey = includePromptText ? null : cachedWriteKey(repoPath);
+  const sealed = (legacy: { origin: Record<string, unknown> }, d: GitNoteData) =>
+    sealKey ? withSealedPrompts(legacy, d, sealKey) : legacy;
+  const sharedLegacy = data.markersForCommit ? null : sealed(buildNoteObject(data, includePromptText), data);
+  const producerVersion = cliVersion();
+  // One budget for the whole call: a held lock costs it once, not once per commit.
+  const lockDeadline = opts.lockWaitMs === undefined ? null : Date.now() + opts.lockWaitMs;
+  for (const rawSha of commitShas) {
+    // One canonical record per annotated commit: the record names its
+    // revision, so it is built for this sha and never shared with the others.
+    const sha = fullCommitSha(repoPath, rawSha);
+    // A session's markers are not every commit's (committed-markers.ts): with
+    // a per-commit lookup, a commit it has nothing for gets none.
+    const forCommit = { ...data, markers: data.markersForCommit ? data.markersForCommit(sha) : data.markers };
+    const legacy = sharedLegacy || sealed(buildNoteObject(forCommit, includePromptText), forCommit);
+    const { payload: notePayload, reason } = buildNoteEnvelopeForCommit(
+      legacy, sha, data.attribution, { recordedAt: new Date(), producerVersion },
+    );
+    if (reason && data.attribution) {
+      // The legacy note is still written; only the v1 record is left out.
+      debugLog('git-notes', 'no v1 attribution record for commit', { sha: sha.slice(0, 8), reason });
+    }
+    // What reached refs/notes/origin, read back after the write — null when
+    // nothing was written (lock held elsewhere, git failed). Only a confirmed
+    // note is mirrored to the API: a payload that lost the lock, or failed to
+    // write, must not link the commit on the server either.
+    let confirmed: string | null = null;
     try {
-      // Use --ref=origin to keep notes in a separate namespace
-      // Use -f to overwrite if note already exists (handles re-runs)
-      execFileSync('git', ['notes', '--ref=origin', 'add', '-f', '-m', notePayload, sha],
-        { ...execOpts, env: { ...process.env, ...gitIdentityEnv(repoPath) } });
+      // Use --ref=origin to keep notes in a separate namespace. -f replaces
+      // this commit's earlier session note (re-runs of Stop/SessionEnd) — but
+      // what a history rewrite carried onto it is kept (OR-11): read, merge
+      // and write under the lock the rewrite hooks take, so neither order of
+      // two backgrounded hooks loses the other's contributions.
+      const mergeAndWrite = (lease: NoteLease) => {
+        let existing: string | null = null;
+        try {
+          existing = execFileSync('git', ['notes', '--ref=origin', 'show', sha], execOpts).replace(/\n$/, '');
+        } catch { /* no note yet */ }
+        // The old commits a rewrite recorded: their notes say which models the
+        // carried session ran under, so the snapshot never restores just one.
+        const readSourceNote = (source: string): string | null => {
+          try { return execFileSync('git', ['notes', '--ref=origin', 'show', source], execOpts); } catch { return null; }
+        };
+        const merged = mergeSessionNoteOverRewrite(existing, notePayload, sha, { recordedAt: new Date(), producerVersion }, readSourceNote);
+        // Our lease may have run out while we read: then a newer holder may
+        // be merging, and our -f would drop its write. Write nothing.
+        if (!lease.holds(NOTE_WRITE_TIMEOUT_MS)) return false;
+        execFileSync('git', ['notes', '--ref=origin', 'add', '-f', '-m', merged, sha],
+          { ...execOpts, timeout: NOTE_WRITE_TIMEOUT_MS, env: { ...process.env, ...gitIdentityEnv(repoPath) } });
+        confirmed = execFileSync('git', ['notes', '--ref=origin', 'show', sha], execOpts);
+        return true;
+      };
+      const waitMs = lockDeadline === null ? undefined : Math.max(0, lockDeadline - Date.now());
+      if (!withNoteWriteLock(repoPath, mergeAndWrite, { waitMs })) {
+        // Never read-merge-write without the lock: a stale snapshot written
+        // with -f would drop what the holder is writing. The note is left as it
+        // is; the session's next write of this commit (Stop, SessionEnd) retries.
+        debugLog('git-notes', 'note lock held by another writer, or lost; note not written this time', { sha: sha.slice(0, 8) });
+      }
     } catch {
       // Never fail session-end because of a notes error
       // Notes are a nice-to-have, not critical
@@ -946,35 +1304,35 @@ export function writeGitNotes(
     // surface attribution on the commit detail / per-file blame views.
     // Fire-and-forget: any failure (no auth, server down, repo not
     // synced yet) is silent. The note already lives in git either way.
-    if (data.sessionId) {
+    if (data.sessionId && confirmed !== null) {
       try {
-        const parsed = JSON.parse(notePayload) as Record<string, unknown>;
+        const parsed = JSON.parse(confirmed) as Record<string, unknown>;
         api.importGitNote(data.sessionId, sha, parsed).catch(() => { /* silent */ });
-      } catch { /* notePayload always parses; defensive */ }
+      } catch { /* a note someone else made non-JSON: nothing to mirror */ }
     }
   }
 
   // Auto-push notes to the configured remote so other developers see
   // them on fetch. Best-effort: silent on failure (no remote, no
-  // network, permission denied, etc.). Single push for the whole notes
-  // ref — git de-dupes per-commit additions. Push to refs/notes/origin
-  // explicitly so we don't surprise the user with their own refs/notes.
+  // network, permission denied, etc.). The same publisher as pre-push and
+  // `origin push-metadata` — no force, --no-verify so the push never
+  // re-enters pre-push — but ONE attempt: this runs inside the agent's Stop
+  // and SessionEnd hooks, and a rejected push is merged and retried by the
+  // next pre-push instead of here.
   try {
-    const remote = resolvePushRemote(repoPath);
+    // `origin` only — never the first-remote fallback memory uses (see
+    // resolveAutoPublishRemote).
+    const remote = resolveAutoPublishRemote(repoPath);
     if (remote) {
-      execFileSync(
-        'git',
-        ['push', remote, 'refs/notes/origin:refs/notes/origin'],
-        { ...execOpts, timeout: 30_000 },
-      );
+      const result = publishAttributionNotes(repoPath, remote, { budgetMs: HOOK_PUBLISH_BUDGET_MS, maxAttempts: 1 });
+      debugLog('git-notes', 'auto-push refs/notes/origin', describePublishResult(result));
     }
   } catch {
     // Push can fail for any number of reasons — never block session-end.
   }
 
   // Memory notes ride the same trigger. Separate try so a failed attribution
-  // push (the block above throws before reaching here on e.g. a rejected
-  // non-fast-forward) doesn't also strand memory.
+  // push doesn't also strand memory.
   try {
     const remote = resolvePushRemote(repoPath);
     if (remote) pushMemoryNotes(repoPath, remote);

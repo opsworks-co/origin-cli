@@ -27,4 +27,21 @@ describe('extractTodosFromPrompts precision', () => {
     const many = Array.from({ length: 15 }, (_, i) => `TODO: task number ${i}`);
     expect(extractTodosFromPrompts([...many, 'TODO: task number 0'])).toHaveLength(10);
   });
+
+  it('does not read talk ABOUT the TODO list, or a lowercase word, as a TODO', () => {
+    // 2026-10-03: "give me todo list short" became the TODO "list short".
+    expect(extractTodosFromPrompts(['give me todo list short'])).toEqual([]);
+    expect(extractTodosFromPrompts(['give me TODO list short'])).toEqual([]);
+    expect(extractTodosFromPrompts(['what is next on the todo list?'])).toEqual([]);
+    expect(extractTodosFromPrompts(['note that the server restarts at 3am'])).toEqual([]);
+    // Naming an existing item would mint a duplicate of it.
+    expect(extractTodosFromPrompts(['TODO `87ec29e1`: repoLine still says the old thing'])).toEqual([]);
+    expect(extractTodosFromPrompts(['take TODO 8865b51a next'])).toEqual([]);
+  });
+
+  it('still reads a marker: a colon in any case, or the word in capitals', () => {
+    expect(extractTodosFromPrompts(['todo: rename the flag to --strict'])).toEqual(['rename the flag to --strict']);
+    expect(extractTodosFromPrompts(['TODO add retries to the uploader'])).toEqual(['add retries to the uploader']);
+    expect(extractTodosFromPrompts(['Note: the cache key must include the org'])).toEqual(['the cache key must include the org']);
+  });
 });

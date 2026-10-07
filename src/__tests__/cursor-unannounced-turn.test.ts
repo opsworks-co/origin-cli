@@ -130,6 +130,10 @@ describe('adoptUnannouncedPrompts', () => {
     expect(state.promptShadows?.find((s) => s.promptIndex === 2)?.shadowSha).toBe('newshadow');
     // Turn 1's baseline is untouched — it already has one.
     expect(state.promptShadows?.find((s) => s.promptIndex === 1)?.shadowSha).toBe('b8b92ff8');
+    // Cut AFTER the edit that revealed the turn: a window boundary, not the
+    // turn's start-state, and marked so the heartbeat does not narrow by it.
+    expect(state.promptShadows?.find((s) => s.promptIndex === 2)?.cutAfterTurnStart).toBe(true);
+    expect(state.promptShadows?.find((s) => s.promptIndex === 1)?.cutAfterTurnStart).toBeUndefined();
   });
 
   it('is a no-op when the transcript has not caught up yet', () => {

@@ -66,7 +66,9 @@ describe('post-commit shadow ingest', () => {
     // same patch-less row the fallback already produces.
     const block = shadowIngestBlock();
     expect(block).toContain('commits: [ingestCommit]');
-    expect(block).toMatch(/diff:\s*diff\s*\?\s*diff\.slice/);
+    // The patch rides through ingestPatchForCommit (hunk-bounded cut + a
+    // `diffTruncated` flag) — was `diff: diff ? diff.slice(...)`.
+    expect(block).toContain('...ingestPatchForCommit(diff)');
     expect(block).toContain('additions: linesAdded');
     expect(block).toContain('deletions: linesRemoved');
   });

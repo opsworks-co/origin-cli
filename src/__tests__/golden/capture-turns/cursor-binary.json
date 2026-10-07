@@ -70,5 +70,22 @@
     ],
     "contentUnavailableFiles": [],
     "commits": []
+  },
+  {
+    "promptIndex": 4,
+    "diffSource": "turn-window",
+    "chatOnly": false,
+    "filesChanged": [
+      "app.py"
+    ],
+    "linesAdded": 1,
+    "linesRemoved": 1,
+    "diff": "diff --git a/app.py b/app.py\nindex <blob>\n--- a/app.py\n+++ b/app.py\n@@ -1,5 +1,5 @@\n def main():\n-    print(\"new\")\n+    print(\"hi\")\n \n \n main()",
+    "uncommittedDiff": "",
+    "editedFiles": [
+      "app.py"
+    ],
+    "contentUnavailableFiles": [],
+    "commits": []
   }
 ]

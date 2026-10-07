@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "revision": {
+    "vcs": "hg",
+    "id": "9c0e2b4d6f8a1c3e5a7b9d0f2e4c6a8b0d1f3e5a"
+  },
+  "attribution_level": "commit",
+  "recorded_at": "2026-09-24T08:00:00Z",
+  "producer": {
+    "name": "example-converter",
+    "version": "1.0.0"
+  },
+  "contributions": [
+    {
+      "evidence": "imported",
+      "model": {
+        "id": "anthropic/claude-sonnet-4-6"
+      }
+    },
+    {
+      "evidence": "inferred",
+      "agent": {
+        "id": "cursor"
+      }
+    }
+  ]
+}

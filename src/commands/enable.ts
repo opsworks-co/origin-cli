@@ -5,6 +5,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { throughLiveInstall } from '../live-install-path.js';
 import chalk from 'chalk';
 import { execSync, execFileSync } from 'child_process';
 import { run, runDetailed, findExecutable } from '../utils/exec.js';
@@ -112,7 +113,7 @@ export function resolveCliEntry(
 function cliEntryScript(): string {
   let moduleDir = '';
   try {
-    moduleDir = path.dirname(fileURLToPath(import.meta.url));
+    moduleDir = throughLiveInstall(path.dirname(fileURLToPath(import.meta.url)));
   } catch { /* unresolvable — argv[1] may still answer */ }
   try {
     return resolveCliEntry(process.argv[1], moduleDir, (f) => fs.existsSync(f));
@@ -324,6 +325,9 @@ function claudeHookEvents(): Record<string, any[]> {
     SessionEnd: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code session-end') }] }],
     PreToolUse: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code pre-tool-use') }] }],
     PostToolUse: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code post-tool-use') }] }],
+    // A FAILED tool call fires this instead of PostToolUse. Without it a failed
+    // `git commit` left its commit claim up for the rest of the turn.
+    PostToolUseFailure: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code post-tool-use-failure') }] }],
   };
 }
 
@@ -416,7 +420,7 @@ function cascadeHookEvents(): Record<string, any[]> {
 // The timeout is part of the hook identity Codex hashes for trust, so an
 // install from before this change shows as "Modified" until `origin enable`
 // re-runs and rewrites both the entry and its trusted_hash.
-const CODEX_STOP_HOOK_TIMEOUT_SEC = 600;
+export const CODEX_STOP_HOOK_TIMEOUT_SEC = 600;
 
 function codexHookEvents(): Record<string, any[]> {
   return {
@@ -2225,6 +2229,35 @@ exit 0
   fs.chmodSync(postMergePath, '755');
 }
 
+// Write the global prepare-commit-msg hook. Synchronous: git reads the message
+// file after it returns, and the CLI also records a cherry-pick's source here
+// while CHERRY_PICK_HEAD still exists (cherry-pick-source.ts).
+export function writeGlobalPrepareCommitMsgHook(globalHooksDir: string): void {
+  const prepareCommitMsgPath = path.join(globalHooksDir, 'prepare-commit-msg');
+  const prepareCommitMsgContent = `#!/bin/sh
+# origin-global-prepare-commit-msg
+# Installed by: origin enable --global
+#
+# git passes: $1 = path to COMMIT_EDITMSG, $2 = source, $3 = sha
+
+${hookShimPreamble()}
+
+# Synchronous — git waits for this to finish before reading the message.
+# Trailer-insertion errors are swallowed internally; never block the commit.
+if [ -n "$ORIGIN_BIN" ]; then
+  "$ORIGIN_BIN" hooks git-prepare-commit-msg "$1" "$2" "$3" || true
+fi
+
+# Chain to local repo hook if present.
+LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/prepare-commit-msg"
+if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
+  "$LOCAL_HOOK" "$@"
+fi
+`;
+  fs.writeFileSync(prepareCommitMsgPath, prepareCommitMsgContent);
+  fs.chmodSync(prepareCommitMsgPath, '755');
+}
+
 function installGlobalGitHooks(): void {
   const globalHooksDir = path.join(os.homedir(), '.origin', 'git-hooks');
 
@@ -2256,29 +2289,7 @@ function installGlobalGitHooks(): void {
   // Prepare-commit-msg hook — writes Origin-Session trailer into COMMIT_EDITMSG.
   // Must run SYNCHRONOUSLY (not backgrounded) because git waits for the hook
   // to finish before reading the message file.
-  const prepareCommitMsgPath = path.join(globalHooksDir, 'prepare-commit-msg');
-  const prepareCommitMsgContent = `#!/bin/sh
-# origin-global-prepare-commit-msg
-# Installed by: origin enable --global
-#
-# git passes: $1 = path to COMMIT_EDITMSG, $2 = source, $3 = sha
-
-${hookShimPreamble()}
-
-# Synchronous — git waits for this to finish before reading the message.
-# Trailer-insertion errors are swallowed internally; never block the commit.
-if [ -n "$ORIGIN_BIN" ]; then
-  "$ORIGIN_BIN" hooks git-prepare-commit-msg "$1" "$2" "$3" || true
-fi
-
-# Chain to local repo hook if present.
-LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/prepare-commit-msg"
-if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
-  "$LOCAL_HOOK" "$@"
-fi
-`;
-  fs.writeFileSync(prepareCommitMsgPath, prepareCommitMsgContent);
-  fs.chmodSync(prepareCommitMsgPath, '755');
+  writeGlobalPrepareCommitMsgHook(globalHooksDir);
 
   // Set git config to use our global hooks directory
   try {

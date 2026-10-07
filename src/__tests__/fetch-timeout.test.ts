@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { fetchWithTimeout } from '../fetch-timeout.js';
+import zlib from 'zlib';
+import { fetchWithTimeout, GZIP_BODY_MIN_BYTES } from '../fetch-timeout.js';
 
 describe('fetchWithTimeout', () => {
   const realFetch = global.fetch;
@@ -28,5 +29,27 @@ describe('fetchWithTimeout', () => {
     const ctrl = new AbortController();
     await fetchWithTimeout('http://x', { signal: ctrl.signal }, 10);
     expect(seenSignal).toBe(ctrl.signal);
+  });
+
+  it('gzips a large body and says so, so a session PATCH fits inside the hook budget', async () => {
+    let seen: any;
+    global.fetch = vi.fn(async (_url: any, opts: any) => { seen = opts; return { ok: true } as any; }) as any;
+    const json = JSON.stringify({ promptChanges: [{ diff: '+line\n'.repeat(GZIP_BODY_MIN_BYTES) }] });
+    await fetchWithTimeout('http://x', { method: 'PATCH', body: json, headers: { 'Content-Type': 'application/json', 'X-API-Key': 'k' } }, 1000);
+    const headers = new Headers(seen.headers);
+    expect(headers.get('content-encoding')).toBe('gzip');
+    expect(headers.get('content-type')).toBe('application/json');
+    expect(headers.get('x-api-key')).toBe('k');
+    expect(seen.body.length).toBeLessThan(json.length / 4);
+    expect(zlib.gunzipSync(seen.body).toString('utf8')).toBe(json);
+  });
+
+  it('leaves a small body plain', async () => {
+    let seen: any;
+    global.fetch = vi.fn(async (_url: any, opts: any) => { seen = opts; return { ok: true } as any; }) as any;
+    const headers = { 'Content-Type': 'application/json' };
+    await fetchWithTimeout('http://x', { method: 'POST', body: '{"a":1}', headers }, 1000);
+    expect(seen.body).toBe('{"a":1}');
+    expect(seen.headers).toBe(headers);
   });
 });

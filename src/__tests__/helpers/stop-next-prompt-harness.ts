@@ -13,7 +13,11 @@ import { fileURLToPath } from 'url';
 import { foldStopRows } from './fold-stop-rows.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-export const BIN = path.join(cliRoot, 'dist', 'index.js');
+// ORIGIN_E2E_BIN runs a scenario through another build (the installed release,
+// say) to show the fix is what changed the outcome — as capture-e2e-cursor-binary does.
+
+export interface ReplyUsage { model: string; in?: number; out?: number; read?: number }
+export const BIN = process.env.ORIGIN_E2E_BIN || path.join(cliRoot, 'dist', 'index.js');
 export const haveDist = fs.existsSync(BIN);
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -39,10 +43,13 @@ export interface Harness {
   repo: string;
   hits: Hit[];
   git: (args: string[], env?: Record<string, string>) => string;
-  run: (event: string, payload?: Record<string, unknown>) => Promise<{ code: number | null; stderr: string }>;
+  run: (event: string, payload?: Record<string, unknown>) => Promise<{ code: number | null; stderr: string; stdout: string }>;
   gitHook: (name: string) => Promise<{ code: number | null; stderr: string }>;
   say: (text: string) => void;
-  reply: (text: string) => void;
+  /** Any other transcript entry, as Claude Code writes it (e.g. an `instructions` attachment). */
+  transcriptEntry: (entry: Record<string, unknown>) => void;
+  /** `usage` makes it a billed reply, the way Claude Code writes one (message id, model, usage). */
+  reply: (text: string, usage?: ReplyUsage) => void;
   /** PreToolUse → the write → PostToolUse. */
   agentWrites: (id: string, file: string, content: string) => Promise<void>;
   /** PreToolUse → `effect` (the command's work on disk) → PostToolUse. */
@@ -60,9 +67,12 @@ export interface Harness {
 }
 
 export interface AgentSession {
-  run: (event: string, payload?: Record<string, unknown>) => Promise<{ code: number | null; stderr: string }>;
+  /** What its session-start hook printed (the context injection). */
+  startStdout: string;
+  run: (event: string, payload?: Record<string, unknown>) => Promise<{ code: number | null; stderr: string; stdout: string }>;
   say: (text: string) => void;
-  reply: (text: string) => void;
+  /** `usage` makes it a billed reply, the way Claude Code writes one (message id, model, usage). */
+  reply: (text: string, usage?: ReplyUsage) => void;
   agentWrites: (id: string, file: string, content: string) => Promise<void>;
   agentRuns: (id: string, command: string, effect: () => void | Promise<void>, extra?: Record<string, unknown>) => Promise<void>;
   submit: (prompt: string) => Promise<void>;
@@ -130,12 +140,13 @@ export async function createHarness(sessionId: string, serverSession: string): P
         cwd: repo, env: { ...process.env, ORIGIN_LIVE_CAPTURE: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
       });
       let stderr = '';
+      let stdout = ''; // the context injection
       child.stderr.on('data', (c) => { stderr += c; });
-      child.stdout.on('data', () => { /* context injection */ });
+      child.stdout.on('data', (c) => { stdout += c; });
       child.stdin.end(JSON.stringify({
         session_id: agentId, transcript_path: agentTranscript, cwd: repo, hook_event_name: event, ...payload,
       }));
-      return new Promise<{ code: number | null; stderr: string }>((resolve) => child.on('close', (code) => resolve({ code, stderr })));
+      return new Promise<{ code: number | null; stderr: string; stdout: string }>((resolve) => child.on('close', (code) => resolve({ code, stderr, stdout })));
     };
 
     const flush = () => fs.writeFileSync(agentTranscript, lines.join('\n') + '\n');
@@ -143,13 +154,24 @@ export async function createHarness(sessionId: string, serverSession: string): P
       lines.push(JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'text', text }] } }));
       flush();
     };
+    const transcriptEntry = (entry: Record<string, unknown>) => {
+      lines.push(JSON.stringify({ timestamp: new Date().toISOString(), ...entry }));
+      flush();
+    };
     const toolUse = (id: string, name: string, input: Record<string, unknown>) => {
       lines.push(JSON.stringify({ type: 'assistant', timestamp: new Date().toISOString(), message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] } }));
       lines.push(JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } }));
       flush();
     };
-    const reply = (text: string) => {
-      lines.push(JSON.stringify({ type: 'assistant', timestamp: new Date().toISOString(), message: { role: 'assistant', content: [{ type: 'text', text }] } }));
+    const reply = (text: string, usage?: ReplyUsage) => {
+      const billed = usage
+        ? {
+          id: `msg_${lines.length}_${Math.random().toString(36).slice(2, 8)}`,
+          model: usage.model,
+          usage: { input_tokens: usage.in ?? 0, output_tokens: usage.out ?? 0, cache_read_input_tokens: usage.read ?? 0, cache_creation_input_tokens: 0 },
+        }
+        : {};
+      lines.push(JSON.stringify({ type: 'assistant', timestamp: new Date().toISOString(), message: { role: 'assistant', content: [{ type: 'text', text }], ...billed } }));
       flush();
     };
 
@@ -180,9 +202,9 @@ export async function createHarness(sessionId: string, serverSession: string): P
       const r = await run('stop', { stop_hook_active: false });
       expect(r.code, r.stderr).toBe(0);
     };
-    return { run, say, reply, agentWrites, agentRuns, submit, stop };
+    return { run, say, transcriptEntry, reply, agentWrites, agentRuns, submit, stop };
   };
-  const { run, say, reply, agentWrites, agentRuns, submit, stop } = agentSession(sessionId, transcript);
+  const { run, say, transcriptEntry, reply, agentWrites, agentRuns, submit, stop } = agentSession(sessionId, transcript);
   const sibling = async (id: string): Promise<AgentSession> => {
     siblings.push(id);
     const t = path.join(tmp, `${id}.jsonl`);
@@ -190,7 +212,7 @@ export async function createHarness(sessionId: string, serverSession: string): P
     const agent = agentSession(id, t);
     const r = await agent.run('session-start', { source: 'startup' });
     expect(r.code, r.stderr).toBe(0);
-    return agent;
+    return { ...agent, startStdout: r.stdout };
   };
 
   const gitHook = (name: string) => {
@@ -269,7 +291,7 @@ export async function createHarness(sessionId: string, serverSession: string): P
   fs.writeFileSync(path.join(repo, '.gitignore'), '.probe\n');
 
   return {
-    repo, hits, git, run, gitHook, say, reply, agentWrites, agentRuns, startSession, submit, stop,
+    repo, hits, git, run, gitHook, say, transcriptEntry, reply, agentWrites, agentRuns, startSession, submit, stop,
     journalText, sibling, rows, hooksLog, close,
   };
 }

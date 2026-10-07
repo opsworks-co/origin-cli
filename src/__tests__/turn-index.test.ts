@@ -83,8 +83,8 @@ describe('clipMappingsToPromptHistory on a resumed conversation', () => {
   });
 
   it('with the base, this launch\'s rows survive and read their text at the LOCAL position', () => {
-    const out = clipMappingsToPromptHistory(rows, ['Привіт :wave:', 'tell me in short'], 21);
-    expect(out.find((m) => m.promptIndex === 21)?.promptText).toBe('Привіт :wave:');
+    const out = clipMappingsToPromptHistory(rows, ['Привіт [image]', 'tell me in short'], 21);
+    expect(out.find((m) => m.promptIndex === 21)?.promptText).toBe('Привіт [image]');
     expect(out.find((m) => m.promptIndex === 22)?.promptText).toBe('tell me in short');
   });
 
@@ -92,7 +92,7 @@ describe('clipMappingsToPromptHistory on a resumed conversation', () => {
     // Stop synthesizes a chat-only mapping per turn and on a resumed session
     // one lands below the base. Sent, it would tell the server that a real
     // earlier turn authored nothing.
-    const out = clipMappingsToPromptHistory(rows, ['Привіт :wave:', 'tell me in short'], 21);
+    const out = clipMappingsToPromptHistory(rows, ['Привіт [image]', 'tell me in short'], 21);
     expect(out.map((m) => m.promptIndex)).toEqual([21, 22]);
   });
 
@@ -103,7 +103,7 @@ describe('clipMappingsToPromptHistory on a resumed conversation', () => {
       { promptIndex: 0, promptText: 'an earlier turn', filesChanged: ['a.ts'], diff: 'd' },
       { promptIndex: 21, promptText: 'Привіт' },
     ];
-    const out = clipMappingsToPromptHistory(withWork, ['Привіт :wave:'], 21);
+    const out = clipMappingsToPromptHistory(withWork, ['Привіт [image]'], 21);
     expect(out.map((m) => m.promptIndex)).toEqual([0, 21]);
     expect(out[0].promptText).toBe('an earlier turn');
   });

@@ -28,7 +28,7 @@ import http from 'http';
 import { execFile, execFileSync, spawn } from 'child_process';
 import { promisify } from 'util';
 import { fileURLToPath } from 'url';
-import { WINDOWS_SLOWDOWN, isWindows } from './helpers/windows-e2e.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { foldStopRows } from './helpers/fold-stop-rows.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -221,7 +221,7 @@ const BG_ONLY = 'export const BG_ONLY_MARKER = "background wip only";';
 const WIP2_ONLY_FILE = 'src/wip_probe.ts';
 const WIP2_ONLY = 'export const WIP2_ONLY_MARKER = "turn two wip only";';
 
-describe.skipIf(!haveDist || isWindows)('a long session with every 874ff028 hazard, through the built binary', () => {
+describe.skipIf(!haveDist)('a long session with every 874ff028 hazard, through the built binary', () => {
   let tmp = '';
   let older = '';
   let foreign = '';

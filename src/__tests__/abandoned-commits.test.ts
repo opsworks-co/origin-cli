@@ -115,6 +115,57 @@ describe('provenAbandonedCommits', () => {
     expect(abandoned([orphan, again], [{ from: orphan, to: again }])).toEqual([]);
   });
 
+  // Session 507dca76, turn 8: "wip" rebased onto a main that moved on, then
+  // reset to main and committed again with a version bump — the commit that was
+  // squash-merged. The rebase result was kept as live work beside the squash.
+  it('a rebased commit later reset away and redone is abandoned; the commit it was rebased from stays with supersession', () => {
+    git('checkout', '-q', '-b', 'fix');
+    write('hooks.ts', 'agents md\n'); const wip = commit('wip');
+    git('checkout', '-q', 'main');
+    write('other.ts', 'main moved on\n'); commit('main moved on');
+    git('checkout', '-q', 'fix');
+    git('rebase', '-q', 'main');
+    const rebased = head();
+    git('reset', '-q', 'main');
+    write('package.json', '{"version":"2"}\n');
+    const redo = commit('fix(cli): Claude sees the repo\'s AGENTS.md');
+    expect(abandoned([wip, rebased, redo], [{ from: wip, to: rebased }])).toEqual([rebased]);
+  });
+
+  describe('a sub-agent\'s own worktree', () => {
+    // Session df8cc9aa turn 30: a sub-agent in an isolated worktree committed
+    // "WIP", reset it away and committed the work again. The reset is in ITS
+    // branch's reflog, never in the reflog of the branch the session is on.
+    const agentTree = () => path.join(repo, '..', `${path.basename(repo)}-agent`);
+    const inAgent = (...args: string[]) =>
+      execFileSync('git', args, { cwd: agentTree(), encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).toString().trim();
+    afterEach(() => { try { git('worktree', 'remove', '--force', agentTree()); } catch { /* gone */ } });
+
+    it('a WIP reset away and redone there is abandoned; the redo is not', () => {
+      git('worktree', 'add', '-q', '-b', 'fix/agent', agentTree());
+      fs.writeFileSync(path.join(agentTree(), 'watcher.ts'), 'first try\n');
+      inAgent('add', '-A'); inAgent('commit', '-qm', 'WIP');
+      const wip = inAgent('rev-parse', 'HEAD');
+      inAgent('reset', '-q', 'HEAD~1');
+      fs.writeFileSync(path.join(agentTree(), 'watcher.ts'), 'the real fix\n');
+      inAgent('add', '-A'); inAgent('commit', '-qm', 'fix(capture): the watcher records it');
+      const redo = inAgent('rev-parse', 'HEAD');
+      expect(abandoned([wip, redo])).toEqual([wip]);
+    });
+
+    it('a branch another worktree stands on, reset to its base after a squash-merge and left there: kept', () => {
+      git('worktree', 'add', '-q', '-b', 'feature', agentTree());
+      fs.writeFileSync(path.join(agentTree(), 'f1.ts'), 'f1\n'); inAgent('add', '-A'); inAgent('commit', '-qm', 'one');
+      const f1 = inAgent('rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(agentTree(), 'f2.ts'), 'f2\n'); inAgent('add', '-A'); inAgent('commit', '-qm', 'two');
+      const f2 = inAgent('rev-parse', 'HEAD');
+      write('other.ts', 'moved on\n'); commit('main moved on');
+      git('merge', '-q', '--squash', 'feature'); git('commit', '-q', '-m', 'feature (#1)');
+      inAgent('reset', '-q', '--hard', 'HEAD~2');
+      expect(abandoned([f1, f2])).toEqual([]);
+    });
+  });
+
   it('an amended commit is not abandoned — the amend is not a reset', () => {
     write('m.ts', 'm\n'); const before = commit('m');
     write('m.ts', 'm2\n'); git('add', '-A'); git('commit', '-q', '--amend', '-m', 'm');

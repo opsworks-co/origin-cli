@@ -1,4 +1,5 @@
 import { withClaudeHookLock } from '../claude-hook-lock.js';
+import { variantAllowsRepoContext } from '../context-variant.js';
 import { loadConfig, saveConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig, isConnectedMode, ensureConfigDir } from '../config.js';
 import { isRepoIgnored, matchIgnoredRepo } from '../ignore-repos.js';
 import { decidePushBlock } from '../push-block.js';
@@ -45,6 +46,7 @@ import {
   recordPromptSubmittedAt,
   turnBaseline,
   applyRewritePairsToState,
+  commitTurnOf,
 } from '../session-state.js';
 import { capCommitMessage, captureGitState, captureAgyDiff, getDirtyFiles, createShadowCommit, commitCombiningTips, commitWithInheritedFiles, mergeTreeOf, commitDiffScopedToPrompt, filesChangedSinceShadow, readFileAtRev, isUnsafeGitShowPath, gitIgnoredFiles, sameSha, MAX_DIFF_SIZE, MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
 import { capDiff, fitDiffToBudget } from '../diff-budget.js';
@@ -66,7 +68,7 @@ import { RECENCY_TIEBREAK_MARGIN_MS, applyAuthoredTotals, commitAuthoredDelta, c
 import { EDIT_HOOK_TOOL, adoptUnannouncedPrompts, buildLiveEditPromptChanges, cursorTranscriptPrompts, handleAfterFileEdit, resolveAfterFileEditCwd } from './hooks/after-file-edit.js';
 // Moved to ./hooks/tool-use.ts — imported for the dispatcher, re-exported so
 // every existing `from './commands/hooks.js'` import keeps resolving.
-import { LIVE_EDIT_MAX_ENTRIES, MAX_DISCOVERED_WORKTREES, PENDING_WRITE_MAX, SHELL_COMMAND_MAX, SHELL_PROBE_MAX_PENDING, attachReposForFiles, beginShellProbe, discoverWorkTreesFromCommand, endShellProbe, enforceFileRestrictions, extractFilePaths, handlePostToolUse, handlePreToolUse, matchGlob, noteShellWriteTurn, probeDepsFor, recordLiveEdits, toolCallFailed, treesToProbe } from './hooks/tool-use.js';
+import { LIVE_EDIT_MAX_ENTRIES, MAX_DISCOVERED_WORKTREES, PENDING_WRITE_MAX, SHELL_COMMAND_MAX, SHELL_PROBE_MAX_PENDING, attachReposForFiles, beginShellProbe, discoverWorkTreesFromCommand, endShellProbe, enforceFileRestrictions, extractFilePaths, handlePostToolUse, handlePostToolUseFailure, handlePreToolUse, matchGlob, noteShellWriteTurn, probeDepsFor, recordLiveEdits, toolCallFailed, treesToProbe } from './hooks/tool-use.js';
 // Moved to ./hooks/session-start.ts — imported for the dispatcher, re-exported so
 // every existing `from './commands/hooks.js'` import keeps resolving.
 import { ADOPT_IDLESS_MAX_AGE_MS, ORIGIN_FRAMEWORK_MARKER, agentFileCarriesFramework, agentReadsContextFromHook, durableRulesFileMessage, emitVisiblePreamble, expireStaleSessionsOnServer, handleSessionStart, maybeSpawnHistorySync, maybeSpawnMemoryBriefBackfill, resolveCodexThreadId, resumeBaseFromTranscript, resumeSeedApplies, selectReusableSession } from './hooks/session-start.js';
@@ -87,7 +89,7 @@ export { SESSION_START_RECENT_SHAS, budgetLockoutDecision, buildContextInjection
 
 export { ADOPT_IDLESS_MAX_AGE_MS, ORIGIN_FRAMEWORK_MARKER, agentFileCarriesFramework, agentReadsContextFromHook, durableRulesFileMessage, emitVisiblePreamble, expireStaleSessionsOnServer, handleSessionStart, maybeSpawnHistorySync, maybeSpawnMemoryBriefBackfill, resolveCodexThreadId, resumeBaseFromTranscript, resumeSeedApplies, selectReusableSession };
 
-export { LIVE_EDIT_MAX_ENTRIES, MAX_DISCOVERED_WORKTREES, PENDING_WRITE_MAX, SHELL_COMMAND_MAX, SHELL_PROBE_MAX_PENDING, attachReposForFiles, beginShellProbe, discoverWorkTreesFromCommand, endShellProbe, enforceFileRestrictions, extractFilePaths, handlePostToolUse, handlePreToolUse, matchGlob, noteShellWriteTurn, probeDepsFor, recordLiveEdits, toolCallFailed, treesToProbe };
+export { LIVE_EDIT_MAX_ENTRIES, MAX_DISCOVERED_WORKTREES, PENDING_WRITE_MAX, SHELL_COMMAND_MAX, SHELL_PROBE_MAX_PENDING, attachReposForFiles, beginShellProbe, discoverWorkTreesFromCommand, endShellProbe, enforceFileRestrictions, extractFilePaths, handlePostToolUse, handlePostToolUseFailure, handlePreToolUse, matchGlob, noteShellWriteTurn, probeDepsFor, recordLiveEdits, toolCallFailed, treesToProbe };
 
 export { EDIT_HOOK_TOOL, adoptUnannouncedPrompts, buildLiveEditPromptChanges, cursorTranscriptPrompts, handleAfterFileEdit, resolveAfterFileEditCwd };
 
@@ -180,13 +182,15 @@ import { isOriginAutoManagedPath, shouldIgnoreFile, stripIgnoredSectionsFromDiff
 import { repoEntryExists } from '../vanished-watched-files.js';
 import { ORIGIN_MANAGED_MARKER, PREAMBLE_VISIBLE_ANCHOR, stripOriginManagedBlock } from '../managed-block-diff.js';
 import { normalizeToolHookPayload } from '../hook-payload.js';
-import { skipManuallyEndedHook } from '../manual-session-end.js';
+import { manuallyEndedSessionIds, skipManuallyEndedHook } from '../manual-session-end.js';
+import { skipCopilotTitleSessionHook } from '../copilot-title-session.js';
 import {
   listMirroredSessionsForTree,
   preferRegisteredSessionId,
   isPendingReservation,
   sessionTagFor,
   dropSessionMirror,
+  finalRewriteOf,
 } from '../session-state.js';
 import { sessionWorkTree, shellWindowTarget, samePath, candidateDirsFromCommand, worktreesAmongCandidates } from '../session-worktree.js';
 import { probeTree, touchedSince, type TreeProbe } from '../shell-command-probe.js';
@@ -925,6 +929,52 @@ export interface CommitReads {
 }
 
 /**
+ * The second parent of the LAST merge among `commits` (oldest first) — the
+ * main a branch took in most recently. Empty when none of them is a merge or
+ * git cannot answer. One git process.
+ */
+function lastAbsorbedParent(repoPath: string, commits: string[]): string {
+  if (commits.length === 0) return '';
+  try {
+    const out = execFileSync('git', ['log', '--no-walk=unsorted', '--format=%H %P', ...commits], {
+      windowsHide: true, cwd: repoPath, encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000,
+    }).toString();
+    const second = new Map<string, string>();
+    for (const line of out.split('\n')) {
+      const [sha, , p2] = line.trim().split(' ');
+      if (sha && p2) second.set(sha, p2);
+    }
+    let absorbed = '';
+    for (const c of commits) if (second.has(c)) absorbed = second.get(c)!;
+    return absorbed;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The patch-id of `from..to` as ONE diff — what a squash of that range carries.
+ * Empty when git cannot answer or the range changes nothing.
+ */
+function rangePatchId(repoPath: string, from: string, to: string): string {
+  try {
+    const diff = execFileSync('git', ['diff', '--no-color', '--no-renames', from, to], {
+      windowsHide: true, cwd: repoPath, encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000, maxBuffer: 64 * 1024 * 1024,
+    }).toString();
+    if (!diff.trim()) return '';
+    const out = execFileSync('git', ['patch-id', '--stable'], {
+      windowsHide: true, cwd: repoPath, encoding: 'utf-8', input: diff,
+      stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000, maxBuffer: 16 * 1024 * 1024,
+    }).toString().trim();
+    return out.split(/\s+/)[0] || '';
+  } catch {
+    return '';
+  }
+}
+
+/**
  * Answer those reads for many commits in four git processes.
  *
  * The rescue compares every orphan against every commit in the session window,
@@ -1097,6 +1147,64 @@ function headsOfOtherSessionTrees(repoPath: string, state: SessionState): string
     if (/^[a-f0-9]{40,64}$/.test(head) && head !== own) heads.add(head);
   }
   return [...heads];
+}
+
+/**
+ * Take out of `replacements` every pair that points BACKWARDS.
+ *
+ * The same patch, the same tree, or a reflog chain proves two commits are
+ * copies of one piece of work. It does not say which one replaced the other:
+ * the rescue takes "HEAD cannot reach it" for the old side, and that answer
+ * changes with the tree the rescue runs from. Session df8cc9aa turn 26
+ * committed 5ab32f7b in its worktree; GitHub squash-merged it as 8497e852.
+ * A rescue run from a tree on main recorded 5ab32f7b -> 8497e852; the next one,
+ * run from the worktree still standing on 5ab32f7b, found 8497e852 unreachable
+ * there and recorded 8497e852 -> 5ab32f7b. Both pairs rode every Stop, the
+ * server retired each commit in favour of the other, and the turn showed no
+ * commit at all (the same happened to eba6027b/deff77d0 and 6f67706e/d7d6ec99).
+ *
+ * A rewrite is made after what it rewrites, so its committer time is never
+ * earlier: a pair whose `to` was committed before its `from` is refused, and
+ * so is one that would close a cycle with the pairs already recorded (git's
+ * post-rewrite pairs are the record; the rescue only infers). A time git
+ * cannot read refuses nothing.
+ */
+function dropBackwardReplacements(repoPath: string, state: SessionState, replacements: Map<string, string>): void {
+  if (replacements.size === 0) return;
+  const known = state.rewrittenCommits || [];
+  const same = (a: string, b: string) => {
+    const x = a.toLowerCase(); const y = b.toLowerCase();
+    return x === y || (x.length >= 7 && y.length >= 7 && (x.startsWith(y) || y.startsWith(x)));
+  };
+  const times = new Map<string, number>();
+  const shas = [...new Set([...replacements].flat())];
+  try {
+    const out = execFileSync('git', ['log', '--no-walk=unsorted', '--format=%H %ct', ...shas], {
+      windowsHide: true, cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000,
+    }).toString();
+    for (const line of out.split('\n')) {
+      const [sha, ct] = line.trim().split(' ');
+      if (sha && ct && /^\d+$/.test(ct)) times.set(sha.toLowerCase(), Number(ct));
+    }
+  } catch { /* unreadable: the time rule refuses nothing */ }
+  const timeOf = (sha: string): number | undefined => {
+    for (const [full, t] of times) if (same(full, sha)) return t;
+    return undefined;
+  };
+  const refused: string[] = [];
+  for (const [from, to] of [...replacements]) {
+    const tf = timeOf(from);
+    const tt = timeOf(to);
+    const backwards = tf !== undefined && tt !== undefined && tt < tf;
+    const cycle = same(finalRewriteOf(to, known), from);
+    if (backwards || cycle) {
+      replacements.delete(from);
+      refused.push(`${from.slice(0, 8)}→${to.slice(0, 8)}${cycle ? ' (cycle)' : ''}`);
+    }
+  }
+  if (refused.length > 0) {
+    debugLog('rescue', 'refused rewrite pairs that point backwards', { sessionId: state.sessionId, refused });
+  }
 }
 
 function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
@@ -1382,14 +1490,39 @@ function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
       const base = parentOf(orphanFull.get(o)!);
       const endTree = revParse(`${tip}^{tree}`);
       if (!base || !endTree) continue;
-      const squash = reachablePool.find((candidate) =>
+      let squash = reachablePool.find((candidate) =>
         !claimed.has(candidate) && !shortByFull.has(candidate)
         && parentOf(candidate) === base && revParse(`${candidate}^{tree}`) === endTree);
+      // A squash the FORGE made sits on main as it was at merge time, not on
+      // the run's base — and when the branch merged main in first, its tree
+      // also differs from nothing we hold. Session d027b430, PR #1929: turn 7's
+      // 133fa563, turn 8's merge of main 0bee0765 and bump fe322fac, squashed
+      // on GitHub as 291c3fdd5 onto the main 0bee0765 had absorbed. None of
+      // them was ever replaced, so the commit that landed carried no session
+      // (`origin why` on its lines: "committed without an active Origin
+      // session"). Its patch is the run's net change against the last main the
+      // run took in — or against the run's own base when it merged nothing in —
+      // and patch-id equality of that whole range is proof, not shape.
+      // Three git processes per run that got here: the run's parents in one
+      // read, then one range diff and its patch-id. Candidates are compared on
+      // the batched patch-ids, and only a match is asked whether it is a merge.
+      // A run every member of which an earlier rung already placed has nothing
+      // left to find.
+      if (!squash && run.length > 1 && run.some((m) => !replacements.has(m))) {
+        const absorbed = lastAbsorbedParent(repoPath, run.map((m) => orphanFull.get(m)!));
+        const net = rangePatchId(repoPath, absorbed || base, tip);
+        if (net) {
+          squash = reachablePool.find((candidate) =>
+            !claimed.has(candidate) && !shortByFull.has(candidate)
+            && reads().patchId(candidate) === net && !revParse(`${candidate}^2`));
+        }
+      }
       if (!squash) continue;
       for (const member of run) replacements.set(member, squash);
       claimed.add(squash);
     }
   }
+  dropBackwardReplacements(repoPath, state, replacements);
   if (replacements.size === 0) {
     // Still worth collapsing exact repeats: the same sha can be recorded by
     // both the post-commit hook and a later git-capture walk.
@@ -1975,18 +2108,50 @@ export function __testSessionScopedCommittedDiff(
   return sessionScopedCommittedDiff(repoPath, state as SessionState, sinceSha);
 }
 
-/** True when a commit's `Origin-Session` trailer id belongs to `state`
- *  (or the session it chained from). Trailers are truncated ("7bfbac34-0cd"),
- *  so match by prefix in either direction. */
-export function commitTrailerBelongsToSession(commitBody: string, state: { sessionId?: string; previousSessionId?: string }): 'self' | 'other' | 'none' {
+/** The ids THIS session answers to in a trailer: its current id and the
+ *  `local-` id it ran under before promotion (prepare-commit-msg stamped that
+ *  one into every commit made while it was local). Lower-cased. */
+export function sessionOwnIds(state: { sessionId?: string; localSessionId?: string }): string[] {
+  return [state.sessionId, state.localSessionId]
+    .filter((id): id is string => typeof id === 'string' && !!id)
+    .map((id) => id.toLowerCase());
+}
+
+/** True when a commit's `Origin-Session` trailer id belongs to `state` — its
+ *  current id, its pre-promotion `local-` id, or the session it chained from.
+ *  Trailers are truncated ("7bfbac34-0cd", "local-3f9a1c"), so match by prefix
+ *  in either direction, ignoring case. */
+export function commitTrailerBelongsToSession(
+  commitBody: string,
+  state: { sessionId?: string; localSessionId?: string; previousSessionId?: string },
+): 'self' | 'other' | 'none' {
   const m = commitBody.match(/^Origin-Session:\s*([^\s|]+)/mi);
   if (!m) return 'none';
-  const owner = m[1].trim();
-  const selves = [state.sessionId, state.previousSessionId].filter(Boolean) as string[];
+  const owner = m[1].trim().toLowerCase();
+  const selves = [...sessionOwnIds(state), ...(state.previousSessionId ? [state.previousSessionId.toLowerCase()] : [])];
   for (const id of selves) {
     if (id === owner || id.startsWith(owner) || owner.startsWith(id)) return 'self';
   }
   return 'other';
+}
+
+/**
+ * Does any `Origin-Session:` line in this commit name THIS session AND the
+ * given 1-based turn (`… | turn N`)? A squash carries one line per squashed
+ * commit, so every line is read, not only the first.
+ */
+export function trailerNamesSessionTurn(
+  commitBody: string,
+  state: { sessionId?: string; localSessionId?: string; previousSessionId?: string },
+  turnNumber: number,
+): boolean {
+  if (!Number.isInteger(turnNumber) || turnNumber <= 0) return false;
+  for (const m of commitBody.matchAll(/^Origin-Session:\s*(.+)$/gmi)) {
+    const line = m[1];
+    if (commitTrailerBelongsToSession(`Origin-Session: ${line}`, state) !== 'self') continue;
+    if (line.split('|').some((part) => part.trim() === `turn ${turnNumber}`)) return true;
+  }
+  return false;
 }
 
 export const GIT_READ_OPTS = {
@@ -2054,7 +2219,9 @@ export function commitBelongsToSession(
   // A trailer naming THIS session is decisive — including a squash-merge of
   // our own PR that GitHub committed and a pull brought back; supersession
   // owns the rewrite.
-  if (commitTrailerBelongsToSession(body, { sessionId: state.sessionId }) === 'self') return true;
+  // Its pre-promotion `local-` id is this session too: the commits it made
+  // while local carry that id, and are no less its own after promotion.
+  if (commitTrailerBelongsToSession(body, { sessionId: state.sessionId, localSessionId: state.localSessionId }) === 'self') return true;
 
   // Nothing this session did can be committed before the session started.
   // A commit older than that is in the range because HEAD MOVED — a
@@ -2068,6 +2235,19 @@ export function commitBelongsToSession(
   // floored to the second, which is all the resolution a committer date has.
   const startedAtMs = state.startedAt ? Math.floor(Date.parse(state.startedAt) / 1000) * 1000 : NaN;
   if (Number.isFinite(startedAtMs) && Number.isFinite(committedAtMs) && committedAtMs < startedAtMs) return false;
+
+  const recorded = (state.sessionCommitShas || []).map((c) => c.toLowerCase());
+  const weRecordedIt = recorded.includes((sha || '').toLowerCase());
+
+  // The floor makes the start SECOND ambiguous: a commit made just before the
+  // session, in the same second, passes the bound above. That second holds
+  // none of our work — no prompt has run yet — so a commit dated inside it is
+  // ours only when this session recorded it. capture-e2e-rebase-replays-
+  // earlier-turn-commit failed whenever the fixture's upstream commit and
+  // session start shared a second: upstream read as the session's own, the
+  // rebasing turn was measured from upstream's tree, and the pick that
+  // replayed turn 0's lines was billed to it.
+  if (Number.isFinite(startedAtMs) && committedAtMs === startedAtMs && !weRecordedIt) return false;
 
   const ownership = commitTrailerBelongsToSession(body, state);
   if (ownership === 'self') {
@@ -2084,9 +2264,6 @@ export function commitBelongsToSession(
     if (localEmail && committerEmail && committerEmail !== localEmail) return false;
     return !trailerNamesAKnownSession(repoPath, body, state, commonDir);
   }
-
-  const recorded = (state.sessionCommitShas || []).map((c) => c.toLowerCase());
-  const weRecordedIt = recorded.includes((sha || '').toLowerCase());
 
   // When our own record and a foreign trailer disagree, WHICH id the trailer
   // names decides it — a blanket priority either way gets one case wrong:
@@ -2185,7 +2362,7 @@ export function commitsThisSessionMayNote(repoPath: string, state: SessionState,
     const existing = existingNoteSessionId(repoPath, sha);
     if (!existing || existing === state.sessionId || !/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(existing)) return true;
     const body = f?.body ?? readCommitOwnershipFacts(repoPath, sha)?.body ?? '';
-    return commitTrailerBelongsToSession(body, { sessionId: state.sessionId }) === 'self';
+    return commitTrailerBelongsToSession(body, { sessionId: state.sessionId, localSessionId: state.localSessionId }) === 'self';
   });
 }
 
@@ -2216,15 +2393,35 @@ export function trailerNamesAKnownSession(
   const m = commitBody.match(/^Origin-Session:\s*([^\s|]+)/mi);
   const id = (m?.[1] || '').toLowerCase();
   if (!id) return false;
+  const selves = sessionOwnIds(state);
   try {
     for (const other of allSessionStatesForRepo(repoPath, commonDir)) {
       if (!other?.sessionId) continue;
       const oid = String(other.sessionId).toLowerCase();
       const tag = String(other.sessionTag || '').toLowerCase();
-      if (oid === String(state.sessionId || '').toLowerCase()) continue;
+      // A leftover row still holding our own pre-promotion id (a reservation
+      // mirror) is us, not a sibling.
+      if (selves.includes(oid)) continue;
       if (oid.startsWith(id) || id.startsWith(oid) || (tag && (tag.startsWith(id) || id.startsWith(tag)))) {
         return true;
       }
+      // A sibling that was promoted answers to its old `local-` id too: a
+      // trailer naming that id is the sibling's commit, not a stale one.
+      const olocal = String(other.localSessionId || '').toLowerCase();
+      if (olocal && !selves.includes(olocal) && (olocal.startsWith(id) || id.startsWith(olocal))) return true;
+    }
+  } catch { /* best-effort */ }
+  // A session ended by hand inside its turn has no `.git` state file any more
+  // (`sessions end` archives it), yet prepare-commit-msg still names it on the
+  // commits that turn goes on to make (#1918, #1919). Read as stale, that
+  // trailer handed the commit to the live sibling in the same tree: 46bb8093,
+  // trailered `Origin-Session: c085f0af-6f5`, was recorded on b300fdf0 and
+  // sent as its prompt 13's work (2026-09-26 19:45Z).
+  try {
+    for (const endedId of manuallyEndedSessionIds()) {
+      const oid = endedId.toLowerCase();
+      if (selves.includes(oid)) continue;
+      if (oid.startsWith(id) || id.startsWith(oid)) return true;
     }
   } catch { /* best-effort */ }
   return false;
@@ -2500,11 +2697,20 @@ export function agentRulesTarget(
   repoPath: string,
 ): { target: string; useMarker: boolean } | null {
   switch (agentSlug) {
-    case 'claude-code':
+    case 'claude-code': {
       // Claude Code reads .claude/settings.local.json instructions, but the most
       // reliable way to inject rules is via the project-level CLAUDE.md file.
       // Use a marker to manage our section without clobbering user content.
-      return { target: path.join(repoPath, 'CLAUDE.md'), useMarker: true };
+      //
+      // Except in a repo that keeps its instructions in AGENTS.md alone: since
+      // 2.1.277 Claude Code reads AGENTS.md only when a folder has NO CLAUDE.md,
+      // so creating one for our notice would hide the user's whole AGENTS.md
+      // from Claude. Claude gets everything over the hook anyway; an AGENTS.md
+      // that already carries our block is still refreshed as a sibling.
+      const claudeMd = path.join(repoPath, 'CLAUDE.md');
+      if (!fs.existsSync(claudeMd) && fs.existsSync(path.join(repoPath, 'AGENTS.md'))) return null;
+      return { target: claudeMd, useMarker: true };
+    }
     case 'cursor':
       // Home-dir rules file — Origin owns it outright, so no marker.
       return { target: path.join(os.homedir(), '.cursor', 'rules', 'origin.md'), useMarker: false };
@@ -2615,6 +2821,141 @@ export function siblingReadsContextFromHook(rel: string): boolean {
   return rel === 'CLAUDE.md' || rel === 'GEMINI.md';
 }
 
+/** Files whose presence makes Claude Code skip a folder's AGENTS.md. */
+const CLAUDE_INSTRUCTION_FILES = ['CLAUDE.md', path.join('.claude', 'CLAUDE.md'), 'CLAUDE.local.md'];
+
+/** The first Claude Code release that reads AGENTS.md. */
+const CLAUDE_AGENTS_MD_SINCE = [2, 1, 277];
+
+/**
+ * Claude Code's version, from the path of the binary it runs hooks from
+ * (`…/claude-code/2.1.286/…`, `…/versions/2.1.286`). null when the path does
+ * not say — callers must then assume the oldest behaviour.
+ */
+export function claudeCodeVersion(env: NodeJS.ProcessEnv = process.env): number[] | null {
+  const m = /(?:^|[\\/])(\d+)\.(\d+)\.(\d+)(?:[\\/]|$)/.exec(env.CLAUDE_CODE_EXECPATH || '');
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/**
+ * The AGENTS.md mode a settings file sets for Claude Code's built-in AGENTS.md
+ * plugin (its `instructionFiles` option, or the older `projectInstructions`),
+ * wherever under `pluginConfigs` it sits. undefined when the file sets none.
+ */
+function agentsMdModeIn(settingsFile: string): string | undefined {
+  let found: string | undefined;
+  const walk = (v: unknown): void => {
+    if (!v || typeof v !== 'object' || found !== undefined) return;
+    for (const [k, child] of Object.entries(v as Record<string, unknown>)) {
+      if ((k === 'instructionFiles' || k === 'projectInstructions') && typeof child === 'string') { found = child; return; }
+      walk(child);
+    }
+  };
+  try { walk(JSON.parse(fs.readFileSync(settingsFile, 'utf-8'))?.pluginConfigs); } catch { /* absent or unreadable */ }
+  return found;
+}
+
+/**
+ * Will THIS Claude Code session load the repo's AGENTS.md as its instructions?
+ *
+ * Only a yes is acted on (the hook then leaves out what the file already
+ * carries), so every doubt answers no: an unknown or pre-2.1.277 version, a
+ * CLAUDE.md / .claude/CLAUDE.md / CLAUDE.local.md that wins over AGENTS.md, or
+ * any settings file that picks a mode other than the two that load AGENTS.md.
+ */
+export function claudeLoadsAgentsMd(repoPath: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const version = claudeCodeVersion(env);
+  if (!version) return false;
+  for (let i = 0; i < 3; i++) {
+    if (version[i] !== CLAUDE_AGENTS_MD_SINCE[i]) {
+      if (version[i] < CLAUDE_AGENTS_MD_SINCE[i]) return false;
+      break;
+    }
+  }
+  if (!fs.existsSync(path.join(repoPath, 'AGENTS.md'))) return false;
+  if (CLAUDE_INSTRUCTION_FILES.some((rel) => fs.existsSync(path.join(repoPath, rel)))) return false;
+  const home = env.HOME || env.USERPROFILE || os.homedir();
+  const settings = [
+    path.join(home, '.claude', 'settings.json'),
+    path.join(repoPath, '.claude', 'settings.json'),
+    path.join(repoPath, '.claude', 'settings.local.json'),
+  ];
+  const loads = new Set(['claude-md-or-agents-md', 'claude-md-and-agents-md', 'agents-fallback', 'both']);
+  if (!settings.every((f) => {
+    const mode = agentsMdModeIn(f);
+    return mode === undefined || loads.has(mode);
+  })) return false;
+  // The rules above are a prediction. Claude Code can switch its AGENTS.md
+  // loading off remotely, or move the setting, and the prediction would still
+  // say yes — leaving Claude with Origin's context from neither the file nor
+  // the hook. The last session on this machine that could look recorded what
+  // actually happened (recordAgentsMdObservation); a "not loaded" there wins.
+  return readAgentsMdObservation(env)?.loaded !== false;
+}
+
+/** Where the last observed answer to "did Claude load AGENTS.md?" is kept. */
+function agentsMdObservationFile(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.HOME || env.USERPROFILE || os.homedir();
+  return path.join(home, '.origin', 'claude-agents-md.json');
+}
+
+export function readAgentsMdObservation(env: NodeJS.ProcessEnv = process.env): { loaded: boolean; at: string; claudeVersion?: string } | null {
+  try {
+    const o = JSON.parse(fs.readFileSync(agentsMdObservationFile(env), 'utf-8'));
+    return typeof o?.loaded === 'boolean' ? o : null;
+  } catch {
+    return null;
+  }
+}
+
+export function recordAgentsMdObservation(loaded: boolean, env: NodeJS.ProcessEnv = process.env): void {
+  try {
+    const file = agentsMdObservationFile(env);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const version = claudeCodeVersion(env);
+    fs.writeFileSync(file, JSON.stringify({ loaded, at: new Date().toISOString(), ...(version && { claudeVersion: version.join('.') }) }) + '\n');
+  } catch { /* best-effort — the next session observes again */ }
+}
+
+/** Should Claude Code load this repo's AGENTS.md at all — AGENTS.md present, no CLAUDE.md-family file? */
+export function agentsMdExpected(repoPath: string): boolean {
+  return fs.existsSync(path.join(repoPath, 'AGENTS.md'))
+    && !CLAUDE_INSTRUCTION_FILES.some((rel) => fs.existsSync(path.join(repoPath, rel)));
+}
+
+/**
+ * Did this Claude Code session load the repo's AGENTS.md? Read from the
+ * transcript, which records the instruction files it loaded as an
+ * `instructions` attachment before the first reply (2.1.286; the
+ * InstructionsLoaded hook does NOT fire for AGENTS.md).
+ *
+ * true  — an `instructions` attachment lists <repo>/AGENTS.md;
+ * false — the first assistant reply came with no such attachment;
+ * null  — no reply yet, so nothing to tell. The attachment is written just
+ *         AFTER the first prompt's UserPromptSubmit hook, so that hook always
+ *         sees null; the second prompt's sees the answer.
+ */
+export function agentsMdLoadedInTranscript(transcriptPath: string, repoPath: string): boolean | null {
+  let text: string;
+  try { text = fs.readFileSync(transcriptPath, 'utf-8'); } catch { return null; }
+  const real = (p: string) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+  const target = real(path.join(repoPath, 'AGENTS.md'));
+  for (const line of text.split('\n')) {
+    if (!line.includes('"instructions"') && !line.includes('"assistant"')) continue;
+    let entry: any;
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (entry?.type === 'attachment' && entry.attachment?.type === 'instructions') {
+      const files: any[] = Array.isArray(entry.attachment.files) ? entry.attachment.files : [];
+      if (files.some((f) => typeof f?.path === 'string' && real(f.path) === target)) return true;
+    } else if (entry?.type === 'assistant') {
+      return false;
+    }
+  }
+  return null;
+}
+
+export { ORIGIN_ONLY_CLAUDE_MD_WARNING, originOnlyClaudeMdHidesAgentsMd } from '../managed-block-diff.js';
+
 export function writeAgentRulesFile(
   agentSlug: string,
   systemMsg: string,
@@ -2709,7 +3050,7 @@ export function buildOriginFrameworkGuidance(): string {
     '',
     '  [Origin: Intent] <one sentence on WHY you\'re making this change>',
     '  [Origin: Decision] <choice you made> — <why>',
-    '  [Origin: Open] <something you didn\'t finish, or aren\'t sure about>',
+    '  [Origin: Open] <work someone still has to do — it becomes a TODO ticket on the Issues tab, so a caveat or an observation goes in Verify or your prose instead>',
     '  [Origin: Verify] <something a human reviewer should check>',
     '  [Origin: Closes] <id of an open TODO above that this change finishes>',
     '',
@@ -2765,6 +3106,26 @@ export { PREAMBLE_VISIBLE_ANCHOR } from '../managed-block-diff.js';
 // ABORTed, never writing completedPromptMappings / advancing prePromptSha.
 // Prompts kept growing (UserPromptSubmit worked) while diffs froze.
 export const STABLE_SESSION_ID_AGENTS = ['claude-code', 'devin', 'copilot'];
+
+/**
+ * An archived session NAMES a different conversation than the hook's — for an
+ * agent whose id is stable per conversation, that is proof it is someone
+ * else's, and recovering it would hand this conversation's prompts and commits
+ * to them. Prod 2026-10-02: Stop found its own archive skipped and adopted a
+ * 7-second Claude session that had opened and closed in the same worktree 20
+ * minutes earlier; that session took prompts 1–3 and their commit. Same rule
+ * findStateForHook already applies to live state ("no exact match for stable
+ * claudeSessionId — new session needed"). Unknown ids on either side decide
+ * nothing.
+ */
+export function archiveIsAnotherConversation(
+  agentSlug: string | undefined,
+  incomingChatId: string | undefined | null,
+  archivedChatId: string | undefined | null,
+): boolean {
+  if (!STABLE_SESSION_ID_AGENTS.includes(agentSlug || '')) return false;
+  return !!incomingChatId && !!archivedChatId && incomingChatId !== archivedChatId;
+}
 export function hookLookupSessionId(
   sessionId: string | undefined,
   agentSlug?: string,
@@ -3715,7 +4076,9 @@ export function filesLeftByOwnEarlierCommits(
   // commits its work is still the turn that wrote it.
   const thisTurnId = (state.promptTurnIds || [])[promptIndex];
   return filesTheWorkingTreeStillHolds(repoPath, inWindow, (sha) => {
-    const owner = mappings.find((m) => m.sha && sameSha(m.sha, sha));
+    // Through the rewrite chain: a commit a later rebase or squash replaced is
+    // still the turn's that made it (commitTurnOf).
+    const owner = commitTurnOf(state, sha);
     // No mapping means we do not know which turn made it; that is the foreign
     // check's question, not this one. Silence here, not a guess.
     if (!owner?.turnId) return false;
@@ -3917,8 +4280,9 @@ export function windowInheritsCommitsForTurn(
  * Same window and ownership rules as `windowInheritsCommitsForTurn`, compared
  * by content like `filesLeftByForeignCommits`, but against the END shadow's
  * tree rather than the live worktree, so it answers for a turn that has
- * closed. A backward or divergent checkout names no commit to compare with, so
- * it answers nothing. Any failure answers nothing — today's behaviour.
+ * closed. A divergent window lists the end side of the fork; a backward
+ * checkout names no commit to compare with, so it answers nothing. Any failure
+ * answers nothing — today's behaviour.
  */
 export function inheritedFilesForTurn(
   repoPath: string,
@@ -3934,7 +4298,13 @@ export function inheritedFilesForTurn(
     const end = deps.baselineCommit!(toShadow);
     const hex = /^[a-fA-F0-9]{7,40}$/;
     if (!hex.test(start) || !hex.test(end) || start === end) return out;
-    if (!deps.isAncestor(start, end)) return out;
+    // A turn that leaves the start's line (`git checkout main && git pull` from
+    // a PR branch) still brought in every commit on the END's side of the fork,
+    // which `start..end` lists exactly. Prod 6b770703 turn 29 (e87a35d5):
+    // started on an abandoned PR head, pulled main, and was billed two files of
+    // another session's #1750 because this answered nothing for any window that
+    // was not a straight line. A backward checkout still lists no commit.
+    const divergent = !deps.isAncestor(start, end);
     const shas = execFileSync('git', ['rev-list', `${start}..${end}`], {
       ...GIT_READ_OPTS, cwd: repoPath, encoding: 'utf-8',
     }).split('\n').map((s) => s.trim()).filter(Boolean);
@@ -3944,7 +4314,31 @@ export function inheritedFilesForTurn(
     // 300 commits cost a `diff-tree` per commit and two `git show` per file.
     // Whatever a batch does not answer is read the old way.
     const exact = batchedReadsMatchPerCommitReads(repoPath);
-    const foreign = shas.filter((sha) => !deps.isOwnWork(sha));
+    let foreign = shas.filter((sha) => !deps.isOwnWork(sha));
+    // Leaving a PR branch for main is also how a turn lands its OWN PR: commit,
+    // squash-merge on GitHub, check out main. The squash is a new sha with
+    // GitHub as committer, so isOwnWork calls it foreign, and only a
+    // `commitTurns` record of the branch commit kept the turn's files — one
+    // that goes missing when post-commit stalls (~29% of committing sessions).
+    //
+    // A divergent window keeps any commit carrying this session's trailer. A
+    // straight-line one (the turn branched from main, landed the PR, pulled
+    // main) keeps only a commit whose trailer names THIS turn (`turn N`): a
+    // later turn that pulls an EARLIER turn's squash did not write it, and
+    // would otherwise be billed for it again wherever its window saw a net
+    // change. A trailer from before `turn N` existed proves no turn, so a
+    // straight-line window still treats it as inherited.
+    if (foreign.length > 0) {
+      const thisTurn = serverRowForLocalTurn(promptIndex, state.promptIndexBase) + 1;
+      const facts = readCommitOwnershipFactsBatch(repoPath, foreign);
+      foreign = foreign.filter((sha) => {
+        const f = facts.get(sha.toLowerCase());
+        if (!f) return true;
+        return divergent
+          ? commitTrailerBelongsToSession(f.body, state) !== 'self'
+          : !trailerNamesSessionTurn(f.body, state, thisTurn);
+      });
+    }
     const names = exact ? commitChangedFilesBatch(repoPath, foreign) : new Map<string, string[]>();
     const pairs: Array<[string, string]> = [];
     let budget = FOREIGN_WINDOW_FILE_BUDGET;
@@ -4339,7 +4733,11 @@ function inheritedWindowDeps(
       return new Map(readRangeGraph(sha, windowEnd || 'HEAD'));
     },
     isOwnWork: (sha) => {
-      const owner = mappings.find((m) => m.sha && sameSha(m.sha, sha));
+      // Read through the rewrite chain: `commitTurns` names survivors, and a
+      // commit a later rebase or squash replaced still sits in this window.
+      // Matched raw, it fell to the session-level test below and read as THIS
+      // turn's — 127d3303 turn 1 was billed turn 0's rebased lines.
+      const owner = commitTurnOf(state, sha);
       // Attributed: this turn's own commit stops the walk, another turn's does
       // not — an earlier turn's work is inherited by this one exactly as a
       // stranger's is.
@@ -4887,7 +5285,7 @@ export function buildDurableContextMessage(repoPath: string, omitRepoContext = f
   const safeCtx = (fn: () => string | null): string | null => { try { return fn(); } catch { return null; } };
   let msg = 'Origin: Session tracking active — prompts, files, and tokens will be captured.';
   if (!isConnectedMode()) msg += ' (standalone mode)';
-  const repoContext = omitRepoContext ? null : assembleRepoContext({
+  const repoContext = omitRepoContext || !variantAllowsRepoContext() ? null : assembleRepoContext({
     brief: safeCtx(() => buildRepoBriefContext(repoPath)),
     attribution: safeCtx(() => buildAttributionContext(repoPath)),
     memory: safeCtx(() => buildMemoryBriefContext(repoPath)) || safeCtx(() => buildMemoryContext(repoPath)),
@@ -5322,6 +5720,12 @@ async function runHookEvent(event: string, agentSlug?: string): Promise<void> {
       }
     } catch (err: any) { transcriptInfo.err = err?.message; }
     debugLog(event, 'copilot payload', { keys: Object.keys(input), hasSession: !!input.session_id, hasPrompt: !!input.prompt, transcript: transcriptInfo });
+    // The desktop app's chat-naming side session is not the user's work.
+    if (skipCopilotTitleSessionHook(input)) {
+      debugLog(event, 'SKIP: copilot chat-naming session', { sessionId: input.session_id });
+      debugLog(event, '=== HOOK COMPLETE ===');
+      return;
+    }
   }
 
   if (skipManuallyEndedHook(event, input, agentSlug)) {
@@ -5401,6 +5805,9 @@ async function runHookEvent(event: string, agentSlug?: string): Promise<void> {
         break;
       case 'post-tool-use':
         await handlePostToolUse(input, agentSlug);
+        break;
+      case 'post-tool-use-failure':
+        await handlePostToolUseFailure(input, agentSlug);
         break;
       case 'after-file-edit':
         await handleAfterFileEdit(input, agentSlug);

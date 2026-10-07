@@ -9,19 +9,10 @@
 // Attribution and memory BOTH carry a "recent work" list and a "hot files" list,
 // derived differently (commits vs sessions). Injecting both makes the agent
 // reconcile two near-duplicate lists (the "four flattened blocks" problem). This
-// assembler deduplicates: when memory is present it supersedes attribution's
-// activity/file lists, so we keep only attribution's unique signal — the
-// one-line AI-authorship headline. Blocks are ordered what-it-IS → AI% →
-// what-sessions-DID → in-progress so the agent reads a single coherent section.
-
-/**
- * First line of the attribution block — the "Repository AI context: X% of recent
- * commits (n/m) are AI-generated." headline, which is its unique contribution
- * once memory covers recent work + hot files. Pure + exported for testing.
- */
-export function attributionHeadline(attribution: string): string {
-  return attribution.split('\n')[0].trim();
-}
+// assembler deduplicates: when memory is present it supersedes attribution
+// entirely. Blocks are ordered what-it-IS → recent AI work (only without
+// memory) → what-sessions-DID → in-progress so the agent reads a single
+// coherent section.
 
 /**
  * Assemble the deduplicated repo-context section from the individual rendered
@@ -44,11 +35,12 @@ export function assembleRepoContext(blocks: {
   const startupCheck = (blocks.startupCheck || '').trim();
 
   // Memory (session-level) supersedes attribution's commit-level activity/file
-  // lists. Keep only attribution's AI-authorship headline to avoid two
-  // redundant recent-work + hot-file lists.
-  if (attribution && memory) {
-    attribution = attributionHeadline(attribution);
-  }
+  // lists, and its one remaining line — "X% of recent commits are
+  // AI-generated" — changes no decision an agent makes. It used to survive as
+  // a headline; it cost tokens on every session and told the agent nothing it
+  // could act on. So with memory present, attribution goes entirely. Without
+  // memory it is still the only record of recent work, and stays.
+  if (memory) attribution = '';
 
   // The pointer follows the digest it describes ("…and here is how to read the
   // rest"), so it is meaningless on its own. Drop it when no memory block

@@ -6,6 +6,7 @@ import path from 'path';
 import { listActiveSessions } from './session-state.js';
 import { readAcceptanceNote } from './acceptance.js';
 import { gitIdentityEnv } from './utils/exec.js';
+import { shouldIgnoreFile, isLockfile, isOriginAutoManagedPath } from './ignore-patterns.js';
 
 // ─── Tool Detection ──────────────────────────────────────────────────────
 
@@ -113,15 +114,28 @@ function readOriginNote(repoPath: string, commitSha: string): Record<string, any
 }
 
 /**
+ * Does an unwrapped legacy note claim AI work on its commit? A session note
+ * names its session; a backfill note names only an agent; a squash aggregate
+ * of several sessions (OR-11) names no single one — its `sessionIds` are the
+ * claim, and no reader may pick one of them as the commit's owner.
+ */
+export function isAiNote(note: Record<string, any> | null | undefined): boolean {
+  if (!note) return false;
+  if (note.sessionId && note.sessionId !== 'unknown') return true;
+  if (note.agent && note.agent !== 'Human') return true;
+  return note.squashMerge === true && Array.isArray(note.sessionIds)
+    && note.sessionIds.some((id: unknown) => typeof id === 'string' && !!id && id !== 'unknown');
+}
+
+/**
  * Check if a commit has an Origin-Session trailer or note.
  */
 export function isAiCommit(repoPath: string, commitSha: string): boolean {
   // Check git notes (stored as { origin: { sessionId, ... } })
   const rawNote = readOriginNote(repoPath, commitSha);
   const note = rawNote?.origin || rawNote;
-  if (note?.sessionId && note.sessionId !== 'unknown') return true;
-  // Backfill notes have agent but no sessionId
-  if (note?.agent && note.agent !== 'Human') return true;
+  // Session notes, backfill notes (agent, no sessionId), squash aggregates.
+  if (isAiNote(note)) return true;
 
   // Check commit message for Origin-Session trailer
   try {
@@ -335,7 +349,9 @@ export function getLineBlame(repoPath: string, filePath: string): LineAttributio
       const rawNote = getNote(commitSha);
       // Notes are stored as { origin: { sessionId, model, ... } }
       const note = rawNote?.origin || rawNote;
-      let isAi = !!note?.sessionId && note.sessionId !== 'unknown';
+      // A multi-session squash aggregate is AI without a session: the line gets
+      // no sessionId/model/agent rather than one of several.
+      let isAi = (!!note?.sessionId && note.sessionId !== 'unknown') || isAiNote(note?.squashMerge ? note : null);
       let model = note?.model;
 
       // Fallback: check commit message trailers and patterns
@@ -663,7 +679,7 @@ export function computeAttributionStats(
       const note = rawNote?.origin || rawNote;
 
       // Also check commit message trailers as fallback
-      let isAi = (!!note?.sessionId && note.sessionId !== 'unknown') || (!!note?.agent && note.agent !== 'Human');
+      let isAi = isAiNote(note);
       if (!isAi) {
         const detected = detectAiFromCommit(repoPath, sha);
         if (detected?.isAi) {
@@ -836,6 +852,10 @@ function attributionCacheFile(repoPath: string): string {
  *
  * Returns null if no meaningful AI activity found.
  */
+// Bumped when what the block says changes, so a cache written by an older CLI
+// at the same HEAD is rebuilt rather than served.
+const ATTRIBUTION_CACHE_VERSION = 2;
+
 export function buildAttributionContext(repoPath: string): string | null {
   let head = '';
   try {
@@ -845,10 +865,10 @@ export function buildAttributionContext(repoPath: string): string | null {
   const cacheFile = head ? attributionCacheFile(repoPath) : '';
   if (cacheFile) {
     try {
-      const c = JSON.parse(fs.readFileSync(cacheFile, 'utf-8')) as { head?: string; context?: string | null };
+      const c = JSON.parse(fs.readFileSync(cacheFile, 'utf-8')) as { v?: number; head?: string; context?: string | null };
       // A cached `null` is a real answer ("no AI activity here") and is worth
       // honouring — re-deriving it costs the same full walk as a hit.
-      if (c && c.head === head) return c.context ?? null;
+      if (c && c.v === ATTRIBUTION_CACHE_VERSION && c.head === head) return c.context ?? null;
     } catch { /* absent or corrupt — rebuild */ }
   }
 
@@ -857,7 +877,7 @@ export function buildAttributionContext(repoPath: string): string | null {
   if (cacheFile) {
     try {
       fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
-      fs.writeFileSync(cacheFile, JSON.stringify({ head, context, builtAt: new Date().toISOString() }), { mode: 0o600 });
+      fs.writeFileSync(cacheFile, JSON.stringify({ v: ATTRIBUTION_CACHE_VERSION, head, context, builtAt: new Date().toISOString() }), { mode: 0o600 });
     } catch { /* cache is an optimization — never fail the hook over it */ }
   }
 
@@ -898,7 +918,7 @@ function buildAttributionContextUncached(repoPath: string): string | null {
       const rawNote = readOriginNote(repoPath, sha);
       const note = rawNote?.origin || rawNote;
 
-      let isAi = !!note?.sessionId && note.sessionId !== 'unknown';
+      let isAi = (!!note?.sessionId && note.sessionId !== 'unknown') || isAiNote(note?.squashMerge ? note : null);
       let model = note?.model || '';
 
       if (!isAi) {
@@ -916,7 +936,13 @@ function buildAttributionContextUncached(repoPath: string): string | null {
       let changedFiles: string[] = [];
       try {
         const filesRaw = execFileSync('git', ['diff-tree', '--no-commit-id', '--name-only', '-r', sha], { ...opts, timeout: 1000 }).trim();
-        changedFiles = filesRaw.split('\n').filter(Boolean).slice(0, 10);
+        // Lockfiles, generated output and Origin's own context files are
+        // never the file an agent should be told about: they topped this list
+        // in Origin's own repo (package-lock.json, "15 AI commits") because
+        // every release bumps them, and no decision changes on reading that.
+        changedFiles = filesRaw.split('\n').filter(Boolean)
+          .filter((f) => !shouldIgnoreFile(f) && !isLockfile(f) && !isOriginAutoManagedPath(f))
+          .slice(0, 10);
       } catch {}
 
       const tool = detectToolFromModel(model, note?.agent || undefined);

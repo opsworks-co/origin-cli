@@ -89,6 +89,15 @@ export function isSpecificModel(model: string | undefined | null): boolean {
 }
 
 /**
+ * The first candidate that names a real model, else the first non-empty one.
+ * A `<synthetic>` transcript placeholder is never a model.
+ */
+export function firstSpecificModel(...candidates: Array<string | undefined | null>): string | undefined {
+  const usable = candidates.map((m) => (m || '').trim()).filter((m) => m && !m.startsWith('<'));
+  return usable.find((m) => isSpecificModel(m)) ?? usable[0];
+}
+
+/**
  * Does this session belong to the given agent? Stored agentSlug is
  * authoritative; model-pattern matching covers old sessions without one;
  * unknown agents fall back to substring matching.

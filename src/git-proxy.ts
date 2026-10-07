@@ -1,9 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { gitOrNull, runDetailed } from './utils/exec.js';
+import { runDetailed } from './utils/exec.js';
 import { isWindows } from './utils/platform.js';
-import { preserveAttributionOnRewrite, handleCherryPick } from './history-preservation.js';
 import { getGitRoot, getHeadSha } from './session-state.js';
 
 // ─── Constants ─────────────────────────────────────────────────────────────
@@ -197,7 +196,12 @@ export function handlePreCommand(args: string[]): void {
  * Handle post-command event from the git proxy wrapper.
  * Called after the real git command completes.
  *
- * Detects rewrites and preserves attribution.
+ * It no longer carries attribution notes. Git's own hooks do, for every
+ * installation, with git's exact signals: post-rewrite's old→new pairs for
+ * amend and rebase, CHERRY_PICK_HEAD for a cherry-pick (history-preservation.ts,
+ * cherry-pick-source.ts). This path guessed — it matched a rebase's commits by
+ * subject line — and a second writer racing the hooks could only disagree
+ * with them.
  */
 export function handlePostCommand(args: string[]): void {
   if (isKillSwitchActive()) return;
@@ -221,86 +225,9 @@ export function handlePostCommand(args: string[]): void {
 
     if (!headAfter || !preState.headBefore) return;
 
-    // Handle based on command type
-    switch (command) {
-      case 'rebase':
-        handlePostRebase(repoPath, preState.headBefore, headAfter);
-        break;
-
-      case 'cherry-pick':
-        handleCherryPick(repoPath);
-        break;
-
-      case 'commit':
-        // Check if this was an amend (--amend flag in args)
-        if (args.includes('--amend')) {
-          preserveAttributionOnRewrite(repoPath, preState.headBefore, headAfter);
-        }
-        break;
-
-      case 'stash':
-        // stash pop/apply may change HEAD
-        if (args.includes('pop') || args.includes('apply')) {
-          if (preState.headBefore !== headAfter) {
-            preserveAttributionOnRewrite(repoPath, preState.headBefore, headAfter);
-          }
-        }
-        break;
-
-      case 'merge':
-        // Merge creates new commits — attribution from merged branch carries over
-        // via notes automatically; no special handling needed
-        break;
-    }
-
     debugLog(`post-command: ${command} ${preState.headBefore.slice(0, 8)} -> ${headAfter.slice(0, 8)}`);
   } catch {
     // Non-fatal — proxy should never break git
-  }
-}
-
-// ─── Internal Helpers ──────────────────────────────────────────────────────
-
-/**
- * Handle post-rebase: walk the reflog to find rewritten commits
- * and copy their Origin notes to the new SHAs.
- */
-function handlePostRebase(repoPath: string, headBefore: string, headAfter: string): void {
-  try {
-    // Use git reflog to find the rewrite mapping
-    // After a rebase, the reflog contains entries like:
-    //   sha1 HEAD@{0}: rebase (finish): returning to refs/heads/branch
-    //   sha2 HEAD@{1}: rebase (pick): commit message
-    //   sha3 HEAD@{2}: rebase (start): checkout upstream
-
-    // All git access via the safe wrapper (array args, no shell) — the old
-    // shell strings interpolated ${headBefore}/${headAfter}/${sha} (injection)
-    // and used `2>/dev/null || true`, which isn't cmd syntax. gitOrNull returns
-    // null on non-zero exit, replacing the `|| true` swallow.
-    // Old branch commits (before rebase)
-    const oldCommits = (gitOrNull(['rev-list', headBefore, '--not', headAfter], { cwd: repoPath }) || '')
-      .split('\n').filter(Boolean);
-
-    // New branch commits (after rebase)
-    const newCommits = (gitOrNull(['rev-list', headAfter, '--not', headBefore], { cwd: repoPath }) || '')
-      .split('\n').filter(Boolean);
-
-    // Match old to new by commit message (best effort)
-    const oldMessages = new Map<string, string>();
-    for (const sha of oldCommits) {
-      const msg = gitOrNull(['log', '-1', '--format=%s', sha], { cwd: repoPath });
-      if (msg) oldMessages.set(msg, sha);
-    }
-
-    for (const newSha of newCommits) {
-      const msg = gitOrNull(['log', '-1', '--format=%s', newSha], { cwd: repoPath });
-      const oldSha = msg ? oldMessages.get(msg) : undefined;
-      if (oldSha) {
-        preserveAttributionOnRewrite(repoPath, oldSha, newSha);
-      }
-    }
-  } catch {
-    // Non-fatal
   }
 }
 

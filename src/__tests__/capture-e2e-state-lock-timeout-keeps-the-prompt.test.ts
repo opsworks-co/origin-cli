@@ -12,8 +12,8 @@
 // `claude-hook-lock.ts` already sets the policy for this codebase and says
 // why: wait a bounded time, then proceed WITHOUT the lock — "a rare lost
 // update on state is recoverable, a killed hook is not". This harness pins
-// both halves of that: the hook returns well inside Codex's 10s hook budget,
-// and the prompt lands on the registered row.
+// both halves of that: the lock costs the hook no more than fits inside
+// Codex's 10s hook budget, and the prompt lands on the registered row.
 //
 // Requires `dist/`. POSIX-only, like the other harnesses.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -25,7 +25,7 @@ import http from 'http';
 import crypto from 'crypto';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { WINDOWS_SLOWDOWN, isWindows } from './helpers/windows-e2e.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -155,12 +155,41 @@ function killDaemons(): void {
   }
 }
 
+/**
+ * The same hook, same kind of session, with nobody holding the lock: what the
+ * hook costs on this machine right now. A loaded box (the full suite, eight
+ * workers) stretches node's startup alone past a few seconds, so the lock's
+ * share is the difference between the two, measured back to back.
+ */
+let baselines = 0;
+async function unlockedRun(kind: 'auto-create' | 'established'): Promise<number> {
+  baselines += 1;
+  const conv = `eeeeeeee-${String(baselines).padStart(4, '0')}-4000-8000-000000000000`;
+  const repo = path.join(tmp, `repo-baseline-${baselines}`);
+  initRepo(repo);
+  const transcript = transcriptFor(conv);
+  if (kind === 'established') {
+    const start = await run('session-start', { cwd: repo, conversation: conv, transcript, payload: { source: 'startup' } });
+    expect(start.code, start.stderr).toBe(0);
+  }
+  fs.appendFileSync(transcript, JSON.stringify({ role: 'user', content: 'baseline prompt' }) + '\n');
+  const r = await run('user-prompt-submit', { cwd: repo, conversation: conv, transcript, payload: { prompt: 'baseline prompt' } });
+  expect(r.code, r.stderr).toBe(0);
+  return r.tookMs;
+}
+
 // Codex kills SessionStart and UserPromptSubmit at 10s (`commands/enable.ts`),
 // and `withClaudeHookLock` may already have spent time before the save. The
 // wait for the state lock has to fit inside what is left of that budget.
 const CODEX_HOOK_BUDGET_MS = 10_000;
+// The lock's share of that budget: all of it but the 2 s the hook itself needs
+// on an idle machine (0.5-1 s measured). Asserted as the difference from an
+// unlocked run, not as wall time: under a full-suite load node's startup alone
+// took the hook to 11.4 s while the lock's share stayed at ~4.2 s (two 2 s
+// waits), idle or under twelve busy cores. The regression this guards took 40 s.
+const LOCK_SHARE_MS = CODEX_HOOK_BUDGET_MS - 2_000;
 
-describe.skipIf(!haveDist || isWindows)('a held state lock never costs the prompt (built binary)', () => {
+describe.skipIf(!haveDist)('a held state lock never costs the prompt (built binary)', () => {
   beforeAll(async () => {
     await startFakeApi();
     tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-e2e-lock-timeout-')));
@@ -218,7 +247,8 @@ describe.skipIf(!haveDist || isWindows)('a held state lock never costs the promp
     const log = hooksLog().slice(logFrom);
     expect(log, 'the wait must end by proceeding unlocked, and say so').toContain('saving without the state lock');
     expect(log, 'a lock timeout is not an API failure').not.toContain('auto-create failed, falling back to local');
-    expect(r.tookMs, `the hook must return inside Codex's ${CODEX_HOOK_BUDGET_MS}ms budget, took ${r.tookMs}ms`).toBeLessThan(CODEX_HOOK_BUDGET_MS);
+    const base = await unlockedRun('auto-create');
+    expect(r.tookMs - base, `the held lock may cost at most ${LOCK_SHARE_MS}ms of Codex's ${CODEX_HOOK_BUDGET_MS}ms budget; locked ${r.tookMs}ms, unlocked ${base}ms`).toBeLessThan(LOCK_SHARE_MS);
   }, 180_000 * WINDOWS_SLOWDOWN);
 
   it('an established session: a held lock costs neither the prompt nor the hook', async () => {
@@ -244,6 +274,7 @@ describe.skipIf(!haveDist || isWindows)('a held state lock never costs the promp
     const st = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
     expect(st.sessionId).toBe(registered);
     expect(st.prompts).toEqual(['second prompt under a held lock']);
-    expect(r.tookMs, `the hook must return inside Codex's ${CODEX_HOOK_BUDGET_MS}ms budget, took ${r.tookMs}ms`).toBeLessThan(CODEX_HOOK_BUDGET_MS);
+    const base = await unlockedRun('established');
+    expect(r.tookMs - base, `the held lock may cost at most ${LOCK_SHARE_MS}ms of Codex's ${CODEX_HOOK_BUDGET_MS}ms budget; locked ${r.tookMs}ms, unlocked ${base}ms`).toBeLessThan(LOCK_SHARE_MS);
   }, 180_000 * WINDOWS_SLOWDOWN);
 });

@@ -56,6 +56,33 @@ describe('ensureServerSession', () => {
     expect(startSession).toHaveBeenCalledTimes(1);
   });
 
+  it('tells the server the local id it ran under — its commits\' trailers carry that id', async () => {
+    startSession.mockResolvedValue({ sessionId: 'srv-real-123' });
+    await ensureServerSession(localState(), '/repo', 'claude-code', 'test');
+    expect(startSession.mock.calls[0][0].localSessionId).toBe('local-abc');
+  });
+
+  it('keeps the local id on the state — its commits so far are trailered with it', async () => {
+    startSession.mockResolvedValue({ sessionId: 'srv-real-123' });
+    const state = localState();
+    await ensureServerSession(state, '/repo', 'claude-code', 'test');
+    expect(state.sessionId).toBe('srv-real-123');
+    expect(state.localSessionId).toBe('local-abc');
+  });
+
+  it('keeps no local id on a re-mint', async () => {
+    startSession.mockResolvedValue({ sessionId: 'srv-fresh-456' });
+    const state = localState({ sessionId: 'srv-deleted-123' });
+    await ensureServerSession(state, '/repo', 'cursor', 'stop', { remintGone: true });
+    expect(state.localSessionId).toBeUndefined();
+  });
+
+  it('sends no local id on a re-mint — the id it had was a server one', async () => {
+    startSession.mockResolvedValue({ sessionId: 'srv-fresh-456' });
+    await ensureServerSession(localState({ sessionId: 'srv-deleted-123' }), '/repo', 'cursor', 'stop', { remintGone: true });
+    expect(startSession.mock.calls[0][0].localSessionId).toBeUndefined();
+  });
+
   it('no-ops (no API call) for a session that already has a server id', async () => {
     const state = localState({ sessionId: 'srv-existing' });
     const ok = await ensureServerSession(state, '/repo', 'claude-code', 'test');

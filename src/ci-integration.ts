@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
-import { git, gitOrNull, runDetailed, gitIdentityEnv } from './utils/exec.js';
+import { gitOrNull, runDetailed } from './utils/exec.js';
+import { rewriteAttributionForTarget, type RewriteTargetOutcome } from './history-preservation.js';
+import type { RewriteWarning } from './history-rewrite.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -13,12 +15,6 @@ export interface CIAttributionReport {
   totalLinesRemoved: number;
   sessions: string[];
   models: string[];
-}
-
-export interface SquashMergeResult {
-  success: boolean;
-  message: string;
-  combinedNote?: string;
 }
 
 // ─── CI Check ──────────────────────────────────────────────────────────────
@@ -124,116 +120,144 @@ export function formatCIReport(report: CIAttributionReport): string {
 }
 
 // ─── Squash Merge ──────────────────────────────────────────────────────────
+//
+// A squash merge — `git merge --squash` + commit, or a forge's "Squash and
+// merge" — runs no post-rewrite hook and states no old→new pairs, and on a
+// hosted forge it happens where no Origin hook runs at all. The only honest
+// mapping is an explicit one: the range of the original commits and the squash
+// commit they became. Nothing is inferred from HEAD: after the merge HEAD IS
+// the squash commit, and `<base>..HEAD` no longer holds the original commits.
+// The note is rebuilt exactly as for a rebase squash (history-rewrite.ts): one
+// commit-level v1 record with every proven contribution, and a legacy aggregate
+// that sums nothing.
 
-/**
- * Collect attribution from all commits being squashed and write a combined
- * note to the new squash-merge commit.
- *
- * @param repoPath - Git repository root path
- * @param baseBranch - The base branch being merged into (e.g., "main")
- */
-export function collectSquashMergeAttribution(
-  repoPath: string,
-  baseBranch: string,
-): SquashMergeResult {
-  const gitOpts = { cwd: repoPath, timeoutMs: 10_000 };
+export interface SquashMergeOptions {
+  /** `<base-before-merge>..<source-tip>`: the original commits. */
+  range: string;
+  /** The squash commit. */
+  target: string;
+  /**
+   * For automation that cannot tell a squash from another merge method: a
+   * target that is provably not a squash commit is skipped (success, nothing
+   * written) instead of being an error.
+   */
+  skipUnlessSquash?: boolean;
+}
 
-  // Validate baseBranch — only allow safe branch-name characters.
-  if (!/^[a-zA-Z0-9_./-]+$/.test(baseBranch)) {
-    return { success: false, message: `Invalid base branch name: ${baseBranch}` };
-  }
+export interface SquashMergeResult {
+  success: boolean;
+  message: string;
+  /**
+   * Why it failed. `usage`: the command was called wrong — never masked.
+   * `operational`: this repository cannot carry the attribution right now (a
+   * source not fetched, an unresolvable or empty range, a target that is not a
+   * squash, a held note lock, git failing) — `--warn-only` reports it and exits 0.
+   */
+  failure?: 'usage' | 'operational';
+  outcome?: RewriteTargetOutcome | 'not-squash';
+  /** Full sha of the squash commit. */
+  target?: string;
+  /** Full shas of the source commits in the range. */
+  sources?: string[];
+  warnings?: RewriteWarning[];
+}
 
-  try {
-    // Get commits between base branch and HEAD
-    const commits = git(
-      ['rev-list', `${baseBranch}..HEAD`],
-      gitOpts,
-    ).trim().split('\n').filter(Boolean);
+const SQUASH_REV = /^[A-Za-z0-9_][A-Za-z0-9_./~^@{}-]*$/;
 
-    if (commits.length === 0) {
-      return { success: false, message: `No commits found between ${baseBranch} and HEAD.` };
-    }
-
-    // Collect all Origin notes from these commits
-    const allSessions = new Set<string>();
-    const allModels = new Set<string>();
-    let totalLinesAdded = 0;
-    let totalLinesRemoved = 0;
-    let totalTokensUsed = 0;
-    let totalCostUsd = 0;
-    let totalDurationMs = 0;
-    let noteCount = 0;
-
-    for (const sha of commits) {
-      if (!/^[a-fA-F0-9]+$/.test(sha)) continue;
-      try {
-        const r = runDetailed('git', ['notes', '--ref=origin', 'show', sha], gitOpts);
-        const note = r.status === 0 ? r.stdout.trim() : '';
-
-        if (!note) continue;
-
-        const parsed = JSON.parse(note);
-        const origin = parsed.origin;
-        if (!origin) continue;
-
-        noteCount++;
-        if (origin.sessionId) allSessions.add(origin.sessionId);
-        if (origin.model) allModels.add(origin.model);
-        totalLinesAdded += origin.linesAdded || 0;
-        totalLinesRemoved += origin.linesRemoved || 0;
-        totalTokensUsed += origin.tokensUsed || 0;
-        totalCostUsd += origin.costUsd || 0;
-        totalDurationMs += origin.durationMs || 0;
-      } catch {
-        // Skip commits without notes
-      }
-    }
-
-    if (noteCount === 0) {
-      return { success: true, message: 'No Origin attribution found in commits being squashed.' };
-    }
-
-    // Build combined note
-    const combinedNote = JSON.stringify({
-      origin: {
-        version: 1,
-        squashMerge: true,
-        commitsSquashed: commits.length,
-        sessionIds: Array.from(allSessions),
-        models: Array.from(allModels),
-        totalLinesAdded,
-        totalLinesRemoved,
-        totalTokensUsed,
-        totalCostUsd: parseFloat(totalCostUsd.toFixed(4)),
-        totalDurationMs,
-        timestamp: new Date().toISOString(),
-      },
-    }, null, 2);
-
-    return {
-      success: true,
-      message: `Collected attribution from ${noteCount} of ${commits.length} commits ` +
-        `(${allSessions.size} sessions, ${allModels.size} models).`,
-      combinedNote,
-    };
-  } catch (err: any) {
-    return { success: false, message: `Failed to collect attribution: ${err.message}` };
-  }
+function resolveRev(repoPath: string, rev: string): string | null {
+  if (!SQUASH_REV.test(rev)) return null;
+  const r = runDetailed('git', ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`], { cwd: repoPath, timeoutMs: 10_000 });
+  const full = r.status === 0 ? r.stdout.trim().toLowerCase() : '';
+  return /^([0-9a-f]{40}|[0-9a-f]{64})$/.test(full) ? full : null;
 }
 
 /**
- * Write a combined attribution note to a specific commit SHA.
+ * The commit of `range` that `target` is a rebased copy of, if any. A rebase
+ * (a forge's "Rebase and merge" included) keeps each commit's author, author
+ * date and message; a squash commit of several commits is a new commit with
+ * its own. Used only to REFUSE a write, never to map attribution.
  */
-export function writeCombinedNote(repoPath: string, commitSha: string, noteContent: string): boolean {
-  if (!/^[a-fA-F0-9]+$/.test(commitSha)) return false;
-  try {
-    git(
-      ['notes', '--ref=origin', 'add', '-f', '-m', noteContent, commitSha],
-      { cwd: repoPath, timeoutMs: 10_000, env: gitIdentityEnv(repoPath) },
-    );
-    return true;
-  } catch {
-    return false;
+function rebasedCopyOf(repoPath: string, target: string, range: string): string | null {
+  const fmt = '--format=%H%x00%an%x00%ae%x00%at%x00%B%x1e';
+  const own = runDetailed('git', ['log', '-1', fmt, target], { cwd: repoPath, timeoutMs: 10_000 });
+  const all = runDetailed('git', ['log', fmt, range], { cwd: repoPath, timeoutMs: 30_000 });
+  if (own.status !== 0 || all.status !== 0) return null;
+  const identity = (rec: string) => rec.slice(rec.indexOf('\0') + 1).trim();
+  const mine = identity(own.stdout.split('\x1e')[0]);
+  for (const rec of all.stdout.split('\x1e')) {
+    const r = rec.replace(/^\s+/, '');
+    if (r && identity(r) === mine) return r.slice(0, r.indexOf('\0'));
+  }
+  return null;
+}
+
+/**
+ * Carry the attribution of the commits in `range` to the squash commit
+ * `target`. Writes at most one note, on `target`; never touches the sources'
+ * notes; a second run with the same inputs changes nothing.
+ */
+export function squashMergeAttribution(repoPath: string, opts: SquashMergeOptions): SquashMergeResult {
+  const parts = (opts.range || '').split('..');
+  if (parts.length !== 2 || !parts[0] || !parts[1] || parts[1].startsWith('.')) {
+    return { success: false, failure: 'usage', message: `--range must be <base-before-merge>..<source-tip>, got "${opts.range || ''}".` };
+  }
+  const base = resolveRev(repoPath, parts[0]);
+  const tip = resolveRev(repoPath, parts[1]);
+  if (!base || !tip) {
+    return {
+      success: false,
+      failure: 'operational',
+      message: `Cannot resolve ${!base ? parts[0] : parts[1]} to a commit here. Fetch the original commits `
+        + '(for a pull request: its head ref) before carrying their attribution; nothing was written.',
+    };
+  }
+  const target = resolveRev(repoPath, opts.target || '');
+  if (!target) return { success: false, failure: 'operational', message: `Cannot resolve --target ${opts.target || '(empty)'} to a commit; nothing was written.` };
+
+  const parents = runDetailed('git', ['rev-list', '--parents', '-n', '1', target], { cwd: repoPath, timeoutMs: 10_000 });
+  const parentCount = parents.status === 0 ? parents.stdout.trim().split(/\s+/).length - 1 : -1;
+  if (parentCount !== 1) {
+    if (opts.skipUnlessSquash && parentCount > 1) {
+      return { success: true, outcome: 'not-squash', target, message: `${target.slice(0, 12)} is a merge commit, not a squash; its original commits keep their own notes. Nothing was written.` };
+    }
+    return {
+      success: false,
+      failure: 'operational',
+      message: `--target ${target.slice(0, 12)} has ${parentCount < 0 ? 'unknown' : parentCount} parents; a squash commit has one. `
+        + 'A merge commit keeps the original commits as ancestors, and their own notes already apply.',
+    };
+  }
+
+  const list = runDetailed('git', ['rev-list', `${base}..${tip}`], { cwd: repoPath, timeoutMs: 30_000 });
+  if (list.status !== 0) return { success: false, failure: 'operational', message: 'Could not list the source commits; nothing was written.' };
+  const sources = list.stdout.split('\n').map((l) => l.trim().toLowerCase()).filter(Boolean);
+  if (sources.length === 0) {
+    return { success: false, failure: 'operational', message: `The range ${parts[0]}..${parts[1]} holds no commits; nothing was written.` };
+  }
+  if (sources.includes(target)) {
+    return { success: false, failure: 'operational', message: `--target ${target.slice(0, 12)} is inside the source range; it must be the squash commit.` };
+  }
+  if (opts.skipUnlessSquash && sources.length > 1) {
+    const copied = rebasedCopyOf(repoPath, target, `${base}..${tip}`);
+    if (copied) {
+      return {
+        success: true, outcome: 'not-squash', target, sources,
+        message: `${target.slice(0, 12)} is a rebased copy of ${copied.slice(0, 12)} (same author, author date and message), not a squash of ${sources.length} commits. Nothing was written.`,
+      };
+    }
+  }
+
+  const { outcome, warnings } = rewriteAttributionForTarget(repoPath, target, sources);
+  const where = `${target.slice(0, 12)} from ${sources.length} source commit${sources.length === 1 ? '' : 's'}`;
+  switch (outcome) {
+    case 'written':
+      return { success: true, outcome, target, sources, warnings, message: `Attribution note written to ${where}.` };
+    case 'unchanged':
+      return { success: true, outcome, target, sources, warnings, message: `The note on ${target.slice(0, 12)} already carries this attribution; nothing changed.` };
+    case 'skipped':
+      return { success: true, outcome, target, sources, warnings, message: `No Origin attribution on the ${sources.length} source commits; nothing was written.` };
+    default:
+      return { success: false, failure: 'operational', outcome, target, sources, warnings, message: `Could not read or write the notes for ${where}.` };
   }
 }
 
@@ -241,18 +265,26 @@ export function writeCombinedNote(repoPath: string, commitSha: string, noteConte
 
 /**
  * Generate a GitHub Actions YAML snippet for Origin CI integration.
+ *
+ * The squash job runs on `closed` (the trigger lists it) for a merged pull
+ * request, only where the repository opted in (ORIGIN_SQUASH_MERGE_ONLY: the
+ * event does not state the merge method), and hands `origin ci squash-merge`
+ * the SHAs the event states: the squash commit (`merge_commit_sha`), the base
+ * before the merge (its first parent) and the PR head. The head is fetched by
+ * its pull ref, which outlives a deleted branch.
  */
 export function generateGitHubActionsWorkflow(): string {
-  return `# Origin CI Attribution Check
+  return `# Origin CI Attribution
 # Add this to your .github/workflows/ directory
 name: Origin Attribution
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, closed]
 
 jobs:
   attribution:
+    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -275,9 +307,47 @@ jobs:
           echo "## Attribution Report" >> \$GITHUB_STEP_SUMMARY
           origin ci check --range "\${{ github.event.pull_request.base.sha }}..\${{ github.sha }}" >> \$GITHUB_STEP_SUMMARY
 
-      - name: Preserve Attribution on Squash Merge
-        if: github.event.action == 'closed' && github.event.pull_request.merged
-        run: origin ci squash-merge \${{ github.event.pull_request.base.ref }}
+  # OPT-IN. The pull_request event does not say HOW a pull request was
+  # merged, so this job runs only in a repository whose settings allow
+  # "Squash and merge" and nothing else, and says so by setting the repository
+  # variable ORIGIN_SQUASH_MERGE_ONLY to "true". --skip-unless-squash still
+  # exits 0 and writes nothing for a merge commit or a rebased copy.
+  # --warn-only: the pull request is already merged, so a run that cannot carry
+  # the attribution (originals not fetchable, a held note lock) warns and
+  # writes nothing instead of failing the merged pull request.
+  squash-attribution:
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true && vars.ORIGIN_SQUASH_MERGE_ONLY == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # pushes refs/notes/origin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Origin CLI
+        run: npm install -g @origin/cli
+
+      - name: Fetch the pull request's original commits and the attribution notes
+        run: |
+          git fetch --no-tags origin "+refs/pull/\${{ github.event.pull_request.number }}/head:refs/origin-ci/pr-head"
+          git fetch --no-tags origin "+refs/notes/origin:refs/notes/origin" || echo "no attribution notes on the remote yet"
+
+      - name: Carry attribution to the squash commit
+        run: |
+          origin ci squash-merge \\
+            --range "\${{ github.event.pull_request.merge_commit_sha }}^..\${{ github.event.pull_request.head.sha }}" \\
+            --target "\${{ github.event.pull_request.merge_commit_sha }}" \\
+            --skip-unless-squash \\
+            --warn-only
+
+      - name: Publish the notes
+        run: origin push-metadata
 `;
 }
-

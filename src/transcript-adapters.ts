@@ -31,6 +31,7 @@ import {
   extractPromptFileMappings,
   buildDiffFromEdits,
   readCopilotModel,
+  applyEstimatedSplit,
   type ModelUsage,
   type ParsedTranscript,
 } from './transcript.js';
@@ -42,6 +43,7 @@ import { debugLog } from './debug-log.js';
 import {
   parseAntigravityTranscript,
   estimateAntigravityUsage,
+  estimateAntigravityTurnUsage,
   type AgyEditRecord,
 } from './antigravity-transcript.js';
 
@@ -82,6 +84,11 @@ export interface ParsedSession {
   // Per-model split of the counts above (ParsedTranscript.modelUsage). Absent
   // for every adapter that reports no per-message usage.
   modelUsage?: ModelUsage[];
+  // An ESTIMATED share of the counts above per prompt, `promptIndex` being the
+  // position in userPrompts (how the watcher numbers rows). Only for agents
+  // with no per-reply usage (Cursor, Antigravity) or none per reply for input
+  // (Copilot); rows carry it as `modelUsage` + `usageEstimated`.
+  turnUsage?: Array<{ promptIndex: number; modelUsage: ModelUsage[] }>;
   // True when the counts above are derived from text length (Cursor, Antigravity)
   // rather than reported by the agent. Rides the wire as `tokensEstimated` so
   // the dashboard can mark the cost "est." — the hook path has sent it since
@@ -152,6 +159,11 @@ export interface ParsedSession {
   // the turn's own git window. Hook-driven agents get the same signal live at
   // PostToolUse; this is the only route for agents that fire no hooks.
   promptsThatWroteViaShell?: number[];
+  // The write-shaped shell commands each of those turns ran, verbatim, keyed by
+  // promptIndex. A command names the paths it writes — the evidence the watcher
+  // uses when a turn's own window is empty because it first saw the turn after
+  // the next one had already begun (both baselines are one snapshot).
+  promptShellWriteCommands?: Record<number, string[]>;
 }
 
 export interface TranscriptAdapter {
@@ -415,11 +427,32 @@ function displayTranscript(transcriptPath: string, _parsed: ParsedTranscript): s
 // Map a ParsedTranscript (Claude-shaped parser output) into a ParsedSession.
 // `modelOverride` lets Cursor/Copilot/Gemini supply the real model when the
 // generic parser can't read one from the file.
+// The per-prompt estimate for an adapter session: the override's estimated
+// counts divided by the transcript's weights (Cursor), or the parser's own
+// estimated split (Copilot). Renumbered from native index to position.
+function estimatedSplitFor(
+  p: ParsedTranscript,
+  tokenOverride?: { tokensUsed: number; inputTokens: number; outputTokens: number; cacheReadTokens?: number },
+): Pick<ParsedSession, 'modelUsage' | 'turnUsage'> {
+  let src: ParsedTranscript = p;
+  if (tokenOverride) {
+    src = { ...p, inputTokens: tokenOverride.inputTokens, outputTokens: tokenOverride.outputTokens,
+      cacheReadTokens: tokenOverride.cacheReadTokens ?? 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0,
+      modelUsage: undefined, turnUsage: undefined, turnUsageEstimated: undefined };
+    applyEstimatedSplit(src);
+  }
+  if (!src.turnUsageEstimated || !src.turnUsage) return {};
+  return {
+    ...(tokenOverride && src.modelUsage ? { modelUsage: src.modelUsage } : {}),
+    turnUsage: src.turnUsage.map((t) => ({ promptIndex: t.promptIndex - src.promptIndexBase, modelUsage: t.modelUsage })),
+  };
+}
+
 function fromParsedTranscript(
   transcriptPath: string,
   p: ParsedTranscript,
   modelOverride?: string | null,
-  tokenOverride?: { tokensUsed: number; inputTokens: number; outputTokens: number },
+  tokenOverride?: { tokensUsed: number; inputTokens: number; outputTokens: number; cacheReadTokens?: number },
 ): ParsedSession {
   return {
     userPrompts: p.prompts,
@@ -437,11 +470,12 @@ function fromParsedTranscript(
     tokensUsed: tokenOverride ? tokenOverride.tokensUsed : p.tokensUsed,
     inputTokens: tokenOverride ? tokenOverride.inputTokens : p.inputTokens,
     outputTokens: tokenOverride ? tokenOverride.outputTokens : p.outputTokens,
-    cacheReadTokens: p.cacheReadTokens,
+    cacheReadTokens: tokenOverride?.cacheReadTokens ?? p.cacheReadTokens,
     cacheCreationTokens: p.cacheCreationTokens,
     cacheCreation1hTokens: p.cacheCreation1hTokens,
     // A token override replaces the counts this split describes.
     ...(tokenOverride ? {} : { modelUsage: p.modelUsage }),
+    ...estimatedSplitFor(p, tokenOverride),
     // A token override is only ever the char-length estimate (Cursor records
     // no usage) — flag it so the server doesn't store it as measured.
     ...(tokenOverride ? { tokensEstimated: true } : {}),
@@ -460,7 +494,7 @@ function fromParsedTranscript(
     // falls back to file overlap when it's empty, so it can only add signal.
     promptsThatCommitted: committingPromptsFromTranscript(transcriptPath),
     promptCommitCommands: commitCommandsFromTranscript(transcriptPath),
-    promptsThatWroteViaShell: shellWritingPromptsFromTranscript(transcriptPath),
+    ...shellWritingPromptsFromTranscript(transcriptPath),
   };
 }
 
@@ -474,14 +508,20 @@ function fromParsedTranscript(
  * Read from the same tool-call walk that spots `git commit`, so it costs
  * nothing extra and covers every agent whose transcript this parser reads.
  */
-function shellWritingPromptsFromTranscript(transcriptPath: string): number[] {
+function shellWritingPromptsFromTranscript(transcriptPath: string): {
+  promptsThatWroteViaShell: number[];
+  promptShellWriteCommands: Record<number, string[]>;
+} {
+  const promptsThatWroteViaShell: number[] = [];
+  const promptShellWriteCommands: Record<number, string[]> = {};
   try {
-    return extractPromptFileMappings(transcriptPath)
-      .filter((m) => m.wroteViaShell)
-      .map((m) => m.promptIndex);
-  } catch {
-    return [];
-  }
+    for (const m of extractPromptFileMappings(transcriptPath)) {
+      if (!m.wroteViaShell) continue;
+      promptsThatWroteViaShell.push(m.promptIndex);
+      if (m.shellWriteCommands && m.shellWriteCommands.length > 0) promptShellWriteCommands[m.promptIndex] = m.shellWriteCommands;
+    }
+  } catch { /* unreadable — no shell evidence */ }
+  return { promptsThatWroteViaShell, promptShellWriteCommands };
 }
 
 function commitCommandsFromTranscript(transcriptPath: string): Record<number, string[]> {
@@ -805,11 +845,16 @@ export const cursorAdapter: TranscriptAdapter = {
     const conversationId = path.basename(transcriptPath).replace(/\.jsonl$/, '');
     // Cursor stores no token counts in the transcript — pull the char-estimated
     // totals, and the real model from Cursor's tracking DB.
-    let tokenOverride: { tokensUsed: number; inputTokens: number; outputTokens: number } | undefined;
+    let tokenOverride: { tokensUsed: number; inputTokens: number; outputTokens: number; cacheReadTokens?: number } | undefined;
     try {
       const est = discoverCursorTranscript(conversationId);
       if (est && est.tokensUsed > 0) {
-        tokenOverride = { tokensUsed: est.tokensUsed, inputTokens: est.inputTokens, outputTokens: est.outputTokens };
+        tokenOverride = {
+          tokensUsed: est.tokensUsed,
+          inputTokens: est.inputTokens,
+          outputTokens: est.outputTokens,
+          cacheReadTokens: est.cacheReadTokens,
+        };
       }
     } catch { /* estimation is best-effort */ }
     let model: string | null = null;
@@ -1026,6 +1071,9 @@ export const antigravityAdapter: TranscriptAdapter = {
       outputTokens: usage.outputTokens,
       // Antigravity reports no usage at all; every count above is chars/4.
       tokensEstimated: true,
+      // Each prompt's share of that estimate, by the text its turn sent and
+      // produced.
+      ...(estimateAntigravityTurnUsage(t, usage) || {}),
       // The transcript's own tool_calls, counted and labelled by the parser.
       // This was hardcoded to 0 — the count and the breakdown were computed on
       // every parse and then thrown away here, which is why an agy turn that
@@ -1045,6 +1093,8 @@ export const antigravityAdapter: TranscriptAdapter = {
       }),
       promptsThatCommitted: t.promptRanCommit.map((r, i) => (r ? i : -1)).filter((i) => i >= 0),
       promptsThatWroteViaShell: (t.promptWroteViaShell || []).map((r, i) => (r ? i : -1)).filter((i) => i >= 0),
+      promptShellWriteCommands: Object.fromEntries((t.promptShellWriteCommands || [])
+        .map((cmds, i) => [i, cmds] as const).filter(([, cmds]) => cmds.length > 0)),
       promptCommitShas: Object.fromEntries(
         t.promptCommitShas.map((shas, i) => [i, shas]).filter(([, shas]) => (shas as string[]).length > 0),
       ) as Record<number, string[]>,

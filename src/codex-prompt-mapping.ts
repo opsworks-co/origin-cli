@@ -22,6 +22,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import { gitOrNull, git as gitExec } from './utils/exec.js';
 import * as fzstd from 'fzstd';
+import { budgetRowDiffs } from './budgeted-row-diff.js';
 
 const HEX = /^[0-9a-f]{4,64}$/i;
 
@@ -43,6 +44,8 @@ export interface CodexPromptMapping {
   diff: string;
   uncommittedDiff: string;
   commitSha: string | null;
+  /** Files whose content did not fit the storage budget (budgetRowDiffs). */
+  contentUnavailableFiles?: string[];
   // Marks this mapping as the authoritative source for the prompt — derived
   // from the rollout's per-turn [branch sha] markers, not racy live captures.
   // The server overwrites diff/uncommittedDiff/filesChanged with the values
@@ -130,7 +133,7 @@ export function getSessionCommitsWithTimes(
 export function buildDiffForCommitRange(
   repoPath: string,
   commits: CodexCommit[],
-): { diff: string; filesChanged: string[]; baseRef: string | null; headRef: string | null } {
+): { diff: string; filesChanged: string[]; contentUnavailableFiles?: string[]; baseRef: string | null; headRef: string | null } {
   if (commits.length === 0) {
     return { diff: '', filesChanged: [], baseRef: null, headRef: null };
   }
@@ -153,7 +156,7 @@ function diffAgainst(
   repoPath: string,
   base: string,
   head: string,
-): { diff: string; filesChanged: string[]; baseRef: string; headRef: string } {
+): { diff: string; filesChanged: string[]; contentUnavailableFiles?: string[]; baseRef: string; headRef: string } {
   const opts = { cwd: repoPath, timeoutMs: 15_000, maxBuffer: 10 * 1024 * 1024 };
   let diff = '';
   let names = '';
@@ -163,9 +166,12 @@ function diffAgainst(
   try {
     names = gitExec(['diff', '--name-only', `${base}..${head}`], opts);
   } catch { /* ignore */ }
+  const budgeted = budgetRowDiffs(diff);
+  const files = (names || '').split('\n').map((s) => s.trim()).filter(Boolean);
   return {
-    diff: (diff || '').slice(0, 200_000),
-    filesChanged: (names || '').split('\n').map((s) => s.trim()).filter(Boolean),
+    diff: budgeted.diff,
+    filesChanged: [...new Set([...files, ...budgeted.cutFiles])],
+    ...(budgeted.cutFiles.length > 0 ? { contentUnavailableFiles: budgeted.cutFiles } : {}),
     baseRef: base,
     headRef: head,
   };
@@ -406,7 +412,7 @@ export function backfillCodexPromptMappings(opts: {
     if (!promptCommits || promptCommits.length === 0) continue;
     // Sort newest-first to match buildDiffForCommitRange's expectations.
     promptCommits.sort((a, b) => b.timestamp - a.timestamp);
-    const { diff, filesChanged, headRef } = buildDiffForCommitRange(opts.repoPath, promptCommits);
+    const { diff, filesChanged, contentUnavailableFiles, headRef } = buildDiffForCommitRange(opts.repoPath, promptCommits);
     if (!diff && filesChanged.length === 0) continue;
     out.push({
       promptIndex: idx,
@@ -415,6 +421,7 @@ export function backfillCodexPromptMappings(opts: {
       diff,
       uncommittedDiff: '',
       commitSha: headRef,
+      ...(contentUnavailableFiles ? { contentUnavailableFiles } : {}),
       authoritative: true,
     });
   }
@@ -439,7 +446,11 @@ export function backfillCodexPromptMappings(opts: {
     } catch { /* ignore */ }
     if (uncommittedDiff || uncommittedNames.length > 0) {
       const last = out[out.length - 1];
-      last.uncommittedDiff = uncommittedDiff.slice(0, 200_000);
+      const budgeted = budgetRowDiffs('', uncommittedDiff);
+      last.uncommittedDiff = budgeted.uncommittedDiff;
+      if (budgeted.cutFiles.length > 0) {
+        last.contentUnavailableFiles = [...new Set([...(last.contentUnavailableFiles || []), ...budgeted.cutFiles])];
+      }
       // Union with committed files so the per-prompt files list reflects
       // EVERYTHING this prompt touched, committed or not.
       const merged = new Set(last.filesChanged);

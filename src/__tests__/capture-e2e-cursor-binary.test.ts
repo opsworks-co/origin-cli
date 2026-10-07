@@ -22,6 +22,7 @@ import { verifyTurn, parseUnifiedDiff } from '../capture-verify.js';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { foldStopRows } from './helpers/fold-stop-rows.js';
 import { expectGoldenTurns, trackTestFailures } from './helpers/golden-turns.js';
+import { rowsFromProducer } from './helpers/producer-rows.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 // ORIGIN_E2E_BIN runs the same scenario through another build — the installed
@@ -118,7 +119,7 @@ function say(text: string) {
   fs.writeFileSync(transcript, lines.join('\n') + '\n');
 }
 function wrote(file: string, contents: string) {
-  lines.push(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write', input: { path: path.join(repo, file), contents } }] } }));
+  lines.push(JSON.stringify({ type: 'assistant', role: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write', input: { path: path.join(repo, file), contents } }] } }));
   fs.writeFileSync(transcript, lines.join('\n') + '\n');
 }
 
@@ -167,6 +168,11 @@ describe.skipIf(!haveDist)('cursor capture end to end through the built binary',
     fs.mkdirSync(tdir, { recursive: true });
     transcript = path.join(tdir, `${CONV}.jsonl`);
     fs.writeFileSync(transcript, '');
+    // Where Cursor itself keeps it, so the Stop hook's token estimate
+    // (discoverCursorTranscript) finds the conversation as it does for real.
+    const cursorWs = path.join(os.homedir(), '.cursor', 'projects', 'e2e-workspace', 'agent-transcripts');
+    fs.mkdirSync(cursorWs, { recursive: true });
+    fs.symlinkSync(tdir, path.join(cursorWs, CONV), 'dir');
 
     const originDir = path.join(os.homedir(), '.origin');
     fs.mkdirSync(originDir, { recursive: true });
@@ -198,7 +204,7 @@ describe.skipIf(!haveDist)('cursor capture end to end through the built binary',
         }
       } catch (e) { console.log('no journal dir', String(e)); }
       try {
-        const log = fs.readFileSync(path.join(os.homedir(), '.origin', 'hooks.log'), 'utf-8').split('\n').filter((l) => /ledger|journal|stop\]|post-tool-use\]|after-file-edit|adopted|pre-mark|antigravity capture|codex-watch/.test(l) && !/HOOK (INVOKED|COMPLETE)|\[stdin\]/.test(l));
+        const log = fs.readFileSync(path.join(os.homedir(), '.origin', 'hooks.log'), 'utf-8').split('\n').filter((l) => /ledger|journal|stop\]|post-tool-use\]|after-file-edit|adopted|pre-mark|antigravity capture|codex-watch|post-commit\]|prepare-commit-msg\]|attest/.test(l) && !/HOOK (INVOKED|COMPLETE)|\[stdin\]/.test(l));
         console.log('--- hooks.log ---\n' + log.map((l) => l.slice(0, 600)).join('\n'));
       } catch { /* none */ }
     }
@@ -270,6 +276,13 @@ describe.skipIf(!haveDist)('cursor capture end to end through the built binary',
     const t1 = rows.find((r: any) => r.promptIndex === 0);
     expect(t1.filesChanged).toEqual(['app.py']);
     expect(t1.diff).not.toContain('remember this');
+
+    // Cursor records no usage per reply: each turn carries its share of the
+    // session's estimate, marked as one.
+    for (const r of [t1, t2]) {
+      expect(r.usageEstimated, `turn ${r.promptIndex + 1} is not marked estimated`).toBe(true);
+      expect(r.modelUsage?.[0]?.outputTokens, `turn ${r.promptIndex + 1} has no estimated share`).toBeGreaterThan(0);
+    }
   }, 120_000 * WINDOWS_SLOWDOWN);
 
   it('turn 3: an edit-hook path is stored repo-relative, and a commit before Stop is attested to the running turn', async () => {
@@ -373,6 +386,76 @@ describe.skipIf(!haveDist)('cursor capture end to end through the built binary',
     expect(t4.filesChanged).toContain('big.py');
     expect(t4.linesAdded).toBe(1);
     expect(t4.linesRemoved).toBe(1);
+  }, 120_000 * WINDOWS_SLOWDOWN);
+
+  it('turn 5: a dirty file the hook never named stays out of both stored blobs, not only out of filesChanged', async () => {
+    // #1806 (Origin TODO 58f09990). Before it, after-file-edit captured the
+    // WHOLE working-tree window into `diff` and `uncommittedDiff` and scoped
+    // only `filesChanged`; the last live Cursor turns before the fix sent
+    // 4 files with a 309 KB diff. A sibling's write, or a file the transcript
+    // extractor missed, sat inside the blob and any reader that did not
+    // re-apply the file list could hand it to this turn. This is the
+    // scenario the PR's test plan left for a release to prove.
+    turnSessionId = 5;
+    say('shorten the greeting');
+    const ups = await run('user-prompt-submit', { prompt: 'shorten the greeting' });
+    expect(ups.code, ups.stderr).toBe(0);
+    // Someone else dirties a tracked file: not in the transcript, never named
+    // to afterFileEdit. The window sees it; the hook must not.
+    fs.writeFileSync(path.join(repo, 'notes.md'), 'remember this\nSIBLING WROTE THIS\n');
+    let stop: Awaited<ReturnType<typeof run>>;
+    try {
+      const before = writesIn();
+      const content = 'def main():\n    print("hi")\n\n\nmain()\n';
+      fs.writeFileSync(path.join(repo, 'app.py'), content);
+      wrote('app.py', content);
+      await waitFor(() => writesIn() > before, 10_000, 'the journal to record the write');
+      // An index into the whole of `hits` (POST/GET included): rowsFromProducer's contract.
+      const hitsBefore = hits.length;
+      const afe = await run('after-file-edit', { file_path: path.join(repo, 'app.py'), edits: [] });
+      expect(afe.code, afe.stderr).toBe(0);
+
+      // The hook's own send, before Stop has a say — picked by its provenance
+      // (`afe_` captureId), not as the first new row of turn 5: under load a
+      // fire-and-forget PATCH of user-prompt-submit, or another background
+      // producer, lands in the same window with the whole dirty tree.
+      const live = rowsFromProducer(hits, hitsBefore, 4, 'afe').pop();
+      expect(live, 'after-file-edit sent no row for turn 5').toBeTruthy();
+      expect(live.filesChanged).toEqual(['app.py']);
+      expect(live.diff).toContain('+    print("hi")');
+      expect(live.diff).not.toContain('notes.md');
+      expect(live.diff).not.toContain('SIBLING WROTE THIS');
+      expect(live.uncommittedDiff || '').not.toContain('notes.md');
+      expect(live.uncommittedDiff || '').not.toContain('SIBLING WROTE THIS');
+      // And what it persisted, which the next producer reads.
+      const stateDir = path.join(os.homedir(), '.origin', 'sessions');
+      const stateFile = fs.readdirSync(stateDir).map((f) => path.join(stateDir, f))
+        .find((f) => f.endsWith('.json') && fs.readFileSync(f, 'utf-8').includes('e2e-cursor-session-0001'));
+      const mapping = JSON.parse(fs.readFileSync(stateFile!, 'utf-8')).completedPromptMappings.find((m: any) => m.promptIndex === 4);
+      expect(mapping, 'after-file-edit wrote no mapping for turn 5').toBeTruthy();
+      expect(mapping.filesChanged).toEqual(['app.py']);
+      expect(mapping.diff).not.toContain('SIBLING WROTE THIS');
+      expect(mapping.uncommittedDiff || '').not.toContain('SIBLING WROTE THIS');
+    } finally {
+      // Stop is a different producer with a different rule. In a LONE session
+      // the write journal records every write in the tree as the open turn's,
+      // and a row that names a file keeps its watched edit (trim-watched-edits.ts).
+      // Leaving the sibling's write in place here would bill it to this turn by
+      // design, not by the bug this turn is about. Put it back before Stop: a
+      // round-trip is not a net change, so the row is the agent's own write.
+      // In `finally`: a failed assertion above must not leave the sibling's
+      // write in place and the turn unstopped for the golden test that follows.
+      fs.writeFileSync(path.join(repo, 'notes.md'), 'remember this\n');
+      stop = await run('stop', { status: 'completed' });
+    }
+    expect(stop.code, stop.stderr).toBe(0);
+    const t5 = lastRows().find((r: any) => r.promptIndex === 4);
+    expect(t5, 'no row for turn 5').toBeTruthy();
+    expect(t5.filesChanged).toEqual(['app.py']);
+    expect(t5.diff).toContain('+    print("hi")');
+    expect(t5.diff).not.toContain('SIBLING WROTE THIS');
+    expect(t5.linesAdded).toBe(1);
+    expect(t5.linesRemoved).toBe(1);
   }, 120_000 * WINDOWS_SLOWDOWN);
 
   it('golden: the final turn rows match the recorded baseline', () => {

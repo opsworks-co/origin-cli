@@ -141,3 +141,55 @@ describe('parseTranscript — repo scoping of filesChanged', () => {
     expect(parsed.filesChanged.some((f) => slash(f).includes('memory/note.md'))).toBe(true);
   });
 });
+
+// The producer behind TODO 7b6837f2. A worktree session's roots held the MAIN
+// checkout ahead of its own worktree (main was discovered at turn 15 by a
+// command run there), and "first containing root" named every later Write from
+// main: session 90eca883 turn 16 mapped its two new files as
+// `.claude/worktrees/xenodochial-…/packages/cli/src/git-moved-files.ts`, +245
+// as a whole-file add, while the ledger named `packages/cli/src/…`. Stop's
+// vanished-file pass then dropped the prefixed sections as written by no tool.
+describe('extractPromptFileMappings — a worktree file when the main checkout is a root too', () => {
+  let dir: string;
+  let main: string;
+  let worktree: string;
+  let transcript: string;
+
+  const line = (o: unknown) => JSON.stringify(o) + '\n';
+
+  beforeAll(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-scope-wt-'));
+    main = path.join(dir, 'origin');
+    worktree = path.join(main, '.claude', 'worktrees', 'xenodochial-swirles-1444e9');
+    fs.mkdirSync(path.join(worktree, 'packages', 'cli', 'src'), { recursive: true });
+    transcript = path.join(dir, 'session.jsonl');
+    fs.writeFileSync(transcript,
+      line({ type: 'user', message: { role: 'user', content: 'leave git-moved files in the journal' } })
+      + line({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', name: 'Write', input: { file_path: path.join(worktree, 'packages/cli/src/git-moved-files.ts'), content: 'export const moved = 1;\n' } },
+          ],
+        },
+      }));
+  });
+
+  afterAll(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+  it('names the file from the worktree whichever root is listed first', () => {
+    for (const roots of [[main, worktree], [worktree, main]]) {
+      const [turn] = extractPromptFileMappings(transcript, { repoRoots: roots });
+      expect(turn.filesChanged, roots.join(' > ')).toEqual(['packages/cli/src/git-moved-files.ts']);
+      expect((turn.edits || []).map((e) => e.file)).toEqual(['packages/cli/src/git-moved-files.ts']);
+      expect(turn.diff).toContain('diff --git a/packages/cli/src/git-moved-files.ts b/packages/cli/src/git-moved-files.ts');
+      expect(turn.diff).not.toContain('.claude/worktrees/');
+    }
+  });
+
+  it('the session-level file list agrees', () => {
+    const parsed = parseTranscript(transcript, { repoRoots: [main, worktree] });
+    expect(parsed.filesChanged).toEqual(['packages/cli/src/git-moved-files.ts']);
+  });
+});

@@ -23,6 +23,7 @@ import { disableCommand } from './commands/disable.js';
 import { benchmarkBakeoffCreateCommand } from './commands/benchmark-bakeoff.js';
 import { benchmarkRunnerCommand, benchmarkKeyCommand } from './commands/benchmark-runner.js';
 import { benchmarkSyncCommand } from './commands/benchmark.js';
+import { benchmarkReplayCommand, benchmarkReplaySyncCommand } from './commands/benchmark-replay.js';
 import { mcpServeCommand } from './commands/mcp.js';
 import { mcpInstallCommand, mcpStatusCommand } from './commands/mcp-install.js';
 import { linkCommand } from './commands/link.js';
@@ -44,10 +45,12 @@ import { resumeCommand } from './commands/resume.js';
 import { shareCommand } from './commands/share.js';
 import { blameCommand } from './commands/blame.js';
 import { scrubNotesCommand } from './commands/scrub-notes.js';
+import { pushMetadataCommand } from './commands/push-metadata.js';
 import { notesRepairCommand } from './commands/notes-repair.js';
 import { commitCommand } from './commands/commit.js';
 import { diffCommand } from './commands/diff.js';
 import { searchCommand } from './commands/search.js';
+import { searchHistoryCommand } from './commands/search-history.js';
 import { rewindCommand } from './commands/rewind.js';
 import { trailCommand, trailListCommand, trailCreateCommand, trailUpdateCommand, trailAssignCommand, trailLabelCommand } from './commands/trail.js';
 import { ciCheckCommand, ciSquashMergeCommand, ciGenerateWorkflowCommand, ciSessionCheckCommand } from './commands/ci.js';
@@ -168,6 +171,22 @@ benchmark.command('runner')
   .option('--once', 'Drain one queued bake-off then exit (for cron/CI) instead of polling forever')
   .option('--interval <seconds>', 'Poll interval when idle (default 15)')
   .action((opts: { once?: boolean; interval?: string }) => benchmarkRunnerCommand(opts));
+benchmark.command('replay')
+  .description('Replay past tasks under different context variants (none, baseline, file-cards, search) and grade each by the task commit\'s own tests')
+  .requiredOption('--tasks <file>', 'JSON task file: { repo?, tasks: [{ id, commit, prompt, tests, testCommand, setupCommand? }] }')
+  .option('--variants <list>', 'Comma-separated context variants: none, baseline, file-cards, search (default none,baseline,file-cards)')
+  .option('--repeats <n>', 'Runs per task and variant (default 2)')
+  .option('--model <model>', 'Model passed to the agent')
+  .option('--only <ids>', 'Comma-separated task ids to run')
+  .option('--validate', 'Check each task instead: its tests must fail on the parent and pass on the commit. Runs no agent')
+  .option('--keep', 'Keep each arm\'s working copy after grading')
+  .option('--timeout-min <n>', 'Per-arm agent timeout in minutes (default 30)')
+  .action((opts) => benchmarkReplayCommand(opts));
+benchmark.command('replay-sync')
+  .description('Upload the results of replay runs on this machine to Origin (Benchmarks → Replays)')
+  .option('--only <runIds>', 'Comma-separated run ids to upload')
+  .option('--repo <path>', 'Repo the runs replayed, for runs that did not record it (default: the current repo)')
+  .action((opts: { only?: string; repo?: string }) => benchmarkReplaySyncCommand(opts));
 benchmark.command('key <provider> [key]')
   .description('Set a LOCAL agent API key (anthropic|openai) for the runner — overrides the server-stored key, never uploaded')
   .option('--clear', 'Remove the local key')
@@ -413,11 +432,17 @@ notes.command('repair')
   .option('--ref <name>', 'Only repair one notes ref (origin | origin-memory)')
   .action((opts: { apply?: boolean; push?: boolean; remote?: string; ref?: string }) => notesRepairCommand(opts));
 
+program.command('push-metadata [remote]')
+  .description('Publish this repo\'s Origin attribution notes (refs/notes/origin) to a remote')
+  .action((remote?: string) => pushMetadataCommand(remote));
+
 program.command('scrub-notes')
   .description('Remove prompt text from this repo\'s Origin git notes (metadata stays)')
-  .option('--push', 'Force-replace refs/notes/origin on the remote after scrubbing')
-  .option('--remote <name>', 'Remote to push to (default: origin)')
-  .action(scrubNotesCommand);
+  .option('--dry-run', 'Report what would be rewritten; writes nothing and contacts no remote')
+  .option('--push', 'After the local rewrite, replace refs/notes/origin on --remote (lease-protected)')
+  .option('--remote <name>', 'Configured remote for --push (default: origin)')
+  .option('--drop-unprovable-edits', 'Delete each whole editsJson that was truncated with prompt text in it (lossy; check the --dry-run count first)')
+  .action((opts) => scrubNotesCommand(opts));
 
 program.command('blame <file>')
   .description('Show AI vs human attribution per line (like git blame)')
@@ -495,14 +520,15 @@ program.command('compare <arg1> [arg2]')
   .option('--json', 'Output as JSON')
   .action(compareCommand);
 
-program.command('export')
-  .description('Export session data as CSV, JSON, or Agent Trace v0.1.0')
-  .option('-f, --format <format>', 'Output format (json, csv, agent-trace)', 'json')
+program.command('export [range]')
+  .description('Export session data as CSV, JSON, or Agent Trace v0.1.0; with a commit range, the canonical attribution records as JSON')
+  .option('-f, --format <format>', 'Output format (json, csv, agent-trace); only json with a range', 'json')
   .option('-o, --output <file>', 'Write to file instead of stdout')
   .option('-l, --limit <n>', 'Limit number of sessions')
   .option('-m, --model <name>', 'Filter by model')
   .option('-s, --session <id>', 'Export only a specific session (agent-trace format)')
-  .action(exportCommand);
+  .option('--strict', 'With a range: fail the whole export on any unusable attribution record instead of skipping it')
+  .action((range: string | undefined, opts) => exportCommand(range, opts));
 
 const ignoreCmd = program.command('ignore').description('Manage file ignore patterns for Origin tracking');
 ignoreCmd.action(ignoreListCommand);
@@ -556,6 +582,14 @@ program.command('search <query>')
   .option('-m, --model <model>', 'Filter by model')
   .option('-r, --repo <path>', 'Filter by repo path')
   .action(searchCommand);
+
+program.command('search-history <query>')
+  .description("Ranked search over this repo's recorded history: sessions, commits, decisions, open TODOs, and the prompts behind commits")
+  .option('-l, --limit <n>', 'Max results (1-50)', '10')
+  .option('-k, --kind <kinds>', 'Only these kinds, comma-separated: session, commit, prompt, decision, todo')
+  .option('-r, --repo <path>', 'Repository to search (default: the current one)')
+  .option('--json', 'Output as JSON')
+  .action(searchHistoryCommand);
 
 program.command('analyze')
   .description('Analyze AI prompting patterns and metrics')
@@ -668,8 +702,12 @@ ci.command('check')
   .description('Report AI attribution stats (run in CI)')
   .option('-r, --range <range>', 'Commit range to check')
   .action(ciCheckCommand);
-ci.command('squash-merge <baseBranch>')
-  .description('Preserve attribution through squash merge')
+ci.command('squash-merge [baseBranch]')
+  .description('Carry attribution from squashed commits to the squash commit (explicit range and target)')
+  .option('--range <range>', 'The original commits: <base-before-merge>..<source-tip>')
+  .option('--target <sha>', 'The squash commit')
+  .option('--skip-unless-squash', 'Exit 0 and write nothing when the target is provably not a squash commit (merge commit, rebased copy)')
+  .option('--warn-only', 'Post-merge automation: when the attribution cannot be carried (sources not fetched, empty range, held note lock), warn, write nothing and exit 0')
   .action(ciSquashMergeCommand);
 ci.command('generate-workflow')
   .description('Generate GitHub Actions workflow snippet')
@@ -714,7 +752,7 @@ program.command('upgrade')
   .option('--check', 'Only check for updates, do not install')
   .option('--force', 'Install the server version even if it is OLDER than this one (deliberate rollback)')
   .option('--dry-run', 'Show what would be downloaded and installed without touching anything')
-  .option('--rollback', 'Re-install the previous version from the last backup')
+  .option('--rollback', 'Not available — no backup of the previous install is kept; exits without changes (use --force to reinstall the server version)')
   .action(upgradeCommand);
 
 // ─── Internal Hook Handlers ──────────────────────────────────────────────
@@ -740,8 +778,36 @@ hooks.command('antigravity <event>').description('Handle Antigravity hook event'
 hooks.command('git-pre-commit').description('Handle git pre-commit hook (secret scan)').action(() => handlePreCommit());
 hooks.command('git-prepare-commit-msg <msgFile> [source] [sha]')
   .description('Handle git prepare-commit-msg hook (writes Origin-Session trailer)')
-  .action((msgFile: string, source?: string) => handlePrepareCommitMsg(msgFile, source));
-hooks.command('git-post-commit').description('Handle git post-commit hook').action(() => handlePostCommit());
+  .action(async (msgFile: string, source?: string) => {
+    // A cherry-pick's source exists only while the pick is prepared; post-commit
+    // carries its attribution. First, before any skip below. See cherry-pick-source.ts.
+    const { rememberCherryPickSource } = await import('./cherry-pick-source.js');
+    rememberCherryPickSource(process.cwd());
+    // Likewise "this commit is a replay": the backgrounded post-commit may start
+    // after the replay's own markers are gone. See replay-marker.ts.
+    const { rememberReplayInProgress } = await import('./replay-marker.js');
+    rememberReplayInProgress(process.cwd());
+    await handlePrepareCommitMsg(msgFile, source);
+  });
+hooks.command('git-post-commit').description('Handle git post-commit hook').action(async () => {
+  // Resolved before handlePostCommit consumes ORIGIN_COMMIT_SHA (on a copy of the env).
+  const hookCwd = process.cwd();
+  let committed = '';
+  try {
+    const { committedShaForHook } = await import('./commands/hooks/post-commit.js');
+    committed = committedShaForHook(hookCwd, { ...process.env });
+  } catch { /* no commit to carry to */ }
+  try {
+    await handlePostCommit();
+  } finally {
+    // After the handler: a note it wrote for this commit is the commit's own,
+    // and the carried contributions are added to it rather than replaced by it.
+    try {
+      const { carryCherryPickAttribution } = await import('./cherry-pick-source.js');
+      carryCherryPickAttribution(hookCwd, committed);
+    } catch { /* attribution carry is best-effort */ }
+  }
+});
 // Detached child spawned by the session-start hook — runs the local-history
 // advertise-and-backfill round without holding the session start open.
 program
@@ -771,7 +837,7 @@ hooks.command('drain-queue').description('Internal: replay queued capture upload
 hooks.command('memory-brief-backfill').description('Internal: generate the continuation brief for a repo that has none').action(() => handleMemoryBriefBackfill());
 hooks.command('git-pre-push').description('Handle git pre-push hook').action(() => handlePrePush());
 hooks.command('git-post-rewrite').description('Handle git post-rewrite hook (rebase/amend)').action(async () => {
-  const { preserveAttributionBatch, parseRewriteInput, handleCherryPick } = await import('./history-preservation.js');
+  const { preserveAttributionBatch, parseRewriteInput } = await import('./history-preservation.js');
   const { getGitRoot } = await import('./session-state.js');
   const repoPath = getGitRoot(process.cwd());
   if (!repoPath) return;
@@ -795,8 +861,8 @@ hooks.command('git-post-rewrite').description('Handle git post-rewrite hook (reb
       recordGitRewrites(process.cwd(), mappings);
     } catch { /* attribution notes are already preserved above */ }
   }
-  // Also check for cherry-pick context
-  handleCherryPick(repoPath);
+  // No cherry-pick here: git never runs post-rewrite for one. Its attribution
+  // is carried by prepare-commit-msg + post-commit (cherry-pick-source.ts).
 });
 hooks.command('git-post-merge')
   .description('Handle git post-merge hook (fold notes fetched by the pull)')
@@ -1255,7 +1321,11 @@ program.hook('postAction', async (thisCommand, actionCommand) => {
 
 // True when this invocation's output is consumed by a machine rather than read
 // by a person, so nothing may be appended to it.
-export function isMachineReadableInvocation(actionCommand?: { name(): string; parent?: unknown } | null): boolean {
+export function isMachineReadableInvocation(actionCommand?: { name(): string; parent?: unknown; args?: unknown[] } | null): boolean {
+  // `origin export <range>` is the attribution read boundary (OR-12/A6): its
+  // stdout is a JSON document, and it promises to stay offline, so it must not
+  // reach getorigin.io for a version check either.
+  if (actionCommand?.name() === 'export' && (actionCommand.args?.length ?? 0) > 0) return true;
   // Walk to the root command name (`origin hooks antigravity pre-tool-use`
   // dispatches the leaf `pre-tool-use`, whose ancestor is `hooks`).
   let cmd: any = actionCommand;

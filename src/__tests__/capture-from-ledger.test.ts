@@ -251,6 +251,24 @@ describe('applyLedgerToMappings', () => {
     expect(pm.ledgerOwned).toBe(true);
   });
 
+  it('drops the marks of the empty row it fills', () => {
+    // c085f0af row 16: blanked by the shadow pass at one Stop (chatOnly,
+    // turnWindowCaptured, contentAuthoritative), refilled by the ledger at the
+    // next — and saved with all three marks beside 3 files and +48/-4.
+    const v1 = put('a\n');
+    const v2 = put('a\nb\n');
+    const log = t('T1', 1) + w('f.ts', 2, v1) + t('T2', 3) + w('f.ts', 4, v2);
+    const pm: Record<string, unknown> = {
+      promptIndex: 1, filesChanged: [], diff: '', uncommittedDiff: '',
+      chatOnly: true, turnWindowCaptured: true, contentAuthoritative: true, diffSource: 'turn-window',
+    };
+    expect(applyLedgerToMappings(ledgerState(['T1', 'T2']), [pm as never], journal(log))).toBe(1);
+    expect(pm.filesChanged).toEqual(['f.ts']);
+    expect(pm.chatOnly).toBeUndefined();
+    expect(pm.turnWindowCaptured).toBeUndefined();
+    expect(pm.diffSource).toBe('ledger');
+  });
+
   describe('a checkout inside the turn', () => {
     const A = 'a'.repeat(40);
     const B = 'b'.repeat(40);
@@ -272,6 +290,60 @@ describe('applyLedgerToMappings', () => {
       expect(pm.diff).toContain('+edited');
       expect(pm.diff).not.toContain('theirs');
       expect([pm.linesAdded, pm.linesRemoved]).toEqual([2, 0]);
+    });
+
+    describe('a round trip through the checkout — a rebase, a cherry-pick, `git checkout -`', () => {
+      // Session c085f0af turn 17 (2026-09-26): the turn only ran
+      // `git rebase --onto origin/main` of turn 16's commit. The checkout wrote
+      // main's bytes to shared.ts, the replay put the turn's own bytes back,
+      // and the fence rule then measured the file from main's bytes: row 17
+      // carried turn 16's whole diff as its own.
+      const X = 'x'.repeat(40);
+      const ours = 'base\nfix\n';
+      const rebaseRepo = {
+        changedFilesBetween: (from: string, to: string) => (from === A && to === B ? ['shared.ts'] : []),
+        readAtRev: (sha: string, file: string) =>
+          (file !== 'shared.ts' ? null : sha === B ? 'base\n' : sha === X ? ours : null),
+      };
+      const run = (log: string, state: Record<string, unknown> = {}) => {
+        const pm: Record<string, unknown> = { promptIndex: 1, filesChanged: ['stale.ts'], diff: 'stale' };
+        const n = applyLedgerToMappings({ ...ledgerState(['T0', 'T1']), ...state }, [pm as never], { ...journal(log), ...rebaseRepo });
+        return { n, pm };
+      };
+      const earlierTurn = () => t('T0', 1) + w('shared.ts', 2, put(ours));
+
+      it.each([
+        ['both rewrites recorded, fence behind them', () => earlierTurn() + t('T1', 10) + w('shared.ts', 11, put('base\n')) + w('shared.ts', 12, put(ours)) + serializeFence(13, A, B)],
+        ['the checkout\'s write debounced away, fence behind', () => earlierTurn() + t('T1', 10) + w('shared.ts', 12, put(ours)) + serializeFence(13, A, B)],
+        ['fence ahead of the rewrites', () => earlierTurn() + t('T1', 10) + serializeFence(11, A, B) + w('shared.ts', 12, put('base\n')) + w('shared.ts', 13, put(ours))],
+      ])('bills the turn nothing: the file ended the turn as it began — %s', (_name, log) => {
+        const { n, pm } = run(log());
+        expect(n).toBe(1);
+        expect(pm.filesChanged).toEqual([]);
+        expect(pm.diff).toBe('');
+        expect([pm.linesAdded, pm.linesRemoved]).toEqual([0, 0]);
+      });
+
+      it('reads what the turn started with from the baseline when the journal has no earlier record', () => {
+        const log = t('T1', 10) + w('shared.ts', 12, put(ours)) + serializeFence(13, A, B);
+        const { pm } = run(log, { prePromptSha: X });
+        expect(pm.filesChanged).toEqual([]);
+      });
+
+      it('an edit minutes after the checkout that restores the original bytes is still the turn\'s', () => {
+        const log = earlierTurn() + t('T1', 10) + w('shared.ts', 11, put('base\n')) + serializeFence(12, A, B) + w('shared.ts', 12 + 5 * 60_000, put(ours));
+        const { pm } = run(log);
+        expect(pm.filesChanged).toEqual(['shared.ts']);
+        expect(pm.diff).toContain('+fix');
+      });
+
+      it('a file the replay left DIFFERENT from what the turn began with is measured from the checkout, as before', () => {
+        const log = earlierTurn() + t('T1', 10) + w('shared.ts', 12, put('base\nfix\nmore\n')) + serializeFence(13, A, B);
+        const { pm } = run(log);
+        expect(pm.filesChanged).toEqual(['shared.ts']);
+        expect(pm.diff).toContain('+fix');
+        expect(pm.diff).toContain('+more');
+      });
     });
 
     it('`git checkout -b` moves no file, so nothing is measured against it', () => {

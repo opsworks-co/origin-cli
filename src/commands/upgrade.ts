@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { execSync } from 'child_process';
 import { findExecutable } from '../utils/exec.js';
 import { compareVersions } from '../version-check.js';
+import { installGlobalAtomically } from '../atomic-global-install.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -17,12 +18,26 @@ const TARBALL_URL = `${SERVER_URL}/cli/origin-cli-latest.tgz`;
 // ─── Main Command ──────────────────────────────────────────────────────────
 
 /**
- * `origin upgrade [--check] [--force]`
+ * `origin upgrade [--check] [--dry-run] [--force]`
  *
  * Check for and install the latest version of the Origin CLI.
  * Downloads directly from the Origin platform server.
+ *
+ * --check and --dry-run are READ-ONLY: no download, no npm install, no daemon
+ * restart, no hook rewrite. --dry-run was declared but never read, so it ran a
+ * full install (2026-09-18: a dry run replaced .1744 with .2155).
  */
-export async function upgradeCommand(opts: { check?: boolean; force?: boolean }): Promise<void> {
+export async function upgradeCommand(opts: { check?: boolean; force?: boolean; dryRun?: boolean; rollback?: boolean }): Promise<void> {
+  // No backup of the previous install is ever kept, so there is nothing to roll
+  // back to. The flag used to fall through to a normal upgrade — refuse instead.
+  if (opts.rollback) {
+    console.log(chalk.yellow('\n  --rollback is not available: Origin keeps no backup of the previous install.'));
+    console.log(chalk.gray('  Nothing was changed. To reinstall the server\'s version (even if older):'));
+    console.log(chalk.gray('    origin upgrade --force\n'));
+    process.exitCode = 1;
+    return;
+  }
+  const readOnly = !!(opts.check || opts.dryRun);
   const currentVersion = getCurrentVersion();
 
   console.log(chalk.bold('\nOrigin CLI Upgrade\n'));
@@ -38,7 +53,7 @@ export async function upgradeCommand(opts: { check?: boolean; force?: boolean })
     // left both watchers capturing on stale code with no way to fix it short of
     // calling the restart helpers by hand. Observed twice in a row on a working
     // machine; an offline machine could never cycle its own daemons at all.
-    if (!opts.check) { await syncWatchersToInstalledCode(); await healHookConfigs(); }
+    if (!readOnly) { await syncWatchersToInstalledCode(); await healHookConfigs(); }
     return;
   }
 
@@ -60,8 +75,7 @@ export async function upgradeCommand(opts: { check?: boolean; force?: boolean })
     // an `npm install -g` (which never runs this command) or by an upgrade that
     // happened while it was already up would otherwise keep capturing with old
     // code until a reboot or its 24h lifetime cap.
-    await syncWatchersToInstalledCode();
-    await healHookConfigs();
+    if (!readOnly) { await syncWatchersToInstalledCode(); await healHookConfigs(); }
     return;
   }
 
@@ -72,7 +86,7 @@ export async function upgradeCommand(opts: { check?: boolean; force?: boolean })
     console.log(chalk.gray('      origin upgrade --force\n'));
     // Same reasoning as the up-to-date path: the binary here is the newest
     // thing on the box, so any daemon not matching it is stale.
-    if (!opts.check) { await syncWatchersToInstalledCode(); await healHookConfigs(); }
+    if (!readOnly) { await syncWatchersToInstalledCode(); await healHookConfigs(); }
     return;
   }
 
@@ -84,11 +98,25 @@ export async function upgradeCommand(opts: { check?: boolean; force?: boolean })
   }
 
   const downgrading = cmp > 0;
+
+  if (opts.dryRun) {
+    let target = '(unknown — `npm root -g` failed)';
+    try {
+      target = execSync('npm root -g', { windowsHide: true, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 15_000 }).trim();
+    } catch { /* report unknown */ }
+    console.log(chalk.cyan(`\n  Dry run — would ${downgrading ? 'downgrade (--force)' : 'upgrade'}: ${currentVersion} → ${latest.version}`));
+    console.log(chalk.gray(`    Download: ${latest.url}`));
+    console.log(chalk.gray(`    SHA-256:  ${latest.sha256}`));
+    console.log(chalk.gray(`    Install:  staged beside ${target}/@origin/cli and swapped in`));
+    console.log(chalk.gray('  Nothing was downloaded or installed.\n'));
+    return;
+  }
+
   console.log(chalk[downgrading ? 'yellow' : 'cyan'](
     `\n  ${downgrading ? 'Downgrading (--force)' : 'Upgrading'}: ${currentVersion} → ${latest.version}\n`,
   ));
 
-  const success = downloadAndInstall(latest.url, latest.sha256);
+  const success = downloadAndInstall(latest.url, latest.sha256, latest.version);
 
   if (success) {
     // Verify the upgrade actually took effect. Compare against the target
@@ -399,7 +427,7 @@ async function getLatestVersion(): Promise<{ version: string; url: string; sha25
 
 // ─── Installation ──────────────────────────────────────────────────────────
 
-function downloadAndInstall(url: string, expectedSha256: string): boolean {
+function downloadAndInstall(url: string, expectedSha256: string, expectedVersion: string): boolean {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-cli-'));
   const tgzPath = path.join(tmpDir, 'origin-cli-latest.tgz');
 
@@ -426,11 +454,12 @@ function downloadAndInstall(url: string, expectedSha256: string): boolean {
     }
 
     console.log(chalk.gray('  Installing...'));
-    execSync(`npm install -g "${tgzPath}"`, { windowsHide: true,
-      encoding: 'utf-8',
-      stdio: 'inherit',
-      timeout: 60_000,
+    // Staged beside the live copy and swapped in, so the hooks of every running
+    // session keep finding `origin` — see atomic-global-install.ts.
+    const installed = installGlobalAtomically(tgzPath, expectedVersion, {
+      log: (msg) => console.log(chalk.gray(`    ${msg}`)),
     });
+    if (!installed.ok) throw new Error(installed.error);
 
     // Cleanup
     try { fs.rmSync(tmpDir, { recursive: true }); } catch { /* ignore */ }

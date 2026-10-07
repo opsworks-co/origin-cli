@@ -15,6 +15,7 @@ import path from 'path';
 import { spawnSync } from 'child_process';
 import { runDetailed, findExecutable } from '../utils/exec.js';
 import { agentEnvWithKey, type AgentKeys } from '../agent-keys.js';
+import { waitForLocalCi } from '../local-ci-lock.js';
 
 /** How to invoke one agent non-interactively with a prompt. */
 export interface AgentRunner {
@@ -120,6 +121,9 @@ export function runArm(
   prompt: string,
   opts: { timeoutMs?: number; keys?: AgentKeys } = {},
 ): ArmRunResult {
+  // An arm runs the repo's test suite; one started during a local CI run
+  // times that run's tests out. Waiting is not the arm's time.
+  waitForLocalCi();
   const start = Date.now();
   const runner = AGENT_RUNNERS[agentSlug];
   if (!runner) {

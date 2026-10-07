@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import ts from 'typescript';
 import { newCaptureStamp } from '../capture-stamp.js';
 import { turnIsClosed } from '../turn-commit-scope.js';
-import { scopeUncommittedToOpenTurn } from '../open-turn-uncommitted-scope.js';
+import { openTurnNarrowingBase, scopeUncommittedToOpenTurn } from '../open-turn-uncommitted-scope.js';
 import { compareResolverWithPasses, createTurnObserver, observeReconstruction, onlyDifferences } from '../resolve-turn.js';
 
 // Exercise the actual daemon function without starting its timers or exiting
@@ -16,7 +16,7 @@ const body = ts.transpileModule(source.slice(start, end), {
 }).outputText;
 const patch = 'diff --git a/app.ts b/app.ts\n--- a/app.ts\n+++ b/app.ts\n@@ -1 +1 @@\n-old\n+new\n';
 
-function harness(duringGit: (state: any) => void = () => {}) {
+function harness(duringGit: (state: any) => void = () => {}, owns: () => boolean = () => true, replaying: () => string | null = () => null) {
   const state = { repoPath: '/repo', prePromptSha: 'abcdef0', prompts: ['edit'],
     promptTurnIds: ['turn-a'], promptIndexBase: 4, lastClosedTurnIndex: null as number | null };
   const send = vi.fn().mockResolvedValue({});
@@ -35,14 +35,16 @@ function harness(duringGit: (state: any) => void = () => {}) {
     hasDuplicateFileSections: () => false,
     combineApplyableTurnDiff: ({ uncommittedDiff }: any) => uncommittedDiff,
     capDiff: (s: string) => s, MAX_PROMPT_DIFF_LEN: 10000,
-    applyLedgerToMappings: noop, stateLedgerIsContended: () => false,
+    applyLedgerToMappings: noop, stateLedgerIsContended: () => false, startDirtReader: () => () => null,
     readJournalEntries: noop, preferShadowRangeForTurns: noop,
     preferCommitPatchForCommittedTurns: noop,
     // The open-turn scoping is pure; no start shadow and no sibling here, so it narrows nothing.
-    scopeUncommittedToOpenTurn, filesChangedSinceShadowOrNull: () => null, filesClaimedByOtherLiveSessions: () => [],
+    scopeUncommittedToOpenTurn, openTurnNarrowingBase, filesChangedSinceShadowOrNull: () => null, filesClaimedByOtherLiveSessions: () => [],
     // The resolver's side-by-side run is pure; the real functions, like the stamp.
     createTurnObserver, observeReconstruction, compareResolverWithPasses, onlyDifferences, debugLog: noop,
     fetchWithTimeout: send, apiUrl: 'https://example.test', sessionId: 'session', apiKey: 'test',
+    stillOwnsSession: owns,
+    replayInProgress: replaying,
   };
   const run = new Function(...Object.keys(dependencies), `${body}\nreturn pushInflightDiff;`)(...Object.values(dependencies));
   return { run, state, send, git };
@@ -76,4 +78,33 @@ describe('heartbeat racing Stop', () => {
     expect(row).toMatchObject({ capturedAt: 1000, promptIndex: 4, turnId: 'turn-a', diff: patch, linesAdded: 1, linesRemoved: 1 });
     expect(row.captureId).toMatch(/^hb_/);
   });
+
+  // A rebase stopped on a conflict leaves HEAD on its base and the picked
+  // commit in the tree: HEAD..worktree is the replayed commit, not the turn.
+  it('does no Git work while a rebase, cherry-pick or am is stopped mid-way', async () => {
+    const h = harness(() => {}, () => true, () => 'rebase');
+    await h.run();
+    expect(h.git).not.toHaveBeenCalled();
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
+  it('does not send when a replay started while the tick ran Git', async () => {
+    let replaying: string | null = null;
+    const h = harness(() => { replaying = 'rebase'; }, () => true, () => replaying);
+    await h.run();
+    expect(h.git).toHaveBeenCalled();
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
+  // TODO 0caf3c77: session-end deletes the pid file but can only SIGTERM a
+  // daemon whose command line it can read. One it cannot read finishes its
+  // tick — and used to PATCH after /session/end.
+  it('does not send once the daemon no longer owns the session (pid file gone mid-tick)', async () => {
+    let owned = true;
+    const h = harness(() => { owned = false; }, () => owned);
+    await h.run();
+    expect(h.git).toHaveBeenCalled();
+    expect(h.send).not.toHaveBeenCalled();
+  });
 });
+

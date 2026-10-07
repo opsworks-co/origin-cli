@@ -18,14 +18,14 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { WINDOWS_SLOWDOWN, isWindows } from './helpers/windows-e2e.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { commitFiles, createHarness, haveDist, numbered, sleep, waitFor } from './helpers/stop-next-prompt-harness.js';
 
 const T = 120_000 * WINDOWS_SLOWDOWN;
 const MINE = 'src/mine.py';
 const GEN = 'src/gen_client.py';
 
-describe.skipIf(!haveDist || isWindows)('a background job that outlives its turn\'s Stop, through the built binary', () => {
+describe.skipIf(!haveDist)('a background job that outlives its turn\'s Stop, through the built binary', () => {
   it('a file the job writes after Stop lands in the turn that started the job', async () => {
     const h = await createHarness('e2e-bg-output-0001', 'e2e-bg-output-srv-1');
     try {

@@ -18,12 +18,12 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { WINDOWS_SLOWDOWN, isWindows } from './helpers/windows-e2e.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { commitFiles, createHarness, haveDist, numbered, sleep } from './helpers/stop-next-prompt-harness.js';
 
 const T = 120_000 * WINDOWS_SLOWDOWN;
 
-describe.skipIf(!haveDist || isWindows)('a turn\'s own shell deletions and checkouts, through the built binary', () => {
+describe.skipIf(!haveDist)('a turn\'s own shell deletions and checkouts, through the built binary', () => {
   it('git rm of a committed directory and rm of a root file stay in the row', async () => {
     const h = await createHarness('e2e-shell-del-rm-0001', 'e2e-shell-del-srv-rm');
     try {

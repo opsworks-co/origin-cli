@@ -51,6 +51,14 @@ interface TranscriptLine {
   // envelopes cleanPrompt strips, these carry NO tag — a skill body is plain
   // markdown — so this field is the only signal there is.
   isMeta?: boolean;
+  /**
+   * Claude Code's context compaction writes its summary into the USER role
+   * ("This session is being continued from a previous conversation that ran
+   * out of context. …") flagged with this, NOT isMeta, and fires no
+   * UserPromptSubmit for it. It is not a prompt: the turn that was running
+   * continues under its own prompt after the compaction.
+   */
+  isCompactSummary?: boolean;
   parentUuid?: string | null;
   message: {
     id?: string;
@@ -100,6 +108,21 @@ export interface ParsedTranscript {
    * told that the turn it is closing is this one.
    */
   midTurnPrompts?: number[];
+  /**
+   * When each of `midTurnPrompts` was absorbed (epoch ms from the attachment's
+   * timestamp; null when the entry carried none), in the same order. A prompt
+   * whose submit hook never finished has no other record of where its turn
+   * began — Stop splits the running turn here (TODO e840ccd5).
+   */
+  midTurnPromptAt?: Array<number | null>;
+  /**
+   * When each prompt was sent (epoch ms from its entry's timestamp), by
+   * position in `prompts`; a hole where the entry carried none. A prompt
+   * whose submit hook never ran has no other record of where its turn began,
+   * whether it was absorbed mid-turn or sent between turns (session 1476cd52
+   * row 1: the hook found no `origin` bin mid-upgrade).
+   */
+  promptAt?: Array<number | undefined>;
   toolCalls: number;
   // Of `tokensUsed`, the portion incurred INSIDE Task sub-agents (isSidechain
   // turns). The session is still billed for it (it's a subset of the total),
@@ -115,11 +138,29 @@ export interface ParsedTranscript {
   // Cursor, anything estimated), and then the session is priced at one model
   // as before. See estimateSessionCost.
   modelUsage?: ModelUsage[];
+  // `modelUsage` again, divided among the prompts: each usage record belongs
+  // to the prompt the conversation was answering when it was produced, and a
+  // sub-agent's records to the prompt whose turn spawned it (by the Task
+  // call's id, else by time). `promptIndex` is the NATIVE index, the same
+  // number a PromptChange row carries. Present exactly when `modelUsage` is,
+  // and the buckets across all prompts add up to it; usage from before the
+  // first prompt is the first prompt's.
+  turnUsage?: Array<{ promptIndex: number; modelUsage: ModelUsage[] }>;
+  // True when `turnUsage` is an ESTIMATE rather than read from per-reply
+  // records: an estimated session total (Cursor) or a measured one the agent
+  // gives only for the whole session (Copilot's input and cache), divided by
+  // `usageWeights`. Rides to the rows as `usageEstimated`.
+  turnUsageEstimated?: boolean;
+  // How much each prompt's model calls handled, by position in `prompts`:
+  // new text sent (`input`), text generated (`output`), and conversation
+  // re-sent from earlier requests (`cache`), in characters. The basis for
+  // dividing a total the transcript has no per-reply record of.
+  usageWeights?: UsageWeights;
   // Files edited INSIDE a sub-agent (isSidechain) turn, with the turn's
   // timestamp — lets the CLI attribute each file to the Task spawn whose
   // execution window contains it (see buildSubagentSummary). Best-effort:
   // exact for sequential sub-agents, ambiguous only for truly parallel ones.
-  subagentEdits: Array<{ file: string; ts: number }>;
+  subagentEdits: Array<{ file: string; ts: number; toolUseId?: string }>;
   // Per-tool-name counts (Read, Edit, Bash, Grep, …) — the structured
   // breakdown the server stores so "Tool calls" doesn't depend on
   // re-parsing the display transcript text later.
@@ -413,6 +454,118 @@ function effectiveSinceMs(raw: string, since?: Date | string | null): number {
 }
 
 /** A message's model, or '' when it names none worth pricing by. */
+/**
+ * One Gemini reply's usage, in the parser's terms: `input` fresh (not cached),
+ * `output` with thinking folded in (billed at the output rate), `cached` read
+ * from cache. Null when the reply carries none.
+ *
+ * Gemini's prompt count INCLUDES the cached part, in both shapes it writes: the
+ * CLI's `tokens.{input,cached}` and the SDK's `usageMetadata`. Over 1,453 real
+ * replies (118 local logs, 2026-09-29) `tokens.total` was input + output +
+ * thoughts + tool every time and never added `cached`, and `cached` never
+ * exceeded `input`. The `tokens` shape used to be read as if the two were
+ * separate, charging the cached 71% of input at the full rate on top of the
+ * cache rate.
+ */
+function geminiReplyUsage(msg: any): { input: number; output: number; cached: number } | null {
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
+  if (msg?.tokens && typeof msg.tokens === 'object') {
+    const t = msg.tokens;
+    const cached = num(t.cached);
+    return { input: Math.max(0, num(t.input) - cached), output: num(t.output) + num(t.thoughts), cached };
+  }
+  if (msg?.usageMetadata && typeof msg.usageMetadata === 'object') {
+    const u = msg.usageMetadata;
+    const cached = num(u.cachedContentTokenCount);
+    return { input: Math.max(0, num(u.promptTokenCount) - cached), output: num(u.candidatesTokenCount) + num(u.thoughtsTokenCount), cached };
+  }
+  return null;
+}
+
+function addUsage(map: Map<string, ModelUsage>, model: string, u: Omit<ModelUsage, 'model'>): void {
+  let bucket = map.get(model);
+  if (!bucket) {
+    bucket = { model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0 };
+    map.set(model, bucket);
+  }
+  bucket.inputTokens += u.inputTokens;
+  bucket.outputTokens += u.outputTokens;
+  bucket.cacheReadTokens += u.cacheReadTokens;
+  bucket.cacheCreationTokens += u.cacheCreationTokens;
+  bucket.cacheCreation1hTokens += u.cacheCreation1hTokens;
+}
+
+export interface UsageWeights { input: number[]; output: number[]; cache: number[] }
+
+/**
+ * `total` divided in proportion to `weights`, in whole tokens that add up to
+ * `total` exactly (largest remainder). All-zero weights share equally.
+ */
+export function splitByWeights(total: number, weights: readonly number[]): number[] {
+  const n = weights.length;
+  if (n === 0) return [];
+  const w = weights.map((x) => (Number.isFinite(x) && x > 0 ? x : 0));
+  const sum = w.reduce((a, b) => a + b, 0);
+  const shares = sum > 0 ? w.map((x) => (total * x) / sum) : w.map(() => total / n);
+  const out = shares.map(Math.floor);
+  let left = total - out.reduce((a, b) => a + b, 0);
+  const order = shares.map((x, k) => [x - Math.floor(x), k] as const).sort((a, b) => b[0] - a[0] || a[1] - b[1]);
+  for (let k = 0; left > 0; k = (k + 1) % n, left--) out[order[k][1]]++;
+  return out;
+}
+
+/**
+ * An estimated session total divided among its prompts: input by the new text
+ * each prompt's calls sent, output by what they generated, cache by the
+ * conversation they re-sent. A component whose own weights are all zero falls
+ * back to the three added together. One bucket per prompt, on `model` ('' = the
+ * session's model). Sums exactly to `totals`.
+ */
+export function estimateTurnUsage(
+  totals: Omit<ModelUsage, 'model'>,
+  model: string,
+  weights: UsageWeights,
+  promptIndexBase = 0,
+): Array<{ promptIndex: number; modelUsage: ModelUsage[] }> | undefined {
+  const n = Math.max(weights.input.length, weights.output.length, weights.cache.length);
+  if (n === 0) return undefined;
+  const at = (a: number[], k: number) => a[k] || 0;
+  const all = Array.from({ length: n }, (_, k) => at(weights.input, k) + at(weights.output, k) + at(weights.cache, k));
+  const pick = (a: number[]) => {
+    const v = Array.from({ length: n }, (_, k) => at(a, k));
+    return v.some((x) => x > 0) ? v : all;
+  };
+  const input = splitByWeights(totals.inputTokens, pick(weights.input));
+  const output = splitByWeights(totals.outputTokens, pick(weights.output));
+  const cacheRead = splitByWeights(totals.cacheReadTokens, pick(weights.cache));
+  const cacheWrite = splitByWeights(totals.cacheCreationTokens, pick(weights.cache));
+  const cacheWrite1h = splitByWeights(totals.cacheCreation1hTokens, cacheWrite.some((x) => x > 0) ? cacheWrite : pick(weights.cache));
+  return Array.from({ length: n }, (_, k) => ({
+    promptIndex: promptIndexBase + k,
+    modelUsage: [{ model, inputTokens: input[k], outputTokens: output[k], cacheReadTokens: cacheRead[k], cacheCreationTokens: cacheWrite[k], cacheCreation1hTokens: Math.min(cacheWrite1h[k], cacheWrite[k]) }],
+  }));
+}
+
+/**
+ * Give a transcript whose session counts are an ESTIMATE (Cursor: text length,
+ * no usage recorded) a matching per-prompt split: one bucket on the session's
+ * model, divided by `usageWeights`, flagged as estimated.
+ */
+export function applyEstimatedSplit(parsed: ParsedTranscript): void {
+  const totals = {
+    inputTokens: parsed.inputTokens || 0, outputTokens: parsed.outputTokens || 0,
+    cacheReadTokens: parsed.cacheReadTokens || 0, cacheCreationTokens: parsed.cacheCreationTokens || 0,
+    cacheCreation1hTokens: parsed.cacheCreation1hTokens || 0,
+  };
+  if (totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheCreationTokens === 0) return;
+  if (!parsed.usageWeights || parsed.prompts.length === 0) return;
+  const turns = estimateTurnUsage(totals, '', parsed.usageWeights, parsed.promptIndexBase);
+  if (!turns) return;
+  parsed.modelUsage = [{ model: '', ...totals }];
+  parsed.turnUsage = turns;
+  parsed.turnUsageEstimated = true;
+}
+
 function realModelName(model: unknown): string {
   if (typeof model !== 'string') return '';
   const m = model.trim();
@@ -436,6 +589,20 @@ const MAX_SUBAGENT_FILES = 2000;
 const MAX_SUBAGENT_FILE_BYTES = 256 * 1024 * 1024;
 
 /**
+ * The prompt (position) a moment belongs to: the last one sent at or before
+ * it. Before the first prompt, or with no times recorded, the first prompt.
+ */
+function promptAtTime(promptAt: Array<number | undefined> | undefined, ts: number): number {
+  let at = 0;
+  if (!promptAt || !Number.isFinite(ts) || ts <= 0) return at;
+  for (let i = 0; i < promptAt.length; i++) {
+    const t = promptAt[i];
+    if (typeof t === 'number' && t <= ts) at = i;
+  }
+  return at;
+}
+
+/**
  * Usage records from a Claude Code session's sub-agent transcripts.
  *
  * `<dir>/<session>.jsonl` → `<dir>/<session>/subagents/agent-*.jsonl`. Each
@@ -444,18 +611,20 @@ const MAX_SUBAGENT_FILE_BYTES = 256 * 1024 * 1024;
  * contributes nothing, exactly as if the sub-agent had never been spawned —
  * which is what every session reported before this existed.
  */
-function readSubagentUsage(
+function readSubagentRecords(
   transcriptPath: string,
   sinceMs: number,
-): Array<{ id: string; model: string; usage: MessageUsage }> {
-  const out: Array<{ id: string; model: string; usage: MessageUsage }> = [];
-  if (!transcriptPath.endsWith('.jsonl')) return out;
+): { usage: Array<{ id: string; model: string; usage: MessageUsage; ts: number; toolUseId?: string }>; edits: Array<{ file: string; ts: number; toolUseId?: string }> } {
+  const out: Array<{ id: string; model: string; usage: MessageUsage; ts: number; toolUseId?: string }> = [];
+  const edits: Array<{ file: string; ts: number; toolUseId?: string }> = [];
+  const result = { usage: out, edits };
+  if (!transcriptPath.endsWith('.jsonl')) return result;
   const dir = path.join(transcriptPath.slice(0, -'.jsonl'.length), 'subagents');
   let names: string[];
   try {
     names = fs.readdirSync(dir).filter((n) => n.startsWith('agent-') && n.endsWith('.jsonl')).sort();
   } catch {
-    return out; // no sub-agents — the common case
+    return result; // no sub-agents — the common case
   }
   if (names.length > MAX_SUBAGENT_FILES) {
     const mtime = (n: string): number => { try { return fs.statSync(path.join(dir, n)).mtimeMs; } catch { return Infinity; } };
@@ -478,23 +647,52 @@ function readSubagentUsage(
     } catch {
       continue;
     }
+    // `agent-<id>.meta.json` names the Task call that spawned this agent, so
+    // its edits belong to exactly one spawn — no time-window guess, which
+    // gave two reviewers running side by side each other's files.
+    let toolUseId: string | undefined;
+    try {
+      const meta = JSON.parse(fs.readFileSync(path.join(dir, name.replace(/\.jsonl$/, '.meta.json')), 'utf-8'));
+      if (typeof meta?.toolUseId === 'string' && meta.toolUseId) toolUseId = meta.toolUseId;
+    } catch { /* older builds write no meta — the time window still applies */ }
     for (const line of raw.split('\n')) {
-      // Most lines are tool results; only a usage-bearing one is worth parsing.
+      // Most lines are tool results; only a usage-bearing one (which is also
+      // where a tool_use lives) is worth parsing.
       if (!line.includes('"usage"')) continue;
       let entry: any;
       try { entry = JSON.parse(line); } catch { continue; }
+      const t = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
+      if (sinceMs > 0 && Number.isFinite(t) && t < sinceMs) continue;
+      // Files this sub-agent edited, for buildSubagentSummary. They used to
+      // come from `isSidechain` entries in the PARENT transcript, which current
+      // Claude Code no longer writes, so every spawn reported no files
+      // (dc58e5a9). Only files inside the sub-agent's own cwd, made relative to
+      // it: a Task run with worktree isolation edits
+      // `.claude/worktrees/agent-<id>/…`, where the repo-relative path is the
+      // one that means something, and what lands outside is scratchpad files.
+      const content = entry?.message?.content;
+      const cwd = typeof entry?.cwd === 'string' ? entry.cwd : '';
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block?.type !== 'tool_use' || !FILE_MODIFICATION_TOOLS.has(block.name || '')) continue;
+          const fp = toolInputPath(block.input);
+          if (!fp) continue;
+          let file = fp;
+          if (cwd && path.isAbsolute(fp)) {
+            if (!fp.startsWith(cwd + path.sep)) continue;
+            file = fp.slice(cwd.length + 1);
+          }
+          edits.push({ file, ts: Number.isFinite(t) ? t : 0, ...(toolUseId ? { toolUseId } : {}) });
+        }
+      }
       const usage = entry?.message?.usage;
       if (!usage || typeof usage !== 'object') continue;
-      if (sinceMs > 0 && entry.timestamp) {
-        const t = Date.parse(entry.timestamp);
-        if (Number.isFinite(t) && t < sinceMs) continue;
-      }
       const id = entry.message?.id || entry.uuid;
       if (typeof id !== 'string' || !id) continue;
-      out.push({ id, model: realModelName(entry.message?.model), usage });
+      out.push({ id, model: realModelName(entry.message?.model), usage, ts: Number.isFinite(t) ? t : 0, ...(toolUseId ? { toolUseId } : {}) });
     }
   }
-  return out;
+  return result;
 }
 
 // ─── Parser ────────────────────────────────────────────────────────────────
@@ -541,6 +739,38 @@ export function livePrompts(
     // A transcript that is missing, unreadable or mid-write decides nothing.
     return stored;
   }
+}
+
+/**
+ * Copilot's per-prompt usage. Output is measured on every reply and stays where
+ * it was produced. Input and cache exist only as the session's shutdown total,
+ * which the converter hangs on the last reply: that part is divided by how much
+ * conversation each prompt's calls sent (new text + re-sent context), onto the
+ * prompt's own model. An estimate; sums exactly to the session.
+ */
+function copilotEstimatedTurns(
+  byPrompt: Map<number, Map<string, ModelUsage>>,
+  result: ParsedTranscript,
+  weights: UsageWeights,
+): Array<{ promptIndex: number; modelUsage: ModelUsage[] }> {
+  const n = result.prompts.length;
+  const sent = Array.from({ length: n }, (_, k) => (weights.input[k] || 0) + (weights.cache[k] || 0));
+  const input = splitByWeights(result.inputTokens, sent);
+  const cacheRead = splitByWeights(result.cacheReadTokens, sent);
+  const cacheWrite = splitByWeights(result.cacheCreationTokens, sent);
+  const cacheWrite1h = splitByWeights(result.cacheCreation1hTokens, cacheWrite.some((x) => x > 0) ? cacheWrite : sent);
+  const out: Array<{ promptIndex: number; modelUsage: ModelUsage[] }> = [];
+  for (let k = 0; k < n; k++) {
+    const own = [...(byPrompt.get(k)?.values() || [])].map((m) => ({ ...m, inputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0 }));
+    const main = [...own].sort((a, b) => b.outputTokens - a.outputTokens)[0];
+    const bucket = main || { model: '', inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0 };
+    if (!main) own.push(bucket);
+    bucket.inputTokens = input[k]; bucket.cacheReadTokens = cacheRead[k];
+    bucket.cacheCreationTokens = cacheWrite[k]; bucket.cacheCreation1hTokens = Math.min(cacheWrite1h[k], cacheWrite[k]);
+    const kept = own.filter((m) => m.inputTokens + m.outputTokens + m.cacheReadTokens + m.cacheCreationTokens > 0);
+    if (kept.length > 0) out.push({ promptIndex: result.promptIndexBase + k, modelUsage: kept });
+  }
+  return out;
 }
 
 export function parseTranscript(
@@ -620,8 +850,7 @@ export function parseTranscript(
   // writes assistant turns twice with the same `id` and identical
   // `tokens` (stream-finalize double-flush). Without this, tokens
   // & cost double-count.
-  type GeminiTokens = { input?: number; output?: number; cached?: number; thoughts?: number };
-  const seenGeminiIds = new Map<string, GeminiTokens>();
+  const seenGeminiIds = new Set<string>();
   const filesSet = new Set<string>();
   const toolCounts = new Map<string, number>();
   const readFilesSet = new Set<string>();
@@ -630,8 +859,32 @@ export function parseTranscript(
   const sidechainMsgIds = new Set<string>();
   // The model that produced each deduped usage record — see `modelUsage`.
   const modelByMsgId = new Map<string, string>();
+  // The prompt (position in result.prompts) each usage record answered, and
+  // the prompt whose turn made each tool call — a sub-agent's usage follows
+  // the Task call that spawned it. See `turnUsage`.
+  const promptByMsgId = new Map<string, number>();
+  const promptByToolUseId = new Map<string, number>();
   let lastKeptPrompt: string | undefined;
   let cursorTranscript = false;
+  // usageWeights: each model call is billed for the text added since the last
+  // one (input), what it generates (output) and everything before (cache).
+  const weights: UsageWeights = { input: [], output: [], cache: [] };
+  let pendingChars = 0;
+  let contextChars = 0;
+  const entryChars = (e: any): number => {
+    const c = e?.message?.content ?? e?.content;
+    if (typeof c === 'string') return c.length;
+    if (c == null) return 0;
+    try { return JSON.stringify(c).length; } catch { return 0; }
+  };
+  const billCall = (outputChars: number) => {
+    const at = Math.max(0, result.prompts.length - 1);
+    weights.input[at] = (weights.input[at] || 0) + pendingChars;
+    weights.cache[at] = (weights.cache[at] || 0) + contextChars;
+    weights.output[at] = (weights.output[at] || 0) + outputChars;
+    contextChars += pendingChars + outputChars;
+    pendingChars = 0;
+  };
 
   for (const line of lines) {
     let entry: TranscriptLine;
@@ -680,10 +933,17 @@ export function parseTranscript(
       if (isCursorTranscriptUserEntry(entry)) cursorTranscript = true;
       const prompt = transcriptPromptIfNew(entry, lastKeptPrompt, cursorTranscript);
       if (prompt) {
-        if ((entry as any).absorbedMidTurn === true) (result.midTurnPrompts ||= []).push(result.prompts.length);
+        if ((entry as any).absorbedMidTurn === true) {
+          (result.midTurnPrompts ||= []).push(result.prompts.length);
+          const at = Date.parse(String((entry as any).timestamp || ''));
+          (result.midTurnPromptAt ||= []).push(Number.isFinite(at) ? at : null);
+        }
+        const sentAt = Date.parse(String((entry as any).timestamp || ''));
+        if (Number.isFinite(sentAt)) (result.promptAt ||= [])[result.prompts.length] = sentAt;
         result.prompts.push(prompt);
         lastKeptPrompt = prompt;
       }
+      pendingChars += entryChars(entry);
     }
 
     // Gemini JSONL — `type: "gemini"` (CLI format) or `type: "model"`
@@ -694,42 +954,19 @@ export function parseTranscript(
     const typeAny = type as string;
     if (typeAny === 'gemini' || typeAny === 'model') {
       const e = entry as any;
+      billCall(entryChars(e));
       const id: string = e.id || '';
-      // Gemini CLI versions differ on where they put usage. Two known
-      // shapes — accept either:
-      //   • Legacy CLI: `tokens: { input, output, cached, thoughts }`
-      //   • Newer CLI / Google AI SDK: `usageMetadata: {
-      //       promptTokenCount, candidatesTokenCount,
-      //       cachedContentTokenCount, thoughtsTokenCount }`
-      // Without the SDK fallback every session on a recent Gemini CLI
-      // reported absurdly low totals (user-observed: 24h / 8 prompts
-      // → 352 total tokens, all from a single legacy-shape entry).
-      let tokensAny: GeminiTokens | null = e.tokens || null;
-      if (!tokensAny && e.usageMetadata && typeof e.usageMetadata === 'object') {
-        const u = e.usageMetadata as Record<string, unknown>;
-        const n = (k: string) => (typeof u[k] === 'number' ? (u[k] as number) : 0);
-        // Google's `promptTokenCount` is the TOTAL prompt size and already
-        // includes `cachedContentTokenCount` (cached tokens are a subset, not
-        // additive). Downstream sums `input` into inputTokens and `cached`
-        // into cacheReadTokens separately, so subtract the cached portion here
-        // to get fresh (non-cached) input — otherwise cached tokens are
-        // counted twice, inflating tokensUsed/cost.
-        const cached = n('cachedContentTokenCount');
-        tokensAny = {
-          input: Math.max(0, n('promptTokenCount') - cached),
-          output: n('candidatesTokenCount'),
-          cached,
-          thoughts: n('thoughtsTokenCount'),
-        };
-      }
-      if (tokensAny && (!id || !seenGeminiIds.has(id))) {
-        if (id) seenGeminiIds.set(id, tokensAny);
-        else {
-          // No id — use a synthetic key so the post-loop sum picks
-          // it up. Collisions theoretically lose entries but Gemini
-          // CLI always emits ids in practice.
-          seenGeminiIds.set(`__noid__${seenGeminiIds.size}`, tokensAny);
-        }
+      // Usage goes through the same id-keyed records as Claude's, so it is
+      // split by model and by prompt too. Gemini CLI writes some replies twice
+      // with the same id and identical tokens (stream-finalize double-flush):
+      // the first copy counts.
+      const reply = geminiReplyUsage(e);
+      const key = `gemini:${id || `__noid__${seenGeminiIds.size}`}`;
+      if (reply && !seenGeminiIds.has(key)) {
+        seenGeminiIds.add(key);
+        seenMessageIds.set(key, { input_tokens: reply.input, output_tokens: reply.output, cache_read_input_tokens: reply.cached });
+        modelByMsgId.set(key, realModelName(e.model));
+        promptByMsgId.set(key, Math.max(0, result.prompts.length - 1));
       }
       // Model name (first one wins, mirroring the Anthropic path)
       if (e.model && !result.model) result.model = e.model;
@@ -755,6 +992,7 @@ export function parseTranscript(
 
     if (type === 'assistant') {
       const isSub = !!entry.isSidechain;
+      if (!isSub) billCall(entryChars(entry));
       // Extract model name — never let a sub-agent's model become the session's.
       if (entry.message?.model && !result.model && !isSub) {
         result.model = entry.message.model;
@@ -766,6 +1004,7 @@ export function parseTranscript(
         for (const block of content) {
           // Count tool calls
           if (block.type === 'tool_use') {
+            if (!isSub && typeof (block as any).id === 'string') promptByToolUseId.set((block as any).id, Math.max(0, result.prompts.length - 1));
             result.toolCalls++;
             const name = block.name || '';
             if (name) toolCounts.set(name, (toolCounts.get(name) || 0) + 1);
@@ -804,6 +1043,8 @@ export function parseTranscript(
           seenMessageIds.set(msgId, usage);
           modelByMsgId.set(msgId, realModelName(entry.message?.model));
         }
+        // First sighting: a streamed message's later copies are the same turn.
+        if (!promptByMsgId.has(msgId)) promptByMsgId.set(msgId, Math.max(0, result.prompts.length - 1));
         if (isSub && msgId) sidechainMsgIds.add(msgId);
       }
     }
@@ -824,12 +1065,21 @@ export function parseTranscript(
     // may replay them; they stay the parent's, counted once and not reported
     // as sub-agent tokens.
     const parentOwnIds = new Set([...seenMessageIds.keys()].filter((id) => !sidechainMsgIds.has(id)));
-    for (const usageRecord of readSubagentUsage(transcriptPath, sinceMs)) {
+    const subagents = readSubagentRecords(transcriptPath, sinceMs);
+    // Not added to filesChanged: a sub-agent's edits land in its own worktree
+    // or a scratchpad, and are the session's work only once merged back — which
+    // the parent's own capture sees.
+    result.subagentEdits.push(...subagents.edits);
+    for (const usageRecord of subagents.usage) {
       if (parentOwnIds.has(usageRecord.id)) continue;
       const existing = seenMessageIds.get(usageRecord.id);
       if (!existing || (usageRecord.usage.output_tokens ?? 0) > (existing.output_tokens ?? 0)) {
         seenMessageIds.set(usageRecord.id, usageRecord.usage);
         modelByMsgId.set(usageRecord.id, usageRecord.model);
+      }
+      if (!promptByMsgId.has(usageRecord.id)) {
+        const spawned = usageRecord.toolUseId !== undefined ? promptByToolUseId.get(usageRecord.toolUseId) : undefined;
+        promptByMsgId.set(usageRecord.id, spawned ?? promptAtTime(result.promptAt, usageRecord.ts));
       }
       sidechainMsgIds.add(usageRecord.id);
     }
@@ -837,6 +1087,7 @@ export function parseTranscript(
 
   // Sum deduplicated token usage (track cache tokens separately for accurate cost)
   const byModel = new Map<string, ModelUsage>();
+  const byPrompt = new Map<number, Map<string, ModelUsage>>();
   for (const [msgId, usage] of seenMessageIds.entries()) {
     const input = usage.input_tokens ?? 0;
     const output = usage.output_tokens ?? 0;
@@ -856,29 +1107,34 @@ export function parseTranscript(
     // `<synthetic>` placeholder) is the session's own: '' here, and
     // estimateSessionCost prices it at the session model.
     const model = modelByMsgId.get(msgId) || '';
-    let bucket = byModel.get(model);
-    if (!bucket) {
-      bucket = { model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0 };
-      byModel.set(model, bucket);
-    }
-    bucket.inputTokens += input;
-    bucket.outputTokens += output;
-    bucket.cacheReadTokens += cacheRead;
-    bucket.cacheCreationTokens += cacheCreation;
-    bucket.cacheCreation1hTokens += cacheCreation1h;
+    const u = { inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead, cacheCreationTokens: cacheCreation, cacheCreation1hTokens: cacheCreation1h };
+    addUsage(byModel, model, u);
+    const at = promptByMsgId.get(msgId) ?? 0;
+    let turn = byPrompt.get(at);
+    if (!turn) byPrompt.set(at, (turn = new Map()));
+    addUsage(turn, model, u);
   }
-  // Only when every token above came from a per-message record. Gemini's
-  // entries carry no model of their own, so a transcript with any keeps the
-  // single-model path rather than a split that does not cover its totals.
-  if (byModel.size > 0 && seenGeminiIds.size === 0) result.modelUsage = [...byModel.values()];
-  // Same for Gemini JSONL entries — id-deduped, then summed.
-  // `thoughts` is billed at the output rate so it folds into
-  // outputTokens. `cached` maps to cacheReadTokens (Gemini's
-  // implicit cache, 25% of input cost).
-  for (const t of seenGeminiIds.values()) {
-    result.inputTokens += t.input ?? 0;
-    result.outputTokens += (t.output ?? 0) + (t.thoughts ?? 0);
-    result.cacheReadTokens += t.cached ?? 0;
+  if (byModel.size > 0) {
+    result.modelUsage = [...byModel.values()];
+    // A session with no prompt kept (every one before `since`) has no row to
+    // hold its usage; the split stays session-level only. Nor does Copilot's:
+    // its log gives output per reply but input and cache only as a session
+    // total at shutdown (18 of 18 local logs), which the converter hangs on
+    // the LAST reply — split by prompt, the last turn would carry the whole
+    // session's input.
+    if (result.prompts.length > 0 && copilotConverted == null) {
+      result.turnUsage = [...byPrompt.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([pos, m]) => ({ promptIndex: result.promptIndexBase + pos, modelUsage: [...m.values()] }));
+    } else if (result.prompts.length > 0) {
+      result.turnUsage = copilotEstimatedTurns(byPrompt, result, weights);
+      result.turnUsageEstimated = true;
+    }
+  }
+  if (result.prompts.length > 0) {
+    const n = result.prompts.length;
+    const pad = (a: number[]) => Array.from({ length: n }, (_, k) => a[k] || 0);
+    result.usageWeights = { input: pad(weights.input), output: pad(weights.output), cache: pad(weights.cache) };
   }
   // `tokensUsed` is the "real" fresh-tokens total. Cache reads/creations are
   // tracked on their own fields so they can be reported without inflating the
@@ -930,8 +1186,14 @@ export function parseTranscript(
  * captures failure. `cleanPrompt` is the other half of the same shared rule;
  * a caller needs BOTH, since `<task-notification>` arrives with isMeta false.
  */
-export function isAgentInjectedEntry(entry: { isMeta?: boolean } | null | undefined): boolean {
-  return entry?.isMeta === true;
+export function isAgentInjectedEntry(entry: { isMeta?: boolean; isCompactSummary?: boolean } | null | undefined): boolean {
+  // A compaction summary is the harness's, not the user's — Claude Code flags
+  // it `isCompactSummary` instead of `isMeta`. Session c085f0af, 2026-09-26:
+  // the summary became turn 15, with no submit hook and so no turn window;
+  // its row was built from the transcript's tool inputs alone (+225 lines,
+  // two files — one a draft the turn had already deleted, the other already
+  // on turn 14's row), and the real prompt that followed sat one index late.
+  return entry?.isMeta === true || entry?.isCompactSummary === true;
 }
 
 // ─── Image references inside a prompt ───────────────────────────────────────
@@ -1315,6 +1577,14 @@ export function cleanPrompt(text: string): string | null {
 
   if (!cleaned) return null;
 
+  // Claude Code's compaction summary, for a producer that carries no
+  // `isCompactSummary` flag (see isAgentInjectedEntry). Anchored at the start:
+  // the harness writes this exact opening, a user quoting it mid-sentence keeps
+  // their prompt.
+  if (/^This session is being continued from a previous conversation that ran out of context\./.test(cleaned)) {
+    return null;
+  }
+
   // Origin's own session-hook digest, after the <hooks_context> wrapper is
   // gone (or was never closed before the 1000-char clip).
   if (/^Origin: Session tracking active/m.test(cleaned) && /Repository AI context:/i.test(cleaned)) {
@@ -1418,6 +1688,8 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript, repoRoots?
     // session had streaming-then-finalize doubles. Same convention as
     // the Claude path (transcript.ts:123 `seenMessageIds`).
     const seenIds = new Set<string>();
+    const byModel = new Map<string, ModelUsage>();
+    const byPrompt = new Map<number, Map<string, ModelUsage>>();
 
     for (const msg of messages) {
       const msgType = msg.type || msg.role || '';
@@ -1457,39 +1729,33 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript, repoRoots?
           result.model = msg.model;
         }
 
-        // Token counts per message — guarded by `seenIds` so a
-        // duplicate write of the same `id` doesn't double-count.
-        // Accepts either the legacy `tokens.{input,output,cached,
-        // thoughts}` shape OR the newer Google AI SDK
-        // `usageMetadata.{promptTokenCount,candidatesTokenCount,
-        // cachedContentTokenCount,thoughtsTokenCount}` shape — see
-        // the JSONL path above for why this fallback exists.
-        const msgAny = msg as any;
-        let t: { input?: number; output?: number; cached?: number; thoughts?: number } | null =
-          msgAny.tokens || null;
-        if (!t && msgAny.usageMetadata && typeof msgAny.usageMetadata === 'object') {
-          const u = msgAny.usageMetadata as Record<string, unknown>;
-          const n = (k: string) => (typeof u[k] === 'number' ? (u[k] as number) : 0);
-          // `promptTokenCount` is the TOTAL prompt size and already includes
-          // `cachedContentTokenCount` (subset, not additive). `input` and
-          // `cached` are summed into separate fields downstream, so subtract
-          // the cached portion to avoid double-counting it.
-          const cached = n('cachedContentTokenCount');
-          t = {
-            input: Math.max(0, n('promptTokenCount') - cached),
-            output: n('candidatesTokenCount'),
-            cached,
-            thoughts: n('thoughtsTokenCount'),
-          };
-        }
-        if (t && (!msg.id || !seenIds.has(msg.id))) {
+        // Duplicate writes of one `id` count once. Split by model and by
+        // prompt as the JSONL path does.
+        const reply = geminiReplyUsage(msg);
+        if (reply && (!msg.id || !seenIds.has(msg.id))) {
           if (msg.id) seenIds.add(msg.id);
-          result.inputTokens += t.input ?? 0;
-          result.cacheReadTokens += t.cached ?? 0;
-          // Gemini 2.5 thinking models report reasoning in `thoughts` — count
-          // those as output tokens since they're billed at the output rate.
-          result.outputTokens += (t.output ?? 0) + (t.thoughts ?? 0);
+          result.inputTokens += reply.input;
+          result.cacheReadTokens += reply.cached;
+          result.outputTokens += reply.output;
+          if (reply.input + reply.output + reply.cached > 0) {
+            const u = { inputTokens: reply.input, outputTokens: reply.output, cacheReadTokens: reply.cached, cacheCreationTokens: 0, cacheCreation1hTokens: 0 };
+            const model = realModelName(msg.model);
+            addUsage(byModel, model, u);
+            const at = Math.max(0, result.prompts.length - 1);
+            let turn = byPrompt.get(at);
+            if (!turn) byPrompt.set(at, (turn = new Map()));
+            addUsage(turn, model, u);
+          }
         }
+      }
+    }
+
+    if (byModel.size > 0) {
+      result.modelUsage = [...byModel.values()];
+      if (result.prompts.length > 0) {
+        result.turnUsage = [...byPrompt.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([pos, m]) => ({ promptIndex: result.promptIndexBase + pos, modelUsage: [...m.values()] }));
       }
     }
 
@@ -1621,6 +1887,11 @@ export interface PromptFileMapping {
   // which is indistinguishable from a chat-only turn. Same signal the hook path
   // records live at PostToolUse; agents with no hooks only have the transcript.
   wroteViaShell?: boolean;
+  // The write-shaped shell commands themselves, verbatim. A command names the
+  // paths it writes, which is the only per-turn evidence left when the watcher
+  // first sees a turn after the next one began: both turns' baselines are then
+  // the same snapshot and the turn's own window is empty.
+  shellWriteCommands?: string[];
 }
 
 /**
@@ -1660,10 +1931,31 @@ function noteOutOfRepoWrite(sink: Set<string>, rawPath: string): void {
 
 export function scopeCapturedPath(roots: string[] | undefined, file: string): string | null {
   if (!roots || roots.length === 0) return file;
+  // The MOST SPECIFIC containing root, not the first. A linked worktree lives
+  // at `<main>/.claude/worktrees/<name>`, so the main checkout contains every
+  // file of every nested worktree, and whichever root the caller listed first
+  // decided the file's name. sessionRepoRoots puts discovered trees ahead of
+  // the session's own, on the assumption that a discovered tree is a nested
+  // worktree — but a worktree session that runs one command in the main
+  // checkout discovers MAIN. Session 90eca883 did at turn 15, and from turn 16
+  // every Write in its own worktree was spelled
+  // `.claude/worktrees/xenodochial-…/packages/cli/src/git-moved-files.ts`
+  // against its transcript, while the ledger named `packages/cli/src/…`. The
+  // row then carried both, and dropVanishedWatchedAdds threw the prefixed
+  // sections away as written by no tool (TODO 7b6837f2). Deepest root wins,
+  // whatever order the roots come in; for a file inside only one root nothing
+  // changes.
+  let best: string | null = null;
   for (const root of roots) {
-    if (root && isInsideRepo(root, file)) return toRepoRelativePath(root, file);
+    if (!root || !isInsideRepo(root, file)) continue;
+    if (best === null || normalizeRootForDepth(root).length > normalizeRootForDepth(best).length) best = root;
   }
-  return null;
+  return best === null ? null : toRepoRelativePath(best, file);
+}
+
+/** A root's normalised spelling, so depth compares paths and not separators. */
+function normalizeRootForDepth(root: string): string {
+  return root.replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
 /**
@@ -1757,6 +2049,7 @@ export function extractPromptFileMappings(
   let currentCommitShas: string[] = [];
   let currentCommitCommands: string[] = [];
   let currentWroteViaShell = false;
+  let currentShellWriteCommands: string[] = [];
 
   // Prompts waiting for their turn to start, and whether the accumulator above
   // belongs to a turn that has actually begun. Only used when `hasTurnMarkers`.
@@ -1813,6 +2106,7 @@ export function extractPromptFileMappings(
         : undefined,
       commitCommands: currentCommitCommands.length > 0 ? currentCommitCommands.slice() : undefined,
       wroteViaShell: currentWroteViaShell || undefined,
+      shellWriteCommands: currentShellWriteCommands.length > 0 ? currentShellWriteCommands.slice() : undefined,
     });
   };
 
@@ -1827,6 +2121,7 @@ export function extractPromptFileMappings(
     currentCommitShas = [];
     currentCommitCommands = [];
     currentWroteViaShell = false;
+    currentShellWriteCommands = [];
   };
 
   for (const line of lines) {
@@ -1937,9 +2232,12 @@ export function extractPromptFileMappings(
           // no edit record either, so the turn looks chat-only to every read
           // surface. Recorded here so the watcher can recover the content from
           // git (the hook path gets the same signal live at PostToolUse).
-          if (block.type === 'tool_use' && block.input && !currentWroteViaShell
-              && isShellTool(String(block.name || '')) && commandWritesFiles(shellCommandText(block.input))) {
-            currentWroteViaShell = true;
+          if (block.type === 'tool_use' && block.input && isShellTool(String(block.name || ''))) {
+            const command = shellCommandText(block.input);
+            if (commandWritesFiles(command)) {
+              currentWroteViaShell = true;
+              currentShellWriteCommands.push(command);
+            }
           }
           if (block.type === 'tool_use' && block.input && ranGitCommit(block.input)) {
             currentRanCommit = true;
@@ -2849,6 +3147,13 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   'sonnet':    { input: 3,    output: 15 },  // Sonnet 4.x (also the unknown-model fallback)
   'sonnet-5':  { input: 2,    output: 10 },  // Sonnet 5 — longer key wins over 'sonnet'
   'opus':      { input: 5,    output: 25 },  // Opus 4.5+
+  // Opus 5.5 is CHEAPER than Opus 5: $4/$20, cache reads $0.20/M (0.05×, not
+  // the 0.10 default — hence cachedInput). Without this row "claude-opus-5-5"
+  // matched 'opus' and every Opus 5.5 session was priced 25% high. Longer
+  // than 'opus', so it wins the longest-substring match; the "[1m]" suffix
+  // Claude Code stamps changes nothing — 1M context carries no premium on
+  // current models (Anthropic pricing reference, 2026-09-23).
+  'opus-5-5':  { input: 4,    output: 20, cachedInput: 0.20 },
   'opus-4-1':  { input: 15,   output: 75 },  // legacy Opus 4.1
   '3-opus':    { input: 15,   output: 75 },  // legacy Claude 3 Opus
   'fable':     { input: 10,   output: 50 },  // Claude Fable 5 (cache reads 10% = $1/M)
@@ -3121,6 +3426,23 @@ export function estimateSessionCost(
     return parseFloat(total.toFixed(4));
   }
   return estimateCost(fallbackModel, usage.inputTokens, usage.outputTokens, usage.cacheReadTokens, usage.cacheCreationTokens, { cacheCreation1hTokens: usage.cacheCreation1hTokens });
+}
+
+/**
+ * One prompt row's share of the session's usage, split by model, for the wire
+ * (`promptChanges[].modelUsage`; the server prices it and fills the row's
+ * token and cost columns). Undefined when the transcript gave no split, or
+ * when the session totals were replaced after parsing and the split no longer
+ * describes them — then no turn claims a share of tokens the session was not
+ * priced on.
+ */
+export function turnModelUsage(
+  parsed: Pick<ParsedTranscript, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens' | 'cacheCreation1hTokens' | 'modelUsage' | 'turnUsage'>,
+  promptIndex: number,
+): ModelUsage[] | undefined {
+  if (!parsed.modelUsage || !parsed.turnUsage || !modelUsageCovers(parsed.modelUsage, parsed)) return undefined;
+  const turn = parsed.turnUsage.find((t) => t.promptIndex === promptIndex);
+  return turn && turn.modelUsage.length > 0 ? turn.modelUsage : undefined;
 }
 
 /** True when the per-model buckets add up to exactly these totals. */

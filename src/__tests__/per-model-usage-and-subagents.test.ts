@@ -130,14 +130,18 @@ describe('per-model usage', () => {
     expect(estimateSessionCost({ ...p, modelUsage: lying }, p.model)).toBeCloseTo(10, 4);
   });
 
-  it('leaves a transcript without per-message models on the single-model path', () => {
+  it('splits a Gemini transcript by the model each reply names', () => {
+    // Gemini replies name their model (1,453 of 1,453 in local logs), so they
+    // join the split rather than keeping the session on one model.
     fs.writeFileSync(transcript, [
       JSON.stringify({ type: 'user', id: 'g0', content: 'hi' }),
       JSON.stringify({ type: 'gemini', id: 'g1', model: 'gemini-3-pro', tokens: { input: 1000, output: 500, cached: 0, thoughts: 0 } }),
     ].join('\n') + '\n');
     const p = parseTranscript(transcript);
     expect(p.inputTokens).toBe(1000);
-    expect(p.modelUsage).toBeUndefined();
+    expect(p.modelUsage).toEqual([
+      { model: 'gemini-3-pro', inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0 },
+    ]);
   });
 });
 

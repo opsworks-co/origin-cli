@@ -48,7 +48,9 @@ it('recovers both branches and the closing turn in the same Stop, without a next
     commitTurns: [{ sha: first, turnId: 't_first', via: 'transcript' }],
   };
   recordTranscriptCommitProofs(state, [{ promptIndex: 0, sha: first }, { promptIndex: 2, sha: second }]);
-  const empty = (promptIndex: number) => ({ promptIndex, diff: '', filesChanged: [] as string[], linesAdded: 0, linesRemoved: 0 });
+  // Every row starts as the safety net's empty mapping, mark included; the
+  // patch that fills a row must take the mark with it (c085f0af row 16).
+  const empty = (promptIndex: number) => ({ promptIndex, diff: '', filesChanged: [] as string[], linesAdded: 0, linesRemoved: 0, chatOnly: true as const });
   // Stop appended a second closing row, then its ledger pass emptied both.
   const rows = mergePromptMappings([], [empty(0), empty(1), empty(2), empty(2)]);
   expect(rows).toHaveLength(3);
@@ -57,6 +59,7 @@ it('recovers both branches and the closing turn in the same Stop, without a next
   })).toBe(2);
   expect(rows.map(row => [row.linesAdded, row.linesRemoved])).toEqual([[2, 0], [0, 0], [3, 0]]);
   expect(rows[2].filesChanged).toEqual(['second.ts']);
+  expect(rows.map((row) => (row as { chatOnly?: boolean }).chatOnly)).toEqual([undefined, true, undefined]);
   // The wire's final legacy pass must not replace Git's creation with a
   // transcript rewrite whose before-state already contains this turn's work.
   const wire = withLegacyWritesRendered(rows[2], JSON.stringify({ edits: [{

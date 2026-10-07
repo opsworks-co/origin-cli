@@ -34,3 +34,36 @@ export function scopeUncommittedToOpenTurn(
   }
   return dropped ? kept.join('').trim() : uncommittedDiff;
 }
+
+interface NarrowingState {
+  promptShadows?: Array<{ promptIndex: number; shadowSha: string; cutAfterTurnStart?: boolean }>;
+  turnEndShadows?: Array<{ promptIndex: number; shadowSha: string }>;
+  sessionStartShadowSha?: string | null;
+}
+
+/**
+ * The tree the open turn (LOCAL index) started from, for narrowing its
+ * in-flight diff — or null when that is not known, and nothing is narrowed.
+ *
+ * The turn's own shadow, unless it was cut after the turn had begun writing
+ * (`cutAfterTurnStart`): Cursor adopting a prompt its hooks never announced
+ * cuts one AFTER the edit that revealed it, and the Codex heartbeat cuts one
+ * when it notices the prompt. A file written before the cut and not since is
+ * identical in that shadow and the live tree, so narrowing against it dropped
+ * the turn's own file from the tick — and when that was its only file, the
+ * tick returned before the ledger could put it back (TODO f7406e7e).
+ *
+ * For such a turn the tree the PREVIOUS turn's Stop closed on is where this
+ * one began; the first turn began at the session-start shadow. With neither,
+ * do not narrow: a tick row that over-reports until Stop replaces it is
+ * recoverable, a file dropped from it is not.
+ */
+export function openTurnNarrowingBase(state: NarrowingState, localTurn: number): string | null {
+  const own = (state.promptShadows || []).find((s) => s.promptIndex === localTurn);
+  if (!own?.shadowSha) return null;
+  if (!own.cutAfterTurnStart) return own.shadowSha;
+  if (localTurn === 0) return state.sessionStartShadowSha || null;
+  const prevEnd = (state.turnEndShadows || []).find((s) => s.promptIndex === localTurn - 1);
+  return prevEnd?.shadowSha || null;
+}
+

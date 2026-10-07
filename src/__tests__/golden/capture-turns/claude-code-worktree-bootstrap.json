@@ -11,7 +11,6 @@
     "diff": "diff --git a/notes.md b/notes.md\nnew file mode 100644\nindex <blob>\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+remember this",
     "uncommittedDiff": "",
     "editedFiles": [
-      "CLAUDE.md",
       "notes.md"
     ],
     "contentUnavailableFiles": [],

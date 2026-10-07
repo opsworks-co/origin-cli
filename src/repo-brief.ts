@@ -16,7 +16,7 @@ import { spawn } from 'child_process';
 import { git, gitOrNull, gitIdentityEnv } from './utils/exec.js';
 import { loadConfig } from './config.js';
 import { isRepoIgnored } from './ignore-repos.js';
-import { isBakeoffRepo } from './memory.js';
+import { isBakeoffRepo, memoryReadBlocked } from './memory.js';
 import { callLLM, getAnthropicKey } from './llm.js';
 import { resolveAgentKeys } from './agent-keys.js';
 
@@ -228,7 +228,7 @@ export function isRepoBriefStale(repoPath: string, cached = readRepoBrief(repoPa
  */
 export function buildRepoBriefContext(repoPath: string): string | null {
   if (!isRepoBriefEnabled()) return null;
-  if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return null;
+  if (memoryReadBlocked(repoPath)) return null;
   const cached = readRepoBrief(repoPath);
   if (!cached) return null;
   return `About this repository:\n${cached.brief}`;

@@ -76,6 +76,25 @@ export function turnStartForServerRow(
 }
 
 /**
+ * `createdAt` for a row, plus the flag saying it IS the turn's submit time.
+ *
+ * Rows from before promptSubmittedAt existed — and every fallback path — carry
+ * the time of the row's first write instead, which for Claude Code is AFTER
+ * the turn's own commits. The server cannot tell the two apart from the value,
+ * and the anchor pass needs to: a turn-START clock means turn i is open from
+ * its own time to the next turn's, while a first-write clock means the turn
+ * ran BEFORE its time. Origin TODO 61813681. Empty when there is no submit
+ * time, so a row is never flagged on a guess.
+ */
+export function turnStartFields(
+  state: { promptSubmittedAt?: string[]; promptIndexBase?: number | null },
+  serverIndex: number,
+): { createdAt?: string; createdAtIsTurnStart?: true } {
+  const at = turnStartForServerRow(state, serverIndex);
+  return at ? { createdAt: at, createdAtIsTurnStart: true } : {};
+}
+
+/**
  * The stable id for the turn at a SERVER row, read from the local-numbered
  * `promptTurnIds`. Undefined for a row this launch has no id for — one that
  * predates the launch, or a session from before ids existed; those keep the

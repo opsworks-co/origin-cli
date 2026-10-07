@@ -223,6 +223,10 @@ describe.skipIf(!haveDist)('antigravity capture end to end through the built bin
     expect(t1.linesRemoved).toBe(1);
     expect(parseUnifiedDiff(t1.diff).files[0].isNew).toBe(false);
     expect(verifyTurn({ promptIndex: 0, filesChanged: t1.filesChanged, diff: t1.diff, linesAdded: t1.linesAdded, linesRemoved: t1.linesRemoved })).toEqual([]);
+    // Antigravity records no usage at all: the turn carries its share of the
+    // session's text-length estimate, marked as one.
+    expect(t1.usageEstimated, 'turn 1 is not marked estimated').toBe(true);
+    expect(t1.modelUsage?.[0]?.inputTokens, 'turn 1 has no estimated share').toBeGreaterThan(0);
   }, 120_000 * WINDOWS_SLOWDOWN);
 
   it('turn 2: its own mark, its own write, nothing of turn 1', async () => {

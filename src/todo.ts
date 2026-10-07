@@ -1,9 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { execFileSync } from 'child_process';
 import { extractTodosFromPrompts } from './handoff.js';
 import {
-  readAllSessionMemory, readManualTodos, readTodoClosures, recordManualTodos, recordTodoClosures,
+  readAllSessionMemory, readArchivedMemory, readManualTodos, readTodoClosures, recordManualTodos, recordTodoClosures,
   sortByDateAsc, todoClosureKey, todoDisplayId, type TodoClosure,
 } from './memory.js';
 import { samePath } from './paths.js';
@@ -133,6 +134,29 @@ export function readMemoryTodos(repoPath: string): TodoItem[] {
       });
     }
   }
+  // …then the ones carried over from sessions that left the note's window.
+  // Under the id they were listed with while their session was still there, so
+  // an id someone copied from an earlier list still resolves.
+  for (const a of readArchivedMemory(repoPath).todos) {
+    const text = typeof a?.text === 'string' ? a.text.trim() : '';
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const closure = closures.get(todoClosureKey(text));
+    if (closure?.state === 'closed') continue;
+    items.push({
+      id: generateId(text, a.sessionId),
+      text,
+      sessionId: a.sessionId,
+      repoPath,
+      branch: a.branch ?? null,
+      createdAt: a.at || new Date().toISOString(),
+      status: 'open',
+      source: 'memory',
+      ...(closure ? { pending: { reason: closure.reason, sessionId: closure.sessionId, at: closure.at } } : {}),
+    });
+  }
   // …and the ones a person typed. These have no session to be written under, so
   // they sit in the note as their own records — see ManualTodo.
   for (const m of readManualTodos(repoPath)) {
@@ -241,6 +265,24 @@ function closeInMemoryNotes(repoPath: string, item: TodoItem, at: string, reason
   }]);
 }
 
+// The repository a checkout belongs to: worktrees of one repo share it.
+// Memoised per process — a TODO store names a handful of distinct paths.
+const commonDirCache = new Map<string, string | null>();
+function gitCommonDir(repoPath: string): string | null {
+  if (commonDirCache.has(repoPath)) return commonDirCache.get(repoPath)!;
+  let out: string | null = null;
+  try {
+    if (fs.existsSync(repoPath)) {
+      const raw = execFileSync('git', ['rev-parse', '--git-common-dir'], {
+        cwd: repoPath, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000,
+      }).trim();
+      out = raw ? fs.realpathSync(path.resolve(repoPath, raw)) : null;
+    }
+  } catch { out = null; }
+  commonDirCache.set(repoPath, out);
+  return out;
+}
+
 /**
  * Lift closures recorded before they travelled into the repo's memory note.
  *
@@ -254,9 +296,21 @@ function closeInMemoryNotes(repoPath: string, item: TodoItem, at: string, reason
 function liftLocalClosuresIntoNotes(repoPath: string): void {
   try {
     const store = loadTodos();
-    const local = store.items.filter(
-      (i) => i.status === 'done' && (i.source === 'memory' || i.source === 'manual') && samePath(i.repoPath, repoPath),
-    );
+    const done = store.items.filter((i) => i.status === 'done' && (i.source === 'memory' || i.source === 'manual'));
+    if (done.length === 0) return;
+    // Any checkout of THIS repository, not just this path. The note lives in
+    // the shared git dir, but a closure recorded from the main checkout used to
+    // be lifted only by a read FROM the main checkout — and agents read from
+    // worktrees. 407 closures on one laptop never reached the note, so every
+    // other machine, and the dashboard's Issues, kept the work open.
+    //
+    // Narrowed to TODOs the note still holds open: lifting a closure for one
+    // that left the note long ago would only spend its byte budget.
+    const openInNote = new Set(readMemoryTodos(repoPath).map((t) => todoClosureKey(t.text)));
+    const here = gitCommonDir(repoPath);
+    const local = done.filter((i) =>
+      samePath(i.repoPath, repoPath)
+      || (openInNote.has(todoClosureKey(i.text)) && !!here && gitCommonDir(i.repoPath) === here));
     if (local.length === 0) return;
     recordTodoClosures(repoPath, local.map((i) => ({
       key: todoClosureKey(i.text),

@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0",
+  "revision": {
+    "vcs": "git",
+    "id": "3f5a1c9e0b7d4a2f8e6c1b0a9d8e7f6a5b4c3d2e",
+    "diff_stats": {
+      "lines_added": 42,
+      "lines_removed": 0
+    }
+  },
+  "attribution_level": "commit",
+  "recorded_at": "2026-09-24T12:40:05.123+02:00",
+  "producer": {
+    "name": "origin-cli",
+    "version": "0.20260924.258"
+  },
+  "contributions": [
+    {
+      "evidence": "session_capture",
+      "agent": {
+        "id": "claude-code",
+        "version": "2.1.62"
+      },
+      "model": {
+        "id": "claude-opus-4-6",
+        "provider": "anthropic"
+      },
+      "actor": {
+        "id": "user_01j8example",
+        "email": "developer@example.com"
+      },
+      "session": {
+        "id": "8b1f3c2e-5d4a-4e6f-9a7b-0c1d2e3f4a5b",
+        "reference_uri": "https://origin.example.com/sessions/8b1f3c2e-5d4a-4e6f-9a7b-0c1d2e3f4a5b",
+        "started_at": "2026-09-24T09:58:12Z",
+        "duration_ms": 1301123,
+        "prompt_count": 2,
+        "iterations": [
+          {
+            "index": 0,
+            "prompt_hash": "sha256:512d6c38f4066df65fc7c9606eee8e56db8f744938c23e1cb473524cb72a6947",
+            "reference_uri": "https://origin.example.com/sessions/8b1f3c2e-5d4a-4e6f-9a7b-0c1d2e3f4a5b"
+          },
+          {
+            "index": 1,
+            "prompt_hash": "sha256:fe415a6ebb38d75f3ff8685e31a4ae1181db8f304f65cb8647f4f2a4e56257ea",
+            "reference_uri": "https://origin.example.com/sessions/8b1f3c2e-5d4a-4e6f-9a7b-0c1d2e3f4a5b?prompt=1"
+          }
+        ],
+        "usage": {
+          "tokens": {
+            "input": 18250,
+            "output": 4120,
+            "cache_read": 152300,
+            "cache_write": 9800
+          },
+          "cost": {
+            "amount": "0.4213",
+            "currency": "USD",
+            "basis": "estimated"
+          }
+        },
+        "diff_stats": {
+          "lines_added": 57,
+          "lines_removed": 9
+        }
+      }
+    }
+  ]
+}

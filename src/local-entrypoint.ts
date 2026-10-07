@@ -1,13 +1,13 @@
 import fs from 'fs';
 import { git, gitDetailed, gitOrNull } from './utils/exec.js';
 import { loadConfig } from './config.js';
+import { sessionBranchPushTarget, type SessionBranchPushTarget } from './prompt-privacy.js';
 import { commitTreeMaybeSigned } from './signing.js';
 import {
   getSessionBackend,
   readSessionFile,
   safeSessionId,
   shouldBuildSessionBranch,
-  shouldPushSessionBranch,
   writeSessionRef,
   type SessionFile,
 } from './session-store.js';
@@ -69,6 +69,9 @@ export interface PromptChange {
   commitSha?: string | null;
   /** Working-tree SHA at the prompt's stop. Powers soft restore on Org B. */
   treeSha?: string | null;
+  /** ISO time the prompt was submitted (`state.promptSubmittedAt`). Lets an
+   *  importing org date the turn when it happened instead of on import day. */
+  createdAt?: string | null;
   // Following are populated by hooks.ts but not currently serialized to
   // changes.json (they're session-level signals, not per-prompt portability
   // data). Kept as optional so the interface still matches existing callers
@@ -350,6 +353,8 @@ function buildChangesJson(data: SessionWriteData): string {
     if (commitSha) out.commitSha = commitSha;
     const treeSha = dropEmpty(c.treeSha);
     if (treeSha) out.treeSha = treeSha;
+    const createdAt = dropEmpty(c.createdAt);
+    if (createdAt) out.createdAt = createdAt;
     return out;
   });
   const changes: SessionChanges = {
@@ -677,6 +682,12 @@ export function publishSessionToBranch(repoPath: string, sessionId: string): boo
  *   - 'auto' (default): publish + push automatically
  *   - 'prompt': skip (user will push manually or via pre-push hook)
  *   - 'false': never push
+ *
+ * The branch carries prompt text, so where it may go is decided by
+ * `sessionBranchPushTarget` (prompt-privacy.ts), the same decision the
+ * pre-push hook uses: the prompt opt-in or `pushStrategy: 'always'` for
+ * `origin`, a `snapshotRepo` for that destination only. The branch is still
+ * built either way, for a manual push.
  */
 /**
  * Bring the local `origin-sessions` branch on top of the remote's, so a push
@@ -758,38 +769,35 @@ export function pushSessionBranch(repoPath: string, sessionId?: string): void {
     // the branch has nothing for it yet. No-op under the branch backend.
     if (sessionId) publishSessionToBranch(repoPath, sessionId);
 
-    // Built, but this user pushes it themselves (pre-push hook / by hand). The
-    // branch must exist for that to be possible, which is why the build above
-    // is NOT gated on the push decision.
-    if (!shouldPushSessionBranch(config)) return;
-
-    const execOpts = {
-      cwd: repoPath,
-      timeoutMs: 15_000,
-    };
-
-    const snapshotRepo = config?.snapshotRepo;
-
-    if (snapshotRepo) {
-      // Push to external snapshot repo. Validate the repo value — it may
-      // be a remote name, path, or URL configured by the user, so allow a
-      // restricted set of characters to block injection via shell metachars.
-      // Reject anything that starts with '-' to block git option injection
-      // (e.g. --upload-pack=/tmp/evil would otherwise be parsed as a flag).
-      if (snapshotRepo.startsWith('-')) return;
-      if (!/^[a-zA-Z0-9_./:@+%~=-]+$/.test(snapshotRepo)) return;
-      // Use '--' as end-of-options marker for defense in depth.
-      git(['push', '--no-verify', '--quiet', '--', snapshotRepo, BRANCH], execOpts);
-    } else {
-      // Push to same repo's origin remote
-      const remote = gitDetailed(['remote', 'get-url', 'origin'], execOpts);
-      if (remote.status !== 0) return; // no remote — nothing to push
-      // Another clone may have pushed its own sessions since we last did;
-      // fold theirs in so ours land on top instead of being rejected.
-      reconcileSessionBranchWithRemote(repoPath, 'origin');
-      git(['push', 'origin', BRANCH, '--no-verify', '--quiet'], execOpts);
-    }
+    // Built either way, so a user who pushes it themselves (pre-push hook /
+    // by hand) has something to push. Whether and where it goes is the one
+    // shared decision (prompt-privacy.ts).
+    const target = sessionBranchPushTarget(repoPath, config, 'publish-moment');
+    if (target) pushSessionBranchTo(repoPath, target);
   } catch {
     // Never fail — push is best-effort
+  }
+}
+
+/**
+ * Push the local origin-sessions branch to a target `sessionBranchPushTarget`
+ * chose — the only code that sends it anywhere, for the publish moments and
+ * the pre-push hook alike. Never throws; true when the push ran clean.
+ */
+export function pushSessionBranchTo(repoPath: string, target: SessionBranchPushTarget): boolean {
+  try {
+    const execOpts = { cwd: repoPath, timeoutMs: 15_000 };
+    if (gitDetailed(['rev-parse', '--verify', '--quiet', `refs/heads/${BRANCH}`], execOpts).status !== 0) return false;
+    if (target.kind === 'snapshot') {
+      // '--' ends the options: the value was validated, this is defense in depth.
+      return gitDetailed(['push', '--no-verify', '--quiet', '--', target.remote, BRANCH], execOpts).status === 0;
+    }
+    if (gitDetailed(['remote', 'get-url', 'origin'], execOpts).status !== 0) return false; // no remote
+    // Another clone may have pushed its own sessions since we last did;
+    // fold theirs in so ours land on top instead of being rejected.
+    reconcileSessionBranchWithRemote(repoPath, 'origin');
+    return gitDetailed(['push', 'origin', BRANCH, '--no-verify', '--quiet'], execOpts).status === 0;
+  } catch {
+    return false;
   }
 }

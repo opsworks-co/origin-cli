@@ -6,7 +6,7 @@ import { acquireJournalLock } from './journal-lock.js';
 import { debugLog } from './debug-log.js';
 
 const MUTATING_EVENTS = new Set([
-  'session-start', 'user-prompt-submit', 'pre-tool-use', 'post-tool-use', 'stop', 'session-end',
+  'session-start', 'user-prompt-submit', 'pre-tool-use', 'post-tool-use', 'post-tool-use-failure', 'stop', 'session-end',
 ]);
 
 /**

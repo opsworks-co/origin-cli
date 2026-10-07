@@ -1,6 +1,6 @@
 {
   "name": "@origin/cli",
-  "version": "0.20260922.2014",
+  "version": "0.20261007.317",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -17,7 +17,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "ajv": "^8.18.0",
+    "ajv-formats": "^3.0.1",
     "chalk": "^5.4.1",
     "commander": "^12.1.0",
     "fzstd": "^0.1.1",

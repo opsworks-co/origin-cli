@@ -1,9 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { git, gitOrNull, gitIdentityEnv } from './utils/exec.js';
+import { git, gitDetailed, gitOrNull, gitIdentityEnv } from './utils/exec.js';
 import { getGitRoot } from './session-state.js';
 import { isRepoIgnored } from './ignore-repos.js';
+import { contextVariant } from './context-variant.js';
 import { loadConfig } from './config.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -61,7 +62,29 @@ export interface CommitMemoryEntry {
 
 const MEMORY_REF = 'refs/notes/origin-memory';
 const MEMORY_TAG = 'origin-memory-index';
-const MAX_ENTRIES = 20; // Keep last 20 session summaries
+
+// ─── How much the note keeps ─────────────────────────────────────────────────
+//
+// The note used to keep the last 20 sessions, whatever their size. That count
+// said nothing about what it was protecting — the note's size — because a
+// session's cost is mostly its commit records (on this repo 371 KB of a 464 KB
+// note), and one busy session outweighs ten chat-only ones. So the window is a
+// byte budget now: keep the newest sessions whose rollups and commit records
+// fit, and never fewer than MIN_SESSIONS_KEPT however large they are.
+//
+// What falls out of the window is not all lost: a session's open TODOs and
+// decisions move into `archivedTodos` / `archivedDecisions` — see settlePayload.
+export const MEMORY_BUDGET_BYTES = 1024 * 1024;
+const MIN_SESSIONS_KEPT = 5;
+// The archive's slice of the budget. It only grows, so without its own ceiling
+// it would slowly squeeze the session window down to MIN_SESSIONS_KEPT.
+const ARCHIVE_SHARE = 0.25;
+
+/** The byte budget in force. The env override exists for tests, which write small sessions. */
+export function memoryBudgetBytes(): number {
+  const raw = Number(process.env.ORIGIN_MEMORY_BUDGET_BYTES);
+  return Number.isFinite(raw) && raw > 0 ? raw : MEMORY_BUDGET_BYTES;
+}
 
 // ─── When to write memory (config.memoryUpdate) ──────────────────────────────
 //
@@ -98,6 +121,18 @@ export function isBakeoffRepo(repoPath: string | undefined | null): boolean {
   if (p.includes('/.origin/bakeoff-repos/')) return true;
   try { if (fs.existsSync(path.join(repoPath, 'BAKEOFF_PROMPT.md'))) return true; } catch { /* ignore */ }
   return false;
+}
+
+/**
+ * May an INJECTION path read this repo's memory? Not in an ignored repo, and
+ * not in a bake-off repo — unless the process runs under a context variant,
+ * where the replay harness has given the clone only the history that existed
+ * before its task (see context-variant.ts). Write paths keep the plain
+ * isBakeoffRepo gate: an arm's work is never remembered.
+ */
+export function memoryReadBlocked(repoPath: string | undefined | null): boolean {
+  if (isRepoIgnored(repoPath)) return true;
+  return isBakeoffRepo(repoPath) && contextVariant() === null;
 }
 
 // Distinctive benchmark / smoke-test prompts that carry no durable signal for a
@@ -151,7 +186,7 @@ export function isSubstantiveMemory(e: SessionMemoryEntry): boolean {
 // mutable per-session ROLLUPS (upserted, regenerated); `commits` are IMMUTABLE
 // per-commit records (frozen once written). Read/written together so one never
 // clobbers the other.
-interface MemoryPayload {
+export interface MemoryPayload {
   version: number;
   sessions: SessionMemoryEntry[];
   commits: CommitMemoryEntry[];
@@ -188,6 +223,33 @@ interface MemoryPayload {
   // Same append-only shape as `closedTodos`, and closed the same way — the
   // closure is the fact that discharges it.
   manualTodos?: ManualTodo[];
+  // Open TODOs and decisions of sessions that aged out of the window.
+  //
+  // They lived only on the session rollup, so when the rollup was dropped they
+  // went with it: an unfinished item vanished from `origin todo list` once 20
+  // newer sessions had run — every few days on a busy repo — without anyone
+  // closing it. The rest of a rollup (summary, files, line counts) describes
+  // work that is done, and can go; these two describe what is still owed and
+  // why the code is the way it is, and cannot be recovered from the code.
+  archivedTodos?: ArchivedItem[];
+  archivedDecisions?: ArchivedItem[];
+}
+
+/**
+ * A TODO or decision carried over from a session that left the window.
+ *
+ * Keyed by text like a closure (see todoClosureKey): the same sentence recorded
+ * by several sessions is one item. The session it came from is kept so the TODO
+ * keeps the id it was listed under — `todoDisplayId(text, sessionId)`.
+ */
+export interface ArchivedItem {
+  key: string;
+  text: string;
+  sessionId: string;
+  agentSlug?: string;
+  branch?: string | null;
+  /** When the session that recorded it ended. */
+  at: string;
 }
 
 /**
@@ -273,24 +335,193 @@ function memoryRootCommit(repoPath: string): string | null {
   return c && /^[a-fA-F0-9]+$/.test(c) ? c : null;
 }
 
-function readMemoryPayload(repoPath: string): MemoryPayload {
-  try {
-    const root = memoryRootCommit(repoPath);
-    if (!root) return { version: 2, sessions: [], commits: [], tombstones: [], closedTodos: [], manualTodos: [] };
-    const raw = git(['notes', '--ref=origin-memory', 'show', root], { cwd: repoPath, timeoutMs: 10_000 }).trim();
-    const data = JSON.parse(raw);
-    return {
-      version: typeof data.version === 'number' ? data.version : 1,
-      sessions: Array.isArray(data.sessions) ? data.sessions : [],
-      commits: Array.isArray(data.commits) ? data.commits : [], // absent in v1 payloads
-      tombstones: Array.isArray(data.tombstones) ? data.tombstones : [],
-      closedTodos: Array.isArray(data.closedTodos) ? data.closedTodos : [],
-      // Absent in every payload written before manual TODOs travelled.
-      manualTodos: Array.isArray(data.manualTodos) ? data.manualTodos : [],
-    };
-  } catch {
-    return { version: 2, sessions: [], commits: [], tombstones: [], closedTodos: [], manualTodos: [] };
+const EMPTY_PAYLOAD = (): MemoryPayload => ({
+  version: 2, sessions: [], commits: [], tombstones: [], closedTodos: [], manualTodos: [],
+  archivedTodos: [], archivedDecisions: [],
+});
+
+/** Parse a note's JSON into a payload, defaulting every record a note may lack. */
+function parsePayload(raw: string): MemoryPayload {
+  const data = JSON.parse(raw);
+  const list = <T>(v: unknown): T[] => (Array.isArray(v) ? v : []);
+  return {
+    version: typeof data.version === 'number' ? data.version : 1,
+    sessions: list(data.sessions),
+    commits: list(data.commits), // absent in v1 payloads
+    tombstones: list(data.tombstones),
+    closedTodos: list(data.closedTodos),
+    // Absent in every payload written before manual TODOs travelled.
+    manualTodos: list(data.manualTodos),
+    // Absent in every payload written before the window became a byte budget.
+    archivedTodos: list(data.archivedTodos),
+    archivedDecisions: list(data.archivedDecisions),
+  };
+}
+
+/**
+ * The note, for a caller about to WRITE it back. Throws when the note could
+ * not be read — a timeout, a lock, a broken repo — rather than returning an
+ * empty payload.
+ *
+ * Every writer here is read-modify-write of the whole note. Reading "nothing"
+ * after a failed read and writing the result back replaces the repo's entire
+ * memory with the one record the writer was adding. Only "there is no note
+ * yet" is an empty payload; a note that exists but will not parse is too,
+ * because nothing can recover it and refusing would stop memory for good.
+ */
+function loadMemoryPayloadForWrite(repoPath: string): MemoryPayload {
+  const root = memoryRootCommit(repoPath);
+  if (!root) return EMPTY_PAYLOAD();
+  const r = gitDetailed(['notes', '--ref=origin-memory', 'show', root], { cwd: repoPath, timeoutMs: 10_000 });
+  if (r.status !== 0) {
+    if (/no note found/i.test(r.stderr)) return EMPTY_PAYLOAD();
+    throw new Error(`memory note unreadable: ${r.stderr.trim() || `exit ${r.status}`}`);
   }
+  try {
+    return parsePayload(r.stdout.trim());
+  } catch {
+    return EMPTY_PAYLOAD();
+  }
+}
+
+/** The note, for a caller that only reads it: anything unreadable reads as empty. */
+export function readMemoryPayload(repoPath: string): MemoryPayload {
+  try {
+    return loadMemoryPayloadForWrite(repoPath);
+  } catch {
+    return EMPTY_PAYLOAD();
+  }
+}
+
+/**
+ * Bytes a record — or a list of records — takes in the stored note, measured
+ * at the depth it is stored at: every record sits in a top-level array, and
+ * pretty-printing indents it four spaces deeper than it prints on its own.
+ */
+function bytesOf(v: unknown): number {
+  return Buffer.byteLength(JSON.stringify({ k: Array.isArray(v) ? v : [v] }, null, 2), 'utf8');
+}
+
+/**
+ * Apply the note's retention rules. Pure — exported for testing.
+ *
+ * Every write and every merge goes through this, so a payload grown on one
+ * machine and one merged from two are held to the same shape:
+ *
+ *  1. The session window. Newest sessions first, each costing its rollup plus
+ *     its commit records, until the budget left after the other records runs
+ *     out — but never fewer than MIN_SESSIONS_KEPT. The kept sessions keep
+ *     their stored order; only which ones stay is decided by time.
+ *  2. What an evicted session still owes moves to the archive: its open TODOs
+ *     (unless a confirmed closure already discharged them) and its decisions.
+ *     Its commit records go with it, as they always did.
+ *  3. The archive is held to its own share of the budget, dropping the oldest
+ *     decisions first and the oldest TODOs only after every decision is gone —
+ *     an unfinished item is the thing this exists to keep.
+ *  4. Closures that no longer reach any TODO are dropped, and a TODO a
+ *     confirmed closure discharges leaves the manual list and the archive.
+ */
+export function settlePayload(p: MemoryPayload, budget: number = memoryBudgetBytes()): MemoryPayload {
+  const sessions = p.sessions || [];
+  const commits = p.commits || [];
+  const tombstones = p.tombstones || [];
+  const manualTodos = p.manualTodos || [];
+  let closedTodos = p.closedTodos || [];
+
+  const commitsBySession = new Map<string, CommitMemoryEntry[]>();
+  for (const c of commits) {
+    const list = commitsBySession.get(c.sessionId) || [];
+    list.push(c);
+    commitsBySession.set(c.sessionId, list);
+  }
+  const sessionIds = new Set(sessions.map((s) => s.sessionId));
+  // A commit whose session is not recorded (write ordering — see
+  // writeCommitMemory) has no session to be evicted with, so it is fixed cost.
+  const unowned = commits.filter((c) => !sessionIds.has(c.sessionId));
+
+  const archiveBudget = Math.floor(budget * ARCHIVE_SHARE);
+  const fixed = bytesOf(tombstones) + bytesOf(closedTodos) + bytesOf(manualTodos) + bytesOf(unowned);
+  const windowBudget = budget - archiveBudget - fixed;
+
+  const kept = new Set<string>();
+  let used = 0;
+  // A tie goes to the one recorded later, as the old count window's slice did.
+  const newestFirst = sessions
+    .map((s, i) => ({ s, i }))
+    .sort((a, b) => (entryTime(b.s) - entryTime(a.s)) || (b.i - a.i))
+    .map(({ s }) => s);
+  for (const s of newestFirst) {
+    const cost = bytesOf(s) + bytesOf(commitsBySession.get(s.sessionId) || []);
+    if (kept.size >= MIN_SESSIONS_KEPT && used + cost > windowBudget) break;
+    kept.add(s.sessionId);
+    used += cost;
+  }
+  const evicted = sessions.filter((s) => !kept.has(s.sessionId));
+
+  const confirmedClosed = new Set(closedTodos.filter((c) => c?.state === 'closed').map((c) => c.key));
+  const archivedTodos = new Map<string, ArchivedItem>();
+  const archivedDecisions = new Map<string, ArchivedItem>();
+  for (const a of p.archivedTodos || []) if (a?.key && a.text && !archivedTodos.has(a.key)) archivedTodos.set(a.key, a);
+  for (const a of p.archivedDecisions || []) if (a?.key && a.text && !archivedDecisions.has(a.key)) archivedDecisions.set(a.key, a);
+  // Oldest evicted first, so an item several sessions recorded is archived
+  // under the first of them — the same "first seen wins" as every other record.
+  for (const s of [...evicted].sort((a, b) => entryTime(a) - entryTime(b))) {
+    const from = (text: string): ArchivedItem => ({
+      key: todoClosureKey(text), text: text.trim(), sessionId: s.sessionId,
+      ...(s.agentSlug ? { agentSlug: s.agentSlug } : {}),
+      branch: s.branch ?? null,
+      at: s.endedAt || s.startedAt || '',
+    });
+    for (const t of s.openTodos || []) {
+      if (typeof t !== 'string' || !t.trim()) continue;
+      const item = from(t);
+      if (!confirmedClosed.has(item.key) && !archivedTodos.has(item.key)) archivedTodos.set(item.key, item);
+    }
+    for (const d of s.decisions || []) {
+      if (typeof d !== 'string' || !d.trim()) continue;
+      const item = from(d);
+      if (!archivedDecisions.has(item.key)) archivedDecisions.set(item.key, item);
+    }
+  }
+
+  const byAge = (a: ArchivedItem, b: ArchivedItem) => (Date.parse(a.at) || 0) - (Date.parse(b.at) || 0);
+  let todosOut = [...archivedTodos.values()].filter((t) => !confirmedClosed.has(t.key)).sort(byAge);
+  let decisionsOut = [...archivedDecisions.values()].sort(byAge);
+  let archiveBytes = bytesOf(todosOut) + bytesOf(decisionsOut);
+  while (archiveBytes > archiveBudget && decisionsOut.length > 0) {
+    archiveBytes -= bytesOf(decisionsOut[0]);
+    decisionsOut = decisionsOut.slice(1);
+  }
+  while (archiveBytes > archiveBudget && todosOut.length > 0) {
+    archiveBytes -= bytesOf(todosOut[0]);
+    todosOut = todosOut.slice(1);
+  }
+
+  const keptSessions = sessions.filter((s) => kept.has(s.sessionId));
+  const evictedIds = new Set(evicted.map((s) => s.sessionId));
+  // A closure exists to suppress a TODO. Once nothing carries that TODO — no
+  // kept session, no manual item, no archived one — the closure is dead weight.
+  // Only prune what is UNREACHABLE, never what is merely closed: dropping a
+  // closure whose TODO is still here resurrects the TODO.
+  const liveTodoKeys = new Set<string>();
+  for (const e of keptSessions) for (const t of e.openTodos || []) liveTodoKeys.add(todoClosureKey(t));
+  for (const m of manualTodos) if (m?.key) liveTodoKeys.add(m.key);
+  for (const a of todosOut) liveTodoKeys.add(a.key);
+  closedTodos = closedTodos.filter((c) => liveTodoKeys.has(c.key));
+  // Closed means gone — the item leaves, and its closure leaves with it on the
+  // next write, once nothing references the key any more.
+  const closedKeys = new Set(closedTodos.filter((c) => c.state === 'closed').map((c) => c.key));
+
+  return {
+    version: 2,
+    sessions: keptSessions,
+    commits: commits.filter((c) => !evictedIds.has(c.sessionId)),
+    tombstones,
+    closedTodos,
+    manualTodos: manualTodos.filter((m) => m?.key && !closedKeys.has(m.key)),
+    archivedTodos: todosOut.filter((t) => !closedKeys.has(t.key)),
+    archivedDecisions: decisionsOut,
+  };
 }
 
 function writeMemoryPayload(
@@ -306,48 +537,43 @@ function writeMemoryPayload(
   // Same contract again. A session-end write knows nothing about the TODOs a
   // person typed, and must not drop them.
   manualTodos?: ManualTodo[],
+  // And again: only a merge knows the other side's archive.
+  archive?: { todos: ArchivedItem[]; decisions: ArchivedItem[] },
 ): void {
   const root = memoryRootCommit(repoPath);
   if (!root) return;
-  const existing = (tombstones === undefined || closedTodos === undefined || manualTodos === undefined)
-    ? readMemoryPayload(repoPath)
+  const existing = (tombstones === undefined || closedTodos === undefined || manualTodos === undefined || archive === undefined)
+    ? loadMemoryPayloadForWrite(repoPath)
     : null;
   const keptTombstones = tombstones ?? existing?.tombstones ?? [];
   const suppressed = new Set(keptTombstones.map((t) => t.commitSha));
-  const visibleCommits = commits.filter((c) => !suppressed.has(c.commitSha));
-  // A closure exists to suppress a TODO. Once the session that recorded that
-  // TODO has aged out of the retained window the TODO is gone on its own, and
-  // the closure is dead weight in a payload that has to stay push-sized — the
-  // same rule that prunes commit records whose session dropped out.
-  //
-  // Only prune what is UNREACHABLE, never what is merely closed: dropping a
-  // closure whose TODO is still in the window resurrects the TODO.
-  const liveTodoKeys = new Set<string>();
-  for (const e of sessions) for (const t of e.openTodos || []) liveTodoKeys.add(todoClosureKey(t));
-  // A manual TODO is its own record rather than a line on a session that ages
-  // out, so it keeps its own closure alive: pruning the closure while the item
-  // is still here is what would resurrect it.
-  const keptManual = manualTodos ?? existing?.manualTodos ?? [];
-  for (const m of keptManual) if (m?.key) liveTodoKeys.add(m.key);
-  const keptClosures = (closedTodos ?? existing?.closedTodos ?? []).filter((c) => liveTodoKeys.has(c.key));
-  // Closed means gone — the item leaves, and its closure leaves with it on the
-  // next write, once nothing references the key any more.
-  const closedKeys = new Set(keptClosures.filter((c) => c.state === 'closed').map((c) => c.key));
-  const visibleManual = keptManual.filter((m) => m?.key && !closedKeys.has(m.key));
-  const payload = JSON.stringify(
-    {
-      version: 2,
-      sessions,
-      commits: visibleCommits,
-      tombstones: keptTombstones,
-      closedTodos: keptClosures,
-      manualTodos: visibleManual,
-    },
-    null,
-    2,
+  const settled = settlePayload({
+    version: 2,
+    sessions,
+    commits: commits.filter((c) => !suppressed.has(c.commitSha)),
+    tombstones: keptTombstones,
+    closedTodos: closedTodos ?? existing?.closedTodos ?? [],
+    manualTodos: manualTodos ?? existing?.manualTodos ?? [],
+    archivedTodos: archive?.todos ?? existing?.archivedTodos ?? [],
+    archivedDecisions: archive?.decisions ?? existing?.archivedDecisions ?? [],
+  });
+  // On STDIN, not `-m <payload>`. The payload is hundreds of KB, and an argv
+  // string that size is refused by the OS before git ever runs: Linux caps one
+  // argument at 128 KB, Windows a whole command line at 32 KB. The write is
+  // best-effort, so every caller swallowed the E2BIG and memory just stopped
+  // being recorded there.
+  const r = gitDetailed(['notes', '--ref=origin-memory', 'add', '-f', '-F', '-', root], {
+    cwd: repoPath, timeoutMs: 10_000, env: gitIdentityEnv(repoPath), input: JSON.stringify(settled, null, 2),
+  });
+  if (r.status !== 0) throw new Error(`git notes add failed: ${r.stderr.trim()}`);
+}
+
+/** Write a payload whole — every record, none preserved from the note. For merge results. */
+function writeWholePayload(repoPath: string, p: MemoryPayload): void {
+  writeMemoryPayload(
+    repoPath, p.sessions, p.commits, p.tombstones || [], p.closedTodos || [], p.manualTodos || [],
+    { todos: p.archivedTodos || [], decisions: p.archivedDecisions || [] },
   );
-  git(['notes', '--ref=origin-memory', 'add', '-f', '-m', payload, root],
-    { cwd: repoPath, timeoutMs: 10_000, env: gitIdentityEnv(repoPath) });
 }
 
 // ─── Cross-machine merge ───────────────────────────────────────────────────
@@ -376,11 +602,11 @@ function entryTime(e: SessionMemoryEntry): number {
  *           and unparseable timestamps keep `local` so a merge is idempotent.
  * commits:  keyed by commitSha, first-seen wins (records are frozen).
  *
- * Result is sorted oldest→newest and trimmed to the same window the writers
- * enforce, with orphaned commit records pruned exactly as writeSessionMemory
- * does — so a merged payload is indistinguishable from a locally-grown one.
+ * Result is sorted oldest→newest and settled by the same rules the writers
+ * apply (settlePayload) — so a merged payload is indistinguishable from a
+ * locally-grown one.
  */
-export function mergeMemoryPayloads(local: MemoryPayload, remote: MemoryPayload): MemoryPayload {
+export function mergeMemoryPayloads(local: MemoryPayload, remote: MemoryPayload, budget?: number): MemoryPayload {
   const sessions = new Map<string, SessionMemoryEntry>();
   for (const e of local?.sessions || []) if (e?.sessionId) sessions.set(e.sessionId, e);
   for (const e of remote?.sessions || []) {
@@ -412,12 +638,14 @@ export function mergeMemoryPayloads(local: MemoryPayload, remote: MemoryPayload)
     if (!mine || (mine.state !== 'closed' && c.state === 'closed')) closedTodos.set(c.key, c);
   }
 
-  // Manual TODOs union by key, first seen wins — the item is the same sentence
-  // whichever machine typed it, and keeping the first keeps its original `at`.
-  const manualTodos = new Map<string, ManualTodo>();
-  for (const m of [...(local?.manualTodos || []), ...(remote?.manualTodos || [])]) {
-    if (m?.key && m.text && !manualTodos.has(m.key)) manualTodos.set(m.key, m);
-  }
+  // Manual TODOs and archived items union by key, first seen wins — the item
+  // is the same sentence whichever machine recorded it, and keeping the first
+  // keeps its original `at`.
+  const unionByKey = <T extends { key: string; text: string }>(a?: T[], b?: T[]): T[] => {
+    const out = new Map<string, T>();
+    for (const m of [...(a || []), ...(b || [])]) if (m?.key && m.text && !out.has(m.key)) out.set(m.key, m);
+    return [...out.values()];
+  };
 
   const commits = new Map<string, CommitMemoryEntry>();
   for (const c of local?.commits || []) if (c?.commitSha) commits.set(c.commitSha, c);
@@ -426,40 +654,33 @@ export function mergeMemoryPayloads(local: MemoryPayload, remote: MemoryPayload)
   }
   for (const sha of tombstones.keys()) commits.delete(sha);
 
-  const mergedSessions = [...sessions.values()]
-    .sort((a, b) => entryTime(a) - entryTime(b))
-    .slice(-MAX_ENTRIES);
+  const mergedSessions = [...sessions.values()].sort((a, b) => entryTime(a) - entryTime(b));
 
-  // Same bounded-window rule the writers apply: drop commit records whose
-  // session fell out of the retained window.
-  const keep = new Set(mergedSessions.map((s) => s.sessionId));
+  // Commit records of a session neither side still has are orphans — the
+  // session left one side's window and this record was never pruned there.
+  const known = new Set(mergedSessions.map((s) => s.sessionId));
   // The union is what makes this necessary: a machine that folded a rebase copy
   // away gets it handed straight back by one that hasn't, so the fold has to
   // happen again on the merged result or it never sticks.
   const mergedCommits = dedupeRebasedCommits(
     [...commits.values()]
-      .filter((c) => keep.size === 0 || keep.has(c.sessionId))
+      .filter((c) => known.size === 0 || known.has(c.sessionId))
       .sort((a, b) => {
         const ta = Date.parse(a?.committedAt || ''), tb = Date.parse(b?.committedAt || '');
         return (Number.isNaN(ta) ? 0 : ta) - (Number.isNaN(tb) ? 0 : tb);
       }),
   );
 
-  const liveTodoKeys = new Set<string>();
-  for (const e of mergedSessions) for (const t of e.openTodos || []) liveTodoKeys.add(todoClosureKey(t));
-  for (const m of manualTodos.values()) if (m?.key) liveTodoKeys.add(m.key);
-  const mergedClosures = [...closedTodos.values()].filter((c) => liveTodoKeys.has(c.key));
-  const closedKeys = new Set(mergedClosures.filter((c) => c.state === 'closed').map((c) => c.key));
-  return {
+  return settlePayload({
     version: 2,
     sessions: mergedSessions,
     commits: mergedCommits,
     tombstones: [...tombstones.values()],
-    closedTodos: mergedClosures,
-    // A closure that arrived from either side discharges the item, exactly as
-    // it does on a local write.
-    manualTodos: [...manualTodos.values()].filter((m) => !closedKeys.has(m.key)),
-  };
+    closedTodos: [...closedTodos.values()],
+    manualTodos: unionByKey(local?.manualTodos, remote?.manualTodos),
+    archivedTodos: unionByKey(local?.archivedTodos, remote?.archivedTodos),
+    archivedDecisions: unionByKey(local?.archivedDecisions, remote?.archivedDecisions),
+  }, budget);
 }
 
 /** Read the memory payload out of an arbitrary notes ref, or null if absent. */
@@ -469,14 +690,7 @@ export function readMemoryPayloadFromRef(repoPath: string, ref: string): MemoryP
     if (!root) return null;
     const raw = git(['notes', `--ref=${ref}`, 'show', root], { cwd: repoPath, timeoutMs: 10_000 }).trim();
     if (!raw) return null;
-    const data = JSON.parse(raw);
-    return {
-      version: typeof data.version === 'number' ? data.version : 1,
-      sessions: Array.isArray(data.sessions) ? data.sessions : [],
-      commits: Array.isArray(data.commits) ? data.commits : [],
-      tombstones: Array.isArray(data.tombstones) ? data.tombstones : [],
-      closedTodos: Array.isArray(data.closedTodos) ? data.closedTodos : [],
-    };
+    return parsePayload(raw);
   } catch {
     return null;
   }
@@ -490,20 +704,20 @@ export function foldRemoteMemory(repoPath: string, stagingRef: string): boolean 
   try {
     const remote = readMemoryPayloadFromRef(repoPath, stagingRef);
     if (!remote) return false;
-    const local = readMemoryPayload(repoPath);
+    const local = loadMemoryPayloadForWrite(repoPath);
     const merged = mergeMemoryPayloads(local, remote);
-    // Compare — and write — ALL FOUR records. Sessions and commits alone left
-    // the other two unable to arrive: `writeMemoryPayload` preserves what it is
-    // not given, so passing only two of the four re-wrote the LOCAL tombstones
-    // and closures over the merged ones, discarding everything the remote had
-    // just contributed. Narrowing the comparison the same way also made a sync
-    // whose only news was a retraction or a closure report "nothing changed"
-    // and write nothing at all.
+    // Compare — and write — EVERY record. Sessions and commits alone left the
+    // rest unable to arrive: `writeMemoryPayload` preserves what it is not
+    // given, so passing only some re-wrote the LOCAL copies over the merged
+    // ones, discarding everything the remote had just contributed. Narrowing
+    // the comparison the same way also made a sync whose only news was a
+    // retraction or a closure report "nothing changed" and write nothing.
     const shape = (p: MemoryPayload) => JSON.stringify({
       s: p.sessions, c: p.commits, t: p.tombstones || [], d: p.closedTodos || [],
+      m: p.manualTodos || [], at: p.archivedTodos || [], ad: p.archivedDecisions || [],
     });
     if (shape(local) === shape(merged)) return false;
-    writeMemoryPayload(repoPath, merged.sessions, merged.commits, merged.tombstones, merged.closedTodos);
+    writeWholePayload(repoPath, merged);
     return true;
   } catch {
     return false;
@@ -529,13 +743,13 @@ export function reconcileMemoryWithRemote(repoPath: string, stagingRef: string):
   try {
     const remote = readMemoryPayloadFromRef(repoPath, stagingRef);
     if (!remote) return false;
-    const merged = mergeMemoryPayloads(readMemoryPayload(repoPath), remote);
+    const merged = mergeMemoryPayloads(loadMemoryPayloadForWrite(repoPath), remote);
     const opts = { cwd: repoPath, timeoutMs: 10_000 };
     git(['update-ref', MEMORY_REF, stagingRef], opts);
-    // All four records, for the reason spelled out in foldRemoteMemory: the ref
+    // Every record, for the reason spelled out in foldRemoteMemory: the ref
     // now points at the REMOTE tip, so anything not written here is whatever
     // the remote had, and the local side's retractions and closures are gone.
-    writeMemoryPayload(repoPath, merged.sessions, merged.commits, merged.tombstones, merged.closedTodos);
+    writeWholePayload(repoPath, merged);
     return true;
   } catch {
     return false;
@@ -591,23 +805,73 @@ export function reconcileSessionWindow(
   };
 }
 
+/**
+ * A session's recorded work only ever GROWS across its own upserts.
+ *
+ * A session writes memory at each commit and again at session end, and every
+ * write replaced the last. A post-commit write carries that commit's files, so
+ * the entry ended up describing only the LAST commit: session 64038e34 changed
+ * ~10 files across four merged PRs and its entry listed one file — the test
+ * the final commit touched. Same rule as reconcileSessionWindow applies to the
+ * time window: keep everything the record already asserted.
+ *
+ * Pure + exported for testing.
+ */
+export function accumulateSessionWork(entry: SessionMemoryEntry, previous: SessionMemoryEntry | undefined): SessionMemoryEntry {
+  if (!previous) return entry;
+  const files = Array.from(new Set([...(previous.filesChanged || []), ...(entry.filesChanged || [])]));
+  return {
+    ...entry,
+    filesChanged: files,
+    linesAdded: Math.max(entry.linesAdded || 0, previous.linesAdded || 0),
+    linesRemoved: Math.max(entry.linesRemoved || 0, previous.linesRemoved || 0),
+  };
+}
+
+/**
+ * Drop open items the repo already knows are done, so the next agent is not
+ * handed a list of leftovers that shipped.
+ *
+ * Only CONFIRMED closures count — a pending one is a claim, and todo-sweep.ts
+ * does not hide it either. Two matches: the item's own text, or an item that
+ * is itself about another TODO (`TODO \`87ec29e1\`: …`) whose id is closed.
+ *
+ * Pure + exported for testing.
+ */
+export function withoutResolvedTodos(entry: SessionMemoryEntry, closures: readonly TodoClosure[]): SessionMemoryEntry {
+  const closed = (closures || []).filter((c) => c && c.state === 'closed');
+  if (closed.length === 0 || !(entry.openTodos || []).length) return entry;
+  const keys = new Set(closed.map((c) => c.key));
+  const ids = new Set(closed.map((c) => (c.id || '').toLowerCase()).filter(Boolean));
+  const refersToClosed = (text: string) => {
+    for (const m of text.matchAll(/\bTODO\s*[`'"]?([0-9a-f]{8})\b/gi)) if (ids.has(m[1].toLowerCase())) return true;
+    return false;
+  };
+  const openTodos = entry.openTodos.filter((t) => !keys.has(todoClosureKey(t)) && !refersToClosed(t));
+  return openTodos.length === entry.openTodos.length ? entry : { ...entry, openTodos };
+}
+
 export function writeSessionMemory(repoPath: string, entry: SessionMemoryEntry): void {
   try {
     // Don't accumulate memory for bake-off arms or repos the user excluded —
     // it only pollutes the shared repo's memory with benchmark noise.
     if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return;
-    const { sessions, commits } = readMemoryPayload(repoPath);
+    const { sessions, commits, closedTodos } = loadMemoryPayloadForWrite(repoPath);
     // UPSERT by sessionId — a session may write memory more than once (at each
     // commit AND at session end, per `memoryUpdate`), and we want ONE entry per
     // session that reflects its latest state, not a duplicate per write.
     const idx = sessions.findIndex((e) => e.sessionId === entry.sessionId);
-    const merged = reconcileSessionWindow(entry, idx >= 0 ? sessions[idx] : undefined, commits);
+    const previous = idx >= 0 ? sessions[idx] : undefined;
+    const merged = withoutResolvedTodos(
+      accumulateSessionWork(reconcileSessionWindow(entry, previous, commits), previous),
+      closedTodos || [],
+    );
     if (idx >= 0) sessions[idx] = merged;
     else sessions.push(merged);
-    const trimmed = sessions.slice(-MAX_ENTRIES);
-    // Prune commit records whose session dropped out of the retained window.
-    const keep = new Set(trimmed.map((s) => s.sessionId));
-    writeMemoryPayload(repoPath, trimmed, commits.filter((c) => keep.has(c.sessionId)));
+    // Prune commit records whose session is no longer recorded. Which sessions
+    // stay is decided by writeMemoryPayload's budget — see settlePayload.
+    const keep = new Set(sessions.map((s) => s.sessionId));
+    writeMemoryPayload(repoPath, sessions, commits.filter((c) => keep.has(c.sessionId)));
   } catch {
     // Non-fatal — memory is nice-to-have
   }
@@ -633,7 +897,7 @@ export function writeSessionMemory(repoPath: string, entry: SessionMemoryEntry):
 export function forgetCommitMemory(repoPath: string, commitSha: string, reason: string): boolean {
   try {
     if (!commitSha || !reason) return false;
-    const { sessions, commits, tombstones } = readMemoryPayload(repoPath);
+    const { sessions, commits, tombstones } = loadMemoryPayloadForWrite(repoPath);
     const existing = tombstones || [];
     if (existing.some((t) => t.commitSha === commitSha)) return false;
     const next = [
@@ -670,7 +934,7 @@ export function recordTodoClosures(repoPath: string, closures: TodoClosure[]): n
   try {
     if (!closures?.length) return 0;
     if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return 0;
-    const { sessions, commits, tombstones, closedTodos } = readMemoryPayload(repoPath);
+    const { sessions, commits, tombstones, closedTodos } = loadMemoryPayloadForWrite(repoPath);
     const byKey = new Map<string, TodoClosure>();
     for (const c of closedTodos || []) if (c?.key) byKey.set(c.key, c);
     let changed = 0;
@@ -690,6 +954,16 @@ export function recordTodoClosures(repoPath: string, closures: TodoClosure[]): n
     return changed;
   } catch {
     return 0;
+  }
+}
+
+/** Open TODOs and decisions carried over from sessions that left the window. */
+export function readArchivedMemory(repoPath: string): { todos: ArchivedItem[]; decisions: ArchivedItem[] } {
+  try {
+    const p = readMemoryPayload(repoPath);
+    return { todos: p.archivedTodos || [], decisions: p.archivedDecisions || [] };
+  } catch {
+    return { todos: [], decisions: [] };
   }
 }
 
@@ -713,7 +987,7 @@ export function recordManualTodos(repoPath: string, items: ManualTodo[]): number
   try {
     if (!items?.length) return 0;
     if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return 0;
-    const { sessions, commits, tombstones, closedTodos, manualTodos } = readMemoryPayload(repoPath);
+    const { sessions, commits, tombstones, closedTodos, manualTodos } = loadMemoryPayloadForWrite(repoPath);
     const byKey = new Map<string, ManualTodo>();
     for (const m of manualTodos || []) if (m?.key) byKey.set(m.key, m);
     let added = 0;
@@ -734,7 +1008,7 @@ export function writeCommitMemory(repoPath: string, entry: CommitMemoryEntry): v
   try {
     if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return;
     if (!entry.commitSha) return;
-    const { sessions, commits, tombstones } = readMemoryPayload(repoPath);
+    const { sessions, commits, tombstones } = loadMemoryPayloadForWrite(repoPath);
     // A retracted commit stays retracted. Without this the writer that produced
     // the wrong record in the first place simply writes it again on the next
     // poll, and the retraction is a no-op with extra steps.
@@ -772,31 +1046,44 @@ export function writeCommitMemory(repoPath: string, entry: CommitMemoryEntry): v
 
 /**
  * Fill in decisions that arrived LATE — after the session rollup and commit
- * records were first written. The trigger is agents that commit before writing
- * their response (Cursor, sometimes Codex): the `[Origin: Decision]` marker only
- * lands in the transcript once the turn's response is flushed, moments after the
- * commit-time capture already ran. A later hook fire re-parses the transcript and
- * calls this to backfill the session's rollup and its commit records.
+ * records were first written. Agents write the `[Origin: Decision]` marker in
+ * the reply that follows the commit (Claude Code, Cursor, sometimes Codex), so
+ * the commit-time capture usually finds none. A later hook fire re-parses the
+ * transcript and calls this to backfill.
+ *
+ * Each commit gets the decisions of the turn that MADE it (`decisionsFor`),
+ * never the session's whole set: a turn whose work was thrown away does not get
+ * to explain a commit it had nothing to do with. The rollup, when empty, gets
+ * the union of what its commits now carry.
  *
  * Fill-only: never overwrites decisions already recorded, so it can't clobber an
  * agy/LLM-derived set or re-run endlessly. No-op when there's nothing to add.
  */
-export function enrichDecisionsForSession(repoPath: string, sessionId: string, decisions: string[]): boolean {
+export function enrichDecisionsForSession(
+  repoPath: string,
+  sessionId: string,
+  decisionsFor: (commit: CommitMemoryEntry) => string[],
+): boolean {
   try {
     if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return false;
-    const clean = (decisions || []).filter((d) => typeof d === 'string' && d.trim());
-    if (!sessionId || clean.length === 0) return false;
-    const { sessions, commits } = readMemoryPayload(repoPath);
+    if (!sessionId) return false;
+    const { sessions, commits } = loadMemoryPayloadForWrite(repoPath);
     let changed = false;
-    for (const s of sessions) {
-      if (s.sessionId === sessionId && (!s.decisions || s.decisions.length === 0)) {
-        s.decisions = clean.slice(0, 8);
-        changed = true;
-      }
-    }
+    const own: string[] = [];
     for (const c of commits) {
-      if (c.sessionId === sessionId && (!c.decisions || c.decisions.length === 0)) {
-        c.decisions = clean.slice(0, 6);
+      if (c.sessionId !== sessionId) continue;
+      if (!c.decisions || c.decisions.length === 0) {
+        const clean = (decisionsFor(c) || []).filter((d) => typeof d === 'string' && d.trim());
+        if (clean.length > 0) {
+          c.decisions = clean.slice(0, 6);
+          changed = true;
+        }
+      }
+      for (const d of c.decisions || []) if (!own.includes(d)) own.push(d);
+    }
+    for (const s of sessions) {
+      if (s.sessionId === sessionId && (!s.decisions || s.decisions.length === 0) && own.length > 0) {
+        s.decisions = own.slice(0, 8);
         changed = true;
       }
     }
@@ -926,6 +1213,28 @@ export function dedupeRebasedCommits(commits: CommitMemoryEntry[]): CommitMemory
   });
 }
 
+/**
+ * The subjects of every commit this repo's memory records for one session,
+ * oldest first — what the session's summary is built from.
+ *
+ * A summary built from the LATEST commit alone falls through to the agent's
+ * last message whenever that commit is noise: a session that merges main in
+ * before merging its PR ends on "Merge remote-tracking branch…", which
+ * summarizeFromCommitSubjects rightly drops, and the entry was left reading
+ * "While that runs, I'm pushing the merge commit…" (22005642).
+ */
+export function sessionCommitSubjects(repoPath: string, sessionId: string): string[] {
+  const own = readAllCommitMemory(repoPath).filter((c) => c.sessionId === sessionId);
+  return sortByDateAsc(own, (c) => c.committedAt)
+    .map((c) => (c.message || '').split('\n')[0].trim())
+    .filter(Boolean);
+}
+
+/** This session's memory entry, if the note has one. */
+export function readSessionMemoryEntry(repoPath: string, sessionId: string): SessionMemoryEntry | undefined {
+  return readAllSessionMemory(repoPath).find((e) => e.sessionId === sessionId);
+}
+
 export function readAllCommitMemory(repoPath: string): CommitMemoryEntry[] {
   // Folded on READ as well as on write: notes already carrying rebase copies
   // are on every machine that has pulled them, and the write-side fix only
@@ -991,7 +1300,7 @@ export const MEMORY_FULL_RECORD_HINT = "run `origin context memory`";
  */
 export function buildMemoryContext(repoPath: string): string | null {
   // (a) Never inject for bake-off arms or repos the user excluded.
-  if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return null;
+  if (memoryReadBlocked(repoPath)) return null;
 
   // (b) Keep only sessions that did real work.
   const substantive = readAllSessionMemory(repoPath).filter(isSubstantiveMemory);
@@ -1123,7 +1432,7 @@ export function buildMemoryContext(repoPath: string): string | null {
 export function buildMemoryPointerContext(repoPath: string): string | null {
   // Same exclusions as the digest: bake-off arms and user-ignored repos get no
   // memory injected, so they must not be told memory exists either.
-  if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return null;
+  if (memoryReadBlocked(repoPath)) return null;
 
   const substantive = readAllSessionMemory(repoPath).filter(isSubstantiveMemory);
   const commits = readAllCommitMemory(repoPath);
@@ -1274,7 +1583,7 @@ export function reconcileMemoryBriefWithRemote(repoPath: string, stagingRef: str
  * caller then falls back to the deterministic buildMemoryContext).
  */
 export function buildMemoryBriefContext(repoPath: string): string | null {
-  if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return null;
+  if (memoryReadBlocked(repoPath)) return null;
   const cached = readMemoryBrief(repoPath);
   const brief = cached?.brief?.trim();
   if (!brief) return null;
@@ -1364,7 +1673,7 @@ function formatAge(ms: number): string {
 // Returns null under exactly the same exclusions as the pointer — a repo with
 // no memory must not be told to go read memory.
 export function buildStartupCheckContext(repoPath: string): string | null {
-  if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return null;
+  if (memoryReadBlocked(repoPath)) return null;
 
   const substantive = readAllSessionMemory(repoPath).filter(isSubstantiveMemory);
   const commits = readAllCommitMemory(repoPath);
@@ -1399,7 +1708,7 @@ export function buildStartupCheckContext(repoPath: string): string | null {
 // same tokens. This one names the omission, which the first block cannot do
 // because at that point there is nothing to name.
 export function buildMemoryEscalationContext(repoPath: string): string | null {
-  if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return null;
+  if (memoryReadBlocked(repoPath)) return null;
 
   const substantive = readAllSessionMemory(repoPath).filter(isSubstantiveMemory);
   const commits = readAllCommitMemory(repoPath);
@@ -1479,7 +1788,7 @@ export function isMemoryReadToolName(toolName: string | undefined | null): boole
 // Words that carry no retrieval signal. Prompts are imperative and
 // conversational ("can you fix the thing where…"), so without this the top
 // terms are all verbs and pronouns and every entry matches equally.
-const MEMORY_STOPWORDS = new Set([
+export const MEMORY_STOPWORDS = new Set([
   'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'this', 'that', 'these', 'those',
   'is', 'are', 'was', 'were', 'be', 'been', 'being', 'do', 'does', 'did', 'doing',
   'have', 'has', 'had', 'can', 'could', 'should', 'would', 'will', 'shall', 'may',
@@ -1548,8 +1857,13 @@ export function extractMemoryTerms(promptText: string): MemoryTerm[] {
     add(raw, 10);
     // Also index the basename, so a prompt naming `src/memory.ts` still matches
     // a note that recorded the file as `packages/cli/src/memory.ts`.
+    //
+    // Only a basename that names a FILE. Prose uses slashes too ("prompts/diffs/
+    // token", "and/or"), and indexing `token` at path weight let one word of a
+    // sentence outscore every real match — then double again on any record that
+    // changed a file called `tokens.ts`.
     const base = raw.split('/').pop() || '';
-    if (base && base !== raw) add(base, 8);
+    if (base && base !== raw && hasFileExtension(base)) add(base, 8);
   }
 
   // Identifier-like: camelCase, snake_case, or dotted — shared jargon.
@@ -1649,6 +1963,58 @@ function scoreEntry(text: string, files: string[], terms: MemoryTerm[]): { score
 // four common ones no longer do. The floor moved by one word, not by a class.
 const MEMORY_HIT_MIN_SCORE = 10;
 
+// A long prompt drowns the threshold above in ordinary words. A pasted
+// 400-word brief about memory design carries ~150 plain terms, and at weight 2
+// any record matching five of them clears the bar. Measured on this repo's own
+// notes: the top five hits for such a prompt were a heartbeat fix, a cost fix,
+// a Codex capture fix and two supersession fixes, each on 28-32 matches like
+// `thing, one, after, before, read, still`. None was about memory.
+//
+// Short prompts score exactly as before: that path is tuned (4/4 recall, no
+// false fires on conversational turns) and a five-word question has no length
+// to correct for. Past MEMORY_PLAIN_TERMS_FULL_WEIGHT plain words, two
+// corrections apply, to plain words only. A path or identifier match is
+// evidence at any prompt length and stays at full weight.
+//
+//   1. Words most records share are no evidence. A plain word found in more
+//      than a quarter of the records is dropped: in a repo about sessions,
+//      `session` and `prompt` rank every record the same. It needs a corpus to
+//      measure, so it applies only from MEMORY_COMMON_WORD_MIN_RECORDS up.
+//   2. Each plain word is worth less the more of them there are. The weight is
+//      scaled by FULL_WEIGHT / count, so what a record needs is the same SHARE
+//      of the prompt's words a short prompt needs, not the same number.
+//
+// Not applied to short prompts on purpose: the common-word filter drops `row`,
+// `hook` and `commit`, which "a heartbeat tick replacing a hook capture's row"
+// needs to reach its record.
+const MEMORY_COMMON_WORD_SHARE = 0.25;
+const MEMORY_COMMON_WORD_MIN_RECORDS = 10;
+const MEMORY_PLAIN_TERMS_FULL_WEIGHT = 12;
+
+/**
+ * The terms a search actually scores with, once plain words are corrected for
+ * how common they are in `texts` and how many of them the prompt carries.
+ * Pure + exported for testing.
+ */
+export function effectiveMemoryTerms(terms: MemoryTerm[], texts: string[]): MemoryTerm[] {
+  const isPlain = (t: MemoryTerm) => t.weight < 4;
+  let plain = terms.filter(isPlain);
+  if (plain.length <= MEMORY_PLAIN_TERMS_FULL_WEIGHT) return terms;
+  const strong = terms.filter((t) => !isPlain(t));
+  if (texts.length >= MEMORY_COMMON_WORD_MIN_RECORDS) {
+    const cap = texts.length * MEMORY_COMMON_WORD_SHARE;
+    plain = plain.filter(({ term }) => {
+      let n = 0;
+      for (const text of texts) {
+        if (text.includes(term) && ++n > cap) return false;
+      }
+      return true;
+    });
+  }
+  const scale = Math.min(1, MEMORY_PLAIN_TERMS_FULL_WEIGHT / Math.max(1, plain.length));
+  return [...strong, ...plain.map((t) => ({ term: t.term, weight: t.weight * scale }))];
+}
+
 
 /**
  * Search this repo's memory for records relevant to `promptText`.
@@ -1659,7 +2025,7 @@ const MEMORY_HIT_MIN_SCORE = 10;
  * agent already has.
  */
 export function searchMemoryForPrompt(repoPath: string, promptText: string, limit = 3): MemoryHit[] {
-  if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return [];
+  if (memoryReadBlocked(repoPath)) return [];
   const terms = extractMemoryTerms(promptText);
   if (terms.length === 0) return [];
   // Bail before touching git when no entry COULD clear the threshold.
@@ -1682,15 +2048,27 @@ export function searchMemoryForPrompt(repoPath: string, promptText: string, limi
   // each a thin wrapper over readMemoryPayload, which is uncached — so calling
   // both made every prompt pay for the same `git notes show` twice.
   const payload = readMemoryPayload(repoPath);
+  const sessions = payload.sessions.filter(isSubstantiveMemory).map((s) => ({
+    s,
+    files: s.filesChanged || [],
+    text: searchableText([
+      s.summary, s.intent, s.decisions, s.openTodos, s.verify, s.filesChanged || [],
+      s.fileNotes ? Object.keys(s.fileNotes) : [], s.fileNotes ? Object.values(s.fileNotes) : [],
+    ]),
+  }));
+  const commits = payload.commits.map((c) => ({
+    c,
+    files: c.filesChanged || [],
+    text: searchableText([
+      c.message, c.decisions, c.filesChanged || [],
+      c.fileNotes ? Object.keys(c.fileNotes) : [], c.fileNotes ? Object.values(c.fileNotes) : [],
+    ]),
+  }));
+  const scored = effectiveMemoryTerms(terms, [...sessions.map((r) => r.text), ...commits.map((r) => r.text)]);
   const hits: MemoryHit[] = [];
 
-  for (const s of payload.sessions.filter(isSubstantiveMemory)) {
-    const files = s.filesChanged || [];
-    const text = searchableText([
-      s.summary, s.intent, s.decisions, s.openTodos, s.verify, files,
-      s.fileNotes ? Object.keys(s.fileNotes) : [], s.fileNotes ? Object.values(s.fileNotes) : [],
-    ]);
-    const { score, matched } = scoreEntry(text, files, terms);
+  for (const { s, files, text } of sessions) {
+    const { score, matched } = scoreEntry(text, files, scored);
     if (score < MEMORY_HIT_MIN_SCORE) continue;
     const lines: string[] = [];
     const when = (s.endedAt || s.startedAt || '').slice(0, 10);
@@ -1702,13 +2080,8 @@ export function searchMemoryForPrompt(repoPath: string, promptText: string, limi
     hits.push({ key: `s:${s.sessionId}`, kind: 'session', score, matched, lines });
   }
 
-  for (const c of payload.commits) {
-    const files = c.filesChanged || [];
-    const text = searchableText([
-      c.message, c.decisions, files,
-      c.fileNotes ? Object.keys(c.fileNotes) : [], c.fileNotes ? Object.values(c.fileNotes) : [],
-    ]);
-    const { score, matched } = scoreEntry(text, files, terms);
+  for (const { c, files, text } of commits) {
+    const { score, matched } = scoreEntry(text, files, scored);
     if (score < MEMORY_HIT_MIN_SCORE) continue;
     const lines: string[] = [];
     lines.push(`- [commit ${c.commitSha.slice(0, 8)}${c.committedAt ? `, ${c.committedAt.slice(0, 10)}` : ''}] ${oneLine(c.message || '', 180)}`);
@@ -1756,5 +2129,34 @@ export function buildPromptScopedMemoryContext(
         'decision above as binding prior context: if you are about to contradict one, say so and why.',
     ].join('\n'),
     keys: hits.map((h) => h.key),
+  };
+}
+
+// ─── Records about one file ──────────────────────────────────────────────────
+
+/**
+ * The memory records that changed `relPath`, newest first — the session and
+ * commit entries whose file list names it — plus every session, for TODOs.
+ * One payload read. Used by the
+ * per-file card, which wants the latest note, decision and open TODO for the
+ * file an agent is about to touch, not the repo's.
+ */
+export function readMemoryRecordsForFile(
+  repoPath: string,
+  relPath: string,
+): { sessions: SessionMemoryEntry[]; commits: CommitMemoryEntry[]; allSessions: SessionMemoryEntry[] } {
+  if (memoryReadBlocked(repoPath)) return { sessions: [], commits: [], allSessions: [] };
+  const payload = readMemoryPayload(repoPath);
+  const touches = (files: string[] | undefined) => (files || []).includes(relPath);
+  const when = (s: string | undefined | null) => Date.parse(s || '') || 0;
+  return {
+    sessions: payload.sessions
+      .filter((s) => touches(s.filesChanged))
+      .sort((a, b) => when(b.endedAt || b.startedAt) - when(a.endedAt || a.startedAt)),
+    commits: payload.commits
+      .filter((c) => touches(c.filesChanged))
+      .sort((a, b) => when(b.committedAt) - when(a.committedAt)),
+    // Every session, for open TODOs that name the file without having changed it.
+    allSessions: payload.sessions,
   };
 }

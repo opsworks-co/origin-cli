@@ -53,7 +53,8 @@ describe('Gemini JSONL token + prompt extraction', () => {
       if (!m.tokens) continue;
       if (m.id && seen.has(m.id)) continue;
       if (m.id) seen.add(m.id);
-      expectedInput += m.tokens.input || 0;
+      // `input` includes the cached part (tokens.total never adds `cached`).
+      expectedInput += (m.tokens.input || 0) - (m.tokens.cached || 0);
       expectedOutput += (m.tokens.output || 0) + (m.tokens.thoughts || 0);
       expectedCached += m.tokens.cached || 0;
     }

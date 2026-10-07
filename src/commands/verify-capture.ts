@@ -25,6 +25,120 @@ import {
   type VerifiableHeader,
   type VerifiableTurn,
 } from '../capture-verify.js';
+import { serverRowForLocalTurn } from '../turn-index.js';
+import { readJournalEntries } from '../write-journal-watch.js';
+import { fencesInTurn, turnFileChanges, type JournalEntry } from '../write-journal.js';
+import { hashContent } from '../write-journal-store.js';
+import { fenceBeforeStates } from '../capture-from-ledger.js';
+import { changedFilesBetween, readFileAtRev } from '../git-capture.js';
+import { isOriginAutoManagedPath, shouldIgnoreFile } from '../ignore-patterns.js';
+import type { PromptEdit } from '../prompt-capture/types.js';
+
+/** Evidence that the turn's own hand wrote the file: a hook saw the tool call. */
+const HOOK_ATTESTED = new Set(['tool_call', 'edit_hook']);
+
+/**
+ * Files each ROW's turn wrote by its own hand, from the state file's
+ * `liveEdits` — the post-tool-use hook's record of every Edit/Write it saw
+ * succeed inside the repo (tool-use.ts skips a failed call and a file outside
+ * the repo before anything lands here). A no-op edit (same bytes before and
+ * after) is not a write. Less what the write journal saw put back within the
+ * turn (`turnFileChanges`: before === after), which an older binary reported
+ * without `discardedFiles`.
+ *
+ * Put back, as the ledger reads it (capture-from-ledger.ts): the turn's last
+ * hash equals the hash it began with; or the journal never saw the file
+ * before this turn (before null — its first write this session) and the
+ * turn's last hash equals the file's bytes at the turn's baseline — or, when
+ * a checkout inside the turn rewrote the file, at the head that checkout
+ * left it on (the journal's fences, read as the ledger reads them). One
+ * `git show` for one file either way. b300fdf0 turn 10: four edits, `git
+ * checkout --` on the file, then `git checkout -B sync-main origin/main`;
+ * an older binary, no discardedFiles. Or the turn created and removed it
+ * (both null — a scratch test the turn wrote and deleted, 773b6ab3 turn 14).
+ *
+ * `liveEdits` are numbered in LOCAL turn space; rows are server rows. The
+ * journal is read at most once per session, and only when some turn has an
+ * own write to check.
+ */
+function ownWriteFilesByRow(d: Record<string, unknown>): Map<number, string[]> {
+  const live = Array.isArray(d.liveEdits)
+    ? (d.liveEdits as Array<{ promptIndex?: unknown; edits?: PromptEdit[] }>)
+    : [];
+  const byLocal = new Map<number, Set<string>>();
+  for (const entry of live) {
+    if (!entry || !Number.isInteger(entry.promptIndex as number)) continue;
+    for (const e of entry.edits || []) {
+      if (!e || typeof e.file !== 'string' || !e.file) continue;
+      if (typeof e.evidence !== 'string' || !HOOK_ATTESTED.has(e.evidence)) continue;
+      // A file capture never carries is not one a row lost: the same filter
+      // Stop applies (stop.ts). `.claude/launch.json` is the live case — the
+      // agent writes it with its own Write to open the Browser pane, and
+      // capture ignores it on purpose (ignore-patterns.ts); counting it made
+      // every preview turn an emptied row (0ad438e9 turn 5, 2026-09-28).
+      if (isOriginAutoManagedPath(e.file) || shouldIgnoreFile(e.file)) continue;
+      if (typeof e.oldContent === 'string' && typeof e.newContent === 'string' && e.oldContent === e.newContent) continue;
+      const local = entry.promptIndex as number;
+      const set = byLocal.get(local) || new Set<string>();
+      set.add(e.file);
+      byLocal.set(local, set);
+    }
+  }
+  const base = Number.isInteger(d.promptIndexBase as number) ? (d.promptIndexBase as number) : 0;
+  const turnIds = Array.isArray(d.promptTurnIds) ? (d.promptTurnIds as unknown[]) : [];
+  const journalPath = typeof d.writeJournalPath === 'string' ? d.writeJournalPath : null;
+  let entries: JournalEntry[] | null = null;
+  const out = new Map<number, string[]>();
+  for (const [local, files] of byLocal) {
+    let kept = [...files];
+    const turnId = turnIds[local];
+    if (journalPath && typeof turnId === 'string' && turnId) {
+      if (entries === null) {
+        try { entries = readJournalEntries(journalPath); } catch { entries = []; }
+      }
+      if (entries.length > 0) {
+        try {
+          const changes = turnFileChanges(entries, turnId);
+          const repoPath = typeof d.repoPath === 'string' ? d.repoPath : null;
+          const putBack = new Set<string>();
+          let fenced: Map<string, string | null> | null = null;
+          for (const c of changes) {
+            if (!kept.includes(c.file)) continue;
+            if (c.beforeHash === c.afterHash) { putBack.add(c.file); continue; }
+            if (c.beforeHash !== null || c.afterHash === null || !repoPath) continue;
+            if (fenced === null) {
+              fenced = fenceBeforeStates(fencesInTurn(entries, turnId), kept, {
+                readAtRev: (sha, f) => readFileAtRev(repoPath, sha, f),
+                changedFilesBetween: (from, to) => changedFilesBetween(repoPath, from, to),
+              }).before;
+            }
+            const at = baselineForLocalTurn(d, local);
+            const bytes = fenced.has(c.file)
+              ? fenced.get(c.file) ?? null
+              : (at ? readFileAtRev(repoPath, at, c.file) : null);
+            if (bytes !== null && hashContent(bytes) === c.afterHash) putBack.add(c.file);
+          }
+          kept = kept.filter((f) => !putBack.has(f));
+        } catch { /* an unreadable journal explains nothing away */ }
+      }
+    }
+    if (kept.length > 0) out.set(serverRowForLocalTurn(local, base), kept);
+  }
+  return out;
+}
+
+/** The tree a turn's ledger diffs against — the same ladder capture-from-ledger.ts climbs. */
+function baselineForLocalTurn(d: Record<string, unknown>, local: number): string | null {
+  const shadows = Array.isArray(d.promptShadows)
+    ? (d.promptShadows as Array<{ promptIndex?: unknown; shadowSha?: unknown }>)
+    : [];
+  const own = shadows.find((ps) => ps && ps.promptIndex === local);
+  const sha = (typeof own?.shadowSha === 'string' && own.shadowSha)
+    || (typeof d.prePromptSha === 'string' && d.prePromptSha)
+    || (typeof d.headShaAtStart === 'string' && d.headShaAtStart)
+    || null;
+  return sha && /^[0-9a-f]{7,40}$/i.test(sha) ? sha : null;
+}
 
 interface StoredSession {
   sessionId: string;
@@ -88,6 +202,18 @@ function collectSessions(cwd?: string): StoredSession[] {
     // here rather than dropped, so a session made entirely of them is reported
     // as unverifiable instead of vanishing into a smaller denominator.
     const turns = rows.filter((t) => !isFileSetRecord(t));
+    // What each turn wrote by its own hand, beside the row — so an emptied
+    // row can be told from a chat-only one (verifySession). The open turn's
+    // row is still being written and is not asked.
+    const ownWrites = ownWriteFilesByRow(d);
+    const activeLocal = (d.activeTurn as { index?: unknown } | null | undefined)?.index;
+    const openRow = Number.isInteger(activeLocal as number)
+      ? serverRowForLocalTurn(activeLocal as number, Number.isInteger(d.promptIndexBase as number) ? (d.promptIndexBase as number) : 0)
+      : null;
+    for (const t of turns) {
+      const own = ownWrites.get(t.promptIndex);
+      if (own && t.promptIndex !== openRow) t.ownWriteFiles = own;
+    }
     const hasHeader = Array.isArray(d.filesChanged)
       || Number.isFinite(d.linesAdded as number)
       || Number.isFinite(d.linesRemoved as number);
@@ -113,8 +239,20 @@ function collectSessions(cwd?: string): StoredSession[] {
     // arithmetic, not a defect. Session ed0e33c8 (base 23, rows 23-24) read as
     // 10 header files in no turn; 8 of them were rows 0-22's.
     const base = Number.isInteger(d.promptIndexBase as number) ? (d.promptIndexBase as number) : 0;
+    // The tell that rows really are elsewhere: a commit record older than this
+    // state file. A re-launch keeps the session's commit records and stamps a
+    // new `startedAt` (ed0e33c8 had eleven from before its launch); an ADOPTED
+    // session also starts at a base above zero, but every commit it holds is
+    // its own and its header totals only those — holding that header back
+    // exempted it from the one check it has. No record, or no start time, and
+    // the header is checked: the hold-back needs evidence, not its absence.
+    const startedMs = typeof d.startedAt === 'string' ? Date.parse(d.startedAt) : NaN;
+    const commitTurns = Array.isArray(d.commitTurns) ? (d.commitTurns as Array<{ at?: unknown }>) : [];
+    const commitsFromAnEarlierLaunch = Number.isFinite(startedMs)
+      && commitTurns.some((c) => typeof c?.at === 'string' && Date.parse(c.at) < startedMs);
     const earlierRowsElsewhere = hasHeader && base > 0
-      && !turns.some((t) => Number.isInteger(t.promptIndex) && t.promptIndex < base);
+      && !turns.some((t) => Number.isInteger(t.promptIndex) && t.promptIndex < base)
+      && commitsFromAnEarlierLaunch;
     out.push({
       sessionId: d.sessionId,
       agentSlug: typeof d.agentSlug === 'string' ? d.agentSlug : undefined,

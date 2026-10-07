@@ -89,6 +89,10 @@ beforeEach(() => {
 
   execFileSync('git', ['init', '--bare', '-b', 'main', upstream], { stdio: 'pipe' });
   execFileSync('git', ['clone', upstream, alice], { stdio: 'pipe' });
+  // Memory leaves the machine only with the prompt opt-in (OR-48); this
+  // fixture publishes it on purpose. Excluded so no fixture commit picks it up.
+  fs.writeFileSync(path.join(alice, '.origin.json'), JSON.stringify({ notesIncludePrompts: true }));
+  fs.appendFileSync(path.join(alice, '.git', 'info', 'exclude'), '\n.origin.json\n');
   muteHooks(alice);
   git(alice, 'config', 'user.email', 'alice@test.dev');
   git(alice, 'config', 'user.name', 'Alice');
@@ -133,6 +137,42 @@ describe('a TODO closure travels with the repo', () => {
     expect(bobOpen).not.toContain(TODO);
     // ...and it closed ONLY what was closed.
     expect(bobOpen).toContain(OTHER);
+  });
+
+  it('a closure stuck in the local store is lifted when the list is read from ANOTHER checkout of the repo', () => {
+    // The shape that kept 407 finished TODOs open on prod: closed from the
+    // main checkout, then the note was rewritten without it, and every later
+    // read came from a worktree — whose path never matched the store's.
+    writeMemory(alice, [session('s1', [TODO, OTHER])]);
+    asMachine(aliceHome);
+    const target = getOpenTodos(alice).find((t) => t.text === TODO)!;
+    // A local-only closure, as an older CLI (or a lost note write) left it.
+    const storeFile = path.join(aliceHome, '.origin', 'origin-todos.json');
+    fs.mkdirSync(path.dirname(storeFile), { recursive: true });
+    fs.writeFileSync(storeFile, JSON.stringify({ version: 1, items: [{
+      ...target, status: 'done', doneAt: '2026-09-02T00:00:00.000Z', repoPath: alice,
+    }] }));
+    expect(readTodoClosures(alice)).toEqual([]);
+
+    const wt = path.join(tmpRoot, 'alice-wt');
+    git(alice, 'worktree', 'add', '-q', '--detach', wt);
+    expect(getOpenTodos(wt).map((t) => t.text)).not.toContain(TODO);
+    // Now in the note, so it reaches every machine.
+    expect(readTodoClosures(alice).map((c) => c.key)).toEqual([todoClosureKey(TODO)]);
+  });
+
+  it('does not lift a same-worded closure from a DIFFERENT repository', () => {
+    writeMemory(alice, [session('s1', [TODO])]);
+    writeMemory(bob, [session('s1', [TODO])]);
+    asMachine(aliceHome);
+    const target = getOpenTodos(alice).find((t) => t.text === TODO)!;
+    const storeFile = path.join(aliceHome, '.origin', 'origin-todos.json');
+    fs.mkdirSync(path.dirname(storeFile), { recursive: true });
+    fs.writeFileSync(storeFile, JSON.stringify({ version: 1, items: [{
+      ...target, status: 'done', doneAt: '2026-09-02T00:00:00.000Z', repoPath: alice,
+    }] }));
+    getOpenTodos(bob);
+    expect(readTodoClosures(bob)).toEqual([]);
   });
 
   it('a closure recorded on either side survives the cross-machine merge, and confirmed beats pending', () => {

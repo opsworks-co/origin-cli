@@ -17,7 +17,7 @@ export function promptHistoryPayload(
       ...(state.promptTurnIds?.[localIndex] ? { turnId: state.promptTurnIds[localIndex] } : {}),
       // Identity, not capture: when this replay is a row's first write, the row
       // starts at its submit time rather than the replay's.
-      ...(state.promptSubmittedAt?.[localIndex] ? { createdAt: state.promptSubmittedAt[localIndex] } : {}),
+      ...(state.promptSubmittedAt?.[localIndex] ? { createdAt: state.promptSubmittedAt[localIndex], createdAtIsTurnStart: true } : {}),
     })),
   };
 }

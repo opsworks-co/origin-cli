@@ -19,12 +19,21 @@
  * when every one of these holds:
  *   - HEAD cannot reach it, no user branch, remote-tracking branch or tag
  *     contains it, and no other worktree stands on it;
- *   - it is not one side of a rewrite pair — an amend, rebase or squash is
- *     superseded, which the server handles separately;
+ *   - it is not the OLD side of a rewrite pair — an amended, rebased or
+ *     squashed commit is superseded, which the server handles separately. The
+ *     NEW side is a commit like any other and can be thrown away in turn:
+ *     session 507dca76 rebased "wip" (fe96a3f1 -> 8c9964cc), then reset off
+ *     8c9964cc and committed its work again with a version bump (7590cb76,
+ *     squash-merged as 8017df53). Skipping both sides kept 8c9964cc as live
+ *     work, and the turn showed it beside the squash: "2 commits total
+ *     +599/-11" for +301/-7;
  *   - a `reset:` in the reflog of the branch this tree is on (its HEAD's,
  *     when detached) moved off it: from a commit containing it to a strict
  *     ancestor of it. A reset on another branch, or on one since deleted — the
- *     cleanup after a squash-merge — proves nothing about this line of work;
+ *     cleanup after a squash-merge — proves nothing about this line of work,
+ *     with one exception: a branch another worktree still stands on, where a
+ *     commit FOLLOWED the reset (a sub-agent's worktree resetting its WIP and
+ *     redoing it — session df8cc9aa);
  *   - no commit HEAD reached since its parent carries its tree or its patch —
  *     that is a squash or a replay, which is supersession's to prove.
  * Anything short of that proof is kept, and so is anything git could not
@@ -32,6 +41,7 @@
  * unreadable object — is not a "no".
  */
 import { execFileSync } from 'child_process';
+import { commitsHeldByRefs } from './refs-holding.js';
 import type { ReflogRewrites } from './rewrite-proof.js';
 
 const gitOpts = (cwd: string) => ({
@@ -107,10 +117,10 @@ function patchIdsOf(repoPath: string, patchText: string | null): Set<string> | n
  * true when HEAD reached, since `sha`'s parent, a commit carrying its tree or
  * its patch; false when it provably did not; null when git could not say.
  */
-function survivesElsewhere(repoPath: string, sha: string): boolean | null {
+function survivesElsewhere(repoPath: string, sha: string, tip = 'HEAD'): boolean | null {
   const parent = (gitText(repoPath, ['rev-parse', '--verify', '--quiet', `${sha}^`]) ?? '').trim();
   if (!parent) return true;
-  const trees = gitText(repoPath, ['log', `-n${REWRITE_WINDOW_CAP + 1}`, '--format=%T', `${parent}..HEAD`]);
+  const trees = gitText(repoPath, ['log', `-n${REWRITE_WINDOW_CAP + 1}`, '--format=%T', `${parent}..${tip}`]);
   if (trees === null) return true;
   const windowTrees = trees.split('\n').filter(Boolean);
   if (windowTrees.length > REWRITE_WINDOW_CAP) return true;
@@ -121,7 +131,7 @@ function survivesElsewhere(repoPath: string, sha: string): boolean | null {
   if (own === null) return null;
   // A successful empty answer: the commit carries no patch to find elsewhere.
   if (own.size === 0) return false;
-  const window = patchIdsOf(repoPath, gitText(repoPath, ['log', '-p', '--format=commit %H', `${parent}..HEAD`]));
+  const window = patchIdsOf(repoPath, gitText(repoPath, ['log', '-p', '--format=commit %H', `${parent}..${tip}`]));
   if (window === null) return null;
   return [...own].some((id) => window.has(id));
 }
@@ -129,6 +139,26 @@ function survivesElsewhere(repoPath: string, sha: string): boolean | null {
 /** The reflog a reset of this tree's own line of work is recorded in. */
 function currentRef(repoPath: string): string {
   return (gitText(repoPath, ['symbolic-ref', '-q', '--short', 'HEAD']) ?? '').trim() || 'HEAD';
+}
+
+/**
+ * The branch every worktree of this repository stands on (short name) and the
+ * commit it stands on, or null when git could not list them. Detached trees
+ * have no branch and are left out.
+ */
+function worktreeBranches(repoPath: string): Map<string, string> | null {
+  let out: string;
+  try {
+    out = execFileSync('git', ['worktree', 'list', '--porcelain'], gitOpts(repoPath)).toString();
+  } catch { return null; }
+  const branches = new Map<string, string>();
+  let head = '';
+  for (const line of out.split('\n')) {
+    if (line.startsWith('HEAD ')) head = line.slice(5).trim();
+    else if (line.startsWith('branch refs/heads/') && HEX.test(head)) branches.set(line.slice('branch refs/heads/'.length).trim(), head);
+    else if (line.trim() === '') head = '';
+  }
+  return branches;
 }
 
 /** The HEAD of every worktree of this repository, or null when git could not list them. */
@@ -159,8 +189,21 @@ export function provenAbandonedCommits(
   let heads: string[] | null | undefined;
   let walk: ReflogRewrites | null = null;
   let ref: string | null = null;
+  let branches: Map<string, string> | null | undefined;
+  // Every recorded commit's "does a user ref hold it?" in one rev-list
+  // (refs-holding.ts), asked the first time an orphan needs it. A commit the
+  // batch did not answer falls back to heldByAUserRef.
+  let heldBatch: Map<string, boolean> | null | undefined;
+  const heldByUserRef = (full: string): boolean => {
+    if (heldBatch === undefined) {
+      const all = [...new Set(recorded.filter((s) => HEX.test(s)).map((s) => fullSha(repoPath, s)).filter(Boolean))];
+      heldBatch = commitsHeldByRefs(repoPath, all, { namespaces: ['refs/heads', 'refs/remotes', 'refs/tags'], excludeRef: (r) => ORIGIN_REF.test(r) });
+    }
+    const hit = heldBatch?.get(full);
+    return hit !== undefined ? hit : heldByAUserRef(repoPath, full);
+  };
   const rewrittenShas = (): Set<string> => (rewritten ??= new Set(
-    rewrites.flatMap((r) => [r.from, r.to]).filter((s): s is string => !!s).map((s) => fullSha(repoPath, s) || s.toLowerCase()),
+    rewrites.map((r) => r.from).filter((s): s is string => !!s).map((s) => fullSha(repoPath, s) || s.toLowerCase()),
   ));
   // Every step is asked for a PROVEN no. A step git could not run keeps the
   // commit: the session's real work must never be unlinked on a failed read.
@@ -168,16 +211,35 @@ export function provenAbandonedCommits(
     if (isAncestor(repoPath, sha, 'HEAD') !== false) continue;
     const full = fullSha(repoPath, sha);
     if (!full || out.includes(full) || rewrittenShas().has(full)) continue;
-    if (heldByAUserRef(repoPath, full)) continue;
+    if (heldByUserRef(full)) continue;
     if (heads === undefined) heads = worktreeHeads(repoPath);
     if (heads === null) continue;
     if (heads.some((h) => isAncestor(repoPath, full, h) !== false)) continue;
     ref ??= currentRef(repoPath);
-    const resetAway = (walk ??= reflog()).resets.some((r) => r.ref === ref
-      && r.to !== full
+    if (branches === undefined) branches = worktreeBranches(repoPath);
+    const movedOff = (r: { from: string; to: string }) => r.to !== full
       && isAncestor(repoPath, full, r.from) === true
-      && isAncestor(repoPath, r.to, full) === true);
-    if (resetAway && survivesElsewhere(repoPath, full) === false) out.push(full);
+      && isAncestor(repoPath, r.to, full) === true;
+    walk ??= reflog();
+    if (walk.resets.some((r) => r.ref === ref && movedOff(r))) {
+      if (survivesElsewhere(repoPath, full) === false) out.push(full);
+      continue;
+    }
+    // The commit was made in ANOTHER worktree of this session — a sub-agent's
+    // isolated worktree — and reset away and redone there. Session df8cc9aa
+    // turn 30: a sub-agent committed "WIP" 87c4cc36 on its own branch,
+    // `reset HEAD~1`, and committed the work again (rebased, squash-merged as
+    // #2087). The reset sat in that branch's reflog, never in the reflog of
+    // the branch the session's own tree was on, so 87c4cc36 stayed live work
+    // and the turn listed it beside the real commits ("3 commits net
+    // +680/-91" for +462/-60). Accepted only when a worktree still stands on
+    // that branch AND a commit followed the reset there — a cleanup after a
+    // squash-merge resets and stops — and when neither that branch nor this
+    // tree's HEAD carries the commit's tree or patch.
+    const other = walk.resets.find((r) => r.ref !== ref && r.redone && branches?.has(r.ref) && movedOff(r));
+    if (!other) continue;
+    const tip = branches!.get(other.ref)!;
+    if (survivesElsewhere(repoPath, full, tip) === false && survivesElsewhere(repoPath, full) === false) out.push(full);
   }
   return out;
 }

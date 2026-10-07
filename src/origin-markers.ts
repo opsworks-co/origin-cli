@@ -19,6 +19,7 @@
 // Kept regex-compatible with the server parser so both surfaces agree.
 
 import * as fs from 'fs';
+import { cleanPrompt } from './transcript.js';
 
 // Case-insensitive marker name, optional surrounding whitespace, optional
 // leading bullet/quote prefix (the caller strips that clutter first).
@@ -303,25 +304,366 @@ const TRANSCRIPT_READ_MAX_BYTES = 4 * 1024 * 1024;
 export function parseMarkersFromTranscriptPath(
   transcriptPath: string | null | undefined,
 ): OriginMarkers | undefined {
+  const raw = readTranscriptCapped(transcriptPath);
+  return raw === undefined ? undefined : parseMarkersFromTranscript(raw);
+}
+
+function readTranscriptCapped(
+  transcriptPath: string | null | undefined,
+  maxBytes: number = TRANSCRIPT_READ_MAX_BYTES,
+): string | undefined {
   if (!transcriptPath) return undefined;
   try {
     const stat = fs.statSync(transcriptPath);
-    let raw: string;
-    if (stat.size <= TRANSCRIPT_READ_MAX_BYTES) {
-      raw = fs.readFileSync(transcriptPath, 'utf-8');
-    } else {
-      const fd = fs.openSync(transcriptPath, 'r');
-      try {
-        const buf = Buffer.alloc(TRANSCRIPT_READ_MAX_BYTES);
-        const start = stat.size - TRANSCRIPT_READ_MAX_BYTES;
-        fs.readSync(fd, buf, 0, TRANSCRIPT_READ_MAX_BYTES, start);
-        raw = buf.toString('utf-8');
-      } finally {
-        fs.closeSync(fd);
-      }
+    if (stat.size <= maxBytes) return fs.readFileSync(transcriptPath, 'utf-8');
+    const fd = fs.openSync(transcriptPath, 'r');
+    try {
+      const buf = Buffer.alloc(maxBytes);
+      const start = stat.size - maxBytes;
+      fs.readSync(fd, buf, 0, maxBytes, start);
+      return buf.toString('utf-8');
+    } finally {
+      fs.closeSync(fd);
     }
-    return parseMarkersFromTranscript(raw);
   } catch {
     return undefined;
   }
+}
+
+// ─── Markers per turn ────────────────────────────────────────────────────────
+//
+// A marker is the agent's account of the work of the turn it was written in.
+// Parsing the whole transcript into one bag and stamping it on every commit
+// the session made put a turn's decision on commits that had nothing to do
+// with it — session 46b82050 tried a white-and-cyan logo on localhost, the
+// user rejected it ("commit only video change, design change is not
+// approved"), and "The logo on public pages became white with a cyan dot" was
+// recorded as the decision behind three landing-page commits, none of which
+// touched the logo. The repo's memory is what was COMMITTED: a marker belongs
+// to a commit only when the turn that wrote it is the turn that made it.
+
+export interface MarkerTurn {
+  /** When the turn's prompt was sent (ms), when the transcript records it. */
+  startedAt: number | null;
+  markers: OriginMarkers | undefined;
+  /**
+   * The lines the turn's tool calls wrote into files, normalized (see
+   * significantLine). How an earlier turn proves its work landed in a commit
+   * made by a later one.
+   */
+  written?: string[];
+}
+
+/** A commit to place: when it was made, and the lines it added (normalized). */
+export interface CommitEvidence {
+  at: number;
+  added?: ReadonlySet<string>;
+  /**
+   * The index (into the turns) of the turn that made it, when the caller
+   * already knows it — the transcript watcher pairs commits with turns itself.
+   * Places a commit in a transcript with no times, where `at` cannot.
+   */
+  turn?: number;
+}
+
+/** Split a transcript at its user prompts and parse each turn's markers. */
+export function splitMarkersByTurn(transcript: string | null | undefined): MarkerTurn[] {
+  if (!transcript) return [];
+  const trimmed = transcript.trim();
+  let records: unknown[] | null = null;
+  if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+    try {
+      const whole = JSON.parse(trimmed);
+      if (Array.isArray(whole)) records = whole;
+      else if (Array.isArray(whole?.messages)) records = whole.messages;
+    } catch { /* JSONL — line mode */ }
+  }
+  const rows: Array<{ rec: unknown; authored: boolean; text: string }> = [];
+  if (records) {
+    for (const m of records) {
+      rows.push({
+        rec: m,
+        authored: isAssistantAuthored(m),
+        text: typeof (m as { content?: unknown })?.content === 'string'
+          ? (m as { content: string }).content
+          : collectAuthoredStrings(m),
+      });
+    }
+  } else {
+    for (const line of transcript.split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      if (t.startsWith('{') || t.startsWith('[')) {
+        // A tool's RESULT is most of a long transcript's bytes (file reads,
+        // command output) and holds no prompt, no authored marker and nothing
+        // written, so it is not parsed at all. What reading it would have
+        // given is exactly what skipping it gives: nothing.
+        if (isToolResultLine(t)) continue;
+        try {
+          const rec = JSON.parse(t);
+          rows.push({ rec, authored: isAssistantAuthored(rec), text: collectAuthoredStrings(rec) });
+          continue;
+        } catch { /* not JSON — use raw */ }
+      }
+      rows.push({ rec: null, authored: false, text: line });
+    }
+  }
+  // Same fallback as joinAuthored: a transcript with no authorship at all is
+  // read whole, per turn.
+  const anyAuthored = rows.some((r) => r.authored);
+  const turns: Array<{ startedAt: number | null; texts: string[]; written: Set<string> }> = [{ startedAt: null, texts: [], written: new Set() }];
+  for (const r of rows) {
+    if (r.rec && isUserPrompt(r.rec)) {
+      turns.push({ startedAt: recordTime(r.rec), texts: [], written: new Set() });
+      continue;
+    }
+    if (r.rec) collectWrittenLines(r.rec, turns[turns.length - 1].written);
+    if (anyAuthored && !r.authored) continue;
+    turns[turns.length - 1].texts.push(r.text);
+  }
+  // No prompt found means no turn boundary to go by: nothing can be placed.
+  if (turns.length === 1) return [];
+  return turns.map((t) => ({
+    startedAt: t.startedAt,
+    markers: parseOriginMarkers(t.texts.join('\n')),
+    written: [...t.written],
+  }));
+}
+
+// One hook asks for the same transcript's turns more than once (post-commit:
+// the note, then the memory entry). Keyed on size and mtime, so a transcript
+// that grew is read again.
+let turnsCache: { key: string; turns: MarkerTurn[] } | null = null;
+
+// Claude Code files a tool result as its own record carrying `toolUseResult`;
+// Codex as a `*_call_output` item, named near the start of the line.
+function isToolResultLine(line: string): boolean {
+  if (line.includes('"toolUseResult"')) return true;
+  return /"type":\s*"(?:custom_tool_call_output|function_call_output)"/.test(line.slice(0, 300));
+}
+
+// The whole transcript, not the 4 MB tail parseMarkersFromTranscriptPath
+// reads: a decision belongs to the turn that wrote it, and in a long session
+// the turn a commit needs is often hours back — session 46b82050's transcript
+// was 11 MB and both its decisions were outside the tail. Bounded still, for a
+// transcript nothing should ever grow to.
+const MARKER_TURNS_MAX_BYTES = 256 * 1024 * 1024;
+
+export function readMarkerTurns(transcriptPath: string | null | undefined): MarkerTurn[] {
+  if (!transcriptPath) return [];
+  let key = '';
+  try {
+    const st = fs.statSync(transcriptPath);
+    key = `${transcriptPath}\0${st.size}\0${st.mtimeMs}`;
+  } catch {
+    return [];
+  }
+  if (turnsCache?.key === key) return turnsCache.turns;
+  const turns = splitMarkersByTurn(readTranscriptCapped(transcriptPath, MARKER_TURNS_MAX_BYTES));
+  turnsCache = { key, turns };
+  return turns;
+}
+
+// A commit's date has whole-second precision and is truncated, so a commit made
+// in the same second its turn's prompt was sent can read as slightly earlier.
+const COMMIT_TIME_SLACK_MS = 1000;
+
+/**
+ * The markers written in the turns that made these commits, merged.
+ *
+ * A commit's turn is the one the caller names (`turn`), else the last one whose
+ * prompt was sent before it. A transcript that records no times (Cursor) and
+ * gets none from the hook (withPromptTimes) cannot place a commit by time,
+ * except in the turn still running: `currentTurnStartedAt` (the hook's own
+ * record of the latest prompt) says whether the commit belongs to it. A commit that cannot be
+ * placed contributes nothing — a missing decision is invisible, a decision
+ * about work that was thrown away misleads whoever reads it next.
+ *
+ * An EARLIER turn joins when its work is in the commit: the agent made and
+ * explained the change in one turn, and "looks good, commit it" in the next
+ * made the commit. Its turn order and time alone cannot tell that apart from a
+ * design tried and thrown away before the commit (session 46b82050), so it has
+ * to show it: most of the lines its tool calls wrote are among the lines the
+ * commit added (`added`). A commit given with no `added` gets its own turn's
+ * markers only.
+ *
+ * `closes` is left out: it is a claim about an earlier session's leftover,
+ * checked against what landed elsewhere (todo-sweep.ts), not about these
+ * commits.
+ */
+export function markersOfCommitTurns(
+  turns: MarkerTurn[],
+  commits: Array<number | CommitEvidence>,
+  opts: { currentTurnStartedAt?: number | null } = {},
+): OriginMarkers | undefined {
+  if (turns.length === 0) return undefined;
+  const timed = turns.some((t) => t.startedAt !== null);
+  const picked = new Set<number>();
+  for (const c of commits) {
+    const { at, added, turn } = typeof c === 'number' ? { at: c, added: undefined, turn: undefined } : c;
+    let pick = -1;
+    if (turn !== undefined) {
+      if (Number.isInteger(turn) && turn >= 0 && turn < turns.length) pick = turn;
+    } else if (!Number.isFinite(at)) {
+      continue;
+    } else if (timed) {
+      for (let i = 0; i < turns.length; i++) {
+        const s = turns[i].startedAt;
+        if (s !== null && s <= at + COMMIT_TIME_SLACK_MS) pick = i;
+      }
+    } else if (opts.currentTurnStartedAt != null && at + COMMIT_TIME_SLACK_MS >= opts.currentTurnStartedAt) {
+      pick = turns.length - 1;
+    }
+    if (pick < 0) continue;
+    picked.add(pick);
+    if (added && added.size > 0) {
+      for (let j = 0; j < pick; j++) if (workLanded(turns[j].written, added)) picked.add(j);
+    }
+  }
+  const sets = [...picked].sort((a, b) => a - b).map((i) => turns[i].markers);
+  const merged = mergeMarkers(...sets);
+  if (merged) delete merged.closes;
+  return hasMarkers(merged) ? merged : undefined;
+}
+
+// Most of what the turn wrote is in the commit — at least half, and at least
+// two lines unless it wrote only one. A turn that wrote nothing (or only
+// deleted) has nothing to show and does not join.
+function workLanded(written: string[] | undefined, added: ReadonlySet<string>): boolean {
+  const lines = written || [];
+  if (lines.length === 0) return false;
+  let hit = 0;
+  for (const l of lines) if (added.has(l)) hit++;
+  return hit * 2 >= lines.length && hit >= Math.min(2, lines.length);
+}
+
+/**
+ * A line as both sides compare it: trimmed, inner whitespace collapsed. Empty
+ * when it is too generic to prove anything — short, or only punctuation (`});`,
+ * `}`, `</div>`) — since those recur in any commit.
+ */
+export function significantLine(line: string): string {
+  const t = line.trim().replace(/\s+/g, ' ');
+  if (t.length < 8) return '';
+  if (!/[A-Za-z0-9]{3}/.test(t)) return '';
+  return t;
+}
+
+// Keys under a tool call that carry text written into a file, across agents:
+// Claude Code / Cursor (new_string, content, contents, edits[].new_string),
+// Gemini (new_string, content), Antigravity (CodeContent, ReplacementContent,
+// ReplacementChunks[].ReplacementContent).
+const WRITE_KEYS = new Set([
+  'new_string', 'newString', 'new_str', 'content', 'contents', 'file_text', 'new_source',
+  'CodeContent', 'ReplacementContent',
+]);
+
+// Gather the lines a record's tool calls wrote. Only inside tool-call nodes —
+// a tool RESULT (a file the agent read) is somebody else's text.
+function collectWrittenLines(rec: unknown, out: Set<string>): void {
+  const visit = (v: unknown, inCall: boolean, key: string, depth: number): void => {
+    if (depth > 12 || v == null) return;
+    if (typeof v === 'string') {
+      if (!inCall) return;
+      // Codex apply_patch: the added lines are the `+` lines.
+      if (/^\*\*\* Begin Patch/m.test(v)) {
+        for (const l of v.split('\n')) if (l.startsWith('+') && !l.startsWith('+++')) add(l.slice(1));
+        return;
+      }
+      // Double-encoded arguments (Antigravity, function_call.arguments).
+      const t = v.trim();
+      if ((t.startsWith('{') || t.startsWith('[') || t.startsWith('"')) && t.length > 1) {
+        try {
+          const parsed = JSON.parse(t);
+          if (typeof parsed !== 'string' || WRITE_KEYS.has(key)) {
+            visit(parsed, true, key, depth + 1);
+            return;
+          }
+        } catch { /* not JSON */ }
+      }
+      if (WRITE_KEYS.has(key)) for (const l of v.split('\n')) add(l);
+      return;
+    }
+    if (Array.isArray(v)) {
+      for (const x of v) visit(x, inCall, key, depth + 1);
+      return;
+    }
+    if (typeof v !== 'object') return;
+    const o = v as Record<string, unknown>;
+    const type = typeof o.type === 'string' ? o.type.toLowerCase() : '';
+    if (type === 'tool_result' || type === 'custom_tool_call_output' || type === 'function_call_output') return;
+    const call = inCall || type === 'tool_use' || type === 'custom_tool_call' || type === 'function_call';
+    for (const [k, x] of Object.entries(o)) {
+      if (k === 'toolUseResult') continue;
+      visit(x, call || k === 'tool_calls' || k === 'functionCall', k, depth + 1);
+    }
+  };
+  const add = (l: string) => {
+    const s = significantLine(l);
+    if (s) out.add(s);
+  };
+  visit(rec, false, '', 0);
+}
+
+/** Union of marker sets, de-duped per bucket, first seen first. */
+export function mergeMarkers(...sets: Array<OriginMarkers | undefined | null>): OriginMarkers | undefined {
+  const out: OriginMarkers = {};
+  for (const kind of ['intent', 'decision', 'open', 'verify', 'closes'] as const) {
+    const seen = new Set<string>();
+    const items: string[] = [];
+    for (const s of sets) {
+      for (const item of s?.[kind] || []) {
+        const key = item.toLowerCase();
+        if (seen.has(key) || items.length >= MAX_PER_BUCKET) continue;
+        seen.add(key);
+        items.push(item);
+      }
+    }
+    if (items.length) out[kind] = items;
+  }
+  return hasMarkers(out) ? out : undefined;
+}
+
+// A prompt the user sent — the start of a turn. Not a tool result (Claude Code
+// files those as `type: "user"`), not a harness injection — marked as meta,
+// or recognisable only by its text, like a background task's
+// `<task-notification>` (cleanPrompt, the same rule the prompt list uses) —
+// not a compaction summary. Session 46b82050: a task notification landing
+// mid-turn split the turn between its commit and the decision about it.
+function isUserPrompt(rec: unknown): boolean {
+  const text = userPromptText(rec);
+  return text !== null && cleanPrompt(text) !== null;
+}
+
+function userPromptText(rec: unknown): string | null {
+  if (!rec || typeof rec !== 'object') return null;
+  const o = rec as Record<string, any>;
+  if (o.isMeta || o.isCompactSummary || o.isSidechain || o.toolUseResult !== undefined) return null;
+  // Antigravity: a step per line, the user's request wrapped in <USER_REQUEST>.
+  if (o.type === 'USER_INPUT') {
+    const c = String(o.content || '');
+    return o.source === 'USER_EXPLICIT' && /<USER_REQUEST>/.test(c) ? c : null;
+  }
+  const payload = o.payload && typeof o.payload === 'object' ? o.payload : undefined;
+  if (payload?.type === 'user_message') return typeof payload.message === 'string' && payload.message.trim() ? payload.message : null;
+  const role = String(o.message?.role ?? o.role ?? payload?.role ?? (o.type === 'user' ? 'user' : '')).toLowerCase();
+  if (role !== 'user') return null;
+  const content = o.message?.content ?? o.content ?? payload?.content ?? o.parts;
+  if (typeof content === 'string') return content.trim() ? content : null;
+  if (Array.isArray(content)) {
+    const text = content
+      .filter((b) => b && typeof b === 'object' && (b.type === undefined || b.type === 'text' || b.type === 'input_text') && typeof b.text === 'string')
+      .map((b) => b.text)
+      .join('\n');
+    return text.trim() ? text : null;
+  }
+  return null;
+}
+
+function recordTime(rec: unknown): number | null {
+  const o = rec as Record<string, unknown>;
+  const raw = o?.timestamp ?? o?.created_at ?? (o?.payload as Record<string, unknown> | undefined)?.timestamp;
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+  const t = typeof raw === 'number' ? raw : Date.parse(raw);
+  return Number.isFinite(t) ? t : null;
 }

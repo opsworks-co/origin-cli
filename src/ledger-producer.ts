@@ -23,7 +23,7 @@ import fs from 'fs';
 import { changedFilesBetween, readFileAtRev, gitIgnoredFiles } from './git-capture.js';
 import { debugLog } from './debug-log.js';
 import { listActiveSessions, type SessionState } from './session-state.js';
-import { detectLiveContention } from './checkout-contention.js';
+import { detectLiveContention, contentionCoversTurn, readContentionTaint } from './checkout-contention.js';
 import type { TurnObservation } from './resolve-turn.js';
 
 /**
@@ -156,10 +156,14 @@ export function producerLedgerIsContended(tag: string, workRoot: string): boolea
   try {
     const { journalPath } = journalPathsForTag(tag, workRoot);
     const taintPath = `${journalPath}.contended`;
-    if (fs.existsSync(taintPath)) return true;
+    const taint = readContentionTaint(taintPath);
+    if (taint?.permanent) return true;
     const sessions = listActiveSessions(workRoot);
     const self = sessions.find((s) => s.sessionTag === tag);
-    if ((self?.contendingSessionIds?.length || 0) > 0) return true;
+    // Rivals cover the turn in flight only while they were not gone before it
+    // began (contentionCoversTurn). Without our own state the taint stands.
+    if (taint && !self) return true;
+    if (self && contentionCoversTurn(self, self.currentTurnStartedAt, taint?.peers)) return true;
     const report = self ? detectLiveContention(self, workRoot, sessions) : null;
     if (!report?.contested) return false;
     // This is a correctness marker, not a lock: it deliberately survives the
@@ -177,21 +181,29 @@ export function producerLedgerIsContended(tag: string, workRoot: string): boolea
 
 /** The hook and heartbeat already have their own state, so no tag lookup. */
 export function stateLedgerIsContended(
-  state: Pick<SessionState, 'sessionId' | 'sessionTag' | 'writeJournalPath' | 'contendingSessionIds'>,
+  state: Pick<SessionState, 'sessionId' | 'sessionTag' | 'writeJournalPath' | 'contendingSessionIds' | 'contenderGoneAt' | 'currentTurnStartedAt'>,
   workRoot: string,
 ): boolean {
   if (!state.sessionId || !workRoot) return false;
   try {
-    if ((state.contendingSessionIds?.length || 0) > 0) return true;
     const tag = state.sessionTag || state.sessionId.slice(0, 12);
     const { journalPath: derivedJournalPath } = journalPathsForTag(tag, workRoot);
     const journalPath = state.writeJournalPath || derivedJournalPath;
-    if (fs.existsSync(`${journalPath}.contended`)) return true;
+    // An incomplete journal can never prove a turn; a rival's taint covers
+    // only the turns it could have written into (contentionCoversTurn).
+    const taint = readContentionTaint(`${journalPath}.contended`);
+    if (taint?.permanent) return true;
+    if (contentionCoversTurn(state, state.currentTurnStartedAt, taint?.peers)) return true;
     const report = detectLiveContention(state, workRoot);
     if (!report.contested) return false;
     try {
       fs.writeFileSync(`${journalPath}.contended`, JSON.stringify({ at: Date.now(), peers: report.peers.map((p) => p.sessionId) }));
     } catch { /* current collision still declines this capture */ }
+    // Record them as rivals too, so the next prompt can see them go and later
+    // turns are released — the taint alone has no one to clear it.
+    const ids = new Set(state.contendingSessionIds || []);
+    for (const p of report.peers) ids.add(p.sessionId);
+    state.contendingSessionIds = [...ids];
     return true;
   } catch { return false; }
 }

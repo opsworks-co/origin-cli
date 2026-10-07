@@ -17,6 +17,8 @@
 // left. A section that does not carry the whole file cannot be rebuilt and is
 // dropped, as before.
 
+import fs from 'fs';
+import path from 'path';
 import { renderFileDiff } from './write-journal-diff.js';
 
 export const ORIGIN_MANAGED_MARKER = '<!-- origin-managed -->';
@@ -168,3 +170,31 @@ export function agentPartOfManagedSection(section: string, file: string): string
   if (before === after) return '';
   return renderFileDiff({ file, before, after }, 2000).replace(/\n+$/, '');
 }
+
+/**
+ * Does this repo's CLAUDE.md hold nothing but Origin's block while the repo
+ * keeps its own instructions in AGENTS.md?
+ *
+ * Origin used to create CLAUDE.md for its notice in every repo. Since Claude
+ * Code 2.1.277 reads AGENTS.md only where there is no CLAUDE.md, that file hides
+ * the user's AGENTS.md from Claude. Origin only WARNS about it (session start,
+ * `origin doctor`) — it never deletes a file in the user's repo; the user
+ * decides. A CLAUDE.md with a single line of anyone else's, or an AGENTS.md
+ * that is only Origin's block, is not reported.
+ */
+export function originOnlyClaudeMdHidesAgentsMd(repoPath: string): boolean {
+  try {
+    const own = fs.readFileSync(path.join(repoPath, 'CLAUDE.md'), 'utf-8');
+    if (!own.includes(ORIGIN_MANAGED_MARKER) || stripOriginManagedBlock(own).trim()) return false;
+    const agents = fs.readFileSync(path.join(repoPath, 'AGENTS.md'), 'utf-8');
+    return !!stripOriginManagedBlock(agents).trim();
+  } catch {
+    return false; // either file absent or unreadable
+  }
+}
+
+/** The one-line warning shown when originOnlyClaudeMdHidesAgentsMd is true. */
+export const ORIGIN_ONLY_CLAUDE_MD_WARNING =
+  "Origin: this repo's CLAUDE.md holds only Origin's block, so Claude Code does not load your AGENTS.md. "
+  + 'Delete CLAUDE.md to let Claude read AGENTS.md — Origin will not create it again.';
+

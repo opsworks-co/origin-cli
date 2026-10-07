@@ -1,0 +1,1231 @@
+{
+ "note": "Recorded by packages/cli capture-e2e-reset-away-commits-leave-the-session with ORIGIN_UPDATE_GOLDEN=1. Replayed by apps/api session-reset-away-commits-real-db.test.ts.",
+ "roots": [
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8/shared-squash",
+  "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8"
+ ],
+ "roles": {
+  "base": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+  "own": "9fa61a73167108804b81caed2868de2e9537fefa",
+  "wip": "7341c6949cac33f22cacd406526760ca2ee0d28d",
+  "redo": "4e0a9c7749169de22bc41d542b3336d94dd28021",
+  "rebased": "f7fe1177883427e9c9731c566338340b105feedd",
+  "follow": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+  "squash": "71efd93b5723c8f79beb543d93387f2b3d429f1b"
+ },
+ "marker": "WIP_ONLY_MARKER",
+ "requests": [
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "src/snapshot.ts"
+    ],
+    "branch": "fix/api-tests",
+    "gitCapture": {
+     "headBefore": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+     "headAfter": "9fa61a73167108804b81caed2868de2e9537fefa",
+     "commitShas": [
+      "9fa61a73167108804b81caed2868de2e9537fefa"
+     ],
+     "commitDetails": [
+      {
+       "sha": "9fa61a73167108804b81caed2868de2e9537fefa",
+       "message": "test(api): three tests stop timing out\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/snapshot.ts"
+       ],
+       "linesAdded": 2,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "turnId": "t_b8c7aa530de34a80",
+      "createdAt": "2026-10-03T23:07:21.981Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_b44f63e58f81481f",
+      "capturedAt": 1791068844637,
+      "promptText": "yes do 1 and 2",
+      "filesChanged": [
+       "src/snapshot.ts"
+      ],
+      "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;",
+      "commitPatch": true,
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "commitSha": "9fa61a73167108804b81caed2868de2e9537fefa",
+      "commitMessage": "test(api): three tests stop timing out"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+     "headAfter": "9fa61a73167108804b81caed2868de2e9537fefa",
+     "commitShas": [
+      "9fa61a73167108804b81caed2868de2e9537fefa"
+     ],
+     "commitDetails": [
+      {
+       "sha": "9fa61a73167108804b81caed2868de2e9537fefa",
+       "message": "test(api): three tests stop timing out\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/snapshot.ts"
+       ],
+       "linesAdded": 2,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;"
+      }
+     ],
+     "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;",
+     "diffTruncated": false,
+     "linesAdded": 2,
+     "linesRemoved": 0,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "src/subagent_check.ts"
+    ],
+    "branch": "test/subagent-reset-redo",
+    "gitCapture": {
+     "headBefore": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+     "headAfter": "4e0a9c7749169de22bc41d542b3336d94dd28021",
+     "commitShas": [
+      "4e0a9c7749169de22bc41d542b3336d94dd28021"
+     ],
+     "commitDetails": [
+      {
+       "sha": "4e0a9c7749169de22bc41d542b3336d94dd28021",
+       "message": "chore: subagent reset check (redo)\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/subagent_check.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "turnId": "t_b8c7aa530de34a80",
+      "createdAt": "2026-10-03T23:07:21.981Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_820003d139764b3b",
+      "capturedAt": 1791068849755,
+      "promptText": "yes do 1 and 2",
+      "filesChanged": [
+       "src/subagent_check.ts"
+      ],
+      "diff": "diff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;",
+      "commitPatch": true,
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "commitSha": "4e0a9c7749169de22bc41d542b3336d94dd28021",
+      "commitMessage": "chore: subagent reset check (redo)"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+     "headAfter": "4e0a9c7749169de22bc41d542b3336d94dd28021",
+     "commitShas": [
+      "4e0a9c7749169de22bc41d542b3336d94dd28021"
+     ],
+     "commitDetails": [
+      {
+       "sha": "4e0a9c7749169de22bc41d542b3336d94dd28021",
+       "message": "chore: subagent reset check (redo)\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/subagent_check.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;"
+      }
+     ],
+     "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;\ndiff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;",
+     "diffTruncated": false,
+     "linesAdded": 3,
+     "linesRemoved": 0,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+     "headAfter": "9fa61a73167108804b81caed2868de2e9537fefa",
+     "commitShas": [
+      "9fa61a73167108804b81caed2868de2e9537fefa",
+      "4e0a9c7749169de22bc41d542b3336d94dd28021"
+     ],
+     "commitDetails": [
+      {
+       "sha": "9fa61a73167108804b81caed2868de2e9537fefa",
+       "message": "test(api): three tests stop timing out\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/snapshot.ts"
+       ],
+       "linesAdded": 2,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;",
+       "committedAt": 1791068843000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      },
+      {
+       "sha": "4e0a9c7749169de22bc41d542b3336d94dd28021",
+       "patch": "diff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;",
+       "message": "chore: subagent reset check (redo)",
+       "author": "E2E",
+       "committedAt": "2026-10-03T19:07:28-04:00",
+       "filesChanged": [
+        "src/subagent_check.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "yes do 1 and 2",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "src/snapshot.ts"
+    ],
+    "tokensUsed": 16,
+    "tokensEstimated": true,
+    "inputTokens": 4,
+    "outputTokens": 12,
+    "toolCalls": 5,
+    "toolBreakdown": [
+     {
+      "name": "Bash",
+      "count": 4
+     },
+     {
+      "name": "Write",
+      "count": 1
+     }
+    ],
+    "durationMs": 9674,
+    "costUsd": 0.0003,
+    "gitCapture": {
+     "headBefore": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+     "headAfter": "9fa61a73167108804b81caed2868de2e9537fefa",
+     "commitShas": [
+      "9fa61a73167108804b81caed2868de2e9537fefa",
+      "4e0a9c7749169de22bc41d542b3336d94dd28021"
+     ],
+     "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;\ndiff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;",
+     "linesAdded": 3,
+     "linesRemoved": 0,
+     "commitDetails": [
+      {
+       "sha": "9fa61a73167108804b81caed2868de2e9537fefa",
+       "message": "test(api): three tests stop timing out\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/snapshot.ts"
+       ],
+       "linesAdded": 2,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;",
+       "committedAt": 1791068843000,
+       "preSessionLinesAdded": 0,
+       "preSessionLinesRemoved": 0
+      },
+      {
+       "sha": "4e0a9c7749169de22bc41d542b3336d94dd28021",
+       "patch": "diff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;",
+       "message": "chore: subagent reset check (redo)",
+       "author": "E2E",
+       "committedAt": "2026-10-03T19:07:28-04:00",
+       "filesChanged": [
+        "src/subagent_check.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0
+      }
+     ],
+     "snapshot": true,
+     "abandonedCommits": [
+      "7341c6949cac33f22cacd406526760ca2ee0d28d"
+     ]
+    },
+    "commitTurns": [
+     {
+      "sha": "9fa61a73167108804b81caed2868de2e9537fefa",
+      "turnId": "t_b8c7aa530de34a80",
+      "at": "2026-10-03T23:07:24.438Z",
+      "via": "post-commit"
+     },
+     {
+      "sha": "4e0a9c7749169de22bc41d542b3336d94dd28021",
+      "turnId": "t_b8c7aa530de34a80",
+      "at": "2026-10-03T23:07:29.270Z",
+      "via": "post-commit"
+     }
+    ],
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "yes do 1 and 2",
+      "filesChanged": [
+       "src/snapshot.ts",
+       "src/subagent_check.ts"
+      ],
+      "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;\ndiff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;\n",
+      "edits": [
+       {
+        "file": "src/snapshot.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8/shared-squash/src/snapshot.ts",
+         "content": "export const SNAPSHOT = 1;\nexport const READS = 2;\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add -A && git commit -m \"test(api): three tests stop timing out\"",
+       "cd /private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8/shared-squash-worktrees/agent-a97c && git add -A && git commit -m WIP",
+       "cd /private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8/shared-squash-worktrees/agent-a97c && git reset --hard HEAD~1 && git commit -am redo"
+      ],
+      "wroteViaShell": true,
+      "shellWriteCommands": [
+       "cd /private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8/shared-squash-worktrees/agent-a97c && git reset --hard HEAD~1 && git commit -am redo"
+      ],
+      "uncommittedDiff": "",
+      "linesAdded": 3,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "discardedFiles": [],
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "commitPatch": true,
+      "commitSha": "4e0a9c7749169de22bc41d542b3336d94dd28021",
+      "patchCommits": [
+       "9fa61a73167108804b81caed2868de2e9537fefa",
+       "4e0a9c7749169de22bc41d542b3336d94dd28021"
+      ],
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"yes do 1 and 2\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/snapshot.ts\",\"op\":\"write\",\"newContent\":\"export const SNAPSHOT = 1;\\nexport const READS = 2;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/snapshot.ts\",\"op\":\"create\",\"newContent\":\"export const SNAPSHOT = 1;\\nexport const READS = 2;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/subagent_check.ts\",\"op\":\"create\",\"oldContent\":\"\",\"newContent\":\"export const SUBAGENT_REDO = 2;\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"9fa61a73167108804b81caed2868de2e9537fefa\"],\"finalHunks\":[{\"file\":\"src/snapshot.ts\",\"start\":1,\"lines\":[\"export const SNAPSHOT = 1;\",\"export const READS = 2;\"]}]}",
+      "turnId": "t_b8c7aa530de34a80",
+      "createdAt": "2026-10-03T23:07:21.981Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_bef26af905b04bc1",
+      "capturedAt": 1791068854035
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "yes do 1 and 2\n\n---\n\nis it merged?",
+    "filesChanged": [
+     "src/snapshot.ts"
+    ],
+    "tokensUsed": 28,
+    "inputTokens": 7,
+    "outputTokens": 21,
+    "toolCalls": 5,
+    "durationMs": 14388,
+    "costUsd": 0.0006,
+    "status": "RUNNING",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "yes do 1 and 2",
+      "filesChanged": [
+       "src/snapshot.ts",
+       "src/subagent_check.ts"
+      ],
+      "contentUnavailableFiles": [],
+      "diffSource": "turn-window",
+      "ledgerOwned": true,
+      "discardedFiles": [],
+      "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;\ndiff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;\n",
+      "uncommittedDiff": "",
+      "linesAdded": 3,
+      "linesRemoved": 0,
+      "commitSha": "4e0a9c7749169de22bc41d542b3336d94dd28021",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "commitPatch": true,
+      "patchCommits": [
+       "9fa61a73167108804b81caed2868de2e9537fefa",
+       "4e0a9c7749169de22bc41d542b3336d94dd28021"
+      ],
+      "capturedAt": 1791068855556,
+      "turnId": "t_b8c7aa530de34a80",
+      "createdAt": "2026-10-03T23:07:21.981Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_1dcf6e3d08a846b2",
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "src/snapshot.ts"
+    ],
+    "branch": "fix/api-tests",
+    "gitCapture": {
+     "rewrittenCommits": [
+      {
+       "from": "9fa61a73167108804b81caed2868de2e9537fefa",
+       "to": "f7fe1177883427e9c9731c566338340b105feedd"
+      }
+     ],
+     "headBefore": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+     "headAfter": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+     "commitShas": [
+      "ba10f27a5bc4dcae7e58864a0df71f9a29477a45"
+     ],
+     "commitDetails": [
+      {
+       "sha": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+       "message": "test(api): keep the default budget\n\nOrigin-Session: e2e-reset-aw | Claude Code | 2 prompts | turn 2",
+       "author": "E2E",
+       "filesChanged": [
+        "src/snapshot.ts"
+       ],
+       "linesAdded": 0,
+       "linesRemoved": 1,
+       "patch": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nindex f1d097f..103620c 100644\n--- a/src/snapshot.ts\n+++ b/src/snapshot.ts\n@@ -1,2 +1 @@\n export const SNAPSHOT = 1;\n-export const READS = 2;"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 1,
+      "turnId": "t_c652f2dec95b4f6c",
+      "createdAt": "2026-10-03T23:07:35.478Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_524df21275794cc1",
+      "capturedAt": 1791068861237,
+      "promptText": "is it merged?",
+      "filesChanged": [
+       "src/snapshot.ts"
+      ],
+      "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nindex f1d097f..103620c 100644\n--- a/src/snapshot.ts\n+++ b/src/snapshot.ts\n@@ -1,2 +1 @@\n export const SNAPSHOT = 1;\n-export const READS = 2;",
+      "commitPatch": true,
+      "linesAdded": 0,
+      "linesRemoved": 1,
+      "commitSha": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+      "commitMessage": "test(api): keep the default budget"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "rewrittenCommits": [
+      {
+       "from": "9fa61a73167108804b81caed2868de2e9537fefa",
+       "to": "f7fe1177883427e9c9731c566338340b105feedd"
+      }
+     ],
+     "headBefore": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+     "headAfter": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+     "commitShas": [
+      "ba10f27a5bc4dcae7e58864a0df71f9a29477a45"
+     ],
+     "commitDetails": [
+      {
+       "sha": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+       "message": "test(api): keep the default budget\n\nOrigin-Session: e2e-reset-aw | Claude Code | 2 prompts | turn 2",
+       "author": "E2E",
+       "filesChanged": [
+        "src/snapshot.ts"
+       ],
+       "linesAdded": 0,
+       "linesRemoved": 1,
+       "patch": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nindex f1d097f..103620c 100644\n--- a/src/snapshot.ts\n+++ b/src/snapshot.ts\n@@ -1,2 +1 @@\n export const SNAPSHOT = 1;\n-export const READS = 2;"
+      }
+     ],
+     "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nindex f1d097f..103620c 100644\n--- a/src/snapshot.ts\n+++ b/src/snapshot.ts\n@@ -1,2 +1 @@\n export const SNAPSHOT = 1;\n-export const READS = 2;\ndiff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;",
+     "diffTruncated": false,
+     "linesAdded": 1,
+     "linesRemoved": 1,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "rewrittenCommits": [
+      {
+       "from": "9fa61a73167108804b81caed2868de2e9537fefa",
+       "to": "f7fe1177883427e9c9731c566338340b105feedd"
+      }
+     ],
+     "headBefore": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+     "headAfter": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+     "commitShas": [
+      "f7fe1177883427e9c9731c566338340b105feedd",
+      "ba10f27a5bc4dcae7e58864a0df71f9a29477a45"
+     ],
+     "commitDetails": [
+      {
+       "sha": "f7fe1177883427e9c9731c566338340b105feedd",
+       "message": "test(api): three tests stop timing out\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/snapshot.ts"
+       ],
+       "linesAdded": 2,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;",
+       "committedAt": 1791068857000
+      },
+      {
+       "sha": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+       "message": "test(api): keep the default budget\n\nOrigin-Session: e2e-reset-aw | Claude Code | 2 prompts | turn 2",
+       "author": "E2E",
+       "filesChanged": [
+        "src/snapshot.ts"
+       ],
+       "linesAdded": 0,
+       "linesRemoved": 1,
+       "patch": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nindex f1d097f..103620c 100644\n--- a/src/snapshot.ts\n+++ b/src/snapshot.ts\n@@ -1,2 +1 @@\n export const SNAPSHOT = 1;\n-export const READS = 2;",
+       "committedAt": 1791068860000
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "yes do 1 and 2\n\n---\n\nis it merged?",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "src/other.ts",
+     "src/snapshot.ts"
+    ],
+    "tokensUsed": 28,
+    "tokensEstimated": true,
+    "inputTokens": 7,
+    "outputTokens": 21,
+    "toolCalls": 8,
+    "toolBreakdown": [
+     {
+      "name": "Bash",
+      "count": 6
+     },
+     {
+      "name": "Write",
+      "count": 2
+     }
+    ],
+    "durationMs": 21032,
+    "costUsd": 0.0006,
+    "gitCapture": {
+     "rewrittenCommits": [
+      {
+       "from": "9fa61a73167108804b81caed2868de2e9537fefa",
+       "to": "f7fe1177883427e9c9731c566338340b105feedd"
+      }
+     ],
+     "headBefore": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+     "headAfter": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+     "commitShas": [
+      "f7fe1177883427e9c9731c566338340b105feedd",
+      "4e0a9c7749169de22bc41d542b3336d94dd28021",
+      "ba10f27a5bc4dcae7e58864a0df71f9a29477a45"
+     ],
+     "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nindex f1d097f..103620c 100644\n--- a/src/snapshot.ts\n+++ b/src/snapshot.ts\n@@ -1,2 +1 @@\n export const SNAPSHOT = 1;\n-export const READS = 2;\ndiff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;",
+     "linesAdded": 1,
+     "linesRemoved": 1,
+     "commitDetails": [
+      {
+       "sha": "f7fe1177883427e9c9731c566338340b105feedd",
+       "message": "test(api): three tests stop timing out\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/snapshot.ts"
+       ],
+       "linesAdded": 2,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;",
+       "committedAt": 1791068857000
+      },
+      {
+       "sha": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+       "message": "test(api): keep the default budget\n\nOrigin-Session: e2e-reset-aw | Claude Code | 2 prompts | turn 2",
+       "author": "E2E",
+       "filesChanged": [
+        "src/snapshot.ts"
+       ],
+       "linesAdded": 0,
+       "linesRemoved": 1,
+       "patch": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nindex f1d097f..103620c 100644\n--- a/src/snapshot.ts\n+++ b/src/snapshot.ts\n@@ -1,2 +1 @@\n export const SNAPSHOT = 1;\n-export const READS = 2;",
+       "committedAt": 1791068860000
+      }
+     ],
+     "snapshot": true,
+     "abandonedCommits": [
+      "7341c6949cac33f22cacd406526760ca2ee0d28d"
+     ],
+     "replayedCommits": [
+      "f7fe1177883427e9c9731c566338340b105feedd"
+     ]
+    },
+    "commitTurns": [
+     {
+      "sha": "f7fe1177883427e9c9731c566338340b105feedd",
+      "turnId": "t_b8c7aa530de34a80",
+      "at": "2026-10-03T23:07:24.438Z",
+      "via": "post-commit"
+     },
+     {
+      "sha": "4e0a9c7749169de22bc41d542b3336d94dd28021",
+      "turnId": "t_b8c7aa530de34a80",
+      "at": "2026-10-03T23:07:29.270Z",
+      "via": "post-commit"
+     },
+     {
+      "sha": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+      "turnId": "t_c652f2dec95b4f6c",
+      "at": "2026-10-03T23:07:40.751Z",
+      "via": "post-commit"
+     }
+    ],
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "yes do 1 and 2",
+      "filesChanged": [
+       "src/snapshot.ts",
+       "src/subagent_check.ts"
+      ],
+      "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;\ndiff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;\n",
+      "edits": [
+       {
+        "file": "src/snapshot.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8/shared-squash/src/snapshot.ts",
+         "content": "export const SNAPSHOT = 1;\nexport const READS = 2;\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add -A && git commit -m \"test(api): three tests stop timing out\"",
+       "cd /private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8/shared-squash-worktrees/agent-a97c && git add -A && git commit -m WIP",
+       "cd /private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8/shared-squash-worktrees/agent-a97c && git reset --hard HEAD~1 && git commit -am redo"
+      ],
+      "wroteViaShell": true,
+      "shellWriteCommands": [
+       "cd /private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8/shared-squash-worktrees/agent-a97c && git reset --hard HEAD~1 && git commit -am redo"
+      ],
+      "uncommittedDiff": "",
+      "linesAdded": 3,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "discardedFiles": [],
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "commitPatch": true,
+      "commitSha": "f7fe1177883427e9c9731c566338340b105feedd",
+      "patchCommits": [
+       "f7fe1177883427e9c9731c566338340b105feedd",
+       "4e0a9c7749169de22bc41d542b3336d94dd28021"
+      ],
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"yes do 1 and 2\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/snapshot.ts\",\"op\":\"write\",\"newContent\":\"export const SNAPSHOT = 1;\\nexport const READS = 2;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/snapshot.ts\",\"op\":\"create\",\"newContent\":\"export const SNAPSHOT = 1;\\nexport const READS = 2;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/subagent_check.ts\",\"op\":\"create\",\"oldContent\":\"\",\"newContent\":\"export const SUBAGENT_REDO = 2;\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"f7fe1177883427e9c9731c566338340b105feedd\",\"ba10f27a5bc4dcae7e58864a0df71f9a29477a45\"],\"finalHunks\":[{\"file\":\"src/snapshot.ts\",\"start\":1,\"lines\":[\"export const SNAPSHOT = 1;\"]}]}",
+      "turnId": "t_b8c7aa530de34a80",
+      "createdAt": "2026-10-03T23:07:21.981Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_d89cd3c2b7364e77",
+      "capturedAt": 1791068866490
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "is it merged?",
+      "filesChanged": [
+       "src/snapshot.ts"
+      ],
+      "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nindex f1d097f..103620c 100644\n--- a/src/snapshot.ts\n+++ b/src/snapshot.ts\n@@ -1,2 +1 @@\n export const SNAPSHOT = 1;\n-export const READS = 2;",
+      "edits": [
+       {
+        "file": "src/snapshot.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8/shared-squash/src/snapshot.ts",
+         "content": "export const SNAPSHOT = 1;\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git commit -am \"test(api): keep the default budget\""
+      ],
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 1,
+      "diffSource": "ledger",
+      "discardedFiles": [],
+      "contentUnavailableFiles": [],
+      "commitPatch": true,
+      "commitSha": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+      "patchCommits": [
+       "ba10f27a5bc4dcae7e58864a0df71f9a29477a45"
+      ],
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"is it merged?\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/snapshot.ts\",\"op\":\"write\",\"newContent\":\"export const SNAPSHOT = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/snapshot.ts\",\"op\":\"write\",\"newContent\":\"export const SNAPSHOT = 1;\\n\",\"source\":\"tool_call\",\"commitSha\":\"f7fe1177883427e9c9731c566338340b105feedd\",\"oldContent\":\"export const SNAPSHOT = 1;\\nexport const READS = 2;\\n\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"f7fe1177883427e9c9731c566338340b105feedd\",\"ba10f27a5bc4dcae7e58864a0df71f9a29477a45\"]}",
+      "turnId": "t_c652f2dec95b4f6c",
+      "createdAt": "2026-10-03T23:07:35.478Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_d89cd3c2b7364e77",
+      "capturedAt": 1791068866514
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "yes do 1 and 2\n\n---\n\nis it merged?\n\n---\n\nmerged now?",
+    "filesChanged": [
+     "src/snapshot.ts"
+    ],
+    "tokensUsed": 40,
+    "inputTokens": 10,
+    "outputTokens": 30,
+    "toolCalls": 8,
+    "durationMs": 28549,
+    "costUsd": 0.0008,
+    "status": "RUNNING",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "yes do 1 and 2",
+      "filesChanged": [
+       "src/snapshot.ts",
+       "src/subagent_check.ts"
+      ],
+      "contentUnavailableFiles": [],
+      "diffSource": "turn-window",
+      "ledgerOwned": true,
+      "discardedFiles": [],
+      "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;\ndiff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;\n",
+      "uncommittedDiff": "",
+      "linesAdded": 3,
+      "linesRemoved": 0,
+      "commitSha": "f7fe1177883427e9c9731c566338340b105feedd",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "commitPatch": true,
+      "patchCommits": [
+       "f7fe1177883427e9c9731c566338340b105feedd",
+       "4e0a9c7749169de22bc41d542b3336d94dd28021"
+      ],
+      "capturedAt": 1791068869718,
+      "turnId": "t_b8c7aa530de34a80",
+      "createdAt": "2026-10-03T23:07:21.981Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_87180bf8a8da4cad",
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "is it merged?",
+      "filesChanged": [
+       "src/snapshot.ts"
+      ],
+      "contentUnavailableFiles": [],
+      "diffSource": "ledger",
+      "ledgerOwned": true,
+      "discardedFiles": [],
+      "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nindex f1d097f..103620c 100644\n--- a/src/snapshot.ts\n+++ b/src/snapshot.ts\n@@ -1,2 +1 @@\n export const SNAPSHOT = 1;\n-export const READS = 2;",
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 1,
+      "commitSha": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+      "commitPatch": true,
+      "patchCommits": [
+       "ba10f27a5bc4dcae7e58864a0df71f9a29477a45"
+      ],
+      "capturedAt": 1791068869718,
+      "turnId": "t_c652f2dec95b4f6c",
+      "createdAt": "2026-10-03T23:07:35.478Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_87180bf8a8da4cad",
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "rewrittenCommits": [
+      {
+       "from": "9fa61a73167108804b81caed2868de2e9537fefa",
+       "to": "f7fe1177883427e9c9731c566338340b105feedd"
+      },
+      {
+       "from": "f7fe1177883427e9c9731c566338340b105feedd",
+       "to": "71efd93b5723c8f79beb543d93387f2b3d429f1b"
+      },
+      {
+       "from": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+       "to": "71efd93b5723c8f79beb543d93387f2b3d429f1b"
+      }
+     ],
+     "headBefore": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+     "headAfter": "71efd93b5723c8f79beb543d93387f2b3d429f1b",
+     "commitShas": [
+      "71efd93b5723c8f79beb543d93387f2b3d429f1b",
+      "f7fe1177883427e9c9731c566338340b105feedd"
+     ],
+     "commitDetails": [
+      {
+       "sha": "71efd93b5723c8f79beb543d93387f2b3d429f1b",
+       "message": "test(api): three tests stop timing out (#2108)",
+       "author": "E2E",
+       "filesChanged": [
+        "src/snapshot.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..103620c\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1 @@\n+export const SNAPSHOT = 1;",
+       "committedAt": 1791068868000
+      },
+      {
+       "sha": "f7fe1177883427e9c9731c566338340b105feedd",
+       "patch": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;",
+       "message": "test(api): three tests stop timing out",
+       "author": "E2E",
+       "committedAt": "2026-10-03T19:07:37-04:00",
+       "filesChanged": [
+        "src/snapshot.ts"
+       ],
+       "linesAdded": 2,
+       "linesRemoved": 0
+      }
+     ]
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "yes do 1 and 2\n\n---\n\nis it merged?\n\n---\n\nmerged now?",
+    "agentSlug": "claude-code",
+    "filesChanged": [
+     "src/other.ts",
+     "src/later.ts",
+     "src/snapshot.ts"
+    ],
+    "tokensUsed": 40,
+    "tokensEstimated": true,
+    "inputTokens": 10,
+    "outputTokens": 30,
+    "toolCalls": 9,
+    "toolBreakdown": [
+     {
+      "name": "Bash",
+      "count": 7
+     },
+     {
+      "name": "Write",
+      "count": 2
+     }
+    ],
+    "durationMs": 30070,
+    "costUsd": 0.0008,
+    "gitCapture": {
+     "rewrittenCommits": [
+      {
+       "from": "9fa61a73167108804b81caed2868de2e9537fefa",
+       "to": "f7fe1177883427e9c9731c566338340b105feedd"
+      },
+      {
+       "from": "f7fe1177883427e9c9731c566338340b105feedd",
+       "to": "71efd93b5723c8f79beb543d93387f2b3d429f1b"
+      },
+      {
+       "from": "ba10f27a5bc4dcae7e58864a0df71f9a29477a45",
+       "to": "71efd93b5723c8f79beb543d93387f2b3d429f1b"
+      }
+     ],
+     "headBefore": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+     "headAfter": "71efd93b5723c8f79beb543d93387f2b3d429f1b",
+     "commitShas": [
+      "71efd93b5723c8f79beb543d93387f2b3d429f1b",
+      "4e0a9c7749169de22bc41d542b3336d94dd28021",
+      "f7fe1177883427e9c9731c566338340b105feedd"
+     ],
+     "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..103620c\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1 @@\n+export const SNAPSHOT = 1;\ndiff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;",
+     "linesAdded": 2,
+     "linesRemoved": 0,
+     "commitDetails": [
+      {
+       "sha": "71efd93b5723c8f79beb543d93387f2b3d429f1b",
+       "message": "test(api): three tests stop timing out (#2108)",
+       "author": "E2E",
+       "filesChanged": [
+        "src/snapshot.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..103620c\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1 @@\n+export const SNAPSHOT = 1;",
+       "committedAt": 1791068868000
+      },
+      {
+       "sha": "f7fe1177883427e9c9731c566338340b105feedd",
+       "patch": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;",
+       "message": "test(api): three tests stop timing out",
+       "author": "E2E",
+       "committedAt": "2026-10-03T19:07:37-04:00",
+       "filesChanged": [
+        "src/snapshot.ts"
+       ],
+       "linesAdded": 2,
+       "linesRemoved": 0
+      }
+     ],
+     "snapshot": true,
+     "abandonedCommits": [
+      "7341c6949cac33f22cacd406526760ca2ee0d28d"
+     ],
+     "replayedCommits": [
+      "f7fe1177883427e9c9731c566338340b105feedd"
+     ]
+    },
+    "commitTurns": [
+     {
+      "sha": "71efd93b5723c8f79beb543d93387f2b3d429f1b",
+      "turnId": "t_b8c7aa530de34a80",
+      "at": "2026-10-03T23:07:24.438Z",
+      "via": "post-commit"
+     },
+     {
+      "sha": "4e0a9c7749169de22bc41d542b3336d94dd28021",
+      "turnId": "t_b8c7aa530de34a80",
+      "at": "2026-10-03T23:07:29.270Z",
+      "via": "post-commit"
+     }
+    ],
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "yes do 1 and 2",
+      "filesChanged": [
+       "src/subagent_check.ts",
+       "src/snapshot.ts"
+      ],
+      "diff": "diff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;\ndiff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;\n",
+      "edits": [
+       {
+        "file": "src/snapshot.ts",
+        "toolName": "Write",
+        "input": {
+         "file_path": "/private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8/shared-squash/src/snapshot.ts",
+         "content": "export const SNAPSHOT = 1;\nexport const READS = 2;\n"
+        }
+       }
+      ],
+      "ranCommit": true,
+      "commitCommands": [
+       "git add -A && git commit -m \"test(api): three tests stop timing out\"",
+       "cd /private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8/shared-squash-worktrees/agent-a97c && git add -A && git commit -m WIP",
+       "cd /private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8/shared-squash-worktrees/agent-a97c && git reset --hard HEAD~1 && git commit -am redo"
+      ],
+      "wroteViaShell": true,
+      "shellWriteCommands": [
+       "cd /private/var/folders/2y/yp0sd7w53kj5c1cdk7634bnr0000gn/T/origin-e2e-reset-away-LhkWn8/shared-squash-worktrees/agent-a97c && git reset --hard HEAD~1 && git commit -am redo"
+      ],
+      "uncommittedDiff": "",
+      "linesAdded": 3,
+      "linesRemoved": 0,
+      "diffSource": "turn-window",
+      "discardedFiles": [],
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "contentUnavailableFiles": [],
+      "commitPatch": true,
+      "commitSha": "71efd93b5723c8f79beb543d93387f2b3d429f1b",
+      "patchCommits": [
+       "4e0a9c7749169de22bc41d542b3336d94dd28021",
+       "f7fe1177883427e9c9731c566338340b105feedd"
+      ],
+      "editsJson": "{\"promptIndex\":0,\"promptText\":\"yes do 1 and 2\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/snapshot.ts\",\"op\":\"write\",\"newContent\":\"export const SNAPSHOT = 1;\\nexport const READS = 2;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/snapshot.ts\",\"op\":\"create\",\"newContent\":\"export const SNAPSHOT = 1;\\nexport const READS = 2;\\n\",\"source\":\"uncommitted\",\"evidence\":\"write_journal\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/subagent_check.ts\",\"op\":\"create\",\"oldContent\":\"\",\"newContent\":\"export const SUBAGENT_REDO = 2;\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1}],\"commits\":[\"71efd93b5723c8f79beb543d93387f2b3d429f1b\"],\"finalHunks\":[{\"file\":\"src/snapshot.ts\",\"start\":1,\"lines\":[\"export const SNAPSHOT = 1;\"]}]}",
+      "turnId": "t_b8c7aa530de34a80",
+      "createdAt": "2026-10-03T23:07:21.981Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_db7d2d7dd3144a92",
+      "capturedAt": 1791068877213
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "is it merged?",
+      "filesChanged": [
+       "src/snapshot.ts"
+      ],
+      "contentUnavailableFiles": [],
+      "diffSource": "ledger",
+      "discardedFiles": [],
+      "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nindex f1d097f..103620c 100644\n--- a/src/snapshot.ts\n+++ b/src/snapshot.ts\n@@ -1,2 +1 @@\n export const SNAPSHOT = 1;\n-export const READS = 2;\n",
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 1,
+      "commitSha": "71efd93b5723c8f79beb543d93387f2b3d429f1b",
+      "capturedAt": 1791068877213,
+      "commitPatch": true,
+      "patchCommits": [
+       "ba10f27a5bc4dcae7e58864a0df71f9a29477a45"
+      ],
+      "editsJson": "{\"promptIndex\":1,\"promptText\":\"is it merged?\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/snapshot.ts\",\"op\":\"write\",\"newContent\":\"export const SNAPSHOT = 1;\\n\",\"source\":\"tool_call\",\"evidence\":\"tool_call\",\"oldStart\":1,\"newStart\":1},{\"file\":\"src/snapshot.ts\",\"op\":\"write\",\"newContent\":\"export const SNAPSHOT = 1;\\n\",\"source\":\"tool_call\",\"oldContent\":\"export const SNAPSHOT = 1;\\nexport const READS = 2;\\n\",\"oldStart\":1,\"newStart\":1}],\"commits\":[]}",
+      "turnId": "t_c652f2dec95b4f6c",
+      "createdAt": "2026-10-03T23:07:35.478Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_db7d2d7dd3144a92"
+     },
+     {
+      "promptIndex": 2,
+      "promptText": "merged now?",
+      "filesChanged": [],
+      "diff": "",
+      "edits": [],
+      "ranCommit": false,
+      "wroteViaShell": true,
+      "shellWriteCommands": [
+       "git checkout --detach main"
+      ],
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "diffSource": "ledger",
+      "discardedFiles": [],
+      "editsJson": "{\"promptIndex\":2,\"promptText\":\"merged now?\",\"agent\":\"claude\",\"edits\":[{\"file\":\"src/later.ts\",\"op\":\"create\",\"oldContent\":\"\",\"newContent\":\"export const LATER = 1;\\n\",\"source\":\"uncommitted\",\"evidence\":\"turn_window\",\"backfillSource\":\"shell-window\",\"oldStart\":1,\"newStart\":1}],\"commits\":[],\"finalHunks\":[{\"file\":\"src/later.ts\",\"start\":1,\"lines\":[\"export const LATER = 1;\"]}]}",
+      "turnId": "t_9615e01d67fa4bd8",
+      "createdAt": "2026-10-03T23:07:49.640Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_db7d2d7dd3144a92",
+      "capturedAt": 1791068877239
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "filesChanged": [
+     "src/subagent_check.ts"
+    ],
+    "branch": "test/subagent-reset-redo",
+    "gitCapture": {
+     "headBefore": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+     "headAfter": "7341c6949cac33f22cacd406526760ca2ee0d28d",
+     "commitShas": [
+      "7341c6949cac33f22cacd406526760ca2ee0d28d"
+     ],
+     "commitDetails": [
+      {
+       "sha": "7341c6949cac33f22cacd406526760ca2ee0d28d",
+       "message": "chore: subagent reset check (WIP)\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/subagent_check.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;"
+      }
+     ]
+    },
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "turnId": "t_b8c7aa530de34a80",
+      "createdAt": "2026-10-03T23:07:21.981Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_383ce674ead74195",
+      "capturedAt": 1791068847453,
+      "promptText": "yes do 1 and 2",
+      "filesChanged": [
+       "src/subagent_check.ts"
+      ],
+      "diff": "diff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;",
+      "commitPatch": true,
+      "linesAdded": 1,
+      "linesRemoved": 0,
+      "commitSha": "7341c6949cac33f22cacd406526760ca2ee0d28d",
+      "commitMessage": "chore: subagent reset check (WIP)"
+     }
+    ]
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "gitCapture": {
+     "headBefore": "eacf3b26ffffa0fefc68abfae9a641a898c53522",
+     "headAfter": "7341c6949cac33f22cacd406526760ca2ee0d28d",
+     "commitShas": [
+      "7341c6949cac33f22cacd406526760ca2ee0d28d"
+     ],
+     "commitDetails": [
+      {
+       "sha": "7341c6949cac33f22cacd406526760ca2ee0d28d",
+       "message": "chore: subagent reset check (WIP)\n\nOrigin-Session: e2e-reset-aw | Claude Code | 1 prompt | turn 1",
+       "author": "E2E",
+       "filesChanged": [
+        "src/subagent_check.ts"
+       ],
+       "linesAdded": 1,
+       "linesRemoved": 0,
+       "patch": "diff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;"
+      }
+     ],
+     "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;\ndiff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..cf29216\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const WIP_ONLY_MARKER = 1;",
+     "diffTruncated": false,
+     "linesAdded": 3,
+     "linesRemoved": 0,
+     "snapshot": true
+    }
+   }
+  },
+  {
+   "kind": "patch",
+   "body": {
+    "prompt": "yes do 1 and 2\n\n---\n\nis it merged?\n\n---\n\nmerged now?\n\n---\n\nthanks",
+    "filesChanged": [
+     "src/snapshot.ts"
+    ],
+    "tokensUsed": 44,
+    "inputTokens": 11,
+    "outputTokens": 33,
+    "toolCalls": 9,
+    "durationMs": 38524,
+    "costUsd": 0.0009,
+    "status": "RUNNING",
+    "promptChanges": [
+     {
+      "promptIndex": 0,
+      "promptText": "yes do 1 and 2",
+      "filesChanged": [
+       "src/subagent_check.ts",
+       "src/snapshot.ts"
+      ],
+      "contentUnavailableFiles": [],
+      "diffSource": "turn-window",
+      "ledgerOwned": true,
+      "discardedFiles": [],
+      "diff": "diff --git a/src/subagent_check.ts b/src/subagent_check.ts\nnew file mode 100644\nindex 0000000..ee52e26\n--- /dev/null\n+++ b/src/subagent_check.ts\n@@ -0,0 +1 @@\n+export const SUBAGENT_REDO = 2;\ndiff --git a/src/snapshot.ts b/src/snapshot.ts\nnew file mode 100644\nindex 0000000..f1d097f\n--- /dev/null\n+++ b/src/snapshot.ts\n@@ -0,0 +1,2 @@\n+export const SNAPSHOT = 1;\n+export const READS = 2;\n",
+      "uncommittedDiff": "",
+      "linesAdded": 3,
+      "linesRemoved": 0,
+      "commitSha": "71efd93b5723c8f79beb543d93387f2b3d429f1b",
+      "turnWindowCaptured": true,
+      "contentAuthoritative": true,
+      "commitPatch": true,
+      "patchCommits": [
+       "4e0a9c7749169de22bc41d542b3336d94dd28021",
+       "f7fe1177883427e9c9731c566338340b105feedd"
+      ],
+      "capturedAt": 1791068879695,
+      "turnId": "t_b8c7aa530de34a80",
+      "createdAt": "2026-10-03T23:07:21.981Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_94048b2c3b154c05",
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     },
+     {
+      "promptIndex": 1,
+      "promptText": "is it merged?",
+      "filesChanged": [
+       "src/snapshot.ts"
+      ],
+      "contentUnavailableFiles": [],
+      "diffSource": "ledger",
+      "ledgerOwned": true,
+      "discardedFiles": [],
+      "diff": "diff --git a/src/snapshot.ts b/src/snapshot.ts\nindex f1d097f..103620c 100644\n--- a/src/snapshot.ts\n+++ b/src/snapshot.ts\n@@ -1,2 +1 @@\n export const SNAPSHOT = 1;\n-export const READS = 2;\n",
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 1,
+      "commitSha": "71efd93b5723c8f79beb543d93387f2b3d429f1b",
+      "commitPatch": true,
+      "patchCommits": [
+       "ba10f27a5bc4dcae7e58864a0df71f9a29477a45"
+      ],
+      "capturedAt": 1791068879695,
+      "turnId": "t_c652f2dec95b4f6c",
+      "createdAt": "2026-10-03T23:07:35.478Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_94048b2c3b154c05",
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     },
+     {
+      "promptIndex": 2,
+      "promptText": "merged now?",
+      "filesChanged": [],
+      "diffSource": "ledger",
+      "ledgerOwned": true,
+      "discardedFiles": [],
+      "diff": "",
+      "uncommittedDiff": "",
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "capturedAt": 1791068879695,
+      "turnId": "t_9615e01d67fa4bd8",
+      "createdAt": "2026-10-03T23:07:49.640Z",
+      "createdAtIsTurnStart": true,
+      "captureId": "c_94048b2c3b154c05",
+      "aiPercentage": 100,
+      "checkpointType": "auto"
+     }
+    ]
+   }
+  }
+ ]
+}

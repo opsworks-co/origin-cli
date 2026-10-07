@@ -1,38 +1,13 @@
 /**
- * Move a commit SHA off a git-only turn onto the earlier turn that wrote
- * those files.
- *
- * Stop stamps `commitSha` on the turn that was CURRENT when `git commit`
- * ran. For Cursor that is often "open PR" / "now commit it" — a turn whose
- * own capture is empty because the work landed in the previous prompt's
- * baseline. The dashboard then badges the empty turn and leaves the
- * authoring turn uncommitted (prod c7cc460f).
- *
- * Discriminator vs capture-failure (#1174): rehome ONLY when an earlier
- * mapping's files overlap the commit. No overlapping author → the empty
- * stamp keeps the SHA.
+ * Recover a commit attestation a missed post-commit hook never wrote — see
+ * recoverCommittedTurnProofs. (The module once also moved a git-only turn's
+ * stamp onto the turn that wrote the files, #1482; since 2026-10-02 the
+ * committing turn keeps it.)
  */
 
 function filesOf(v: unknown): string[] {
   if (Array.isArray(v)) return v.filter((f): f is string => typeof f === 'string');
   return [];
-}
-
-function filesOverlap(a: string[], b: string[]): boolean {
-  if (a.length === 0 || b.length === 0) return false;
-  return a.some((f) => b.some((cf) => f === cf || f.endsWith(cf) || cf.endsWith(f)));
-}
-
-function mappingWroteBytes(m: {
-  diff?: string | null;
-  uncommittedDiff?: string | null;
-  linesAdded?: number | null;
-  linesRemoved?: number | null;
-}): boolean {
-  if ((m.diff || '').trim()) return true;
-  if ((m.uncommittedDiff || '').trim()) return true;
-  if ((m.linesAdded ?? 0) > 0 || (m.linesRemoved ?? 0) > 0) return true;
-  return false;
 }
 
 export interface StampMapping {
@@ -120,32 +95,3 @@ export function recoverCommittedTurnProofs(
   return proofs;
 }
 
-export function rehomeGitOnlyCommitStamp(
-  mappings: StampMapping[],
-  commitDetails: Array<{ sha?: string | null; filesChanged?: string[] | null }>,
-): boolean {
-  if (!Array.isArray(mappings) || mappings.length === 0) return false;
-  const bySha = new Map<string, string[]>();
-  for (const c of commitDetails || []) {
-    if (c?.sha) bySha.set(c.sha, filesOf(c.filesChanged));
-  }
-  let moved = false;
-  const ordered = [...mappings].sort((a, b) => a.promptIndex - b.promptIndex);
-  for (const m of ordered) {
-    const sha = m.commitSha;
-    if (!sha || mappingWroteBytes(m)) continue;
-    const commitFiles = bySha.get(sha) || [];
-    if (commitFiles.length === 0) continue;
-    const authors = ordered.filter((other) =>
-      other.promptIndex < m.promptIndex
-      && mappingWroteBytes(other)
-      && filesOverlap(filesOf(other.filesChanged), commitFiles),
-    );
-    if (authors.length === 0) continue;
-    const author = authors[authors.length - 1]!;
-    if (!author.commitSha) author.commitSha = sha;
-    m.commitSha = null;
-    moved = true;
-  }
-  return moved;
-}

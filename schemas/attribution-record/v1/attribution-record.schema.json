@@ -1,0 +1,589 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Origin attribution record, schema version 1",
+  "description": "Provenance of AI-assisted changes to one VCS revision, at commit level and optionally at line level. Transport- and consumer-neutral. Contains no prompt text. Specification: README.md next to this file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "revision",
+    "attribution_level",
+    "recorded_at",
+    "producer",
+    "contributions"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Exact contract version of this record. This schema file is version 1.0; a record of any other version is not a 1.0 record. README.md describes how a reader handles newer 1.x records.",
+      "const": "1.0"
+    },
+    "revision": {
+      "$ref": "#/$defs/revision"
+    },
+    "attribution_level": {
+      "description": "Precision of the record. commit: every contribution is a commit-level claim and no contribution has files. line: at least one contribution carries line-level claims in files; contributions without files remain commit-level claims.",
+      "enum": [
+        "commit",
+        "line"
+      ]
+    },
+    "recorded_at": {
+      "description": "When the producer created this record. RFC 3339 with an explicit UTC offset.",
+      "$ref": "#/$defs/timestamp"
+    },
+    "producer": {
+      "$ref": "#/$defs/producer"
+    },
+    "contributions": {
+      "description": "One entry per AI contribution associated with the revision.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/contribution"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "attribution_level": {
+            "const": "commit"
+          }
+        }
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "contributions": {
+            "type": "array",
+            "items": {
+              "not": {
+                "type": "object",
+                "required": [
+                  "files"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "attribution_level": {
+            "const": "line"
+          }
+        }
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "contributions": {
+            "type": "array",
+            "contains": {
+              "type": "object",
+              "required": [
+                "files"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)(\\.[0-9]{1,9})?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "version_string": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$"
+    },
+    "opaque_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "not_unknown": {
+      "not": {
+        "type": "string",
+        "pattern": "^[Uu][Nn][Kk][Nn][Oo][Ww][Nn]$"
+      }
+    },
+    "reference_uri": {
+      "description": "Absolute http(s) URI of a permissioned resource. Host, optional port and path only: no userinfo, query or fragment. Dereferencing must require authorization.",
+      "type": "string",
+      "format": "uri",
+      "maxLength": 2048,
+      "pattern": "^https?://[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~!$&'()*+,;=:@%-]*)*$"
+    },
+    "revision": {
+      "description": "The VCS revision this record describes. The id format depends on the VCS.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "vcs",
+        "id"
+      ],
+      "properties": {
+        "vcs": {
+          "description": "VCS type. Well-known values: git, hg, svn.",
+          "$ref": "#/$defs/slug"
+        },
+        "id": {
+          "description": "Full, unabbreviated revision identifier.",
+          "type": "string",
+          "pattern": "^[\\x21-\\x7E]{1,256}$"
+        },
+        "diff_stats": {
+          "description": "The change this revision introduces (for a merge, relative to its first parent). One value per record; never repeated per contribution.",
+          "$ref": "#/$defs/diff_stats"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "vcs": {
+                "const": "git"
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "vcs": {
+                "const": "hg"
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "vcs": {
+                "const": "svn"
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,18}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "producer": {
+      "description": "The software that created this record (not the AI agent).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/slug"
+        },
+        "version": {
+          "$ref": "#/$defs/version_string"
+        }
+      }
+    },
+    "contribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence"
+      ],
+      "properties": {
+        "evidence": {
+          "description": "How the producer knows about this contribution.",
+          "enum": [
+            "session_capture",
+            "imported",
+            "inferred"
+          ]
+        },
+        "agent": {
+          "$ref": "#/$defs/agent"
+        },
+        "model": {
+          "$ref": "#/$defs/model"
+        },
+        "actor": {
+          "$ref": "#/$defs/actor"
+        },
+        "session": {
+          "$ref": "#/$defs/session"
+        },
+        "files": {
+          "description": "Line-level claims of this contribution. Present: the contribution is line-level. Absent: it is commit-level. Never derived from diff totals.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/line_file"
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "agent"
+          ]
+        },
+        {
+          "required": [
+            "model"
+          ]
+        }
+      ],
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "evidence": {
+                "const": "session_capture"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "agent",
+              "session"
+            ]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "evidence": {
+                "const": "inferred"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "session"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "agent": {
+      "description": "The AI coding tool that performed the work.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/slug"
+            },
+            {
+              "$ref": "#/$defs/not_unknown"
+            }
+          ]
+        },
+        "version": {
+          "$ref": "#/$defs/version_string"
+        }
+      }
+    },
+    "model": {
+      "description": "The language model, exactly as reported by the agent or provider. Never inferred from the agent.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "allOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/\\[\\]+-]{0,199}$"
+            },
+            {
+              "$ref": "#/$defs/not_unknown"
+            }
+          ]
+        },
+        "provider": {
+          "$ref": "#/$defs/slug"
+        },
+        "version": {
+          "$ref": "#/$defs/version_string"
+        }
+      }
+    },
+    "actor": {
+      "description": "The human on whose behalf the agent acted. Personal data; see README.md.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/opaque_id"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 254
+        }
+      }
+    },
+    "session": {
+      "description": "The agent session the contribution came from. usage, duration_ms, prompt_count and diff_stats are session-cumulative; iterations lists only the turns whose work is in this revision.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/opaque_id"
+        },
+        "reference_uri": {
+          "description": "Permissioned record of the whole session.",
+          "$ref": "#/$defs/reference_uri"
+        },
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "duration_ms": {
+          "description": "Wall-clock milliseconds from session start to recorded_at.",
+          "$ref": "#/$defs/count"
+        },
+        "prompt_count": {
+          "description": "Human prompts submitted in the whole session up to recorded_at, including prompts before a resume. Session-cumulative: can exceed the number of iterations, and every listed iteration index is below it (semantic rule S6).",
+          "$ref": "#/$defs/count"
+        },
+        "iterations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/iteration"
+          },
+          "description": "The prompt turns whose work is part of this revision: a subset of the session, not its history. Each (session.id, index) appears once in the record (semantic rule S1)."
+        },
+        "usage": {
+          "$ref": "#/$defs/usage"
+        },
+        "diff_stats": {
+          "description": "Cumulative change of the whole session up to recorded_at. It can span several revisions.",
+          "$ref": "#/$defs/diff_stats"
+        }
+      }
+    },
+    "iteration": {
+      "description": "One prompt turn of the session whose work is part of this revision. Identity is (session.id, index).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index"
+      ],
+      "properties": {
+        "index": {
+          "description": "Zero-based position of the prompt in the session.",
+          "$ref": "#/$defs/count"
+        },
+        "prompt_hash": {
+          "description": "sha256 digest of the canonical prompt text; see README.md for the canonical input.",
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "reference_uri": {
+          "description": "Permissioned record of this one prompt: <session record>?prompt=<index>. The prompt it serves is the input of prompt_hash.",
+          "$ref": "#/$defs/prompt_reference_uri"
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "tokens": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "input": {
+              "description": "Input tokens that were not cache reads or cache writes, as the agent reports them.",
+              "$ref": "#/$defs/count"
+            },
+            "output": {
+              "description": "Output tokens as the agent reports them.",
+              "$ref": "#/$defs/count"
+            },
+            "cache_read": {
+              "description": "Input tokens served from the provider's prompt cache, as the agent reports them.",
+              "$ref": "#/$defs/count"
+            },
+            "cache_write": {
+              "description": "Input tokens written to the provider's prompt cache, as the agent reports them.",
+              "$ref": "#/$defs/count"
+            }
+          }
+        },
+        "cost": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "amount",
+            "currency",
+            "basis"
+          ],
+          "properties": {
+            "amount": {
+              "description": "Non-negative decimal number encoded as a string.",
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,6})?$"
+            },
+            "currency": {
+              "description": "ISO 4217 alphabetic code.",
+              "type": "string",
+              "pattern": "^[A-Z]{3}$"
+            },
+            "basis": {
+              "description": "estimated: computed by the producer from usage and a price table. reported: taken from the provider's billing data.",
+              "enum": [
+                "estimated",
+                "reported"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "diff_stats": {
+      "description": "Line counts of a diff. Totals only: they do not say which lines are AI-authored. The scope comes from where the object sits: revision.diff_stats or session.diff_stats.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lines_added",
+        "lines_removed"
+      ],
+      "properties": {
+        "lines_added": {
+          "$ref": "#/$defs/count"
+        },
+        "lines_removed": {
+          "$ref": "#/$defs/count"
+        }
+      }
+    },
+    "prompt_reference_uri": {
+      "description": "Like reference_uri, but must end with exactly one query parameter prompt=N (N a non-negative decimal integer without leading zeros). No other query, no fragment, no userinfo. N must equal the iteration index (semantic rule S3).",
+      "type": "string",
+      "format": "uri",
+      "maxLength": 2048,
+      "pattern": "^https?://[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~!$&'()*+,;=:@%-]*)*\\?prompt=(?:0|[1-9][0-9]{0,15})$"
+    },
+    "repo_path": {
+      "description": "Repository-relative POSIX path: no leading slash, no empty, . or .. segment, no trailing slash, no backslash, no NUL or other control character.",
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?!.*//)(?!.*/$)(?!(?:.*/)?\\.{1,2}(?:/|$))[^\\\\\\u0000-\\u001f]+$"
+    },
+    "line_number": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "line_range": {
+      "description": "Inclusive 1-based line range in the file as it is at this revision. start_line <= end_line is semantic rule S4.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start_line",
+        "end_line"
+      ],
+      "properties": {
+        "start_line": {
+          "$ref": "#/$defs/line_number"
+        },
+        "end_line": {
+          "$ref": "#/$defs/line_number"
+        },
+        "iteration_index": {
+          "description": "Index of the contributing iteration of the same contribution that produced these lines. Absent: the contribution is known, the prompt is not. Must name a listed iteration (semantic rule S5).",
+          "$ref": "#/$defs/count"
+        }
+      }
+    },
+    "line_file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "ranges"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/repo_path"
+        },
+        "ranges": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10000,
+          "items": {
+            "$ref": "#/$defs/line_range"
+          }
+        }
+      }
+    }
+  }
+}

@@ -8,9 +8,10 @@ import crypto from 'crypto';
 // one. These are the hottest git calls in the CLI — the watcher runs them for
 // every live session on every poll, and every hook fire runs them too.
 import { execFileSync, spawn } from 'child_process';
+import { throughLiveInstall } from './live-install-path.js';
 import { fileURLToPath } from 'url';
 import { processInfo } from './utils/process-detect.js';
-import { isHeartbeatFor, signalOwnDaemon } from './utils/signal-own-daemon.js';
+import { isHeartbeatFor, isOwnDaemonAlive, signalOwnDaemon } from './utils/signal-own-daemon.js';
 import { samePath } from './paths.js';
 import { keepWriteTreesSavedMeanwhile } from './session-write-trees.js';
 import type { WriteTree } from './session-write-trees.js';
@@ -156,12 +157,24 @@ export interface SessionState {
   // decided memory is irrelevant to its task should not be told again on every
   // prompt for the rest of the session.
   memoryNudged?: boolean;
+  /**
+   * What session start left out of the hook because it predicted Claude would
+   * read it from AGENTS.md (#2050). The prompt hook checks the transcript once
+   * it can and delivers `text` if AGENTS.md was not loaded after all.
+   */
+  agentsMdOmission?: { text: string; settled?: boolean; loaded?: boolean };
+  /** This session already recorded whether Claude loaded AGENTS.md. */
+  agentsMdObserved?: boolean;
   // Keys of the memory records already retrieved into THIS session's context by
   // the prompt-scoped search (`s:<sessionId>` / `c:<sha>`). A conversation that
   // stays on one file would otherwise be handed the same three records on every
   // prompt — real context spent to tell the agent something it was told a turn
   // ago, and the fastest way to train it to skim past this block.
   memoryHitsInjected?: string[];
+  // Repo-relative files this session was already looked up for a per-file
+  // history card (file-card.ts), whether or not one was produced. Capped by
+  // FILE_CARDS_CHECKED_PER_SESSION.
+  fileCardsChecked?: string[];
   headShaAtStart: string | null; // HEAD commit SHA when session started (null if no git)
   // Shadow commit (created by createShadowCommit at session start) that
   // snapshots the FULL working tree — tracked mods + untracked — as it was
@@ -190,6 +203,15 @@ export interface SessionState {
   // alongside and consumed only by the shell-window capture, which uses both
   // halves together. See session-worktree.ts.
   prePromptWorkTree?: { path: string; sha: string; promptIndex: number } | null;
+  /**
+   * LOCAL-numbered: the start of prompt i in the linked worktree the session
+   * was writing in, when that is not repoPath — `prePromptWorkTree`, kept per
+   * prompt instead of overwritten. A branch cut in that worktree is measured
+   * from it (commit-patch-for-committed-turn.ts): session 9f3d6bd2 turn 2 was
+   * billed a sub-agent's file it only committed, because the turn's own shadow
+   * was of another checkout.
+   */
+  promptWorkTreeShadows?: Array<{ promptIndex: number; path: string; shadowSha: string }>;
   // Worktrees discovered from a shell command's own text mid-turn, each with a
   // baseline snapshotted at the moment of discovery (pre-tool-use, before that
   // command ran). Covers the agent that does `cd <worktree> && …` inside one
@@ -212,6 +234,10 @@ export interface SessionState {
   // so a turn captured under contention is a weaker claim than one captured
   // alone — recorded rather than hidden. See checkout-contention.ts.
   contendingSessionIds?: string[];
+  // When this session first saw each rival above no longer live (epoch ms).
+  // A rival covers a turn only while it was not gone before that turn began —
+  // see contentionCoversTurn in checkout-contention.ts.
+  contenderGoneAt?: Record<string, number>;
   writeJournalPath?: string;
   /**
    * Content snapshots for this session's journal — see write-journal-store.ts.
@@ -252,7 +278,22 @@ export interface SessionState {
     // contested file (13 sessions claim packages/cli/src/commands/hooks.ts)
     // gets excluded from the turn that really wrote it.
     command?: string;
+    // HEAD of `tree` before a TREE-MOVING command (pull, checkout, merge, …),
+    // so post-tool-use can name the files that moved between the two commits.
+    // Absent for every other command. See git-moved-files.ts.
+    headBefore?: string;
+    // Where `tree`'s HEAD reflog ended when that command started. A command
+    // can pass through several HEADs — `gh pr merge --delete-branch` checks
+    // out a stale local main, then pulls — and the files it rewrote on the way
+    // can end identical to where they began; post-tool-use reads the reflog
+    // lines appended after this. See git-moved-files.ts.
+    reflogMark?: { path: string; size: number };
   }>;
+
+  // Per LOCAL turn and tree: files a tree-moving git command put in place.
+  // They are git's, not the turn's, and the write-journal channel drops them
+  // (TODO e87a35d5). Written by endShellProbe, read by journalFilesForTurn.
+  gitMovedFilesByTurn?: Array<{ promptIndex: number; tree: string; files: string[] }>;
 
 
   promptShadows?: Array<{
@@ -260,6 +301,12 @@ export interface SessionState {
     shadowSha: string;
     capturedAt: string; // ISO timestamp
     completeBaseline?: boolean; // Full tree captured at the prompt hook, including a clean HEAD.
+    // Cut when the turn was DISCOVERED, after it had already written: Cursor's
+    // after-file-edit adopting an unannounced prompt (the edit that revealed
+    // it is in the tree), the Codex heartbeat noticing a new user_message. It
+    // is a boundary for the window, not the turn's start-state — see
+    // openTurnNarrowingBase.
+    cutAfterTurnStart?: boolean;
   }>;
   // LOCAL-numbered: the tree Stop saw when it CLOSED turn L. The next prompt's
   // shadow is where turn L+1 starts, which is not where turn L ended when
@@ -343,6 +390,12 @@ export interface SessionState {
    * never sent.
    */
   preSquashCommitTurns?: Array<{ sha: string; turnId: string; at?: string; squash: string }>;
+  /**
+   * Who made each commit a rewrite (rebase, amend, forge squash) folded out of
+   * `commitTurns`, which names survivors only. Written at fold time; read by
+   * commitTurnOf. Local; never sent.
+   */
+  foldedCommitTurns?: Array<{ sha: string; turnId: string; at?: string }>;
   // Shas whose Commit-row patch Stop already rescued via `git show` (post-commit's
   // PATCH never landed). Once per sha per session — the server keeps the first
   // patch it gets, so re-sending is spawn cost with no effect.
@@ -360,6 +413,16 @@ export interface SessionState {
   // rather than the list tail, so two prompts queued back-to-back run in
   // order instead of the first being skipped.
   lastClosedTurnIndex?: number;
+  // Stop's progress on the turn it is closing: `stopClosing` when it marked
+  // the turn closed (before sending), `stopSentTurnIndex` once its row was
+  // handed to the send queue. A Stop killed between the two left a closed
+  // turn with no final row, and the heartbeat, reading "closed", sent nothing
+  // for it — see stopAbandonedTurn.
+  stopClosing?: { turn: number; at: number };
+  // Where the last Stop left off, so the next can send settled turns as saved
+  // instead of re-deriving them — see stop-reuse.ts.
+  stopReuse?: import('./stop-reuse.js').StopReuseMark;
+  stopSentTurnIndex?: number;
   // How many turns of this conversation predate `prompts` — i.e. the offset
   // between our LOCAL turn numbering (always from 0) and the SERVER row a turn
   // belongs to (its native position in the transcript). 0 / absent on an
@@ -392,6 +455,9 @@ export interface SessionState {
     outOfRepoFiles?: string[];
     // Files the turn changed but whose content could not be retained.
     contentUnavailableFiles?: string[];
+    // Files the turn wrote and put back before it ended (discarded-work.ts).
+    // [] is a measured "none"; absent means Stop never decided.
+    discardedFiles?: string[];
     diff: string;
     uncommittedDiff?: string;
     // The source and ownership guard for a stored diff. A ledger capture is
@@ -404,6 +470,8 @@ export interface SessionState {
     // The diff is the turn's commit patch (preferCommitPatchForCommittedTurns).
     // Travels with every re-send, or the server treats the row as a rebuild.
     commitPatch?: boolean;
+    /** The commits that patch stands for — see commit-patch-for-committed-turn.ts. */
+    patchCommits?: string[];
     ledgerOwned?: boolean;
     linesAdded?: number;
     linesRemoved?: number;
@@ -455,6 +523,13 @@ export interface SessionState {
     toolName: string;
     capturedAt: string;
     edits: PromptEdit[];
+    /**
+     * The linked worktree the edit landed in, when it is not repoPath (a
+     * sub-agent's `.claude/worktrees/agent-*`). `edits[].file` is relative to
+     * it. Windows diffed in repoPath cannot see the edit — see
+     * prefer-shadow-range.ts.
+     */
+    tree?: string;
   }>;
   // Files this session is ABOUT to write, claimed by the PRE-tool-use hook
   // before the tool runs.
@@ -475,7 +550,7 @@ export interface SessionState {
   // (`git commit`, merge, cherry-pick…). Set at pre-tool-use, cleared at that
   // call's post-tool-use; the commit hooks read it to name the committing
   // session before they weigh any file. See commit-command-in-flight.ts.
-  commitCommandInFlight?: { at: string; toolCallId?: string; cwd?: string; turn?: number } | null;
+  commitCommandInFlight?: { at: string; toolCallId?: string; cwd?: string; turn?: number; endedAt?: string } | null;
   // Prompt indexes whose turn ran a WRITE-SHAPED shell command (a heredoc,
   // `sed -i`, `cp`, an interpreter invocation…). The post-tool-use hook sets
   // this; Stop reads it to decide whether to derive that turn's shell writes
@@ -487,7 +562,11 @@ export interface SessionState {
   // mutating git commands named (checkout/restore/rm/mv/reset -- <paths>, the
   // files a revert or apply rewrites). See git-pathspec-names.ts.
   gitPathspecsByTurn?: Array<{ promptIndex: number; paths: string[] }>;
-  branch: string | null;      // Git branch at session start
+  // LOCAL-numbered: every repo-relative path Cursor's after-file-edit named
+  // during the turn. Paths only, so unlike liveEdits nothing is declined for
+  // size. The last 64 turns are kept. See afterFileEditFilesForTurn.
+  editHookPathsByTurn?: Array<{ promptIndex: number; paths: string[] }>;
+  branch: string | null;     // Git branch at session start
   sessionTag?: string;        // Tag for concurrent session support
   // Ring buffer of tool-call pre/post records. Field kept as `subagents` for
   // backward compat with serialized session-state files. See R2 in
@@ -574,6 +653,11 @@ export interface SessionState {
   // from refs/notes/origin-memory). Persisted into git notes so readers can
   // walk a chain of sessions across commits.
   previousSessionId?: string;
+  // The `local-<uuid>` id this session ran under before it reached the server
+  // (a standalone or failed start, or session-start's reservation). Commits
+  // made under it carry `Origin-Session: local-<6 hex>`, so the ownership
+  // checks treat it as this session's own id. See `rememberLocalSessionId`.
+  localSessionId?: string;
   // ISO timestamp the previous session started — used to scope the
   // acceptance backfill scan to only commits that session could have authored.
   previousSessionStartedAt?: string;
@@ -707,12 +791,35 @@ export function promptKey(text: string): string {
  * The rule here is the one `homePromptIndexByText` already trusted for
  * re-homing a write: same normalised key, or one key a prefix of the other —
  * which absorbs both a trailing placeholder and a truncation.
+ *
+ * A prefix counts only when what the longer key adds is noise a producer
+ * appends — an image placeholder — or when the shorter one is a clip (it ends
+ * in `...`, or it is long enough to be a producer's clip — every producer cuts
+ * at 200 chars or more, and whitespace collapse can shorten a raw 200-char cut
+ * a little). Words the user typed are not noise.
+ * Session d027b430 (2026-09-27): "next task from the list" was sent,
+ * interrupted after two seconds and never reached the hook; the retry "next
+ * task from the list, 74c99e04 is done already" did. The transcript held both,
+ * the reconciler matched the short one against the stored long one, and the
+ * long one was appended a second time — row 12 with no turnId, which the next
+ * commit's post-commit then billed with the same work as row 11.
  */
+const CLIP_FLOOR = 100;
+const PLACEHOLDER_TAIL = /^(?:\s*\[image[^\]]*\])+\s*$/i;
+const CLIP_MARK = /(?:\.\.\.|…)$/;
+
 export function samePromptText(a: string | null | undefined, b: string | null | undefined): boolean {
   const ka = promptKey(a || '');
   const kb = promptKey(b || '');
   if (!ka || !kb) return ka === kb;
-  return ka === kb || ka.startsWith(kb) || kb.startsWith(ka);
+  if (ka === kb) return true;
+  const [short, long] = ka.length <= kb.length ? [ka, kb] : [kb, ka];
+  if (CLIP_MARK.test(short)) {
+    const stem = short.replace(CLIP_MARK, '').trimEnd();
+    return stem.length > 0 && long.startsWith(stem);
+  }
+  if (!long.startsWith(short)) return false;
+  return short.length >= CLIP_FLOOR || PLACEHOLDER_TAIL.test(long.slice(short.length));
 }
 
 /**
@@ -892,20 +999,39 @@ function subsequencePrefixLength(prev: string[], next: string[]): number {
  * 1000 chars; adopting the transcript wholesale would trade the richer record
  * for the poorer one on every reconcile.
  */
-function adoptNumberingKeepingStored(prev: string[], next: string[]): string[] {
+function adoptNumberingKeepingStored(prev: string[], next: string[]): { prompts: string[]; placed: number[] } {
   let i = 0;
-  return next.map((candidate) => (i < prev.length && samePromptText(prev[i], candidate)) ? prev[i++] : candidate);
+  const placed: number[] = [];
+  const prompts = next.map((candidate, at) => {
+    if (i < prev.length && samePromptText(prev[i], candidate)) { placed[i] = at; return prev[i++]; }
+    return candidate;
+  });
+  return { prompts, placed };
 }
 
-export function reconcilePromptHistory(
+/** `placed[i] = i` for every stored prompt: the list only grew at its tail. */
+function stayedPut(count: number): number[] {
+  return Array.from({ length: count }, (_, i) => i);
+}
+
+/**
+ * The reconciled list, and where each stored prompt landed in it.
+ *
+ * `placed[i]` is the new index of stored prompt `i`. It is `i` for every entry
+ * unless the transcript's numbering was adopted — the "we started late" shapes
+ * below — which puts a prompt no hook recorded AHEAD of prompts we already
+ * store. Every index-keyed record of those prompts (turn id, shadows, saved
+ * rows, live edits…) has to move with them: see movePromptIdentities.
+ */
+export function reconcilePromptHistoryPlaced(
   stored: string[] | undefined | null,
   parsed: string[] | undefined | null,
   opts?: { collapseTrailingRepeat?: boolean },
-): string[] {
+): { prompts: string[]; placed: number[] } {
   const prev = Array.isArray(stored) ? stored : [];
   const next = Array.isArray(parsed) ? parsed : [];
-  if (prev.length === 0) return [...next];
-  if (next.length === 0) return [...prev];
+  if (prev.length === 0) return { prompts: [...next], placed: [] };
+  if (next.length === 0) return { prompts: [...prev], placed: stayedPut(prev.length) };
 
   const collapseExtra = (extra: string[]): string[] => {
     if (!opts?.collapseTrailingRepeat || prev.length === 0) return extra;
@@ -916,7 +1042,7 @@ export function reconcilePromptHistory(
 
   // Ordinary growth: everything we already recorded is still at the head.
   if (next.length >= prev.length && prev.every((p, i) => samePromptText(p, next[i]))) {
-    return [...prev, ...collapseExtra(next.slice(prev.length))];
+    return { prompts: [...prev, ...collapseExtra(next.slice(prev.length))], placed: stayedPut(prev.length) };
   }
 
   // We started LATE: the transcript still contains everything we stored, in
@@ -928,14 +1054,20 @@ export function reconcilePromptHistory(
   // Same, except the newest prompt hasn't reached the transcript yet — keep it
   // at the END so it takes the next index instead of colliding with the last
   // turn the transcript does know about.
-  if (matched === prev.length - 1) return [...adoptNumberingKeepingStored(prev.slice(0, -1), next), prev[prev.length - 1]];
+  if (matched === prev.length - 1) {
+    const head = adoptNumberingKeepingStored(prev.slice(0, -1), next);
+    return {
+      prompts: [...head.prompts, prev[prev.length - 1]],
+      placed: [...head.placed, head.prompts.length],
+    };
+  }
 
   // Transcript dropped earlier turns: find where its first surviving prompt
   // sits in our history, and append only the tail beyond the overlap.
   for (let start = 0; start < prev.length; start++) {
     let k = 0;
     while (start + k < prev.length && k < next.length && samePromptText(prev[start + k], next[k])) k++;
-    if (k > 0 && start + k === prev.length) return [...prev, ...next.slice(k)];
+    if (k > 0 && start + k === prev.length) return { prompts: [...prev, ...next.slice(k)], placed: stayedPut(prev.length) };
   }
 
   // Last resort: the transcript and our history disagree in a way none of the
@@ -969,7 +1101,139 @@ export function reconcilePromptHistory(
       fresh.push(candidate);
     }
   }
-  return [...prev, ...fresh];
+  return { prompts: [...prev, ...fresh], placed: stayedPut(prev.length) };
+}
+
+export function reconcilePromptHistory(
+  stored: string[] | undefined | null,
+  parsed: string[] | undefined | null,
+  opts?: { collapseTrailingRepeat?: boolean },
+): string[] {
+  return reconcilePromptHistoryPlaced(stored, parsed, opts).prompts;
+}
+
+/** A turn id, the shape user-prompt-submit and after-file-edit mint. */
+export function mintTurnId(): string {
+  return `t_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+}
+
+/**
+ * Move every per-prompt record with its prompt after the reconciler renumbered.
+ *
+ * `promptIndex` is a POSITION, and the server finds a turn's row by its turn id
+ * first (routes/mcp.ts: "Route by identity, not position" — the row found by id
+ * moves to the client's new index). So a renumbered prompt list is harmless
+ * exactly when each prompt's identity moves with it, and a confident lie when
+ * it does not: `promptTurnIds[1]` still named the prompt that USED to be at 1,
+ * the next Stop sent the newly adopted prompt's content under that id, the
+ * server wrote it onto the old prompt's row, and every later turn shifted onto
+ * its neighbour's row (TODO b4c19d8f). The submit-time recovery in #1938 keeps
+ * Claude Code on plain growth; Cursor and the other agents reach this path.
+ *
+ * `placed[i]` is where stored prompt `i` now sits (reconcilePromptHistoryPlaced).
+ * LOCAL-numbered records move by it directly; saved rows are SERVER rows, local
+ * plus `promptIndexBase` (turn-index.ts). A prompt the transcript inserted gets
+ * a fresh turn id, so its row is its own rather than whichever one sat there.
+ * Returns false, touching nothing, when every prompt stayed put.
+ */
+export function movePromptIdentities(
+  state: SessionState,
+  placed: readonly number[],
+  total: number,
+  newId: () => string = mintTurnId,
+): boolean {
+  if (placed.every((to, from) => to === from)) return false;
+  const moveLocal = (i: number): number =>
+    (Number.isInteger(i) && i >= 0 && i < placed.length ? placed[i] : i);
+  const base = Number.isInteger(state.promptIndexBase) && (state.promptIndexBase as number) > 0
+    ? state.promptIndexBase as number : 0;
+  const moveRow = (row: number): number => {
+    if (!Number.isInteger(row)) return row;
+    const local = row - base;
+    return local >= 0 && local < placed.length ? placed[local] + base : row;
+  };
+  const moveArray = <T>(arr: T[] | undefined): T[] | undefined => {
+    if (!Array.isArray(arr)) return arr;
+    const out: T[] = [];
+    arr.forEach((v, i) => { out[moveLocal(i)] = v; });
+    return out;
+  };
+  const moveEach = <T extends { promptIndex: number }>(arr: T[] | undefined, move: (i: number) => number = moveLocal): T[] | undefined =>
+    (Array.isArray(arr) ? arr.map((e) => (e && Number.isInteger(e.promptIndex) ? { ...e, promptIndex: move(e.promptIndex) } : e)) : arr);
+
+  state.promptTurnIds = moveArray(state.promptTurnIds) || [];
+  // A prompt the transcript put BETWEEN two we know is a turn of its own.
+  const lastKnown = placed.length > 0 ? Math.max(...placed) : -1;
+  const taken = new Set(placed);
+  for (let i = 0; i < Math.min(total, lastKnown); i++) {
+    if (!taken.has(i) && !state.promptTurnIds[i]) state.promptTurnIds[i] = newId();
+  }
+  state.promptSubmittedAt = moveArray(state.promptSubmittedAt);
+  state.promptResponses = moveArray(state.promptResponses);
+
+  state.promptShadows = moveEach(state.promptShadows as any) as any;
+  state.promptWorkTreeShadows = moveEach(state.promptWorkTreeShadows as any) as any;
+  state.turnEndShadows = moveEach(state.turnEndShadows as any) as any;
+  state.liveEdits = moveEach(state.liveEdits as any) as any;
+  state.shellProbes = moveEach(state.shellProbes as any) as any;
+  state.gitMovedFilesByTurn = moveEach(state.gitMovedFilesByTurn);
+  state.gitPathspecsByTurn = moveEach(state.gitPathspecsByTurn);
+  state.editHookPathsByTurn = moveEach(state.editHookPathsByTurn);
+  state.discoveredWorkTrees = moveEach(state.discoveredWorkTrees);
+  state.pendingWorktreeTargets = moveEach(state.pendingWorktreeTargets);
+  if (state.prePromptWorkTree && Number.isInteger(state.prePromptWorkTree.promptIndex)) {
+    state.prePromptWorkTree = { ...state.prePromptWorkTree, promptIndex: moveLocal(state.prePromptWorkTree.promptIndex) };
+  }
+  if (Array.isArray(state.shellWriteTurns)) state.shellWriteTurns = state.shellWriteTurns.map(moveLocal);
+  if (Array.isArray(state.promptsWithoutBaseline)) state.promptsWithoutBaseline = state.promptsWithoutBaseline.map(moveLocal);
+  if (state.activeTurn && Number.isInteger(state.activeTurn.index)) {
+    state.activeTurn = { ...state.activeTurn, index: moveLocal(state.activeTurn.index) };
+  }
+  if (Number.isInteger(state.lastClosedTurnIndex)) state.lastClosedTurnIndex = moveLocal(state.lastClosedTurnIndex as number);
+  if (Number.isInteger(state.stopSentTurnIndex)) state.stopSentTurnIndex = moveLocal(state.stopSentTurnIndex as number);
+  if (state.stopClosing && Number.isInteger(state.stopClosing.turn)) {
+    state.stopClosing = { ...state.stopClosing, turn: moveLocal(state.stopClosing.turn) };
+  }
+  if (state.commitCommandInFlight && Number.isInteger(state.commitCommandInFlight.turn)) {
+    state.commitCommandInFlight = { ...state.commitCommandInFlight, turn: moveLocal(state.commitCommandInFlight.turn as number) };
+  }
+  // Saved rows are SERVER rows.
+  state.completedPromptMappings = moveEach(state.completedPromptMappings, moveRow);
+  return true;
+}
+
+/**
+ * Prompts the transcript holds AFTER everything we stored, which no hook ever
+ * recorded — to be appended before the prompt now being submitted.
+ *
+ * A submit hook killed mid-run (the user interrupted, the hook timed out)
+ * leaves its prompt in the transcript and nowhere else. When it was the newest
+ * prompt, Stop's reconcile appends it and nothing is lost. When the user types
+ * again first, this submit used to append its prompt at the killed one's
+ * index: the hook said N, the transcript said N+1. Session d027b430
+ * (2026-09-27): "next task from the list" at 14:59:01, interrupted, hook
+ * killed; "next task from the list, 74c99e04 is done already" saved as 11.
+ * Every Stop then sent the transcript's row 12 — the same work as the hook's
+ * row 11 — and post-commit billed a commit to it.
+ *
+ * Only plain growth is taken: every stored prompt must sit at its own index in
+ * the transcript. Anything else would renumber rows already written, which is
+ * the one outcome that cannot be undone — that case keeps today's behaviour.
+ */
+export function promptsTheHookMissed(
+  stored: string[] | undefined | null,
+  transcript: string[] | undefined | null,
+  incoming: string,
+): string[] {
+  const prev = Array.isArray(stored) ? stored : [];
+  const next = Array.isArray(transcript) ? transcript : [];
+  if (next.length <= prev.length) return [];
+  if (!prev.every((p, i) => samePromptText(p, next[i]))) return [];
+  const extra = next.slice(prev.length);
+  // Claude normally runs UserPromptSubmit before it appends the new entry; a
+  // build that writes it first shows the incoming prompt as the last one.
+  if (extra.length > 0 && samePromptText(extra[extra.length - 1], incoming)) extra.pop();
+  return extra;
 }
 
 /**
@@ -1631,7 +1895,9 @@ export function saveSessionState(state: SessionState, cwd?: string, sessionTag?:
  * dies after this has not claimed a row it never sent. False when the state
  * is not where `getStatePath` says (the sandbox fallback) — today's behaviour.
  */
-export function markTurnClosedOnDisk(cwd: string | undefined, sessionTag: string | undefined, localTurn: number): boolean {
+export function markTurnClosedOnDisk(
+  cwd: string | undefined, sessionTag: string | undefined, localTurn: number, at: number = Date.now(),
+): boolean {
   if (!Number.isInteger(localTurn) || localTurn < 0) return false;
   try {
     const statePath = getStatePath(cwd, sessionTag);
@@ -1641,6 +1907,32 @@ export function markTurnClosedOnDisk(cwd: string | undefined, sessionTag: string
       const prev = Number.isInteger(onDisk.lastClosedTurnIndex) ? onDisk.lastClosedTurnIndex as number : -1;
       if (prev >= localTurn) return true;
       onDisk.lastClosedTurnIndex = localTurn;
+      onDisk.stopClosing = { turn: localTurn, at };
+      const tmp = statePath + '.tmp.' + process.pid;
+      fs.writeFileSync(tmp, JSON.stringify(onDisk, null, 2), { mode: 0o600 });
+      fs.renameSync(tmp, statePath);
+      return true;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Record ON DISK that Stop handed its row for LOCAL turn `localTurn` to the
+ * send queue. The pair of markTurnClosedOnDisk: a closed turn with this mark
+ * has its final row; one without it, whose Stop never finished, does not.
+ */
+export function markStopSentOnDisk(cwd: string | undefined, sessionTag: string | undefined, localTurn: number): boolean {
+  if (!Number.isInteger(localTurn) || localTurn < 0) return false;
+  try {
+    const statePath = getStatePath(cwd, sessionTag);
+    return withSessionStateLock(statePath, () => {
+      const onDisk = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+      if (!onDisk || typeof onDisk !== 'object' || Array.isArray(onDisk)) return false;
+      const prev = Number.isInteger(onDisk.stopSentTurnIndex) ? onDisk.stopSentTurnIndex as number : -1;
+      if (prev >= localTurn) return true;
+      onDisk.stopSentTurnIndex = localTurn;
       const tmp = statePath + '.tmp.' + process.pid;
       fs.writeFileSync(tmp, JSON.stringify(onDisk, null, 2), { mode: 0o600 });
       fs.renameSync(tmp, statePath);
@@ -1794,6 +2086,27 @@ export function isProvisionalSessionId(id: unknown): boolean {
 }
 
 /**
+ * Record the `local-` id a session is leaving behind as it takes a server id.
+ *
+ * prepare-commit-msg stamps the CURRENT id into every commit, so whatever the
+ * session committed before promotion is trailered `Origin-Session:
+ * local-<6 hex>`. The server keeps that id since #2032; the CLI's ownership
+ * checks must too, or after promotion those commits read as another session's
+ * and are disowned. Call it at every place `sessionId` moves off a local id.
+ * The first local id wins: a session is only ever promoted once, and a later
+ * call (a re-mint from one server id to another) has nothing local to give.
+ */
+export function rememberLocalSessionId(
+  state: { sessionId?: string; localSessionId?: string },
+  previousId: string | null | undefined,
+): void {
+  if (!isProvisionalSessionId(previousId)) return;
+  if (previousId === state.sessionId) return;
+  if (state.localSessionId) return;
+  state.localSessionId = previousId as string;
+}
+
+/**
  * How long a session-start reservation is treated as "registration in flight".
  *
  * Long enough to cover a slow `session/start` — the prod trace that motivated
@@ -1906,6 +2219,7 @@ export function adoptRegisteredReservation(
   if (promoted === state.sessionId) return null;
   const from = state.sessionId;
   state.sessionId = promoted;
+  rememberLocalSessionId(state, from);
   // The registered row on disk is session-start's full row: the enforcement
   // rules and policies the server handed back, the system prompt, the
   // previous-session link, the baseline it captured. The copy this hook holds
@@ -2038,6 +2352,37 @@ export function finalRewriteOf(sha: string, pairs: ReadonlyArray<RewritePair> | 
 }
 
 /**
+ * The turn that made `sha`: its attestation in `commitTurns`, or, for a commit
+ * a later rewrite replaced, the one it had when the fold took it away.
+ *
+ * `commitTurns` names survivors only: a rebase, an amend or a forge squash
+ * folds each attestation onto the commit that replaced it
+ * (foldCommitRecordsToSurvivors). A sha a later rewrite left behind — still in
+ * a turn's git window, because that is where the rebase put it — then matched
+ * no attestation, fell to the session-level "is it ours" test, and counted as
+ * the ASKING turn's own work. Session 127d3303 (2026-09-30): turn 1 rebased
+ * turn 0's commit 802c110 as 1347971 over a main that had also edited
+ * insights-scope.ts, GitHub squashed it as 9afdf670, and every later Stop
+ * measured turn 1 from main — billing turn 0's +41/-7 as turn 1's.
+ *
+ * Exact shas only, never "whoever owns the survivor": an amend by the NEXT
+ * turn attests the survivor to that turn, and the commit it replaced is still
+ * the first turn's. Undefined when the sha was never attested.
+ */
+export function commitTurnOf(
+  state: Pick<SessionState, 'commitTurns' | 'foldedCommitTurns' | 'preSquashCommitTurns'>,
+  sha: string,
+): { sha: string; turnId: string } | undefined {
+  if (!sha) return undefined;
+  for (const list of [state.commitTurns, state.foldedCommitTurns, state.preSquashCommitTurns]) {
+    if (!Array.isArray(list)) continue;
+    const hit = (list as Array<{ sha?: string; turnId?: string }>).find((c) => c?.sha && c.turnId && sameRecordedSha(c.sha, sha));
+    if (hit) return hit as { sha: string; turnId: string };
+  }
+  return undefined;
+}
+
+/**
  * Record rewrite pairs on the session and move every local reading of an
  * orphan onto its final survivor: the sha list (deduped) and the turn
  * attestation (`commitTurns`, keeping the earliest observation per survivor).
@@ -2047,7 +2392,7 @@ export function finalRewriteOf(sha: string, pairs: ReadonlyArray<RewritePair> | 
  * Returns true when anything changed. Does not save.
  */
 export function applyRewritePairsToState(
-  state: Pick<SessionState, 'sessionCommitShas' | 'rewrittenCommits' | 'commitTurns'>,
+  state: Pick<SessionState, 'sessionCommitShas' | 'rewrittenCommits' | 'commitTurns' | 'foldedCommitTurns'>,
   incoming: ReadonlyArray<RewritePair>,
 ): boolean {
   const pairs: RewritePair[] = Array.isArray(state.rewrittenCommits) ? [...state.rewrittenCommits] : [];
@@ -2081,7 +2426,7 @@ function sameRecordedSha(a: string, b: string): boolean {
 
 /** The sha list (deduped) and the turn attestations, each moved to its final survivor. */
 function foldCommitRecordsToSurvivors(
-  state: Pick<SessionState, 'sessionCommitShas' | 'commitTurns' | 'preSquashCommitTurns'>,
+  state: Pick<SessionState, 'sessionCommitShas' | 'commitTurns' | 'preSquashCommitTurns' | 'foldedCommitTurns'>,
   pairs: ReadonlyArray<RewritePair>,
 ): void {
   if (Array.isArray(state.sessionCommitShas)) {
@@ -2127,6 +2472,30 @@ function foldCommitRecordsToSurvivors(
       }
       state.preSquashCommitTurns = pre;
     }
+    // Who made each commit the fold is about to replace, and each hop between
+    // it and its survivor (a rebased copy, before a forge squash of it). The
+    // survivor's attestation says nothing about them: an amend by the next
+    // turn attests the survivor to that turn (commitTurnOf). The first word on
+    // a sha stands.
+    const folded = Array.isArray(state.foldedCommitTurns) ? [...state.foldedCommitTurns] : [];
+    const attested = (sha: string) => state.commitTurns!.some((c) => c?.sha && sameRecordedSha(c.sha, sha))
+      || folded.some((c) => sameRecordedSha(c.sha, sha));
+    const foldedBefore = folded.length;
+    for (const ct of state.commitTurns) {
+      if (!ct?.sha || !ct.turnId) continue;
+      let cur = ct.sha;
+      const seen = new Set<string>();
+      for (let hops = 0; hops < 32 && !seen.has(cur.toLowerCase()); hops++) {
+        seen.add(cur.toLowerCase());
+        const next = pairs.find((p) => sameRecordedSha(p.from, cur) && !sameRecordedSha(p.to, cur))?.to;
+        if (!next) break;
+        if (cur === ct.sha ? !folded.some((c) => sameRecordedSha(c.sha, cur)) : !attested(cur)) {
+          folded.push({ sha: cur, turnId: ct.turnId, ...(ct.at ? { at: ct.at } : {}) });
+        }
+        cur = next;
+      }
+    }
+    if (folded.length > foldedBefore) state.foldedCommitTurns = folded;
     const bySha = new Map<string, CommitTurn>();
     for (const ct of state.commitTurns) {
       if (!ct?.sha) continue;
@@ -2161,8 +2530,8 @@ function foldCommitRecordsToSurvivors(
  * Returns what was added, or null when nothing was. Does not save.
  */
 export function keepCommitRecordsSavedMeanwhile(
-  state: Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits' | 'preSquashCommitTurns' | 'replayedCommits'>,
-  onDisk: Partial<Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits' | 'preSquashCommitTurns' | 'replayedCommits'>> | null | undefined,
+  state: Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits' | 'preSquashCommitTurns' | 'foldedCommitTurns' | 'replayedCommits'>,
+  onDisk: Partial<Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits' | 'preSquashCommitTurns' | 'foldedCommitTurns' | 'replayedCommits'>> | null | undefined,
 ): { shas: string[]; turns: number; pairs: number } | null {
   if (!onDisk || !state?.sessionId || onDisk.sessionId !== state.sessionId) return null;
   const same = (a: string, b: string) => {
@@ -2184,6 +2553,10 @@ export function keepCommitRecordsSavedMeanwhile(
   const addPre = (Array.isArray(onDisk.preSquashCommitTurns) ? onDisk.preSquashCommitTurns : []).filter((c) =>
     c?.sha && c.turnId && c.squash && !ownPre.some((own) => own?.sha && same(own.sha, c.sha)));
   if (addPre.length > 0) state.preSquashCommitTurns = [...ownPre, ...addPre];
+  const ownFolded = Array.isArray(state.foldedCommitTurns) ? state.foldedCommitTurns : [];
+  const addFolded = (Array.isArray(onDisk.foldedCommitTurns) ? onDisk.foldedCommitTurns : []).filter((c) =>
+    c?.sha && c.turnId && !ownFolded.some((own) => own?.sha && same(own.sha, c.sha)));
+  if (addFolded.length > 0) state.foldedCommitTurns = [...ownFolded, ...addFolded];
   // Same reasoning as preSquashCommitTurns, and merged BEFORE the early return
   // for the same reason: a replay verdict is observed once, by whichever
   // post-commit was running in the worktree that replayed it. A save carrying
@@ -2728,7 +3101,9 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
   try {
     // Resolve the heartbeat script path (sibling to this file in dist/)
     const __filename = fileURLToPath(import.meta.url);
-    const __dirname = path.dirname(__filename);
+    // Through the npm name, so the heartbeat runs whatever copy is installed
+    // and can see the next upgrade (live-install-path.ts).
+    const __dirname = throughLiveInstall(path.dirname(__filename));
     const heartbeatScript = path.join(__dirname, 'heartbeat.js');
 
     if (!fs.existsSync(heartbeatScript)) {
@@ -2854,14 +3229,21 @@ export function isHeartbeatAlive(sessionId: string): boolean {
   try {
     if (!fs.existsSync(pidFile)) return false;
     const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
-    if (pid <= 0) return false;
-    // signal 0 checks if process exists without actually sending a signal
-    process.kill(pid, 0);
-    return true;
+    // Alive AND ours: a live pid alone may be a stranger that inherited the
+    // number of a SIGKILLed heartbeat. The daemon re-stamps this file every
+    // tick (heartbeat.ts), so a recent stamp answers without a `ps`.
+    return isOwnDaemonAlive(pid, isHeartbeatFor(sessionId), {
+      stampedAtMs: fs.statSync(pidFile).mtimeMs,
+      freshWithinMs: HEARTBEAT_STAMP_FRESH_MS,
+    });
   } catch {
     return false;
   }
 }
+
+// Three heartbeat ticks (30 s each): a daemon that has not re-stamped its pid
+// file in that long must show its command line before it counts as alive.
+const HEARTBEAT_STAMP_FRESH_MS = 90_000;
 
 /**
  * How long a retired (ENDED) state file is kept before being pruned.
@@ -2934,7 +3316,7 @@ export function clearAllSessionStates(cwd?: string): void {
 // so it was empty on every hook-driven session on disk.
 
 interface ShadowBearingState {
-  promptShadows?: Array<{ promptIndex: number; shadowSha: string; capturedAt: string; completeBaseline?: boolean }>;
+  promptShadows?: Array<{ promptIndex: number; shadowSha: string; capturedAt: string; completeBaseline?: boolean; cutAfterTurnStart?: boolean }>;
   /**
    * Prompts this launch WATCHED arrive without ever anchoring a start-state —
    * see `markSkippedPromptBaselines`. Distinct from an index that is simply
@@ -2954,7 +3336,7 @@ export function recordPromptShadow(
   state: ShadowBearingState,
   promptIndex: number,
   shadowSha: string | null | undefined,
-  opts?: { now?: () => string; completeBaseline?: boolean },
+  opts?: { now?: () => string; completeBaseline?: boolean; cutAfterTurnStart?: boolean },
 ): void {
   if (!shadowSha || !Number.isInteger(promptIndex) || promptIndex < 0) return;
   if (!state.promptShadows) state.promptShadows = [];
@@ -2964,7 +3346,24 @@ export function recordPromptShadow(
     shadowSha,
     capturedAt: (opts?.now ?? (() => new Date().toISOString()))(),
     ...(opts?.completeBaseline !== undefined ? { completeBaseline: opts.completeBaseline } : {}),
+    ...(opts?.cutAfterTurnStart ? { cutAfterTurnStart: true } : {}),
   });
+}
+
+/**
+ * Remember the start of prompt `promptIndex` in the linked worktree at `path`.
+ * First write wins, as for `recordPromptShadow`.
+ */
+export function recordPromptWorkTreeShadow(
+  state: { promptWorkTreeShadows?: Array<{ promptIndex: number; path: string; shadowSha: string }> },
+  promptIndex: number,
+  path: string,
+  shadowSha: string | null | undefined,
+): void {
+  if (!shadowSha || !path || !Number.isInteger(promptIndex) || promptIndex < 0) return;
+  if (!state.promptWorkTreeShadows) state.promptWorkTreeShadows = [];
+  if (state.promptWorkTreeShadows.some((s) => s.promptIndex === promptIndex)) return;
+  state.promptWorkTreeShadows.push({ promptIndex, path, shadowSha });
 }
 
 /**

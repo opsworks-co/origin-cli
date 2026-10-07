@@ -14,10 +14,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const sessions: any[] = [];
 const commits: any[] = [];
+const archive: { todos: any[]; decisions: any[] } = { todos: [], decisions: [] };
 
 vi.mock('../memory.js', () => ({
   readAllSessionMemory: () => sessions,
   readAllCommitMemory: () => commits,
+  readArchivedMemory: () => archive,
   sortByDateAsc: <T,>(list: T[], dateOf: (i: T) => string | undefined) =>
     [...list].sort((a, b) => String(dateOf(a) || '').localeCompare(String(dateOf(b) || ''))),
 }));
@@ -39,7 +41,7 @@ const commit = (over: Partial<any> = {}) => ({
   branch: 'main', committedAt: '2026-08-13T11:05:00Z', ...over,
 });
 
-beforeEach(() => { sessions.length = 0; commits.length = 0; });
+beforeEach(() => { sessions.length = 0; commits.length = 0; archive.todos = []; archive.decisions = []; });
 
 describe('getRepoMemory — empty and error cases', () => {
   it('returns an empty result with a note rather than throwing', () => {
@@ -77,6 +79,22 @@ describe('getRepoMemory — token discipline', () => {
     expect(s.decisions).toEqual(['gated on producedWork']);
     expect(s.openTodos).toEqual(['verify on prod']);
     expect(s.fileNotes).toEqual({ 'a.ts': 'note' });
+  });
+
+  it('reports what sessions older than the note still owe, newest first, only with the detail', () => {
+    sessions.push(session());
+    archive.todos = [
+      { key: 'a', text: 'older item', sessionId: 'aaaaaaaa1111', at: '2026-08-01T00:00:00Z' },
+      { key: 'b', text: 'newer item', sessionId: 'bbbbbbbb2222', at: '2026-08-05T00:00:00Z' },
+    ];
+    archive.decisions = [{ key: 'd', text: 'why X', sessionId: 'aaaaaaaa1111', at: '2026-08-01T00:00:00Z' }];
+    expect(getRepoMemory({ repoPath: '/tmp/x' }).older).toBeUndefined();
+    const older = getRepoMemory({ repoPath: '/tmp/x', includeDetail: true }).older!;
+    expect(older.openTodos.map((t) => t.text)).toEqual(['newer item', 'older item']);
+    expect(older.openTodos[0].sessionId).toBe('bbbbbbbb');
+    expect(older.decisions.map((d) => d.text)).toEqual(['why X']);
+    // An archived item records no files, so a path filter never matches one.
+    expect(getRepoMemory({ repoPath: '/tmp/x', includeDetail: true, paths: ['a.ts'] }).older).toBeUndefined();
   });
 
   it('caps the file list but still reports the true count', () => {

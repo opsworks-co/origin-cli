@@ -24,7 +24,8 @@ import path from 'path';
 import crypto from 'crypto';
 import { combineApplyableTurnDiff } from './applyable-turn-diff.js';
 import { git, gitDetailed, gitOrNull } from './utils/exec.js';
-import { isUnsafeGitShowPath, mergeTreeOf, tmpIndexPath } from './git-capture.js';
+import { commitLineCounts, isUnsafeGitShowPath, mergeTreeOf, tmpIndexPath } from './git-capture.js';
+import { ingestPatchForCommit } from './commit-ingest-patch.js';
 
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
 
@@ -36,7 +37,6 @@ export const RECENT_SHAS_LIMIT = 500;
 // Server-side MAX_COMMITS per /commits/ingest request.
 const INGEST_BATCH = 200;
 // Per-commit patch cap — same as the live post-commit path.
-const MAX_DIFF_LEN = 500_000;
 // Server truncates messages at 5000; don't ship more than it will keep.
 const MAX_MESSAGE_LEN = 5000;
 // Flush a batch once its serialized payload reaches this budget. Since #597
@@ -85,7 +85,15 @@ export interface BackfillCommitPayload {
   // wrong and permanent — null lets a later provider sync fill it in.
   filesChanged?: string[];
   committedAt?: string;
+  // Git's own totals (numstat). Without them the server counted the patch
+  // text — and that text is cut at the ingest limit, so a large commit
+  // stored the count of its first 500KB (prod 92408f51: +678 for +729).
+  additions?: number;
+  deletions?: number;
   diff?: string;
+  // `diff` was cut to fit; the server marks the row clipped so readers use
+  // `additions`/`deletions` over the text.
+  diffTruncated?: boolean;
 }
 
 export type IngestFn = (data: {
@@ -589,13 +597,17 @@ export function extractCommitDiff(
 export interface CommitPrefetch {
   meta: Map<string, { author: string; committedAt: string; message: string }>;
   files: Map<string, string[]>;
+  // Git's totals per commit, one batched numstat. A merge prints nothing
+  // here (no single parent) and is asked one at a time by commitLineCounts.
+  numstat: Map<string, { added: number; removed: number }>;
 }
 
 export function prefetchCommitPayloads(cwd: string, shas: string[]): CommitPrefetch {
   const meta = new Map<string, { author: string; committedAt: string; message: string }>();
   const files = new Map<string, string[]>();
+  const numstat = new Map<string, { added: number; removed: number }>();
   const valid = shas.filter((x) => SHA_RE.test(x));
-  if (valid.length === 0) return { meta, files };
+  if (valid.length === 0) return { meta, files, numstat };
 
   // Records are NUL-separated (-z); fields inside one record by \x1f, with the
   // raw body (%B) last because it is the only multi-line field.
@@ -632,7 +644,32 @@ export function prefetchCommitPayloads(cwd: string, shas: string[]): CommitPrefe
     if (/^[0-9a-f]{40}$/.test(line)) { current = line; if (!files.has(current)) files.set(current, []); continue; }
     if (current) files.get(current)!.push(line);
   }
-  return { meta, files };
+
+  // Same shape as commitLineCounts (`-M`, every file incl. lockfiles: the
+  // commit total, not the authored view), batched through --stdin.
+  const numRes = gitDetailed(
+    ['diff-tree', '--stdin', '--numstat', '-M', '-r', '--root'],
+    { cwd, input: `${valid.join('\n')}\n` },
+  );
+  const numOut = numRes.status === 0 ? numRes.stdout : '';
+  current = null;
+  // An entry exists only once a row was seen: a merge prints its sha line
+  // and no rows (no single parent), and an empty entry would read as a
+  // commit that changed nothing — commitLineCounts answers for it instead.
+  for (const line of (numOut || '').split('\n')) {
+    if (!line) continue;
+    if (/^[0-9a-f]{40}$/.test(line)) { current = line; continue; }
+    if (!current) continue;
+    const parts = line.split('\t');
+    if (parts.length < 3) continue;
+    const a = Number(parts[0]);
+    const r = Number(parts[1]);
+    let t = numstat.get(current);
+    if (!t) { t = { added: 0, removed: 0 }; numstat.set(current, t); }
+    if (Number.isFinite(a)) t.added += a;
+    if (Number.isFinite(r)) t.removed += r;
+  }
+  return { meta, files, numstat };
 }
 
 /** SHAs reachable from HEAD, newest first. Empty on any git failure. */
@@ -677,6 +714,7 @@ export function buildCommitPayload(
   }
 
   const { diff, filesChanged } = extractCommitDiff(cwd, sha, prefetch?.files.get(sha));
+  const counts = prefetch?.numstat.get(sha) ?? commitLineCounts(cwd, sha);
 
   return {
     sha,
@@ -684,7 +722,9 @@ export function buildCommitPayload(
     author,
     filesChanged,
     committedAt: committedAt || undefined,
-    diff: diff ? diff.slice(0, MAX_DIFF_LEN) : undefined,
+    ...(counts ? { additions: counts.added, deletions: counts.removed } : {}),
+    // Hunk-bounded and flagged, never a byte slice — see ingestPatchForCommit.
+    ...ingestPatchForCommit(diff),
   };
 }
 

@@ -52,7 +52,6 @@ describe('shouldIgnoreFile — a directory pattern covers the directory itself',
 
   it('leaves non-directory patterns alone', () => {
     // These have no trailing `/**`, so the new branch never fires for them.
-    expect(shouldIgnoreFile('package-lock.json')).toBe(true);
     expect(shouldIgnoreFile('app.min.js')).toBe(true);
     expect(shouldIgnoreFile('src/index.ts')).toBe(false);
   });

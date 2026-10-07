@@ -17,7 +17,12 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { diffSectionsFor, rescueRevealingWrite } from '../commands/hooks/after-file-edit.js';
+import {
+  diffSectionsFor,
+  EDIT_HOOK_TOOL,
+  rescueRevealingWrite,
+  scopeAfterFileEditDiffs,
+} from '../commands/hooks/after-file-edit.js';
 import { captureGitState, createShadowCommit } from '../git-capture.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf-8' }).trim();
@@ -54,6 +59,89 @@ describe('diffSectionsFor', () => {
   it('ignores a leading fragment that is not a diff --git section', () => {
     expect(diffSectionsFor('warning: whatever\n' + section('a.ts'), new Set(['a.ts'])))
       .toContain('diff --git a/a.ts');
+  });
+});
+
+describe('after-file-edit blob ownership', () => {
+  it('removes an extractor-missed file from both stored diffs', () => {
+    const prior = section('first.ts');
+    const current = section('second.ts');
+    const missed = section('session-state.ts');
+    const wholeTree = [prior, current, missed].join('\n');
+    const state = {
+      liveEdits: [{
+        promptIndex: 2,
+        toolName: EDIT_HOOK_TOOL,
+        capturedAt: new Date().toISOString(),
+        edits: [{
+          file: 'first.ts',
+          op: 'write' as const,
+          oldContent: 'old',
+          newContent: 'new',
+          source: 'uncommitted' as const,
+          evidence: 'edit_hook' as const,
+        }],
+      }],
+    };
+
+    // Cursor names second.ts now; first.ts was named by this turn's earlier
+    // edit hook. session-state.ts is merely dirty in the same working tree —
+    // the exact production shape behind TODO 58f09990.
+    const scoped = scopeAfterFileEditDiffs(
+      state, 2, ['second.ts'], wholeTree, wholeTree,
+    );
+
+    expect([...scoped.files]).toEqual(['second.ts', 'first.ts']);
+    for (const blob of [scoped.diff, scoped.uncommittedDiff]) {
+      expect(blob).toContain('first.ts');
+      expect(blob).toContain('second.ts');
+      expect(blob).not.toContain('session-state.ts');
+    }
+  });
+
+  it('does not borrow edit evidence from another turn or producer', () => {
+    const state = {
+      liveEdits: [
+        {
+          promptIndex: 1,
+          toolName: EDIT_HOOK_TOOL,
+          capturedAt: new Date().toISOString(),
+          edits: [{ file: 'other-turn.ts', op: 'write' as const, source: 'uncommitted' as const }],
+        },
+        {
+          promptIndex: 2,
+          toolName: 'origin:shell-probe',
+          capturedAt: new Date().toISOString(),
+          edits: [{ file: 'inferred.ts', op: 'write' as const, source: 'uncommitted' as const }],
+        },
+      ],
+    };
+    const wholeTree = [
+      section('current.ts'),
+      section('other-turn.ts'),
+      section('inferred.ts'),
+    ].join('\n');
+
+    const scoped = scopeAfterFileEditDiffs(
+      state, 2, ['current.ts'], wholeTree, wholeTree,
+    );
+
+    expect(scoped.diff).toContain('current.ts');
+    expect(scoped.diff).not.toContain('other-turn.ts');
+    expect(scoped.diff).not.toContain('inferred.ts');
+  });
+
+  it('still owns the current hook path when the ledger declined the write', () => {
+    // An oversized Cursor write never enters liveEdits (content cap). The hook
+    // path is then the only ownership evidence — dropping it is how
+    // session-state.ts vanished from the mapping while remaining in the blob.
+    const wholeTree = [section('session-state.ts'), section('sibling.ts')].join('\n');
+    const scoped = scopeAfterFileEditDiffs(
+      { liveEdits: [] }, 0, ['session-state.ts'], wholeTree, wholeTree,
+    );
+    expect([...scoped.files]).toEqual(['session-state.ts']);
+    expect(scoped.diff).toContain('session-state.ts');
+    expect(scoped.diff).not.toContain('sibling.ts');
   });
 });
 

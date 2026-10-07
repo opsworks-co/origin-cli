@@ -114,16 +114,23 @@ describe('mergeMemoryPayloads', () => {
     expect(twice).toEqual(once);
   });
 
-  it('sorts sessions oldest→newest and trims to the 20-entry window', () => {
-    // 15 + 15 = 30 distinct sessions; the window keeps the newest 20.
+  it('sorts sessions oldest→newest and trims to the byte budget, newest kept', () => {
+    // 15 + 15 = 30 distinct sessions of ~400 bytes; a 10 KB budget holds fewer.
     const mk = (prefix: string, n: number) =>
       Array.from({ length: n }, (_, i) =>
-        session(`${prefix}${i}`, { endedAt: `2026-08-${String(i + 1).padStart(2, '0')}T00:00:00.000Z` }),
+        session(`${prefix}${i}`, { endedAt: `2026-08-${String(i + 1).padStart(2, '0')}T00:00:0${prefix === 'a' ? 0 : 1}.000Z` }),
       );
-    const merged = mergeMemoryPayloads(payload(mk('a', 15)), payload(mk('b', 15)));
-    expect(merged.sessions).toHaveLength(20);
+    const all = mergeMemoryPayloads(payload(mk('a', 15)), payload(mk('b', 15)));
+    expect(all.sessions).toHaveLength(30);
+    const merged = mergeMemoryPayloads(payload(mk('a', 15)), payload(mk('b', 15)), 10_000);
+    expect(merged.sessions.length).toBeGreaterThanOrEqual(5);
+    expect(merged.sessions.length).toBeLessThan(30);
+    expect(JSON.stringify(merged, null, 2).length).toBeLessThanOrEqual(10_000);
     const times = merged.sessions.map((s) => Date.parse(s.endedAt));
     expect(times).toEqual([...times].sort((x, y) => x - y));
+    // The newest ones are the ones that stayed.
+    expect(ids(merged)).toContain('b14');
+    expect(ids(merged)).not.toContain('a0');
   });
 
   it('prunes commit records whose session fell out of the retained window', () => {
@@ -134,6 +141,7 @@ describe('mergeMemoryPayloads', () => {
     const merged = mergeMemoryPayloads(
       payload([old], [commit('orphan', 'old')]),
       payload(recent, [commit('kept', 'r5')]),
+      9_000,
     );
     expect(ids(merged)).not.toContain('old');
     expect(shas(merged)).toEqual(['kept']);

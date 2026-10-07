@@ -255,5 +255,9 @@ describe.skipIf(!haveDist)('a turn that commits on two branches, end to end thro
       branchA.linesRemoved + branchB.linesRemoved,
     ]);
     expect(log).toContain('ledger diff replaced by the commit patches of several branches');
+    // The upload says which commits the patch stands for — both branches — so
+    // a row stamped with either one takes it (session 690e594c turn 6).
+    expect(last.commitPatch, why).toBe(true);
+    expect(last.patchCommits, why).toEqual(expect.arrayContaining([aSha, bSha]));
   }, 120_000 * WINDOWS_SLOWDOWN);
 });

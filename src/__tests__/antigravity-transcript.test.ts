@@ -9,6 +9,7 @@ import {
   normalizeAntigravityModel,
   estimateTokens,
   estimateAntigravityUsage,
+  agyArgs,
 } from '../antigravity-transcript.js';
 
 const FIXTURE = path.join(__dirname, 'fixtures', 'antigravity-transcript.jsonl');
@@ -31,7 +32,32 @@ describe('parseAntigravityTranscript (real agy fixture)', () => {
 
   it('accumulates input/output text for token estimation', () => {
     expect(parsed.inputChars).toBeGreaterThan(0);
-    expect(parsed.outputChars).toBeGreaterThan(parsed.inputChars); // model did the work
+    expect(parsed.outputChars).toBeGreaterThan(0);
+    // An agentic session is INPUT-heavy: the model reads far more (tool
+    // results, injected system context) than it writes. Until TODO 26b063c3
+    // every tool result was counted as output and this asserted the reverse —
+    // on this fixture 50k of 55k "output" chars were VIEW_FILE / RUN_COMMAND
+    // results the model had read.
+    expect(parsed.inputChars).toBeGreaterThan(parsed.outputChars);
+  });
+
+  it('counts tool results and system steps as input, the model\'s own text as output', () => {
+    const steps = jsonl.split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    let input = 0; let output = 0;
+    for (const st of steps) {
+      const c = typeof st.content === 'string' ? st.content.length : 0;
+      if (st.type === 'USER_INPUT' && st.source === 'USER_EXPLICIT') {
+        const m = st.content.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/);
+        if (m) input += m[1].length;
+      } else if (st.source === 'SYSTEM') input += c;
+      else if (st.source === 'MODEL') {
+        if (typeof st.thinking === 'string') output += st.thinking.length;
+        for (const tc of st.tool_calls || []) output += JSON.stringify(agyArgs(tc)).length;
+        if (st.type === 'PLANNER_RESPONSE') output += c; else input += c;
+      }
+    }
+    expect(parsed.inputChars).toBe(input);
+    expect(parsed.outputChars).toBe(output);
   });
 });
 
@@ -150,6 +176,26 @@ describe('helpers', () => {
     expect(estimateTokens(10)).toBe(3);
   });
 
+  it('classifies each step kind: system and tool results are input, planner text, thinking and args are output', () => {
+    const line = (o: unknown) => JSON.stringify(o);
+    const jsonl = [
+      line({ type: 'CONVERSATION_HISTORY', source: 'SYSTEM', content: 'H'.repeat(100) }),
+      line({ type: 'USER_INPUT', source: 'USER_EXPLICIT', content: '<USER_REQUEST>\nfix it\n</USER_REQUEST>\nModel Selection: Gemini 3.5 Flash' }),
+      line({ type: 'EPHEMERAL_MESSAGE', source: 'SYSTEM', content: 'E'.repeat(2500) }),
+      line({ type: 'PLANNER_RESPONSE', source: 'MODEL', content: 'P'.repeat(30), thinking: 'T'.repeat(40), tool_calls: [{ name: 'run_command', args: { CommandLine: 'ls' } }] }),
+      line({ type: 'RUN_COMMAND', source: 'MODEL', content: 'Completed At: now\nOutput:\n' + 'O'.repeat(1000) }),
+      line({ type: 'EPHEMERAL_MESSAGE', source: 'SYSTEM', content: 'E'.repeat(2500) }),
+      line({ type: 'PLANNER_RESPONSE', source: 'MODEL', content: 'done' }),
+    ].join('\n');
+    const t = parseAntigravityTranscript(jsonl);
+    const argsLen = JSON.stringify({ CommandLine: 'ls' }).length;
+    expect(t.inputChars).toBe(100 + 'fix it'.length + 2500 + ('Completed At: now\nOutput:\n'.length + 1000) + 2500);
+    expect(t.outputChars).toBe(30 + 40 + argsLen + 'done'.length);
+    const u = estimateAntigravityUsage(t);
+    expect(u.inputTokens).toBeGreaterThan(u.outputTokens);
+    expect(u.estimated).toBe(true);
+  });
+
   it('builds an estimated-usage object flagged as estimated', () => {
     const u = estimateAntigravityUsage({ inputChars: 40, outputChars: 400 });
     expect(u).toEqual({ inputTokens: 10, outputTokens: 100, totalTokens: 110, estimated: true });
@@ -193,7 +239,7 @@ describe('helpers', () => {
   });
 
   it('handles empty/garbage transcripts without throwing', () => {
-    expect(parseAntigravityTranscript('')).toEqual({ prompts: [], responses: [], promptTimes: [], model: null, inputChars: 0, outputChars: 0, filePaths: [], filesEdited: [], promptFilesEdited: [], promptEditRecords: [], promptRanCommit: [], promptWroteViaShell: [], promptCommitShas: [], toolCalls: 0, toolBreakdown: [] });
+    expect(parseAntigravityTranscript('')).toEqual({ prompts: [], responses: [], promptTimes: [], model: null, inputChars: 0, outputChars: 0, promptInputChars: [], promptOutputChars: [], filePaths: [], filesEdited: [], promptFilesEdited: [], promptEditRecords: [], promptRanCommit: [], promptWroteViaShell: [], promptShellWriteCommands: [], promptCommitShas: [], toolCalls: 0, toolBreakdown: [] });
     expect(parseAntigravityTranscript('not json\n{bad').prompts).toEqual([]);
   });
 });

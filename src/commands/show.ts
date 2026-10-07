@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { withOpenedPrompts } from '../note-seal.js';
 import { listSessionIds, readSessionFile } from '../session-store.js';
 import { execFileSync, execSync } from 'child_process';
 import { getGitRoot, loadSessionState, listActiveSessions } from '../session-state.js';
@@ -213,7 +214,9 @@ export async function showCommand(commitSha: string, options: { json?: boolean }
   }
 
   // Read git note
-  const note = readOriginNote(repoPath, fullSha);
+  // Sealed prompts open here when this user can still get the key (note-seal.ts).
+  const rawNote = readOriginNote(repoPath, fullSha);
+  const note = rawNote ? await withOpenedPrompts(rawNote) : null;
 
   if (!note) {
     console.log('');
@@ -297,6 +300,14 @@ export async function showCommand(commitSha: string, options: { json?: boolean }
     for (const line of summaryLines) {
       console.log(`  ${chalk.gray('→')} ${chalk.white(line.trim())}`);
     }
+  } else if (note.promptTextWithheld === true) {
+    // Metadata-only note (the default): the prompts live in the permissioned
+    // Origin record, not in the repository.
+    const where = typeof note.originUrl === 'string' && /^https?:\/\//.test(note.originUrl) ? ` — ${note.originUrl}` : '';
+    console.log('');
+    console.log(chalk.gray(note.sealed
+      ? `  Prompts: sealed in git notes — no key for this user (needs repo access in Origin)${where}`
+      : `  Prompts: not stored in git notes${where}`));
   }
 
   // Files

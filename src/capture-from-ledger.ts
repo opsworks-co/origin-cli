@@ -30,6 +30,7 @@ import {
   type JournalEntry,
   type JournalFence,
 } from './write-journal.js';
+import { discardedWorkForTurn } from './discarded-work.js';
 import { recoverJournalTurns } from './recover-journal-turns.js';
 import { getSnapshot } from './write-journal-store.js';
 import { localTurnForServerRow } from './turn-index.js';
@@ -57,6 +58,16 @@ import type { TurnObservation } from './resolve-turn.js';
  * costs a few lines and a dropped real write costs the user their turn.
  */
 export const PHANTOM_MTIME_SLACK_MS = 60_000;
+
+/**
+ * How close to a checkout's fence a file's last write must sit to be git's own
+ * rewrite rather than the agent's edit. The fence and the rewrites race (the
+ * hook writes the fence after git has written the tree; the watcher reports
+ * a burst once its 250 ms debounce closes), so the two can land in either
+ * order, but within a second or so of each other; an agent's edit comes
+ * later by orders of magnitude.
+ */
+export const CHECKOUT_REWRITE_SLACK_MS = 10_000;
 
 /** How the before-state of each file was obtained. */
 export type BeforeSource = 'ledger' | 'baseline' | 'absent' | 'unavailable';
@@ -141,6 +152,14 @@ export interface LedgerCaptureDeps {
    * is the pre-checkout content — the same stale answer in a closer voice.
    */
   beforeOverrides?: Map<string, string | null>;
+  /**
+   * An inherited before-state with the work the turn STARTED with merged in
+   * (inheritedWithStartDirt), or null to keep it. The inherited commit knows
+   * nothing of an earlier turn's uncommitted work, so a rebase that replays it
+   * over an upstream change to the same file billed it to this turn
+   * (690e594c turn 1).
+   */
+  startDirt?: (file: string, started: string, inherited: string) => string | null;
 }
 
 /**
@@ -204,6 +223,10 @@ export function captureTurnFromLedger(deps: LedgerCaptureDeps): LedgerCapture | 
   const contentUnavailable: string[] = [];
   const netZero: string[] = [];
   let complete = true;
+  // Checkouts inside the turn, by time — see the round-trip rule below.
+  const checkoutsAt = fencesInTurn(entries, turnId)
+    .filter((f) => f.from && f.to && f.from !== f.to)
+    .map((f) => f.at);
 
   for (const c of changes) {
     // AFTER. A delete has no after-state, which is different from empty.
@@ -231,6 +254,34 @@ export function captureTurnFromLedger(deps: LedgerCaptureDeps): LedgerCapture | 
       // describes work that is not this turn's to claim.
       before = inherited.get(c.file) ?? null;
       if (before !== null) beforeSource = 'baseline';
+      if (before !== null && deps.startDirt) {
+        let atStart: string | null = null;
+        if (c.beforeHash) atStart = getSnapshot(snapshotDir, c.beforeHash);
+        else if (!c.reclaimed && deps.baselineSha && deps.readAtRev) atStart = deps.readAtRev(deps.baselineSha, c.file);
+        const merged = atStart !== null ? deps.startDirt(c.file, atStart, before) : null;
+        if (merged !== null) before = merged;
+      }
+      // A ROUND TRIP through a checkout. A rebase (cherry-pick, `git checkout -`,
+      // a stash pop) checks out `to` and then puts the turn's own bytes back;
+      // the override above then measures the file from `to`'s bytes and bills
+      // the turn for work it did not do. Session c085f0af turn 17, 2026-09-26:
+      // `git rebase --onto origin/main` of turn 16's commit, and row 17 carried
+      // turn 16's whole diff (+48/-4) as its own. A file whose last write sits
+      // at the checkout AND whose final bytes are the ones the turn started
+      // with — the ledger's earlier snapshot, else the baseline — ended the
+      // turn unchanged. An edit that restores the original minutes later is
+      // still the turn's: it is not at the checkout.
+      if (after !== null && typeof c.lastAt === 'number'
+        && checkoutsAt.some((at) => Math.abs((c.lastAt as number) - at) <= CHECKOUT_REWRITE_SLACK_MS)) {
+        let started: string | null = null;
+        if (c.beforeHash) started = getSnapshot(snapshotDir, c.beforeHash);
+        else if (!c.reclaimed && deps.baselineSha && deps.readAtRev) started = deps.readAtRev(deps.baselineSha, c.file);
+        if (started !== null && started === after) {
+          netZero.push(c.file);
+          resolved.push({ file: c.file, before: after, after, beforeSource: c.beforeHash ? 'ledger' : 'baseline' });
+          continue;
+        }
+      }
     } else if (c.beforeHash) {
       before = getSnapshot(snapshotDir, c.beforeHash);
       if (before === null) {
@@ -322,7 +373,10 @@ export interface LedgerSessionState {
   /** LOCAL-numbered: index L is this launch's turn L. */
   promptTurnIds?: string[];
   /** LOCAL-numbered, like the ids. */
-  promptShadows?: Array<{ promptIndex: number; shadowSha: string; promptStartedAt?: number }>;
+  promptShadows?: Array<{ promptIndex: number; shadowSha: string; promptStartedAt?: number; cutAfterTurnStart?: boolean }>;
+  /** LOCAL-numbered: the tree Stop saw when it closed turn L. */
+  turnEndShadows?: Array<{ promptIndex: number; shadowSha: string }>;
+  sessionStartShadowSha?: string | null;
   prePromptSha?: string | null;
   headShaAtStart?: string | null;
   /** Server row of this launch's turn 0 — see turn-index.ts. */
@@ -349,6 +403,14 @@ export interface LedgerApplicableMapping {
   diffSource?: 'ledger' | 'turn-window';
   /** Internal marker for callers that must suppress their own re-derivation. */
   ledgerOwned?: boolean;
+  /** Marks an EMPTY row carries; a fill here contradicts them (chat-only-flag.ts). */
+  chatOnly?: boolean;
+  turnWindowCaptured?: boolean;
+  /**
+   * Files the turn wrote and put back before it ended — see discarded-work.ts.
+   * Sent on the wire; an explicit [] says the turn measured and found none.
+   */
+  discardedFiles?: string[];
 }
 
 export interface ApplyLedgerDeps {
@@ -364,12 +426,27 @@ export interface ApplyLedgerDeps {
    * it needs the repo, and this module does no IO of its own.
    */
   inheritedBefore?: (baselineSha: string, localTurn: number) => Map<string, string | null>;
+  /** LedgerCaptureDeps.startDirt, for the turn whose baseline is `baselineSha`. */
+  startDirt?: (baselineSha: string, file: string, started: string, inherited: string) => string | null;
   /** `git diff --name-only <from> <to>` — what a checkout between them rewrote. */
   changedFilesBetween?: (from: string, to: string) => string[];
   /** Optional trace hook; never throws. */
   log?: (event: string, data: Record<string, unknown>) => void;
   /** What the ledger found for each row — see resolve-turn.ts. */
   observe?: (promptIndex: number, observation: TurnObservation) => void;
+  /**
+   * Files the turn's own hands wrote, on authoring evidence (see
+   * authoredFilesForTurn). Absent, the turn's discarded work is not decided.
+   */
+  authoredFiles?: (serverRow: number, localTurn: number) => ReadonlySet<string>;
+  /** Files in the commits the turn made; null when a commit could not be read. */
+  committedFiles?: (serverRow: number, localTurn: number) => ReadonlySet<string> | null;
+  /**
+   * Files a stash made since `sinceMs` holds at bytes the turn wrote (file →
+   * the hashes the journal recorded for it in the turn) — see stashed-work.ts.
+   * Null when git could not be asked.
+   */
+  stashedFiles?: (sinceMs: number, written: ReadonlyMap<string, ReadonlySet<string>>) => ReadonlySet<string> | null;
 }
 
 /**
@@ -409,6 +486,35 @@ export function fenceBeforeStates(
     } catch { unresolved = true; }
   }
   return { before, unresolved };
+}
+
+/**
+ * The turn's put-back files a stash made during the turn holds at bytes the
+ * turn wrote (stashed-work.ts). The hashes come from the turn's own journal
+ * records, so the answer is about THIS turn's writes and not the file's.
+ * Empty without a turn mark or without a recorded hash; null when git could
+ * not be asked.
+ */
+function heldInTurnStashes(
+  entries: readonly JournalEntry[],
+  turnId: string,
+  files: readonly string[],
+  stashedFiles: NonNullable<ApplyLedgerDeps['stashedFiles']>,
+): ReadonlySet<string> | null {
+  const span = turnSpan(entries, turnId);
+  const mark = span ? entries[span.start - 1] : undefined;
+  if (!span || !mark || mark.kind !== 'turn') return new Set();
+  const wanted = new Set(files);
+  const written = new Map<string, Set<string>>();
+  for (let i = span.start; i < span.end; i++) {
+    const e = entries[i];
+    if (e.kind !== 'write' || e.gone || !e.hash || !wanted.has(e.file)) continue;
+    const set = written.get(e.file) || new Set<string>();
+    set.add(e.hash);
+    written.set(e.file, set);
+  }
+  if (written.size === 0) return new Set();
+  return stashedFiles(mark.at, written);
 }
 
 /**
@@ -478,7 +584,21 @@ export function applyLedgerToMappings(
       // first to touch is diffed against what was really there rather than
       // against the last commit — which would credit the turn with someone
       // else's uncommitted edits.
-      const shadow = state.promptShadows?.find((ps) => ps.promptIndex === local)?.shadowSha;
+      //
+      // Unless that shadow was cut AFTER the turn began writing (Cursor
+      // adopting an unannounced prompt, the Codex heartbeat noticing one): it
+      // already holds the turn's first edit, which then reads as unchanged and
+      // the turn resolves to nothing (TODO f7406e7e). The baseline is only read
+      // for a file with no journal history this session — one nothing changed
+      // while the journal recorded — so any EARLIER tree holds its real
+      // starting bytes: the previous turn's end, its start, the session's.
+      const own = state.promptShadows?.find((ps) => ps.promptIndex === local);
+      const shadow = own?.cutAfterTurnStart
+        ? (state.turnEndShadows?.find((ps) => ps.promptIndex === local - 1)?.shadowSha
+          || state.promptShadows?.find((ps) => ps.promptIndex === local - 1)?.shadowSha
+          || state.sessionStartShadowSha
+          || state.headShaAtStart)
+        : own?.shadowSha;
       const baselineSha = shadow || state.prePromptSha || state.headShaAtStart || null;
       // For a write reclaimed from ahead of this turn's mark: the tree as the
       // previous turn found it. Same fallbacks — a session with no shadows
@@ -513,6 +633,9 @@ export function applyLedgerToMappings(
       const cap = captureTurnFromLedger({
         entries, turnId, snapshotDir, baselineSha, priorBaselineSha,
         readAtRev: deps.readAtRev, ignoredFiles: deps.ignoredFiles, beforeOverrides,
+        startDirt: deps.startDirt && baselineSha
+          ? (file, started, inherited) => deps.startDirt!(baselineSha, file, started, inherited)
+          : undefined,
       });
       if (!ledgerCaptureIsUsable(cap)) {
         // A silent fallback is indistinguishable from a working ledger that
@@ -546,7 +669,39 @@ export function applyLedgerToMappings(
       // anywhere else silently fails to travel.
       pm.diffSource = 'ledger';
       pm.ledgerOwned = true;
+      // The marks of the row this replaces. `chatOnly` says the row shows
+      // nothing; `turnWindowCaptured` says its content is the shadow window's.
+      // Both were set by the shadow pass blanking this row at an earlier Stop
+      // and both are false of the row now (c085f0af row 16: chatOnly beside
+      // 3 files and +48/-4 for a day). The window pass runs after this one
+      // and re-marks a row it fills or blanks itself.
+      delete pm.chatOnly;
+      delete pm.turnWindowCaptured;
       if (cap.contentUnavailable.length > 0) pm.contentUnavailableFiles = cap.contentUnavailable;
+      // What the turn wrote and put back. Decided only by a producer that can
+      // say what the turn authored (Stop); left as it stands otherwise, so a
+      // later re-send cannot clear a verdict an earlier Stop reached.
+      if (deps.authoredFiles) {
+        const discarded = discardedWorkForTurn(
+          cap.netZero,
+          deps.authoredFiles(pm.promptIndex, local),
+          // Held elsewhere: in a commit of the turn, or in a stash it made.
+          () => {
+            const committed = deps.committedFiles ? deps.committedFiles(pm.promptIndex, local) : new Set<string>();
+            if (committed === null || !deps.stashedFiles) return committed;
+            const held = heldInTurnStashes(entries, turnId, cap.netZero, deps.stashedFiles);
+            return held === null ? null : new Set([...committed, ...held]);
+          },
+        );
+        if (discarded !== null) {
+          pm.discardedFiles = discarded;
+          if (discarded.length > 0) {
+            deps.log?.('turn put its own writes back before it ended', {
+              promptIndex: pm.promptIndex, turnId, files: discarded,
+            });
+          }
+        }
+      }
       replaced++;
       deps.observe?.(pm.promptIndex, {
         source: 'ledger', outcome: 'applied',

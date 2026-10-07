@@ -24,7 +24,7 @@ import path from 'path';
 import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { WINDOWS_SLOWDOWN, isWindows } from './helpers/windows-e2e.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { foldStopRows } from './helpers/fold-stop-rows.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -156,7 +156,7 @@ const PR_FILES = ['src/pr_one.py', 'src/pr_two.py'];
 const TURN_FILE = 'src/mine.py';
 const numbered = (tag: string, n: number) => Array.from({ length: n }, (_, i) => `${tag}_${i} = ${i}`).join('\n') + '\n';
 
-describe.skipIf(!haveDist || isWindows)('a pathspec checkout straddling the next prompt, through the built binary', () => {
+describe.skipIf(!haveDist)('a pathspec checkout straddling the next prompt, through the built binary', () => {
   let tmp = '';
   let older = '';
 

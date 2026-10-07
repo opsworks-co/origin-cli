@@ -128,7 +128,7 @@ function say(text: string) {
   fs.writeFileSync(transcript, lines.join('\n') + '\n');
 }
 function toolUse(id: string, name: string, input: Record<string, unknown>) {
-  lines.push(JSON.stringify({ type: 'assistant', timestamp: new Date().toISOString(), message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] } }));
+  lines.push(JSON.stringify({ type: 'assistant', timestamp: new Date().toISOString(), message: { role: 'assistant', model: 'claude-opus-5-5', content: [{ type: 'tool_use', id, name, input }] } }));
   lines.push(JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } }));
   fs.writeFileSync(transcript, lines.join('\n') + '\n');
 }
@@ -375,6 +375,9 @@ describe.skipIf(!haveDist)('capture end to end through the built binary', () => 
     // git fires the post-commit hook; `origin enable` points it at this.
     const pc = await gitHook('git-post-commit');
     expect(pc.code, pc.stderr).toBe(0);
+    // The note names the model the transcript ran, not the brand: the session
+    // started with no model, and its stored one is at best "claude".
+    expect(JSON.parse(git(['notes', '--ref=origin', 'show', sha])).origin?.model).toBe('claude-opus-5-5');
     toolUse('tu-4', 'Bash', { command: cmd });
     await run('post-tool-use', { tool_name: 'Bash', tool_input: { command: cmd }, tool_use_id: 'tu-4', tool_response: { stdout: '', stderr: '' } });
 

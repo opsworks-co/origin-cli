@@ -36,9 +36,10 @@ vi.mock('child_process', async (orig) => {
   return { ...actual, default: { ...actual, spawn }, spawn };
 });
 
-import { drainUpdateQueue, durableEndSession, durableUpdateSession, enqueueFailedUpdate, HOOK_REPLAY_MAX_BYTES } from '../update-queue.js';
+import { drainUpdateQueue, durableEndSession, durableUpdateSession, enqueueFailedUpdate, HOOK_REPLAY_MAX_BYTES, HOOK_SEND_MAX_WIRE_BYTES } from '../update-queue.js';
+import crypto from 'crypto';
 import { SERVER_EDITS_JSON_MAX_CHARS, fitEditsJsonForServer, fitSessionUpdateForServer } from '../session-update-size.js';
-import { timeoutForPayload } from '../fetch-timeout.js';
+import { timeoutForPayload, wireBytes } from '../fetch-timeout.js';
 
 const QUEUE_DIR = path.join(TEST_HOME, '.origin', 'queue');
 const entries = () => (fs.existsSync(QUEUE_DIR) ? fs.readdirSync(QUEUE_DIR).filter((f) => f.endsWith('.json')).sort() : [])
@@ -216,5 +217,56 @@ describe('Stop snapshots', () => {
     await tick();
     await durableUpdateSession('s', { tag: 'commit' });
     expect(updateSession.mock.calls.map((c) => c[1].tag)).toEqual(['old-stop', 'commit']);
+  });
+});
+
+// Session daf2d1ca, 2026-09-25: a 3MB Stop update was sent with the hook's 8s,
+// aborted, and waited for the NEXT hook to hand it to the background drain,
+// which then sent it in about a second. A hook now skips that doomed attempt.
+describe('a hook update too large to send in 8s goes straight to the background drain', () => {
+  // Diff text compresses about 4:1; random bytes do not, so this stays large on the wire.
+  const bigOnTheWire = () => ({ tag: 'big-stop', blob: crypto.randomBytes(HOOK_SEND_MAX_WIRE_BYTES).toString('base64') });
+
+  it('is queued without a send, the drain is started, and the drain sends it with room', async () => {
+    updateSession.mockResolvedValue({});
+    const data = bigOnTheWire();
+    expect(wireBytes(JSON.stringify(data))).toBeGreaterThan(HOOK_SEND_MAX_WIRE_BYTES);
+
+    expect(await durableUpdateSession('s', data, undefined, { deferLarge: true })).toBeNull();
+    expect(updateSession).not.toHaveBeenCalled();
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect((spawn.mock.calls[0] as unknown[])[1]).toEqual(expect.arrayContaining(['hooks', 'drain-queue']));
+    const queued = entries();
+    expect(queued).toHaveLength(1);
+    expect(queued[0].lastError).toMatch(/too large to send inside a hook/);
+
+    const bytes = fs.statSync(path.join(QUEUE_DIR, queued[0].name)).size;
+    await drainUpdateQueue(undefined, { background: true });
+    expect(updateSession.mock.calls[0][1]).toEqual(data);
+    expect(updateSession.mock.calls[0][2]).toEqual({ timeoutMs: timeoutForPayload(bytes) });
+    expect(entries()).toHaveLength(0);
+  });
+
+  it('a large payload that compresses small is still sent by the hook itself', async () => {
+    updateSession.mockResolvedValue({ ok: true });
+    const data = { tag: 'diffy', diff: '+ const x = 1;\n'.repeat(80_000) }; // ~1.3MB raw, tiny gzipped
+    expect(JSON.stringify(data).length).toBeGreaterThan(1_000_000);
+    expect(await durableUpdateSession('s', data, undefined, { deferLarge: true })).toEqual({ ok: true });
+    expect(updateSession).toHaveBeenCalledTimes(1);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('a small hook update is sent as before', async () => {
+    updateSession.mockResolvedValue({ ok: true });
+    expect(await durableUpdateSession('s', { tag: 'small' }, undefined, { deferLarge: true })).toEqual({ ok: true });
+    expect(updateSession).toHaveBeenCalledTimes(1);
+    expect(entries()).toHaveLength(0);
+  });
+
+  it('a caller that is not a hook (origin sessions sync) still sends a large update directly', async () => {
+    updateSession.mockResolvedValue({ ok: true });
+    expect(await durableUpdateSession('s', bigOnTheWire())).toEqual({ ok: true });
+    expect(updateSession).toHaveBeenCalledTimes(1);
+    expect(spawn).not.toHaveBeenCalled();
   });
 });

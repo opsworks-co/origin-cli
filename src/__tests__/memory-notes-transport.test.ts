@@ -21,6 +21,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { forgetCommitMemory } from '../memory.js';
+import { clearConfigCache } from '../config.js';
 import {
   syncNotesFromRemote,
   pushMemoryNotes,
@@ -73,6 +74,11 @@ const session = (id: string, endedAt = '2026-08-01T01:00:00.000Z', extra: any = 
   ...extra,
 });
 
+/** The explicit prompt opt-in (OR-48): memory leaves the machine only with it. */
+function optIn(repo: string, value: unknown = true) {
+  fs.writeFileSync(path.join(repo, '.origin.json'), JSON.stringify({ notesIncludePrompts: value }));
+}
+
 beforeEach(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-memory-transport-'));
   upstream = path.join(tmpRoot, 'upstream.git');
@@ -93,9 +99,18 @@ beforeEach(() => {
   muteHooks(bob);
   git(bob, 'config', 'user.email', 'bob@test.dev');
   git(bob, 'config', 'user.name', 'Bob');
+  // Every transport test below publishes on purpose, so both clones opt in;
+  // the default is pinned in its own tests.
+  optIn(alice);
+  optIn(bob);
 });
 
+// The machine config, in the per-worker HOME the vitest setup isolates.
+const machineConfig = path.join(os.homedir(), '.origin', 'config.json');
+
 afterEach(() => {
+  fs.rmSync(machineConfig, { force: true });
+  clearConfigCache();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
@@ -226,6 +241,29 @@ describe('memory notes transport', () => {
     expect(cfg).toContain(ORIGIN_NOTES_GLOB_REFSPEC);
     expect(() => git(bob, 'fetch', '-q', 'origin')).not.toThrow();
     expect(readMemory(bob).sessions.map((s) => s.sessionId)).toEqual(['a1']);
+  });
+
+  it('does not push memory by default — no repo or machine config is metadata only', () => {
+    fs.rmSync(path.join(alice, '.origin.json'));
+    writeMemory(alice, [session('a1')]);
+    pushMemoryNotes(alice, 'origin');
+    expect(git(alice, 'ls-remote', 'origin', 'refs/notes/*')).not.toContain('origin-memory');
+  });
+
+  it('only a literal boolean true opts in', () => {
+    optIn(alice, 'true');
+    writeMemory(alice, [session('a1')]);
+    pushMemoryNotes(alice, 'origin');
+    expect(git(alice, 'ls-remote', 'origin', 'refs/notes/*')).not.toContain('origin-memory');
+  });
+
+  it('a repo opt-in wins over a machine opt-out', () => {
+    fs.mkdirSync(path.dirname(machineConfig), { recursive: true });
+    fs.writeFileSync(machineConfig, JSON.stringify({ notesIncludePrompts: false }));
+    clearConfigCache();
+    writeMemory(alice, [session('a1')]);
+    pushMemoryNotes(alice, 'origin');
+    expect(git(alice, 'ls-remote', 'origin', 'refs/notes/*')).toContain('origin-memory');
   });
 
   it('does not push memory when the privacy opt-out is set', () => {

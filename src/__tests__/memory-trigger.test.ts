@@ -97,15 +97,21 @@ describe('writeSessionMemory upsert-by-sessionId', () => {
   });
 
   it('prunes commit records whose session dropped out of the retained window', () => {
-    writeSessionMemory(repo, entry({ sessionId: 'old' }));
-    writeCommitMemory(repo, commit({ commitSha: 'old1', sessionId: 'old' }));
-    expect(readAllCommitMemory(repo).map((c) => c.commitSha)).toContain('old1');
-    // push 20 more sessions so 'old' falls off the MAX_ENTRIES window
-    for (let i = 0; i < 21; i++) writeSessionMemory(repo, entry({ sessionId: `n${i}`, summary: `s${i}` }));
-    writeCommitMemory(repo, commit({ commitSha: 'new1', sessionId: 'n20' }));
-    const shas = readAllCommitMemory(repo).map((c) => c.commitSha);
-    expect(shas).toContain('new1');    // its session is retained
-    expect(shas).not.toContain('old1'); // 'old' session dropped → its commit pruned
+    // The window is a byte budget; a small one makes six tiny sessions overflow it.
+    process.env.ORIGIN_MEMORY_BUDGET_BYTES = '4000';
+    try {
+      writeSessionMemory(repo, entry({ sessionId: 'old' }));
+      writeCommitMemory(repo, commit({ commitSha: 'old1', sessionId: 'old' }));
+      expect(readAllCommitMemory(repo).map((c) => c.commitSha)).toContain('old1');
+      for (let i = 0; i < 21; i++) writeSessionMemory(repo, entry({ sessionId: `n${i}`, summary: `s${i}` }));
+      writeCommitMemory(repo, commit({ commitSha: 'new1', sessionId: 'n20' }));
+      expect(readAllSessionMemory(repo).map((e) => e.sessionId)).not.toContain('old');
+      const shas = readAllCommitMemory(repo).map((c) => c.commitSha);
+      expect(shas).toContain('new1');    // its session is retained
+      expect(shas).not.toContain('old1'); // 'old' session dropped → its commit pruned
+    } finally {
+      delete process.env.ORIGIN_MEMORY_BUDGET_BYTES;
+    }
   });
 
   it('per-file change notes round-trip and surface in the injected context', () => {
@@ -164,19 +170,33 @@ describe('writeSessionMemory upsert-by-sessionId', () => {
     expect(readAllSessionMemory(repo).find((e) => e.sessionId === 'cur1')?.decisions ?? []).toEqual([]);
 
     const late = ['Commit only toy.py — left Origin-managed AGENTS.md out'];
-    expect(enrichDecisionsForSession(repo, 'cur1', late)).toBe(true);
+    expect(enrichDecisionsForSession(repo, 'cur1', () => late)).toBe(true);
     expect(readAllSessionMemory(repo).find((e) => e.sessionId === 'cur1')?.decisions).toEqual(late);
     expect(readAllCommitMemory(repo).find((c) => c.commitSha === 'cur1sha')?.decisions).toEqual(late);
 
     // Idempotent: nothing empty left to fill → returns false, no overwrite.
-    expect(enrichDecisionsForSession(repo, 'cur1', ['SOMETHING ELSE'])).toBe(false);
+    expect(enrichDecisionsForSession(repo, 'cur1', () => ['SOMETHING ELSE'])).toBe(false);
     expect(readAllSessionMemory(repo).find((e) => e.sessionId === 'cur1')?.decisions).toEqual(late);
+  });
+
+  // Session 46b82050: a turn's decision about a rejected design was stamped on
+  // every commit the session made. Each commit gets ITS turn's decisions.
+  it('enrichDecisionsForSession fills each commit with its own decisions, and the rollup with their union', () => {
+    writeSessionMemory(repo, entry({ sessionId: 'two1', summary: 'two commits' }));
+    writeCommitMemory(repo, commit({ commitSha: 'aaa1111', sessionId: 'two1', message: 'A' }));
+    writeCommitMemory(repo, commit({ commitSha: 'bbb2222', sessionId: 'two1', message: 'B' }));
+    const per: Record<string, string[]> = { aaa1111: ['why A'], bbb2222: [] };
+    expect(enrichDecisionsForSession(repo, 'two1', (c) => per[c.commitSha] || [])).toBe(true);
+    const commits = readAllCommitMemory(repo);
+    expect(commits.find((c) => c.commitSha === 'aaa1111')?.decisions).toEqual(['why A']);
+    expect(commits.find((c) => c.commitSha === 'bbb2222')?.decisions ?? []).toEqual([]);
+    expect(readAllSessionMemory(repo).find((e) => e.sessionId === 'two1')?.decisions).toEqual(['why A']);
   });
 
   it('enrichDecisionsForSession is a no-op for empty input or unknown session', () => {
     writeSessionMemory(repo, entry({ sessionId: 'x1', summary: 'work' }));
-    expect(enrichDecisionsForSession(repo, 'x1', [])).toBe(false);
-    expect(enrichDecisionsForSession(repo, 'nope', ['a'])).toBe(false);
+    expect(enrichDecisionsForSession(repo, 'x1', () => [])).toBe(false);
+    expect(enrichDecisionsForSession(repo, 'nope', () => ['a'])).toBe(false);
   });
 
   it('memory brief: signature is stable, changes with the sessions, round-trips, and clears', () => {

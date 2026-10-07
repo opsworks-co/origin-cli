@@ -38,14 +38,16 @@ describe('commitLineCounts', () => {
     expect(commitLineCounts(repo, git('rev-parse', 'HEAD'))).toEqual({ added: 30_001, removed: 0 });
   });
 
-  it('counts lockfiles in commit totals while authored totals still filter them', () => {
+  // Lock files count everywhere now — a turn that bumps a version is as long
+  // as its commit (session d97d7b2c turn 6 read +434/-56 beside +436/-58).
+  it('counts lockfiles in commit totals and in authored totals alike', () => {
     write('package-lock.json', Array.from({ length: 500 }, (_, i) => `"dep${i}": "1.0.0",`).join('\n') + '\n');
     write('app.ts', 'a\nb\n');
     git('add', '-A'); git('commit', '-qm', 'lock');
     const sha = git('rev-parse', 'HEAD');
     expect(commitLineCounts(repo, sha)).toEqual({ added: 502, removed: 0 });
     expect(numstatTotals(['diff-tree', '--no-commit-id', '--numstat', '-r', sha], { cwd: repo }))
-      .toEqual({ added: 2, removed: 0 });
+      .toEqual({ added: 502, removed: 0 });
   });
 
   it('counts a merge by its resolution, not zero and not the absorbed branch', () => {

@@ -70,9 +70,11 @@ export interface ReflogRewrites {
   /**
    * Every `reset:` entry that moved a ref: the reflog it is in (`HEAD`, a linked
    * worktree's `worktrees/<id>/HEAD`, or a branch's short name), the sha it left
-   * and the sha it landed on.
+   * and the sha it landed on. `redone`: the same reflog recorded a commit
+   * after the reset — the reset-and-redo shape, not a cleanup that left the
+   * ref where the reset put it.
    */
-  resets: Array<{ ref: string; from: string; to: string }>;
+  resets: Array<{ ref: string; from: string; to: string; redone: boolean }>;
   commits: Map<string, ReflogCommit>;
 }
 
@@ -163,7 +165,10 @@ export function readReflogRewrites(repoPath: string): ReflogRewrites {
         return;
       }
       if (message.startsWith('reset:')) {
-        if (oldSha && oldSha !== newSha) result.resets.push({ ref, from: oldSha, to: newSha });
+        if (oldSha && oldSha !== newSha) {
+          const redone = entries.slice(i + 1).some((e) => e.message.startsWith('commit'));
+          result.resets.push({ ref, from: oldSha, to: newSha, redone });
+        }
         return;
       }
       if (/^(?:commit \(cherry-pick\)|cherry-pick):/.test(message)) {

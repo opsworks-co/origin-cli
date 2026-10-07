@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.9999",
+  "revision": {
+    "vcs": "git",
+    "id": "3f5a1c9e0b7d4a2f8e6c1b0a9d8e7f6a5b4c3d2e"
+  },
+  "attribution_level": "commit",
+  "recorded_at": "2026-09-24T10:15:30Z",
+  "producer": {
+    "name": "origin-cli",
+    "version": "0.20260924.258"
+  },
+  "contributions": [
+    {
+      "evidence": "session_capture",
+      "agent": {
+        "id": "claude-code"
+      },
+      "session": {
+        "id": "8b1f3c2e-5d4a-4e6f-9a7b-0c1d2e3f4a5b"
+      }
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import { estimateTurnUsage, type ModelUsage } from './transcript.js';
 import { commandWritesFiles } from './shell-write-capture.js';
 import path from 'path';
 
@@ -21,8 +22,16 @@ export interface AntigravityTranscript {
   // fired), which drifts out of order across re-parses.
   promptTimes: (number | null)[];
   model: string | null;   // normalized slug, e.g. "gemini-3.5-flash"
-  inputChars: number;     // user-side text (for token estimation)
-  outputChars: number;    // model-side text (for token estimation)
+  // Text the model was SENT: user requests, every SYSTEM-injected step, and
+  // the result content of every tool-execution step (for token estimation).
+  inputChars: number;
+  // Text the model PRODUCED: PLANNER_RESPONSE prose, thinking, tool-call args.
+  outputChars: number;
+  // inputChars / outputChars again, per prompt (aligned with prompts[]). Text
+  // sent before the first prompt is the first prompt's. They add up to the
+  // session's.
+  promptInputChars: number[];
+  promptOutputChars: number[];
   // Absolute paths of every file the session touched (edit/write/read tools),
   // pulled from tool_calls[].args. agy reports no reliable repo root — its
   // `workspacePaths[0]` is often the workspace/project NAME, not the folder the
@@ -46,6 +55,8 @@ export interface AntigravityTranscript {
   promptRanCommit: boolean[];
   // Turns that ran a write-shaped shell command — see stepWroteViaShell.
   promptWroteViaShell: boolean[];
+  /** Per prompt: the write-shaped shell commands it ran, verbatim. */
+  promptShellWriteCommands: string[][];
   // Short SHAs each turn printed from its OWN `git commit` — exact pairing,
   // so a turn never has to be matched to a commit by counting.
   promptCommitShas: string[][];
@@ -177,12 +188,18 @@ function stepRanGitCommit(step: any): boolean {
 // the same way, and a heredoc / `sed -i` / interpreter leaves no edit record —
 // so without this the turn reads as chat-only to every surface downstream.
 function stepWroteViaShell(step: any): boolean {
+  return stepShellWriteCommands(step).length > 0;
+}
+
+/** The write-shaped commands this step ran, verbatim — they name the paths they write. */
+function stepShellWriteCommands(step: any): string[] {
+  const out: string[] = [];
   for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
     const a = agyArgs(tc);
     const cmd = typeof a.CommandLine === 'string' ? a.CommandLine : '';
-    if (cmd && commandWritesFiles(cmd)) return true;
+    if (cmd && commandWritesFiles(cmd)) out.push(cmd);
   }
-  return false;
+  return out;
 }
 
 /**
@@ -321,7 +338,7 @@ function plannerStepText(step: any): string {
 // One user turn plus the assistant output assembled under it. Kept together so
 // that when we sort by prompt time, text + response + timestamp move as a unit
 // (see the sort at the end of parseAntigravityTranscript).
-interface AgyTurn { text: string; createdAt: number | null; buf: string[]; editedFiles: string[]; editRecords: AgyEditRecord[]; ranCommit: boolean; wroteViaShell: boolean; commitShas: string[] }
+interface AgyTurn { text: string; createdAt: number | null; inChars: number; outChars: number; buf: string[]; editedFiles: string[]; editRecords: AgyEditRecord[]; ranCommit: boolean; wroteViaShell: boolean; shellWriteCommands: string[]; commitShas: string[] }
 
 export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript {
   const turns: AgyTurn[] = [];
@@ -339,6 +356,12 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
   // phantom duplicate turn. Track whether a compaction happened since the last
   // real prompt so we can collapse the re-injection.
   let sawCompaction = false;
+  // The per-prompt share of inputChars / outputChars. Text before any prompt
+  // waits here and joins the first one.
+  let unclaimedIn = 0;
+  let unclaimedOut = 0;
+  const addIn = (n: number) => { inputChars += n; if (turns.length > 0) turns[turns.length - 1].inChars += n; else unclaimedIn += n; };
+  const addOut = (n: number) => { outputChars += n; if (turns.length > 0) turns[turns.length - 1].outChars += n; else unclaimedOut += n; };
 
   for (const line of jsonl.split('\n')) {
     const t = line.trim();
@@ -346,6 +369,14 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
     let step: any;
     try { step = JSON.parse(t); } catch { continue; }
     const content: string = typeof step?.content === 'string' ? step.content : '';
+
+    // Everything the SYSTEM injects is read by the model on its next step: the
+    // ~2.5 KB EPHEMERAL_MESSAGE reminder before nearly every step, the
+    // CONVERSATION_HISTORY summary, a CHECKPOINT, an ERROR_MESSAGE, a
+    // SYSTEM_MESSAGE. Input, all of it. Measured on four real transcripts
+    // (2026-09-26): 73k, 76k, 115k and 4k chars per session — the bulk of what
+    // the model was actually sent, and none of it was counted (TODO 26b063c3).
+    if (step?.source === 'SYSTEM') addIn(content.length);
 
     if (step?.type === 'CHECKPOINT' && /resuming from a compaction/i.test(content)) {
       sawCompaction = true;
@@ -361,16 +392,28 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
         const isReinjection = sawCompaction && turns.length > 0 && turns[turns.length - 1].text === req;
         if (!isReinjection) {
           const ms = typeof step?.created_at === 'string' ? Date.parse(step.created_at) : NaN;
-          turns.push({ text: req, createdAt: Number.isFinite(ms) ? ms : null, buf: [], editedFiles: [], editRecords: [], ranCommit: false, wroteViaShell: false, commitShas: [] });
-          inputChars += req.length;
+          turns.push({ text: req, createdAt: Number.isFinite(ms) ? ms : null, inChars: turns.length === 0 ? unclaimedIn : 0, outChars: turns.length === 0 ? unclaimedOut : 0, buf: [], editedFiles: [], editRecords: [], ranCommit: false, wroteViaShell: false, shellWriteCommands: [], commitShas: [] });
+          addIn(req.length);
         }
       }
       sawCompaction = false;
       if (!model) model = extractModel(content);
     } else if (step?.source === 'MODEL') {
-      // Planner reasoning + tool output text — the model's side of the work.
-      outputChars += content.length;
-      if (typeof step?.thinking === 'string') outputChars += step.thinking.length;
+      // A MODEL step is one of two things. A PLANNER_RESPONSE is the model's
+      // own turn: its prose (`content`), its `thinking`, and the tool calls it
+      // emitted (`tool_calls[].args`) — output. Every other MODEL step is a
+      // tool's EXECUTION RECORD, typed by the tool (RUN_COMMAND, VIEW_FILE,
+      // CODE_ACTION, LIST_DIRECTORY, GENERIC…), and its `content` is the tool's
+      // result — "Completed At … Output: …", a file's text, a listing — which
+      // the model READS. That is input. Counting it as output, as this did
+      // until TODO 26b063c3, priced an agy session as almost pure output: on
+      // the real fixture 50k of the 55k "output" chars were tool results.
+      if (typeof step?.thinking === 'string') addOut(step.thinking.length);
+      for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
+        try { addOut(JSON.stringify(agyArgs(tc)).length); } catch { /* unmeasurable args */ }
+      }
+      if (step?.type === 'PLANNER_RESPONSE') addOut(content.length);
+      else addIn(content.length);
       if (step?.type === 'PLANNER_RESPONSE') {
         const text = plannerStepText(step);
         if (text && turns.length > 0) turns[turns.length - 1].buf.push(text);
@@ -381,6 +424,7 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
         for (const r of stepEditRecords(step)) turns[turns.length - 1].editRecords.push(r);
         if (stepRanGitCommit(step)) turns[turns.length - 1].ranCommit = true;
         if (stepWroteViaShell(step)) turns[turns.length - 1].wroteViaShell = true;
+        turns[turns.length - 1].shellWriteCommands.push(...stepShellWriteCommands(step));
       }
     }
 
@@ -422,6 +466,7 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
   const promptEditRecords = turns.map((t) => t.editRecords);
   const promptRanCommit = turns.map((t) => t.ranCommit);
   const promptWroteViaShell = turns.map((t) => t.wroteViaShell);
+  const promptShellWriteCommands = turns.map((t) => t.shellWriteCommands);
   const promptCommitShas = turns.map((t) => [...new Set(t.commitShas)]);
   const filesEdited = [...new Set(turns.flatMap((t) => t.editedFiles))];
 
@@ -429,8 +474,9 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
     .map(([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 
-  return { prompts, responses, promptTimes, model, inputChars, outputChars, filePaths: [...filePathSet], filesEdited, promptFilesEdited, promptEditRecords, promptRanCommit,
-    promptWroteViaShell, promptCommitShas, toolCalls, toolBreakdown };
+  return { prompts, responses, promptTimes, model, inputChars, outputChars,
+    promptInputChars: turns.map((t) => t.inChars), promptOutputChars: turns.map((t) => t.outChars), filePaths: [...filePathSet], filesEdited, promptFilesEdited, promptEditRecords, promptRanCommit,
+    promptWroteViaShell, promptShellWriteCommands, promptCommitShas, toolCalls, toolBreakdown };
 }
 
 // agy exposes no token counts, so we estimate from text length (~4 chars/token,
@@ -438,6 +484,21 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
 // turns them into an (also estimated) cost via its pricing table.
 export function estimateTokens(chars: number): number {
   return Math.max(0, Math.ceil(chars / 4));
+}
+
+/**
+ * The session estimate divided among the prompts by the text each turn sent
+ * and produced, as one bucket on the session's model (''), plus the session
+ * bucket it adds up to. Undefined when there is nothing to divide.
+ */
+export function estimateAntigravityTurnUsage(
+  t: Pick<AntigravityTranscript, 'prompts' | 'promptInputChars' | 'promptOutputChars'>,
+  usage: Pick<EstimatedUsage, 'inputTokens' | 'outputTokens' | 'totalTokens'>,
+): { modelUsage: ModelUsage[]; turnUsage: Array<{ promptIndex: number; modelUsage: ModelUsage[] }> } | undefined {
+  if (t.prompts.length === 0 || usage.totalTokens === 0) return undefined;
+  const totals = { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0 };
+  const turnUsage = estimateTurnUsage(totals, '', { input: t.promptInputChars, output: t.promptOutputChars, cache: [] });
+  return turnUsage ? { modelUsage: [{ model: '', ...totals }], turnUsage } : undefined;
 }
 
 export interface EstimatedUsage { inputTokens: number; outputTokens: number; totalTokens: number; estimated: true }

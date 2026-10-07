@@ -18,6 +18,7 @@
  * `from` no session recorded is not ours and is left alone.
  */
 import { debugLog } from '../../debug-log.js';
+import { holdRewrites } from '../../held-rewrites.js';
 import { applyRewritePairsToState, saveSessionState } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import { listSessionsForGitHookUnscoped } from './post-commit.js';
@@ -52,6 +53,7 @@ export function recordGitRewrites(
   if (valid.length === 0) return { sessions: 0, pairs: 0 };
   let sessions = 0;
   let pairs = 0;
+  const claimed = new Set<string>();
   for (const state of listSessionsForGitHookUnscoped(hookCwd)) {
     // Ownership chains WITHIN the batch: a rebase followed by an amend before
     // any hook could record the first arrives as "A B" then "B C", and B is
@@ -65,6 +67,7 @@ export function recordGitRewrites(
       gained.push(m.newSha);
     }
     if (mine.length === 0) continue;
+    for (const m of mine) claimed.add(m.oldSha.toLowerCase());
     const changed = applyRewritePairsToState(state, mine.map((m) => ({ from: m.oldSha, to: m.newSha })));
     if (!changed) continue;
     try {
@@ -76,6 +79,19 @@ export function recordGitRewrites(
       sessionId: state.sessionId,
       pairs: mine.map((m) => `${m.oldSha.slice(0, 8)}->${m.newSha.slice(0, 8)}`),
       commits: (state.sessionCommitShas || []).map((s) => s.slice(0, 8)),
+    });
+  }
+  // A pair no live session owns YET. The commit's own post-commit hook may
+  // still be starting — `git commit && git rebase` runs this hook first — and
+  // it records the old sha seconds from now. Hold the pair for it; a pair that
+  // is genuinely someone else's meets no such commit and ages out. Logged, so
+  // a rewrite the log shows nothing for is a hook that did not fire, not one
+  // that fired and stayed silent (session c085f0af, 2026-09-26).
+  const unowned = valid.filter((m) => !claimed.has(m.oldSha.toLowerCase()));
+  if (unowned.length > 0) {
+    const held = holdRewrites(hookCwd, unowned.map((m) => ({ from: m.oldSha, to: m.newSha })));
+    debugLog('post-rewrite', 'held rewrite pairs no live session owns yet — post-commit folds them when it records the old sha', {
+      pairs: unowned.map((m) => `${m.oldSha.slice(0, 8)}->${m.newSha.slice(0, 8)}`), held,
     });
   }
   return { sessions, pairs };

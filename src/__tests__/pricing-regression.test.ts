@@ -78,7 +78,8 @@ describe('pricing regression — Gemini JSONL', () => {
       if (!m.tokens) continue;
       if (m.id && seen.has(m.id)) continue;
       if (m.id) seen.add(m.id);
-      eIn += m.tokens.input || 0;
+      // `input` includes the cached part (tokens.total never adds `cached`).
+      eIn += (m.tokens.input || 0) - (m.tokens.cached || 0);
       eOut += (m.tokens.output || 0) + (m.tokens.thoughts || 0);
       eCached += m.tokens.cached || 0;
     }
@@ -108,17 +109,19 @@ describe('pricing regression — Codex rollout', () => {
     // The fixture's max-total event has these exact values:
     //   input_tokens: 131039, cached_input_tokens: 97792,
     //   output_tokens: 1045, reasoning_output_tokens: 73
+    //   total_tokens: 132084 = input + output, so reasoning is INSIDE output.
     // Post-split: inputTokens = 131039 - 97792 = 33247;
-    //             outputTokens = 1045 + 73 = 1118;
+    //             outputTokens = 1045 (reasoning 73 already counted in it;
+    //             adding it again was a double count);
     //             cacheReadTokens = 97792;
-    //             tokensUsed = 33247 + 1118 = 34365 — non-cached input + output,
+    //             tokensUsed = 33247 + 1045 = 34292 — non-cached input + output,
     //             EXCLUDING cache reads (T1 fix). Cache is tracked separately in
     //             cacheReadTokens; folding it into tokensUsed made Codex look far
     //             less token-efficient than an identical Claude session.
     expect(parsed.inputTokens).toBe(33247);
-    expect(parsed.outputTokens).toBe(1118);
+    expect(parsed.outputTokens).toBe(1045);
     expect((parsed as any).cacheReadTokens).toBe(97792);
-    expect(parsed.tokensUsed).toBe(34365);
+    expect(parsed.tokensUsed).toBe(34292);
 
     // Cost: model is gpt-5.x family. Pricing varies by version, but
     // the test asserts that the cached portion is meaningfully

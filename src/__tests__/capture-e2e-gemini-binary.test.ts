@@ -120,8 +120,8 @@ const TOKENS = { input: 1200, output: 80, cached: 0, thoughts: 0, tool: 0, total
 function say(text: string) {
   append({ id: `u-${++rowSeq}`, timestamp: iso(), type: 'user', content: [{ text }] });
 }
-function reply(text: string) {
-  append({ id: `g-${++rowSeq}`, timestamp: iso(), type: 'gemini', content: text, thoughts: [], tokens: TOKENS, model: 'gemini-2.5-pro' });
+function reply(text: string, usage: { tokens: Record<string, number>; model: string } = { tokens: TOKENS, model: 'gemini-2.5-pro' }) {
+  append({ id: `g-${++rowSeq}`, timestamp: iso(), type: 'gemini', content: text, thoughts: [], ...usage });
 }
 function toolCall(callId: string, name: string, args: Record<string, unknown>, output: string) {
   append({
@@ -285,10 +285,23 @@ describe.skipIf(!haveDist)('a Gemini session end to end through the built binary
     expect(ups2.code, ups2.stderr).toBe(0);
     await sleep(400);
     await agentWrites('write_file_2', 'notes.md', 'remember the greeting\n');
-    reply('Noted.');
+    // On another model, mostly from cache: Gemini's `input` includes `cached`.
+    reply('Noted.', { tokens: { input: 5000, output: 50, cached: 4000, thoughts: 10, tool: 0, total: 5060 }, model: 'gemini-2.5-flash' });
     await waitFor(() => writesIn() >= 4, 10_000, 'the journal to record the note');
     const stop2 = await run('stop', { prompt: 'leave a note about it', prompt_response: 'Noted.' });
     expect(stop2.code, stop2.stderr).toBe(0);
+
+    // Stop sends each row what its prompt cost, by model: turn 1 is three
+    // replies on pro, turn 2 one on pro and one on flash.
+    const stopRows = hits.filter((h) => h.method === 'PATCH' && Array.isArray(h.body?.promptChanges)).pop()!.body.promptChanges;
+    const usageOf = (i: number) => stopRows.filter((r: any) => r.promptIndex === i).pop()?.modelUsage;
+    expect(usageOf(0), `turn 1's usage\n${why()}`).toEqual([
+      { model: 'gemini-2.5-pro', inputTokens: 3600, outputTokens: 240, cacheReadTokens: 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0 },
+    ]);
+    expect(usageOf(1), `turn 2's usage\n${why()}`).toEqual([
+      { model: 'gemini-2.5-pro', inputTokens: 1200, outputTokens: 80, cacheReadTokens: 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0 },
+      { model: 'gemini-2.5-flash', inputTokens: 1000, outputTokens: 60, cacheReadTokens: 4000, cacheCreationTokens: 0, cacheCreation1hTokens: 0 },
+    ]);
 
     // Gemini's SessionEnd on exit ends the session: the real session-end body.
     const end = await run('session-end', { reason: 'exit' });

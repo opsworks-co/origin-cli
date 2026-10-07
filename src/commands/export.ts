@@ -1,8 +1,10 @@
 import chalk from 'chalk';
 import { listSessionIds, readSessionFile } from '../session-store.js';
 import fs from 'fs';
+import path from 'path';
 import { git, gitDetailed } from '../utils/exec.js';
 import { getGitRoot } from '../session-state.js';
+import { AttributionExportError, exportAttributionRecords, type AttributionExport } from '../attribution-export.js';
 
 const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
@@ -97,7 +99,91 @@ function csvEscape(value: string): string {
   return value;
 }
 
-export async function exportCommand(opts?: { format?: string; output?: string; limit?: string; model?: string; session?: string }) {
+export interface ExportOptions { format?: string; output?: string; limit?: string; model?: string; session?: string; strict?: boolean }
+
+/**
+ * Write `data` to `target` in one step: a temp file next to it, then a rename,
+ * so a failure never leaves a partial file or a half-overwritten target.
+ */
+function writeFileAtomic(target: string, data: string): void {
+  const tmp = path.join(path.dirname(path.resolve(target)), `.${path.basename(target)}.${process.pid}.${Date.now()}.tmp`);
+  try {
+    fs.writeFileSync(tmp, data, { flag: 'wx' });
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
+    throw err;
+  }
+}
+
+function failRangeExport(message: string): void {
+  console.error(chalk.red(`Error: ${message}`));
+  process.exitCode = 1;
+}
+
+/**
+ * `origin export --format=json <range>` (OR-12/A6): a JSON array of the
+ * canonical v1 attribution records of the range, oldest first. A commit whose
+ * note carries an unusable record is left out with one warning on stderr, or,
+ * with `--strict`, fails the export. Nothing reaches stdout or `--output`
+ * unless the whole range was read without a Git error; warnings are printed
+ * only then, so a failed run never reports a partial success.
+ */
+function exportRangeCommand(range: string, opts: ExportOptions): void {
+  const format = (opts.format || 'json').toLowerCase();
+  if (format !== 'json') {
+    failRangeExport(`--format ${opts.format} cannot be used with a range; a range exports JSON attribution records only.`);
+    return;
+  }
+  const incompatible = (['limit', 'model', 'session'] as const).filter((k) => opts[k] !== undefined);
+  if (incompatible.length > 0) {
+    failRangeExport(`${incompatible.map((k) => `--${k}`).join(', ')} cannot be used with a range.`);
+    return;
+  }
+
+  let result: AttributionExport;
+  try {
+    result = exportAttributionRecords(process.cwd(), range);
+  } catch (err) {
+    if (err instanceof AttributionExportError) {
+      failRangeExport(err.message);
+      return;
+    }
+    throw err;
+  }
+
+  if (opts.strict && result.skipped.length > 0) {
+    for (const s of result.skipped) console.error(chalk.red(`Error: unusable attribution for ${s.sha}: ${s.message}`));
+    failRangeExport(`--strict: ${result.skipped.length} unusable attribution record${result.skipped.length !== 1 ? 's' : ''}; nothing was exported.`);
+    return;
+  }
+  for (const s of result.skipped) console.error(chalk.yellow(`Warning: skipped attribution for ${s.sha}: ${s.message}`));
+
+  const output = JSON.stringify(result.records, null, 2) + '\n';
+  const count = result.records.length;
+
+  if (opts.output) {
+    try {
+      writeFileAtomic(opts.output, output);
+    } catch (err: any) {
+      failRangeExport(`could not write ${opts.output}: ${err?.message ?? err}`);
+      return;
+    }
+    console.error(chalk.green(`  Exported ${count} attribution record${count !== 1 ? 's' : ''} to ${opts.output}`));
+  } else {
+    process.stdout.write(output);
+  }
+}
+
+export async function exportCommand(range: string | undefined, opts?: ExportOptions) {
+  if (range !== undefined) {
+    exportRangeCommand(range, opts ?? {});
+    return;
+  }
+  if (opts?.strict) {
+    failRangeExport('--strict applies only to a commit range: origin export --format=json --strict <range>.');
+    return;
+  }
   const cwd = process.cwd();
   const repoPath = getGitRoot(cwd);
   if (!repoPath) {

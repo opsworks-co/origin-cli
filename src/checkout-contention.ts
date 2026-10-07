@@ -205,3 +205,88 @@ export function contentionAdvice(report: ContentionReport): string | null {
     + 'File attribution between them cannot be proven — give each session its own '
     + 'git worktree to make it exact.';
 }
+
+/**
+ * The marks that say "another session was writing in this tree".
+ *
+ * `contendingSessionIds` used to be permanent for the life of the session:
+ * once any rival was seen, every later turn declined the exact capture paths.
+ * That is right for turns that ran WHILE the rival was alive — their journal
+ * records cannot be told apart — and wrong for turns that began after it was
+ * gone. Session 90eca883 shared its first minutes with the previous
+ * conversation in its worktree (f5556085, ended 16:31Z) and still declined the
+ * ledger at every Stop seven hours later (TODO 650f6aa6).
+ *
+ * So each rival also gets `contenderGoneAt[id]` — the moment this session
+ * first saw it no longer live — and the mark covers a turn only while some
+ * rival was not provably gone before that turn started.
+ */
+export interface ContentionMarks {
+  contendingSessionIds?: string[];
+  contenderGoneAt?: Record<string, number>;
+}
+
+/**
+ * Does a rival's presence cover the turn that started at `turnStartMs`?
+ *
+ * True when any recorded rival has no `goneAt`, or went after the turn began.
+ * A turn with no known start is covered — unprovable stays declined.
+ */
+export function contentionCoversTurn(
+  marks: ContentionMarks,
+  turnStartMs: number | null | undefined,
+  extraPeers: readonly string[] = [],
+): boolean {
+  const ids = [...new Set([...(marks.contendingSessionIds || []), ...extraPeers])];
+  if (ids.length === 0) return false;
+  if (typeof turnStartMs !== 'number' || !Number.isFinite(turnStartMs)) return true;
+  return ids.some((id) => {
+    const gone = marks.contenderGoneAt?.[id];
+    return !(typeof gone === 'number' && gone <= turnStartMs);
+  });
+}
+
+/**
+ * Stamp `contenderGoneAt` for every recorded rival that is no longer live.
+ *
+ * `observedAt` is the time the absence is vouched for. The prompt hook passes
+ * the turn's start, which it stamped milliseconds before looking: a rival
+ * that is ENDED (or whose state is gone) at that check was not writing in the
+ * gap. Any other caller must pass the time it actually looked. First
+ * observation wins; a rival that comes back is a new contention, recorded as
+ * such by the caller. Returns whether anything changed.
+ */
+export function noteContendersGone(
+  marks: ContentionMarks,
+  liveIds: ReadonlySet<string>,
+  observedAt: number,
+): boolean {
+  let changed = false;
+  for (const id of marks.contendingSessionIds || []) {
+    if (liveIds.has(id)) continue;
+    if (typeof marks.contenderGoneAt?.[id] === 'number') continue;
+    (marks.contenderGoneAt ||= {})[id] = observedAt;
+    changed = true;
+  }
+  return changed;
+}
+
+/**
+ * What a journal's `.contended` taint says.
+ *
+ * The live check writes `{ at, peers }` when it sees a rival at capture time;
+ * those peers are rivals like any other and clear the same way. Any other
+ * content — journal-lock.ts writes "journal mutation timed out" when the log
+ * itself is incomplete — is permanent: that journal can never prove a turn.
+ */
+export function readContentionTaint(taintPath: string): { permanent: boolean; peers: string[] } | null {
+  let raw: string;
+  try { raw = fs.readFileSync(taintPath, 'utf-8'); } catch { return null; }
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && Array.isArray(parsed.peers) && parsed.peers.every((p: unknown) => typeof p === 'string') && parsed.peers.length > 0) {
+      return { permanent: false, peers: parsed.peers };
+    }
+  } catch { /* not the peers shape */ }
+  return { permanent: true, peers: [] };
+}

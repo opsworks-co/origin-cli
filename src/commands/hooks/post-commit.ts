@@ -3,9 +3,10 @@
 // Moved out of commands/hooks.ts mechanically: the text is unchanged, only its
 // home is. Shared helpers still live in hooks.ts and are imported from there.
 import { findCodexRolloutPath, getCodexPromptsTimeline } from '../../agents/codex.js';
+import { ensureWriteKey } from '../../note-seal.js';
 import type { PromptTimelineEntry } from '../../agents/codex.js';
 import { getGeminiPromptsTimeline } from '../../agents/gemini.js';
-import { attributionPgrepChecks, isCodexLikeModel, sessionMatchesAgent, standalonePgrepChecks } from '../../agents/registry.js';
+import { attributionPgrepChecks, firstSpecificModel, isCodexLikeModel, sessionMatchesAgent, standalonePgrepChecks } from '../../agents/registry.js';
 import { api } from '../../api.js';
 import { maybeAutoSyncBenchmark } from '../../benchmark-auto-sync.js';
 import { backfillCodexPromptMappings } from '../../codex-prompt-mapping.js';
@@ -14,17 +15,25 @@ import { debugLog } from '../../debug-log.js';
 import { readDevinDesktopSessions, selectDevinSessionForRepo } from '../../devin-desktop.js';
 import type { DevinDesktopSession } from '../../devin-desktop.js';
 import { capDiff, fitDiffToBudget } from '../../diff-budget.js';
+import { COMMIT_INGEST_PATCH_LIMIT, ingestPatchForCommit } from '../../commit-ingest-patch.js';
+export { COMMIT_INGEST_PATCH_LIMIT, ingestPatchForCommit };
 import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
 import { MAX_PROMPT_DIFF_LEN, capCommitMessage, captureGitState, commitLineCounts, sameSha } from '../../git-capture.js';
 import { writeGitNotes } from '../../git-notes.js';
+import { attributionSourceFromState } from '../../attribution-note.js';
 import { commitReplayKind } from '../../commit-replay.js';
+import { takeReplayMarker } from '../../replay-marker.js';
+import { sessionRunningTheCommit } from '../../commit-command-in-flight.js';
 import { BACKFILL_TIMEOUT_MS, COMMIT_INGEST_TIMEOUT_MS, RECENT_SHAS_LIMIT, acquireBackfillLock, backfillUnknownCommits, commitAuthoredDelta, extractCommitDiff, listRecentShas, releaseBackfillLock, shouldAdvertiseHistory, writeSyncMarker } from '../../history-backfill.js';
 import { pushSessionBranch, writeSessionFiles } from '../../local-entrypoint.js';
-import { memoryUpdateTrigger, shouldWriteMemoryOnCommit, summarizeFromCommitSubjects, writeCommitMemory, writeSessionMemory } from '../../memory.js';
-import { parseMarkersFromTranscriptPath } from '../../origin-markers.js';
+import { memoryUpdateTrigger, shouldWriteMemoryOnCommit, sessionCommitSubjects, summarizeFromCommitSubjects, writeCommitMemory, writeSessionMemory } from '../../memory.js';
+import { readMarkerTurns } from '../../origin-markers.js';
+import { commitEvidence, commitTurnDecisions, commitTurnMarkersFor, committedSessionMarkers, currentTurnStart, withTurnDiffs } from '../../committed-markers.js';
 import type { OriginMarkers } from '../../origin-markers.js';
-import { currentTurnIndex, getBranch, getGitRoot, getHeadSha, getWorkingGitRoot, isSessionAlive, listActiveSessions, listMirroredSessionsForTree, markSessionEnded, saveSessionState, stampCaptured } from '../../session-state.js';
+import { applyRewritePairsToState, currentTurnIndex, getBranch, getGitRoot, getHeadSha, getWorkingGitRoot, isSessionAlive, listActiveSessions, listMirroredSessionsForTree, markSessionEnded, saveSessionState, stampCaptured } from '../../session-state.js';
+import { takeHeldRewritesFor } from '../../held-rewrites.js';
 import type { SessionState } from '../../session-state.js';
+import { samePath } from '../../session-worktree.js';
 import { estimateSessionCost, extractPromptFileMappings, livePrompts, parseTranscript } from '../../transcript.js';
 import type { ParsedTranscript } from '../../transcript.js';
 import { commitOverlapsWritesInTree } from '../../session-write-trees.js';
@@ -35,7 +44,7 @@ import { condenseSnapshot, listSnapshots } from '../snapshot.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { serverRowForLocalTurn, turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
+import { serverRowForLocalTurn, turnIdForServerRow, turnStartFields } from '../../turn-index.js';
 import { applyLedgerCaptures, buildMemoryEntry, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitTrailerBelongsToSession, durableUpdate, isInsideRepo, ownedRangeCommitShas, rewrittenCommitsPayload, sameDir, scheduleMemoryBriefRefresh, scopedCommitForTurn, sessionAbandonedCommits, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, trailerNamesAKnownSession, turnIdFor, withDerivedLineCounts } from '../hooks.js';
 
 
@@ -75,6 +84,7 @@ export function countDiffSignLines(diff: string, sign: '+' | '-'): number {
   }
   return n;
 }
+
 
 /**
  * The session-to-date COMMITTED diff for the post-commit snapshot.
@@ -353,22 +363,50 @@ export function filesNamedInDiff(diff: string | null | undefined): string[] {
  * scoped diff yields `[]`, the server skips the field, and the turn is left as
  * the chat-only turn it was.
  *
- * NOT a truncation concern: when the scoped diff is capped, the counts are
- * taken from the same capped text, so the three stay consistent with each other
- * — which is the property that matters here. A list that describes more than
- * the diff does is the failure being fixed.
+ * A CUT scoped diff is the one case where the list may not be read off the
+ * text. commitDiffScopedToPrompt counts lines from numstat and caps only the
+ * TEXT (whole sections, in order), so a commit whose one big file does not fit
+ * arrives here as counts for every file beside a diff that names a prefix of
+ * them. Prod c085f0af turn 2 (2026-09-25): a 500KB golden fixture pushed the
+ * commit to 508KB at the narrowest context the ladder tries, the section cut
+ * kept 2 of its 4 files (5.7KB), and this unit sent `f:2, a:729, r:175`. The
+ * server recounted +81/-1 from the two-file text — nothing had declared the
+ * other two files partial — and the line-count heal persisted that number, so
+ * the turn read +81/-1 under a commit chip of +729/-175 forever. The Stop's
+ * commit-patch producer already follows the right rule (see
+ * commit-patch-for-committed-turn.ts): the files are the range's, and the
+ * ones the cut dropped are named in `contentUnavailableFiles`, which is what
+ * lets the read side keep the stated counts (`diffPartial`) instead of
+ * recounting a text it knows is short.
+ *
+ * Only a cut diff takes the numstat list. An uncut one still reads its files
+ * off the text: numstat can name a file whose section the ignore rules
+ * stripped, and for a whole diff the text is the narrower, safer answer.
  */
 export function commitTurnContentUnit(
-  scoped: { diff: string; linesAdded: number; linesRemoved: number } | null | undefined,
+  scoped: { diff: string; linesAdded: number; linesRemoved: number; files?: string[]; diffTruncated?: boolean } | null | undefined,
   turnFiles: string[],
   turnDiff: string,
-): { filesChanged: string[]; diff: string; linesAdded: number; linesRemoved: number } {
+): { filesChanged: string[]; diff: string; linesAdded: number; linesRemoved: number; contentUnavailableFiles: string[] } {
   if (scoped) {
+    const inText = filesNamedInDiff(scoped.diff);
+    if (scoped.diffTruncated && Array.isArray(scoped.files) && scoped.files.length > 0) {
+      const shown = new Set(inText);
+      const named = [...new Set([...scoped.files, ...inText])];
+      return {
+        filesChanged: named,
+        diff: scoped.diff,
+        linesAdded: scoped.linesAdded,
+        linesRemoved: scoped.linesRemoved,
+        contentUnavailableFiles: named.filter((f) => !shown.has(f)),
+      };
+    }
     return {
-      filesChanged: filesNamedInDiff(scoped.diff),
+      filesChanged: inText,
       diff: scoped.diff,
       linesAdded: scoped.linesAdded,
       linesRemoved: scoped.linesRemoved,
+      contentUnavailableFiles: [],
     };
   }
   return {
@@ -376,6 +414,7 @@ export function commitTurnContentUnit(
     diff: turnDiff,
     linesAdded: countDiffSignLines(turnDiff, '+'),
     linesRemoved: countDiffSignLines(turnDiff, '-'),
+    contentUnavailableFiles: [],
   };
 }
 
@@ -820,7 +859,7 @@ export function excludeSessionsFromOtherTrees(
   // mayClaimTreeByWrites.
   const claims = (s: SessionState): boolean =>
     !worksInAnotherTree(s, hookTree) || mayClaimTreeByWrites(s, hookTree, opts?.commitFiles);
-  if (!sessions.some(claims)) return sessions;
+  if (!sessions.some(claims)) return keepPossibleMovers(sessions, hookCwd, hookTree);
   const kept = sessions.filter((s) =>
     claims(s)
     || (!!s.lastCwd && isInsideRepo(hookTree, s.lastCwd))
@@ -832,6 +871,59 @@ export function excludeSessionsFromOtherTrees(
       dropped: sessions
         .filter((s) => !kept.includes(s))
         .map((s) => `${s.sessionId.slice(0, 12)}@${s.repoPath || '?'}`),
+      kept: kept.map((s) => s.sessionId.slice(0, 12)),
+    });
+  }
+  return kept;
+}
+
+/**
+ * An UNCLAIMED worktree keeps only the sessions that could have moved into it.
+ *
+ * No candidate claims the tree, and the rule above keeps the whole pool for
+ * the EnterWorktree case: a session registered under the main checkout before
+ * its worktree existed, which the worktree fallback reached out to find. That
+ * session's home is the main checkout — an ancestor of a `.claude/worktrees/…`
+ * tree, or the repository's main checkout for a worktree kept elsewhere.
+ *
+ * A session whose home is ANOTHER linked worktree is not that case. It lives
+ * next door, and keeping it hands a sibling's commit to whichever neighbour
+ * happens to have a turn open. 2026-09-27 14:02Z: session c085f0af's
+ * conversation, ended by hand for a release, went on to commit 9d583342 in
+ * `vigorous-rubin-91647c`. Nothing live claimed that tree, so the pool stayed
+ * whole; its one member was d027b430, home `capturing-corruption-33d0db`,
+ * mid-turn — `loneSessionMayOwnCommit` said "turn open", the trailer named
+ * d027b430, post-commit took it on the trailer, restamped d027b430's branch
+ * and billed its turn 8 with three files it never wrote. With the neighbour
+ * gone the pool is empty, and prepare-commit-msg falls to the session ended by
+ * hand in THIS tree — the owner #1918 exists to find.
+ *
+ * The carve-outs of the claimed-tree rule hold here too: a session with no
+ * recorded home is unknown, not elsewhere; one last seen inside this tree has
+ * moved here; one the hook's path names owns it.
+ */
+function keepPossibleMovers(sessions: SessionState[], hookCwd: string, hookTree: string): SessionState[] {
+  let mainRoot: string | null = null;
+  try { mainRoot = getGitRoot(hookCwd); } catch { mainRoot = null; }
+  const livesNextDoor = (s: SessionState): boolean => {
+    const home = s.repoPath;
+    if (!home) return false;
+    if (isInsideRepo(home, hookTree)) return false;
+    if (mainRoot && sameDir(home, mainRoot)) return false;
+    // Moved here means a lastCwd inside this tree and OUTSIDE the session's
+    // own. Linked worktrees nest under the main checkout (`.claude/worktrees/…`),
+    // so for a commit in the main checkout every worktree session's lastCwd is
+    // textually "inside this tree" while it never left home.
+    if (s.lastCwd && isInsideRepo(hookTree, s.lastCwd) && !isInsideRepo(home, s.lastCwd)) return false;
+    if (pathNamesSession(s, hookCwd)) return false;
+    return true;
+  };
+  const kept = sessions.filter((s) => !livesNextDoor(s));
+  if (kept.length !== sessions.length) {
+    debugLog('git-hook-sessions', 'unclaimed tree: dropped sessions living in another worktree', {
+      hookCwd,
+      hookTree,
+      dropped: sessions.filter((s) => !kept.includes(s)).map((s) => `${s.sessionId.slice(0, 12)}@${s.repoPath || '?'}`),
       kept: kept.map((s) => s.sessionId.slice(0, 12)),
     });
   }
@@ -920,6 +1012,20 @@ export type FileEvidenceSession = {
 };
 
 /**
+ * The commit's committer time in ms, or undefined. post-commit runs in the
+ * background and may read a commit claim after its call returned; the claim
+ * counts only if it was live at THIS moment.
+ */
+function commitTimeMs(cwd: string, sha: string): number | undefined {
+  try {
+    const sec = Number(execFileSync('git', ['log', '-1', '--format=%ct', sha], {
+      windowsHide: true, cwd, encoding: 'utf-8', timeout: 5_000, stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim());
+    return Number.isFinite(sec) && sec > 0 ? sec * 1000 : undefined;
+  } catch { return undefined; }
+}
+
+/**
  * Files the session's OPEN turn is writing: the post-tool-use ledger entries
  * belonging to that turn, plus the pre-tool-use claims for writes announced
  * but not yet landed. Empty when no turn is open.
@@ -984,6 +1090,72 @@ export function runningTurnTouchedCommit(
   }
   return false;
 }
+
+/**
+ * The running turn's agent is in the middle of a shell call that commits —
+ * the commit landing now is that call's.
+ *
+ * A turn that only runs `git commit` (or `git add -A && git commit`) over work
+ * an EARLIER turn wrote has no captures of its own, so
+ * runningTurnTouchedCommit cannot see it, no tool capture opens its turn, and
+ * the commit was recorded with "(no active turn)": the turn that committed
+ * kept no commit and the turn that wrote the work read "uncommitted" (session
+ * df8cc9aa turns 4 and 6). pre-tool-use records every tool call before it
+ * runs; the one still open (no `endedAt`), started after the running prompt
+ * was submitted, whose command commits, is the agent's own `git commit` —
+ * direct evidence, not an inference from files. Agents without tool hooks
+ * keep the file rule above.
+ */
+export function runningTurnIsCommitting(
+  state: { subagents?: Array<{ toolName?: string; startedAt?: string; endedAt?: string; prompt?: string }>; promptSubmittedAt?: string[] },
+  running: number,
+  notBefore?: number,
+): boolean {
+  const submitted = Date.parse((state.promptSubmittedAt || [])[running] || '');
+  if (!Number.isFinite(submitted)) return false;
+  const floor = Number.isFinite(notBefore) ? Math.max(submitted, notBefore as number) : submitted;
+  for (const call of state.subagents || []) {
+    if (!call || call.endedAt) continue;
+    const started = Date.parse(call.startedAt || '');
+    if (!Number.isFinite(started) || started < floor) continue;
+    if (COMMITTING_COMMAND.test(call.prompt || '')) return true;
+  }
+  return false;
+}
+
+/**
+ * The turn's Stop has already run, no prompt came after it, and the agent's
+ * own shell call — started AFTER that Stop and still open — is the one
+ * committing.
+ *
+ * A background task re-invokes the agent after its Stop without a new
+ * prompt (Claude Code task notifications, background sub-agents). Session
+ * df8cc9aa turn 27 ("is the release live?"): its first commit landed while
+ * the turn ran and was attested; the second was made after a Stop, recorded
+ * with "(no active turn)", and every later Stop measured the turn from the
+ * first commit alone — the row read +65/-3 under a "2 commits +89/-5" chip.
+ *
+ * Only the in-flight committing call counts, never file overlap: a closed
+ * turn's files say nothing about who runs a later `git commit` (a person
+ * between prompts), and #1726 learned that re-opening on weak evidence bills
+ * the closed turn for work that is not its own. The floor is the Stop's time,
+ * so a call the turn made before it closed cannot qualify.
+ */
+export function closedTurnIsCommittingAfterItsStop(
+  state: {
+    subagents?: Array<{ toolName?: string; startedAt?: string; endedAt?: string; prompt?: string }>;
+    promptSubmittedAt?: string[];
+    lastTurnClosedAt?: number;
+  },
+  closed: number,
+): boolean {
+  const stoppedAt = Number(state.lastTurnClosedAt);
+  if (!Number.isFinite(stoppedAt) || stoppedAt <= 0) return false;
+  return runningTurnIsCommitting(state, closed, stoppedAt);
+}
+
+/** A shell command that makes a commit in this checkout: `git … commit`. */
+const COMMITTING_COMMAND = /\bgit\b(?:\s+-[cC]\s+\S+|\s+--?[\w-]+(?:=\S+)?)*\s+commit\b/;
 
 /**
  * May the ONLY live session be credited with this commit?
@@ -1135,6 +1307,7 @@ export const RECENCY_TIEBREAK_MARGIN_MS = 120_000;
 export function pickSessionForCommit<
   T extends {
     sessionId?: string;
+    localSessionId?: string;
     previousSessionId?: string;
     agentSlug?: string | null;
     model?: string | null;
@@ -1288,7 +1461,7 @@ export async function pinCodexCommitToProducer(state: SessionState, hookCwd: str
         diff: capDiff(pm.diff, MAX_PROMPT_DIFF_LEN),
         // `completedPromptMappings` is numbered by SERVER row; ids are local.
         ...(turnIdForServerRow(state, pm.promptIndex) && { turnId: turnIdForServerRow(state, pm.promptIndex) }),
-        ...(turnStartForServerRow(state, pm.promptIndex) && { createdAt: turnStartForServerRow(state, pm.promptIndex) }),
+        ...turnStartFields(state, pm.promptIndex),
         ...captureStamp(),
       })),
     });
@@ -1538,7 +1711,14 @@ export async function handlePostCommit(): Promise<void> {
         // the session composers as this session's authored content (the
         // header recovery, the git-fallback body), so a first-parent patch
         // here is how another PR's files reached a session's header.
-        diff: diff ? diff.slice(0, 500_000) : undefined,
+        //
+        // Cut at hunk boundaries and FLAGGED, never byte-sliced. The slice
+        // this replaces stopped mid-hunk, and the session header counts the
+        // stored patch's lines: prod c085f0af read +678/-175 for a +729/-175
+        // commit because the cut landed 600 lines into its 631-line file and
+        // dropped the file after it. `additions`/`deletions` above are git's
+        // own totals; `diffTruncated` tells the server the text is not.
+        ...ingestPatchForCommit(diff),
         ...(authored.isMerge ? { isMerge: true, absorbed: authored.absorbed } : {}),
       };
       // AWAITED (#1247). This was a floating promise: the hook fired the
@@ -1655,10 +1835,25 @@ export async function handlePostCommit(): Promise<void> {
   // runs even for a lone session — one active session is not evidence that the
   // commit is that session's (see commitIsAnotherSessions below).
   const trailerPick = pickSessionForCommit(activeSessions, { commitMessage });
+  // No trailer names anyone — an agent concluding a merge (`git commit` or
+  // `git merge --continue`: prepare-commit-msg returns before its picker for
+  // source=merge, so nothing stamps one), or a commit whose prepare-commit-msg
+  // did not run. The session whose shell announced the commit is the one making
+  // it, the same rule prepare-commit-msg applies first. Without it a lone
+  // session was refused for "no evidence" (a merge's files are not in its
+  // ledger) and several sessions fell to process/branch/file guesses.
+  const claimPick = trailerPick.reason === 'trailer' && trailerPick.session
+    ? null
+    : sessionRunningTheCommit(activeSessions, hookCwd, new Set(filesChanged), (s) => inFlightEditedFiles(s as any), undefined, Date.now(), commitTimeMs(hookCwd, commitSha));
   if (trailerPick.reason === 'trailer' && trailerPick.session) {
     state = trailerPick.session;
     debugLog('post-commit', 'disambiguated by Origin-Session trailer', {
       sessionId: state.sessionId, ofActive: activeSessions.length,
+    });
+  } else if (claimPick?.session) {
+    state = claimPick.session;
+    debugLog('post-commit', 'attributed by the commit command in flight', {
+      sessionId: state.sessionId, ofActive: activeSessions.length, commitSha: commitSha.slice(0, 8),
     });
   } else if (activeSessions.length === 1) {
     const only = activeSessions[0];
@@ -1786,7 +1981,30 @@ export async function handlePostCommit(): Promise<void> {
   // trailer, or one naming a session that has ended, and both read as ours.
   // A replay of this session's own commit is not lost: post-rewrite moves its
   // sha, its turn attestation and its note onto the copy.
-  const replayed = state ? commitReplayKind(hookCwd, commitSha) : null;
+  // What prepare-commit-msg saw in the foreground, taken for every commit so a
+  // marker never outlives the commit it was written for (replay-marker.ts).
+  const markedReplay = takeReplayMarker(hookCwd, commitSha);
+  let replayVerdict = state ? commitReplayKind(hookCwd, commitSha) : null;
+  // The reflog could not be read and the replay has already finished — this
+  // hook runs in the background — so its markers are gone. prepare-commit-msg
+  // recorded the answer while they existed. The reflog still comes first: it
+  // tells an authored commit made at a rebase's `edit` stop from the picks.
+  if (replayVerdict === 'unknown' && markedReplay) {
+    debugLog('post-commit', 'replay verdict from prepare-commit-msg: the reflog could not be read', {
+      commitSha: commitSha.slice(0, 8), replay: markedReplay,
+    });
+    replayVerdict = markedReplay;
+  }
+  // Nothing could answer (a starved host, a backgrounded hook that started
+  // after the replay finished, and no prepare-commit-msg record — an older
+  // hook, or a commit git prepared without one). Kept as the ordinary-commit
+  // path, but said out loud so a mis-attested pick can be traced to it.
+  if (replayVerdict === 'unknown') {
+    debugLog('post-commit', 'replay verdict unknown: the reflog could not be read and no replay is in progress', {
+      commitSha: commitSha.slice(0, 8), pickedSession: state?.sessionId,
+    });
+  }
+  const replayed = replayVerdict === 'unknown' ? null : replayVerdict;
   if (replayed) {
     debugLog('post-commit', 'SKIP recording: the commit is a replay, not this turn\'s work', {
       commitSha: commitSha.slice(0, 8), replay: replayed, pickedSession: state?.sessionId,
@@ -1843,9 +2061,20 @@ export async function handlePostCommit(): Promise<void> {
       if (!state.activeTurn && Array.isArray(state.prompts) && state.prompts.length > 0) {
         const lastClosed = Number.isInteger(state.lastClosedTurnIndex as number) ? (state.lastClosedTurnIndex as number) : -1;
         const running = state.prompts.length - 1;
-        if (running > lastClosed && runningTurnTouchedCommit(state, running, filesChanged)) {
+        if (running > lastClosed && (runningTurnTouchedCommit(state, running, filesChanged)
+          || runningTurnIsCommitting(state, running))) {
           const opened = currentTurnIndex(state);
           debugLog('post-commit', 'opened the running turn to attest the commit', {
+            promptIndex: opened, lastClosed, commitSha: commitSha.slice(0, 8),
+          });
+        } else if (running === lastClosed && closedTurnIsCommittingAfterItsStop(state, running)) {
+          // Work AFTER the turn's Stop, with no prompt since: a background task
+          // re-invoked the agent and it committed (session df8cc9aa turn 27).
+          // currentTurnIndex re-opens the closed turn — the #1726 rule every
+          // tool capture already follows — and the next prompt's submit ends
+          // it again (#1937).
+          const opened = currentTurnIndex(state);
+          debugLog('post-commit', 're-opened the closed turn to attest a commit made after its Stop', {
             promptIndex: opened, lastClosed, commitSha: commitSha.slice(0, 8),
           });
         }
@@ -1856,6 +2085,17 @@ export async function handlePostCommit(): Promise<void> {
         if (!state.commitTurns.some((c) => c.sha === commitSha)) {
           state.commitTurns.push({ sha: commitSha, turnId: attestTurnId, at: new Date().toISOString(), via: 'post-commit' });
         }
+      }
+      // git may already have rewritten this commit — `git commit && git rebase`
+      // runs the rebase, and its post-rewrite hook, while this backgrounded hook
+      // is still starting. post-rewrite found no owner then and held the pair
+      // (held-rewrites.ts); the sha is ours now, so the pair is too.
+      const held = takeHeldRewritesFor(state.repoPath || hookCwd, commitSha);
+      if (held.length > 0 && applyRewritePairsToState(state, held)) {
+        debugLog('post-commit', 'applied rewrite pairs git reported before this commit was recorded', {
+          commitSha: commitSha.slice(0, 8),
+          pairs: held.map((p) => `${p.from.slice(0, 8)}->${p.to.slice(0, 8)}`),
+        });
       }
       try {
         saveSessionState(state, state.repoPath || hookCwd, state.sessionTag);
@@ -2031,6 +2271,11 @@ export async function handlePostCommit(): Promise<void> {
       parsedForSessionWrite = parseTranscript(state.transcriptPath, {
         since: state.startedAt, repoRoots: sessionRepoRoots(state),
       });
+      // The session's stored model can be the bare brand ("claude": a
+      // SessionStart that carried none, then the pgrep guess above), while
+      // the transcript names the model that ran. The note is often the only
+      // record of it another org — or an offline reader — ever sees.
+      noteModel = firstSpecificModel(noteModel, parsedForSessionWrite.model) || noteModel;
       const costModel = parsedForSessionWrite.model || state.model;
       const cost = estimateSessionCost(parsedForSessionWrite, costModel);
       // Absent, never zero, when the walk finds nothing. A zero reads as a
@@ -2060,6 +2305,9 @@ export async function handlePostCommit(): Promise<void> {
   // replay: prod session 6c21a6d8 (2026-09-16) merged other sessions' PRs in
   // its own worktree, every such commit logged "SKIP recording" here and still
   // got a note naming 6c21a6d8, and it served 45 commits for the 4 it wrote.
+  // Sealed prompts: cache this month's key before the note write below (the
+  // writer is synchronous). A no-op unless the repo opted in (note-seal.ts).
+  await ensureWriteKey(repoPath);
   if (commitIsAnotherSessions) {
     debugLog('post-commit', 'no git note — commit is another session\'s', { commitSha: commitSha.slice(0, 8) });
   } else if (!state) {
@@ -2085,8 +2333,8 @@ export async function handlePostCommit(): Promise<void> {
       prompts: state ? buildPromptNoteEntries(state, state.agentSlug, noteModel || state.model) : undefined,
       // No in-memory transcript here (post-commit hook) — read markers from
       // the session's transcript file. Matters for Codex, which routes its
-      // note writes through this path.
-      markers: parseMarkersFromTranscriptPath(state?.transcriptPath),
+      // note writes through this path. Only the committing turn's.
+      markersForCommit: commitTurnMarkersFor(repoPath, withTurnDiffs(readMarkerTurns(state?.transcriptPath), state), { currentTurnStartedAt: currentTurnStart(state) }),
       // Read from the hoisted parse above — absent when there was no
       // transcript to walk, never zeroed.
       tokensUsed: noteMetrics.tokensUsed,
@@ -2104,6 +2352,12 @@ export async function handlePostCommit(): Promise<void> {
       snapshotAt: new Date().toISOString(),
       filesChanged,
       subagents: (state?.subagentSpawns || []).map((s) => ({ type: s.subagentType, promptIndex: s.promptIndex })),
+      // The v1 record takes the model the session REPORTED (state.model), not
+      // noteModel: that one falls back to a pgrep hit, i.e. a model guessed
+      // from a process name.
+      attribution: attributionSourceFromState(state, {
+        agentSlug: state.agentSlug, model: state.model, costUsd: noteMetrics.costUsd, connected, apiUrl,
+      }),
     });
     debugLog('post-commit', 'git notes written');
   } catch (err: any) {
@@ -2237,8 +2491,16 @@ export async function handlePostCommit(): Promise<void> {
         // reads as +15, because the whole file is new to git. Diffing from this
         // prompt's baseline shadow yields the +5 it actually added. Falls back to
         // the commit's own stat when there's no usable baseline.
-        const promptBaseline =
-          s.promptShadows?.find((sh) => sh.promptIndex === latestPromptIdx)?.shadowSha
+        // A commit made in the linked worktree the session also writes in is
+        // measured from THAT worktree's start, not repoPath's: the two are
+        // different checkouts, and a file an earlier turn left there read as
+        // new against the other one. Session 9f3d6bd2 turn 2 (2026-09-27) was
+        // sent a sub-agent's +139 it only committed.
+        const commitTree = getWorkingGitRoot(hookCwd) || hookCwd;
+        const workTreeStart = (s.promptWorkTreeShadows || [])
+          .find((sh) => sh.promptIndex === latestPromptIdx && samePath(sh.path, commitTree))?.shadowSha;
+        const promptBaseline = workTreeStart
+          || s.promptShadows?.find((sh) => sh.promptIndex === latestPromptIdx)?.shadowSha
           || s.prePromptSha;
         // A merge is already scoped to what it resolved; re-diffing it from
         // the baseline tree would put the absorbed branch straight back in.
@@ -2308,7 +2570,7 @@ export async function handlePostCommit(): Promise<void> {
           // submit time the row is stamped now, after the commit, and the
           // gitCapture-only PATCH that follows moves the commit to the turn
           // before (session a7740ea3, commit 562618d7).
-          ...(turnStartForServerRow(s, latestPromptRow) && { createdAt: turnStartForServerRow(s, latestPromptRow) }),
+          ...turnStartFields(s, latestPromptRow),
           ...captureStamp(),
           promptText: latestPromptText.slice(0, 1000),
           // Files, diff and line counts all come from commitTurnContentUnit, so
@@ -2323,8 +2585,15 @@ export async function handlePostCommit(): Promise<void> {
           // server keeps it against the Stop that is often already building a
           // smaller answer for this turn (session a7740ea3, turn 10).
           ...(scoped ? { commitPatch: true } : {}),
-          ...(budgetedCommitDiff.omittedFiles.length > 0
-            ? { contentUnavailableFiles: budgetedCommitDiff.omittedFiles }
+          // Two cuts can drop a file: the section cap inside the scoped render
+          // (named by the unit) and the wire budget just above. Either way the
+          // file stays in `filesChanged` and is declared here, so the row says
+          // "partial" rather than letting a recount of the short text replace
+          // the counts numstat measured.
+          ...(unit.contentUnavailableFiles.length + budgetedCommitDiff.omittedFiles.length + budgetedCommitDiff.partialFiles.length > 0
+            ? { contentUnavailableFiles: [...new Set([
+              ...unit.contentUnavailableFiles, ...budgetedCommitDiff.omittedFiles, ...budgetedCommitDiff.partialFiles,
+            ])] }
             : {}),
           linesAdded: unit.linesAdded,
           linesRemoved: unit.linesRemoved,
@@ -2552,11 +2821,25 @@ export async function handlePostCommit(): Promise<void> {
       // Explicit [Origin: Decision] markers from the transcript — ground truth,
       // no LLM call needed. The normal commit path doesn't LLM-synthesize, so
       // markers are the decision source here.
+      //
+      // Only the turns that made commits: this commit's record carries what its
+      // own turn wrote so far — plus any earlier turn whose work is in it — and
+      // the rollup what every committing turn wrote. The rest of the reply
+      // lands after the commit and is filled in at the end
+      // (enrichDecisionsForSession).
+      const committedAt = gitCommitDate(repoPath, commitSha) || new Date().toISOString();
       let commitDecisions: string[] = [];
       let commitMarkers: OriginMarkers | undefined;
       try {
-        commitMarkers = parseMarkersFromTranscriptPath(state.transcriptPath);
-        commitDecisions = commitMarkers?.decision || [];
+        const turns = withTurnDiffs(readMarkerTurns(state.transcriptPath), state);
+        const turnStart = currentTurnStart(state);
+        const added = turns.length > 0 ? commitEvidence(repoPath, [commitSha]).get(commitSha)?.added : undefined;
+        commitDecisions = commitTurnDecisions(turns, committedAt, { currentTurnStartedAt: turnStart, added });
+        commitMarkers = committedSessionMarkers({
+          repoPath, sessionId: state.sessionId, turns,
+          commitShas: [...(state.sessionCommitShas || []), commitSha],
+          currentTurnStartedAt: turnStart,
+        });
       } catch { /* best-effort */ }
       try {
         const memPrompts = (parsed.prompts && parsed.prompts.length > 0) ? parsed.prompts : (state.prompts || []);
@@ -2579,9 +2862,14 @@ export async function handlePostCommit(): Promise<void> {
           // ("Merge branch 'main' into feature") is not a summary of anything,
           // and for a commit-and-go session — which never reaches session end —
           // whatever lands here is what the next agent reads permanently.
-          summary: summarizeFromCommitSubjects([commitMessage]) || parsed.summary || memPrompts[0] || undefined,
+          //
+          // Every commit the session made, not just this one: when THIS commit
+          // is the noise (merging main in before the PR merges), the one-commit
+          // version fell through to the agent's narration of that moment.
+          summary: summarizeFromCommitSubjects([...sessionCommitSubjects(repoPath, state.sessionId), commitMessage])
+            || parsed.summary || memPrompts[0] || undefined,
           prompts: memPrompts,
-          decisions: commitDecisions,
+          decisions: commitMarkers?.decision || [],
           markers: commitMarkers,
         }));
         debugLog('post-commit', 'session memory refreshed (memoryUpdate=commit)', { sessionId: state.sessionId, decisions: commitDecisions.length });
@@ -2606,7 +2894,7 @@ export async function handlePostCommit(): Promise<void> {
           // window disagree with the commits it claims — see
           // reconcileSessionWindow. Falls back to now only if git can't answer.
           branch: currentBranch || state.branch || null,
-          committedAt: gitCommitDate(repoPath, commitSha) || new Date().toISOString(),
+          committedAt,
         });
       } catch { /* non-fatal */ }
     }

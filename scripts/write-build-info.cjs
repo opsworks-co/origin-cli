@@ -18,9 +18,13 @@ function safeGit(args) {
   }
 }
 
-const sha = safeGit(['rev-parse', 'HEAD']) || 'unknown';
+// The Docker image builds the downloadable CLI with no .git in its context, so
+// git has nothing to say there and every served CLI reported `gitSha: unknown`.
+// The deploy passes the commit it is building (Dockerfile ARG GIT_SHA).
+const envSha = /^[0-9a-f]{7,40}$/i.test(process.env.ORIGIN_BUILD_SHA || '') ? process.env.ORIGIN_BUILD_SHA : '';
+const sha = safeGit(['rev-parse', 'HEAD']) || envSha || 'unknown';
 const shortSha = sha === 'unknown' ? 'unknown' : sha.slice(0, 12);
-const branch = safeGit(['rev-parse', '--abbrev-ref', 'HEAD']) || 'unknown';
+const branch = safeGit(['rev-parse', '--abbrev-ref', 'HEAD']) || process.env.ORIGIN_BUILD_BRANCH || 'unknown';
 const dirty = safeGit(['status', '--porcelain']) ? true : false;
 
 // Locate the CLI package root by walking upward from this script.
@@ -46,6 +50,7 @@ const srcGenerated = `// AUTO-GENERATED at build time by scripts/write-build-inf
 // Do not edit by hand. This file is gitignored.
 export const BUILD_INFO = ${JSON.stringify(buildInfo, null, 2)} as const;
 `;
+fs.mkdirSync(path.join(pkgRoot, 'src'), { recursive: true });
 fs.writeFileSync(path.join(pkgRoot, 'src', 'build-info.ts'), srcGenerated);
 
 // Log to STDERR, not stdout. This runs as an npm `prepare` lifecycle script, so

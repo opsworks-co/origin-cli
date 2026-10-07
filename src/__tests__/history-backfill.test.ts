@@ -173,9 +173,18 @@ describe('history-backfill', () => {
     // Three ~500KB-capped diffs overflow the 1.2MB payload budget, forcing
     // a flush and pushing the remaining sha into a second batch. The first
     // batch's failure (e.g. a 413/timeout) must not strand the rest.
+    //
+    // Three ~220KB files per commit, not one 600KB line: the patch is cut
+    // at HUNK boundaries now, and a new file is one hunk — a single
+    // oversize hunk is omitted whole and the payload shrinks to nothing.
+    // Two of the three sections fit under the ingest limit, so each
+    // commit still ships ~440KB.
     const bigShas: string[] = [];
     for (let i = 0; i < 3; i++) {
-      fs.writeFileSync(path.join(dir, `big${i}.txt`), 'x'.repeat(600_000) + '\n');
+      for (let f = 0; f < 3; f++) {
+        const lines = Array.from({ length: 2200 }, (_, n) => `${'x'.repeat(100)} ${i} ${f} ${n}`).join('\n');
+        fs.writeFileSync(path.join(dir, `big${i}-${f}.txt`), lines + '\n');
+      }
       git(dir, 'add', '.');
       git(dir, 'commit', '-q', '-m', `huge vendored blob ${i}`);
       bigShas.push(git(dir, 'rev-parse', 'HEAD'));

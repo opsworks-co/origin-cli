@@ -19,6 +19,7 @@ import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { gitAsync } from './helpers/git-async.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(cliRoot, 'dist', 'index.js');
@@ -57,10 +58,14 @@ function startFakeApi(): Promise<void> {
   });
 }
 
-const git = (args: string[], opts: { hooks?: boolean; env?: Record<string, string> } = {}): string =>
-  execFileSync('git', [...(opts.hooks ? ['-c', `core.hooksPath=${hooksDir}`] : []), ...args], {
+const git = (args: string[], opts: { env?: Record<string, string> } = {}): string =>
+  execFileSync('git', args, {
     cwd: repo, encoding: 'utf-8', stdio: 'pipe', env: { ...process.env, GIT_EDITOR: 'true', ...(opts.env || {}) },
   }).trim();
+
+/** A git command that fires the hooks: async, so the fake API can answer them (gitAsync). */
+const hookedGit = (args: string[]): Promise<string> =>
+  gitAsync(repo, ['-c', `core.hooksPath=${hooksDir}`, ...args], { env: { ...process.env, GIT_EDITOR: 'true' } });
 
 function run(event: string, payload: Record<string, unknown> = {}): Promise<{ code: number | null; stderr: string }> {
   const child = spawn(process.execPath, [BIN, 'hooks', 'claude-code', event], {
@@ -196,18 +201,18 @@ describe.skipIf(!haveDist)('a replayed commit through the built binary', () => {
     const bump = { tool_name: 'Bash', tool_input: { command: 'commit the bump, rebase and cherry-pick the PRs' }, tool_use_id: 'tu-2' };
     expect((await run('pre-tool-use', bump)).code).toBe(0);
     git(['add', '-A']);
-    git(['commit', '-q', '-m', 'chore(cli): bump version'], { hooks: true });
+    await hookedGit(['commit', '-q', '-m', 'chore(cli): bump version']);
     const own = git(['rev-parse', 'HEAD']);
 
     // Rebase the stranger's branch onto the session's commit…
     git(['checkout', '-q', 'codex/track-created-worktrees']);
-    git(['rebase', '-q', 'main'], { hooks: true });
+    await hookedGit(['rebase', '-q', 'main']);
     const rebased = git(['rev-parse', 'HEAD']);
     expect(git(['show', '-s', '--format=%s', rebased])).toBe('fix(capture): track worktrees created mid-session');
 
     // …and cherry-pick the other one onto main.
     git(['checkout', '-q', 'main']);
-    git(['cherry-pick', picked], { hooks: true });
+    await hookedGit(['cherry-pick', picked]);
     const cherryPicked = git(['rev-parse', 'HEAD']);
     expect(cherryPicked).not.toBe(picked);
 

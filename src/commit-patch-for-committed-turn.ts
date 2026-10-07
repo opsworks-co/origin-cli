@@ -52,9 +52,10 @@
  * observation rather than a reconstruction — which it is.
  */
 import { mergeOwnDiff } from './history-backfill.js';
+import { commitsHeldByRefs } from './refs-holding.js';
 import { execFileSync } from 'child_process';
 import { isOriginAutoManagedPath } from './ignore-patterns.js';
-import { commitDiffScopedToPrompt, MAX_DIFF_SIZE, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { commitDiffScopedToPrompt, MAX_DIFF_SIZE, MAX_PROMPT_DIFF_LEN, readFileAtRev, shadowHeadOf, startDirtOnInherited, writeBlob } from './git-capture.js';
 import { localTurnForServerRow } from './turn-index.js';
 import type { TurnObservation } from './resolve-turn.js';
 
@@ -68,6 +69,10 @@ export interface CommittedTurnState {
   commitTurns?: Array<{ sha: string; turnId: string; at?: string }>;
   /** LOCAL-numbered, like the ids. */
   promptShadows?: Array<{ promptIndex: number; shadowSha: string }>;
+  /** LOCAL-numbered: the start of each prompt in the linked worktree it wrote in. */
+  promptWorkTreeShadows?: Array<{ promptIndex: number; path?: string; shadowSha: string }>;
+  /** The latest prompt's worktree start — see session-state.ts. */
+  prePromptWorkTree?: { path?: string; sha: string; promptIndex: number } | null;
   prePromptSha?: string | null;
   /** Server row of this launch's turn 0 — see turn-index.ts. */
   promptIndexBase?: number | null;
@@ -76,6 +81,8 @@ export interface CommittedTurnState {
   /** Each turn's own commit, one hop short of a squash that folded several
    *  turns' commits together — see foldCommitRecordsToSurvivors. */
   preSquashCommitTurns?: Array<{ sha: string; turnId: string; squash: string }>;
+  /** A turn's commit a later rewrite replaced, kept with the turn that made it. */
+  foldedCommitTurns?: Array<{ sha: string; turnId: string }>;
 }
 
 /** Recorded shas may be short or differently cased; seven hex digits is git's own floor. */
@@ -115,8 +122,18 @@ export interface CommittedTurnMapping {
    * the mapping carries now.
    */
   commitPatch?: boolean;
+  /**
+   * Every commit the patch stands for: the turn's own commits and their
+   * rewrites. Sent beside `commitPatch` so the server can tell a patch of the
+   * row's OWN commit from a patch of another one — a row stamped with the
+   * turn's last commit is not "another commit" to a patch labelled with its
+   * first (session 690e594c turn 6, 2026-09-27).
+   */
+  patchCommits?: string[];
   /** The row's content, even when empty, replaces what is stored. */
   contentAuthoritative?: boolean;
+  /** An empty row's mark; a patch landing here contradicts it (chat-only-flag.ts). */
+  chatOnly?: boolean;
 }
 
 export interface PreferCommitPatchDeps {
@@ -254,12 +271,28 @@ function chainsOf(repoPath: string, shas: string[]): CommitChain[] {
  */
 type ChainStanding = 'reachable' | 'carried' | 'stranded' | 'superseded';
 
+const SHADOW_REF = /(^|\/)shadow(\/|$)/;
+
+/**
+ * Answer heldByABranch for many commits at once (refs-holding.ts): one
+ * rev-list for the whole pass instead of a `for-each-ref --contains` per
+ * chain. A commit the batch could not answer is left out and falls through
+ * to the per-commit query below.
+ */
+function prefillHeldByABranch(repoPath: string, shas: readonly string[], cache: Map<string, boolean>): void {
+  const need = shas.filter((sha) => !cache.has(sha));
+  if (need.length === 0) return;
+  const held = commitsHeldByRefs(repoPath, need, { namespaces: ['refs/heads', 'refs/remotes'], excludeRef: (ref) => SHADOW_REF.test(ref) });
+  if (!held) return;
+  for (const [sha, isHeld] of held) cache.set(sha, isHeld);
+}
+
 /** Refs holding `sha`, cached per pass: one `for-each-ref` per chain. */
 function heldByABranch(repoPath: string, sha: string, cache: Map<string, boolean>): boolean {
   const hit = cache.get(sha);
   if (hit !== undefined) return hit;
   const refs = git(repoPath, ['for-each-ref', '--contains', sha, '--format=%(refname)', 'refs/heads', 'refs/remotes']);
-  const held = refs.out.split('\n').map((r) => r.trim()).some((r) => !!r && !/(^|\/)shadow(\/|$)/.test(r));
+  const held = refs.out.split('\n').map((r) => r.trim()).some((r) => !!r && !SHADOW_REF.test(r));
   cache.set(sha, held);
   return held;
 }
@@ -292,6 +325,23 @@ function chainStanding(
   };
   const own = facts(chain.first);
   if (!own.parents) return 'stranded';
+  // Left behind by a rewrite of its own base. The commit this chain was built
+  // on was rewritten (a rebase, an amend — post-rewrite recorded it), and the
+  // chain was not: a rewrite that carries a commit along records that commit
+  // too. So the line it sat on was replaced without it, and no branch holds it
+  // (tested above). Whatever of it was kept lives in what replaced that line.
+  //
+  // Session 690e594c (CLI .1910): turn 1's bump f1e51e72 sat on f2c1714b; the
+  // branch was rebased (f2c1714b → f400d05f) and the bump redone on the new
+  // base as a2bed1ad, later squashed into 21b78c57. The same-parents test
+  // below could not pair f1e51e72 with its redo — the parents differ by that
+  // very rewrite — so it stood `stranded`, became a branch of its own, its
+  // package.json a second section beside the squash's, and the row's primary
+  // sha. Turn 2's bump 4a3e48f9 (on 2acb028d → a36bee48) was the same shape.
+  const base = own.parents.split(' ')[0];
+  const baseRewritten = rewrites.some((r) => HEX.test(r.to || '') && sameSha(r.from, base));
+  const chainRewritten = chain.members.some((m) => rewrites.some((r) => sameSha(r.from, m)));
+  if (baseRewritten && !chainRewritten) return 'superseded';
   for (const sibling of siblings) {
     if (sibling === chain) continue;
     const theirs = facts(sibling.first);
@@ -334,6 +384,117 @@ function chainStanding(
  *
  * Returns true when the mapping took the union.
  */
+type ScopedPatch = NonNullable<ReturnType<typeof commitDiffScopedToPrompt>>;
+
+/**
+ * One branch's own patch: `base` → its tip, cut at every MERGE of the chain.
+ *
+ * A single range across a merge carries everything the merge brought in.
+ * Session d027b430 turn 9 merged main into its PR branch and bumped the
+ * version; the chain's range ran from the branch's pre-merge commit to the
+ * bump and read +90/-1 — 89 of them #1922's and #1926's lines, which main
+ * had and the turn never wrote. Post-commit had logged the right answer,
+ * "crediting the session with its resolution only".
+ *
+ * So the ranges between merges are diffed as before, and each merge counts
+ * its resolution only (mergeOwnDiff) — the same rule the single-range path
+ * applies to a turn whose only commit is a merge. A clean merge adds nothing.
+ * Sections repeat per path across segments, as they already do across
+ * branches.
+ *
+ * Null when any piece cannot be diffed.
+ */
+function chainPatch(
+  repoPath: string,
+  chain: CommitChain,
+  base: string,
+  budget: number,
+  /** The files this turn changed — see turnStart in patchAcrossBranches. */
+  only: Set<string>,
+  /** file → the shadow, for files measured from what the turn started with. */
+  inheritedFrom: Map<string, string> | null,
+): ScopedPatch | null {
+  const EMPTY: ScopedPatch = { diff: '', linesAdded: 0, linesRemoved: 0, files: [], diffTruncated: false };
+  const own = (files: string[]) => files.filter((f) => only.has(f));
+  const isMerge = (sha: string) =>
+    git(repoPath, ['rev-list', '--parents', '-n', '1', sha]).out.trim().split(/\s+/).length > 2;
+  const merges = chain.members.filter(isMerge);
+  if (merges.length === 0) {
+    const files = own(filesOfCommits(repoPath, chain.members));
+    return files.length === 0 ? EMPTY : commitDiffScopedToPrompt(repoPath, base, chain.tip, files, budget, inheritedFrom);
+  }
+
+  // Oldest first, by ancestry. `rev-list` of the tip lists every member.
+  const order = git(repoPath, ['rev-list', '--topo-order', '--reverse', chain.tip]);
+  if (!order.ok) return null;
+  const members = order.out.split('\n').map((l) => l.trim())
+    .filter((sha) => chain.members.some((m) => sameSha(m, sha)));
+  if (members.length !== chain.members.length) return null;
+
+  const pieces: ScopedPatch[] = [];
+  let from = base;
+  let run: string[] = [];
+  const flush = (to: string): boolean => {
+    const files = own(filesOfCommits(repoPath, run));
+    if (run.length === 0 || files.length === 0) { run = []; return true; }
+    const piece = commitDiffScopedToPrompt(repoPath, from, to, files, budget, from === base ? inheritedFrom : null);
+    if (!piece) return false;
+    pieces.push(piece);
+    run = [];
+    return true;
+  };
+  let prev = '';
+  for (const sha of members) {
+    if (!isMerge(sha)) { run.push(sha); prev = sha; continue; }
+    if (!flush(prev)) return null;
+    const resolution = mergeOwnDiff(repoPath, sha);
+    if (!resolution) return null;
+    const resolved = own(resolution.filesChanged);
+    if (resolved.length > 0) {
+      const mergeBase = resolution.baseline || git(repoPath, ['rev-parse', `${sha}^1`]).out.trim();
+      const piece = commitDiffScopedToPrompt(repoPath, mergeBase, sha, resolved, budget);
+      if (!piece) return null;
+      pieces.push(piece);
+    }
+    from = sha;
+    prev = sha;
+  }
+  if (!flush(prev)) return null;
+
+  return {
+    diff: pieces.map((p) => p.diff).filter((d) => d.trim()).map((d) => (d.endsWith('\n') ? d : `${d}\n`)).join(''),
+    linesAdded: pieces.reduce((n, p) => n + p.linesAdded, 0),
+    linesRemoved: pieces.reduce((n, p) => n + p.linesRemoved, 0),
+    files: [...new Set(pieces.flatMap((p) => p.files))],
+    diffTruncated: pieces.some((p) => p.diffTruncated),
+  };
+}
+
+/**
+ * Inherited sources, with the turn's starting dirt laid over each file a move
+ * brought in (inheritedWithStartDirt). A file both uncommitted at the turn's
+ * start and changed by the commit it rebased onto is measured from that merge,
+ * so the replayed earlier-turn work is not billed again (690e594c turn 1).
+ * A file that cannot be merged keeps its source.
+ */
+function withStartDirt(
+  repoPath: string,
+  shadow: string | null,
+  sources: Map<string, string>,
+): Map<string, string> {
+  const head = shadow ? shadowHeadOf(repoPath, shadow) : null;
+  if (!head || !shadow || sources.size === 0) return sources;
+  const out = new Map(sources);
+  for (const [file, rev] of sources) {
+    if (!HEX.test(rev)) continue;
+    const merged = startDirtOnInherited(repoPath, head, file, readFileAtRev(repoPath, shadow, file), readFileAtRev(repoPath, rev, file));
+    if (merged === null) continue;
+    const blob = writeBlob(repoPath, merged);
+    if (blob) out.set(file, `blob:${blob}`);
+  }
+  return out;
+}
+
 function patchAcrossBranches(
   repoPath: string,
   pm: CommittedTurnMapping,
@@ -342,6 +503,10 @@ function patchAcrossBranches(
   stranded: number,
   deps: PreferCommitPatchDeps,
   stampFor: (tip: string) => string = (tip) => tip,
+  /** The turn's baseline shadow, when it has one. */
+  shadow: string | null = null,
+  /** The turn's start in each linked worktree it wrote in. */
+  workTreeShadows: string[] = [],
 ): boolean {
   const perChain = chains
     .map((chain) => ({ chain, files: filesOfCommits(repoPath, chain.members) }))
@@ -359,7 +524,10 @@ function patchAcrossBranches(
   const watch = [...new Set([...ledgerFilesOf(pm), ...commitFiles])].filter(f => !isOriginAutoManagedPath(f));
   if (watch.length > 0 && !git(repoPath, ['diff', '--quiet', 'HEAD', '--', ...watch]).ok) {
     declined(deps, pm, 'a file of the turn is dirty against its commit');
-    deps.log?.('commit patch declined: a file of the turn is dirty against its commit', { promptIndex: pm.promptIndex, commits: tips });
+    deps.log?.('commit patch declined: a file of the turn is dirty against its commit', {
+      promptIndex: pm.promptIndex, commits: tips,
+      dirty: git(repoPath, ['diff', '--name-only', 'HEAD', '--', ...watch]).out.split('\n').filter(Boolean).slice(0, 10),
+    });
     return false;
   }
   const untracked = watch.length > 0
@@ -371,13 +539,83 @@ function patchAcrossBranches(
     return false;
   }
 
-  const parts: Array<NonNullable<ReturnType<typeof commitDiffScopedToPrompt>>> = [];
+  // What the turn started with is its SHADOW: HEAD then (`shadowHead`) plus
+  // whatever was uncommitted — an earlier turn's work this turn may only have
+  // committed. A branch's own parent knows nothing of that, so each file is
+  // held against the shadow first (turnStart):
+  //
+  //   • the same bytes at the branch tip as in the shadow — the turn did not
+  //     change the file, whatever the commit's parent says. Session c085f0af
+  //     turn 19 ran `gh pr merge --squash`; the squash (5463a6ef4) was its
+  //     only commit, its content equalled the shadow file for file, and it
+  //     was sent as +93/-1 against the squash's parent — turn 18's work again.
+  //   • uncommitted at the start, and the branch's parent holds the same
+  //     version the turn's HEAD did — measured from the shadow's version.
+  //     Session d027b430 turn 7 committed turn 6's +426 as 595bc711;
+  //     post-commit scoped it to the shadow and sent +0/-0, and this pass,
+  //     diffing from 595bc711's parent, sent the +426 again.
+  //   • anything else — from the branch's parent, as before. Where that parent
+  //     moved the file since the turn began, the shadow's version would bill
+  //     the move instead.
+  // A turn that started on a clean tree records HEAD itself as its shadow
+  // (d027b430's rows 10-12 all hold 25027d71, a release commit). Only a
+  // commit createShadowCommit wrote sits on top of HEAD with the dirt in it.
+  //
+  // Each branch is held against the start of the checkout it was cut in. The
+  // turn's shadow is of repoPath; a branch cut in a linked worktree the session
+  // also wrote in starts from THAT worktree's shadow. Session 9f3d6bd2 turn 2
+  // (2026-09-27): turn 1's background sub-agent wrote a test in its own
+  // worktree and committed it there during turn 2. Held against repoPath's
+  // shadow — another checkout, another HEAD — the file read as new, and the
+  // turn was sent its +139 again. The worktree's shadow, taken as turn 2
+  // began, already held those bytes. The start whose head is the branch's
+  // nearest ancestor is the one it was cut from; none fits, the turn's own.
+  const startOf = (sha: string) => {
+    const isShadow = /^origin shadow /.test(git(repoPath, ['show', '-s', '--format=%s', sha]).out.trim());
+    const head = isShadow ? git(repoPath, ['rev-parse', '--verify', '-q', `${sha}^1`]).out.trim() : sha;
+    return { shadow: sha, isShadow, shadowHead: head };
+  };
+  const own = shadow ? startOf(shadow) : null;
+  const others = [...new Set(workTreeShadows.filter((s) => HEX.test(s) && s !== shadow))].map(startOf)
+    .filter((s) => HEX.test(s.shadowHead));
+  const isAncestor = (a: string, b: string) => git(repoPath, ['merge-base', '--is-ancestor', a, b]).ok;
+  const startFor = (parent: string) => {
+    if (others.length === 0 || !HEX.test(parent)) return own;
+    const fits = [own, ...others].filter((s): s is NonNullable<typeof s> => !!s && HEX.test(s.shadowHead) && isAncestor(s.shadowHead, parent));
+    return fits.find((s) => fits.every((o) => o === s || isAncestor(o.shadowHead, s.shadowHead))) || own;
+  };
+  const namesBetween = (a: string, b: string, files: string[]): Set<string> | null => {
+    const out = git(repoPath, ['diff', '--no-renames', '--name-only', a, b, '--', ...files]);
+    return out.ok ? new Set(out.out.split('\n').map((l) => l.trim()).filter(Boolean)) : null;
+  };
+  const turnStart = (tip: string, parent: string, files: string[]) => {
+    const start = startFor(parent);
+    if (!start || !HEX.test(start.shadowHead)) return { only: new Set(files), inheritedFrom: null };
+    const { shadow, isShadow, shadowHead } = start;
+    const changed = namesBetween(shadow, tip, files);
+    const dirty = isShadow ? namesBetween(shadowHead, shadow, files) : new Set<string>();
+    const moved = HEX.test(parent) ? namesBetween(shadowHead, parent, files) : null;
+    // A read that failed is not an answer: every file stays, from the parent.
+    if (!changed || !dirty) return { only: new Set(files), inheritedFrom: null };
+    const inheritedFrom = new Map<string, string>();
+    for (const f of files) if (changed.has(f) && dirty.has(f) && moved && !moved.has(f)) inheritedFrom.set(f, shadow);
+    //   • uncommitted at the start AND moved by the parent — the parent's
+    //     version with the turn's starting dirt merged in (withStartDirt).
+    if (moved && HEX.test(parent)) {
+      const both = new Map(files.filter((f) => changed.has(f) && dirty.has(f) && moved.has(f)).map((f) => [f, parent] as [string, string]));
+      for (const [f, src] of withStartDirt(repoPath, shadow, both)) if (src !== parent) inheritedFrom.set(f, src);
+    }
+    return { only: new Set(files.filter((f) => changed.has(f))), inheritedFrom: inheritedFrom.size > 0 ? inheritedFrom : null };
+  };
+  const parts: Array<{ scoped: NonNullable<ReturnType<typeof commitDiffScopedToPrompt>>; chain: CommitChain }> = [];
   for (const { chain, files } of perChain) {
     const parent = git(repoPath, ['rev-parse', '--verify', '-q', `${chain.first}^1`]).out.trim();
+    const base = HEX.test(parent) ? parent : EMPTY_TREE;
+    const { only, inheritedFrom } = turnStart(chain.tip, parent, files);
     // Step down context before upload, using the per-turn wire budget rather
     // than the much larger session budget. Reserve room for every branch.
-    const scoped = commitDiffScopedToPrompt(repoPath, HEX.test(parent) ? parent : EMPTY_TREE, chain.tip, files,
-      Math.floor(MAX_PROMPT_DIFF_LEN / perChain.length));
+    const budget = Math.floor(MAX_PROMPT_DIFF_LEN / perChain.length);
+    const scoped = chainPatch(repoPath, chain, base, budget, only, inheritedFrom);
     // A branch that cannot be diffed would leave its work out, which is the
     // undercount this exists to fix. Keep the ledger instead.
     if (!scoped) {
@@ -385,7 +623,7 @@ function patchAcrossBranches(
       deps.log?.('commit patch declined: a branch of the turn could not be diffed', { promptIndex: pm.promptIndex, commit: chain.tip.slice(0, 8) });
       return false;
     }
-    if (scoped.diff.trim()) parts.push(scoped);
+    if (scoped.diff.trim()) parts.push({ scoped, chain });
   }
   if (parts.length === 0) {
     declined(deps, pm, 'nothing between the turn baseline and its commit');
@@ -396,7 +634,7 @@ function patchAcrossBranches(
   // Each part is already capped; the union is capped again by whole sections.
   let diff = '';
   let cut = false;
-  for (const part of parts) {
+  for (const { scoped: part } of parts) {
     for (const section of part.diff.split(/^(?=diff --git )/m)) {
       if (!section.trim()) continue;
       const text = section.endsWith('\n') ? section : `${section}\n`;
@@ -404,11 +642,11 @@ function patchAcrossBranches(
       diff += text;
     }
   }
-  const diffTruncated = cut || parts.some((p) => p.diffTruncated);
-  const named = [...new Set(parts.flatMap((p) => (p.files.length > 0 ? p.files : pathsInDiff(p.diff))))];
+  const diffTruncated = cut || parts.some((p) => p.scoped.diffTruncated);
+  const named = [...new Set(parts.flatMap((p) => (p.scoped.files.length > 0 ? p.scoped.files : pathsInDiff(p.scoped.diff))))];
   const before = { linesAdded: pm.linesAdded, linesRemoved: pm.linesRemoved };
-  const linesAdded = parts.reduce((n, p) => n + p.linesAdded, 0);
-  const linesRemoved = parts.reduce((n, p) => n + p.linesRemoved, 0);
+  const linesAdded = parts.reduce((n, p) => n + p.scoped.linesAdded, 0);
+  const linesRemoved = parts.reduce((n, p) => n + p.scoped.linesRemoved, 0);
   pm.diff = diff;
   pm.filesChanged = named;
   pm.linesAdded = linesAdded;
@@ -417,13 +655,37 @@ function patchAcrossBranches(
   pm.contentUnavailableFiles = diffTruncated ? named.filter((f) => !inText.has(f)) : [];
   pm.uncommittedDiff = '';
   pm.commitPatch = true;
+  delete pm.chatOnly;
   // The same attestation that supplied the patch supplies its primary SHA.
   // A stale HEAD stamp may name an unrelated commit from a branch checkout.
-  pm.commitSha = stampFor(perChain.find(x => x.chain.members.includes(pm.commitSha || ''))?.chain.tip
-    || perChain[perChain.length - 1].chain.tip);
+  //
+  // Chosen among the chains that CONTRIBUTED text, not among every chain the
+  // turn committed on. A commit that touches only Origin's own context files
+  // — the `WIP origin context files (temporary)` an agent makes to get a dirty
+  // CLAUDE.md/AGENTS.md/GEMINI.md past a rebase — scopes to an empty diff, so it
+  // is in `perChain` and absent from `parts`. Listed last, it was the fallback:
+  // session c085f0af turn 4 (2026-09-25) wore 2f25335c (+30/-151 of context
+  // files, "0 files" once the server stripped them) as its commit while
+  // 32bd8196, the fix the turn wrote and the only chain in the patch, went
+  // unlinked and the page read "commit total +30/-151 · 0f".
+  //
+  // …and the NEWEST of those tips, not the one holding the row's local sha.
+  // post-commit stamps each commit on the row as the turn makes it, so the
+  // server's row names the turn's latest commit; a union sent under any other
+  // of the turn's shas is refused there as "a commit patch of another commit"
+  // (commit-patch-hold.ts) and the row keeps a stale capture. Session 690e594c
+  // turn 6 (2026-09-27) made five commits on two branches: every Stop sent
+  // +162/-4 under 1ff2abfc, the row held b2fb7f06, and it stayed at +2/-2.
+  const tipTime = (tip: string) => Number(git(repoPath, ['show', '-s', '--format=%ct', tip]).out.trim()) || 0;
+  const primary = parts
+    .map((p) => ({ chain: p.chain, at: tipTime(p.chain.tip) }))
+    .sort((a, b) => a.at - b.at)
+    .pop()!.chain;
+  pm.commitSha = stampFor(primary.tip);
   applied(deps, pm);
   deps.log?.('ledger diff replaced by the commit patches of several branches', {
     promptIndex: pm.promptIndex, turnId, branches: parts.length, stranded, commits: tips,
+    primary: primary.tip.slice(0, 8),
     files: named.length, diffTruncated, ledgerLines: `+${before.linesAdded ?? '?'}/-${before.linesRemoved ?? '?'}`,
     commitLines: `+${linesAdded}/-${linesRemoved}`,
   });
@@ -444,12 +706,13 @@ export function preferCommitPatchForCommittedTurns(
   const turns = state.commitTurns || [];
   // Earlier passes may have replaced the content a previous Stop flagged, and
   // the flag now survives the state round-trip — so it is re-earned every pass.
-  for (const pm of mappings || []) if (pm) delete pm.commitPatch;
+  for (const pm of mappings || []) if (pm) { delete pm.commitPatch; delete pm.patchCommits; }
   if (turns.length === 0 || !repoPath) {
     for (const pm of mappings || []) if (pm) declined(deps, pm, 'the session has no attested commits');
     return 0;
   }
   let replaced = 0;
+  const covered = new Map<CommittedTurnMapping, string[]>();
   for (const pm of mappings) {
     // The mapping is a SERVER row; ids and shadows are numbered by this
     // launch (see turn-index.ts). A row from before the launch has neither.
@@ -484,6 +747,8 @@ export function preferCommitPatchForCommittedTurns(
       ...preSquash.filter((c) => c.turnId === turnId),
     ];
     if (own.length === 0) { declined(deps, pm, 'the turn made no commit'); continue; }
+    covered.set(pm, [...new Set(own.flatMap((c) => [c.sha, ...rewritesOf(c.sha, allRewrites)]))]
+      .filter((sha) => !isSharedSquash(sha)));
     // Every commit of the turn that still exists as an object names the
     // pathspec, reachable from HEAD or not. The END of the range is the
     // latest commit still on the branch.
@@ -513,16 +778,49 @@ export function preferCommitPatchForCommittedTurns(
     // …but only when HEAD holds all of the turn's work. A branch whose
     // commits HEAD neither reaches nor carries the content of is work one
     // range off HEAD cannot describe.
+    // Only a real prompt shadow: its first parent is the commit the turn
+    // started on, which is what patchAcrossBranches compares against.
+    const turnShadow = state.promptShadows?.find((s) => s.promptIndex === local)?.shadowSha || null;
+    const workTreeShadows = [
+      ...(state.promptWorkTreeShadows || []).filter((s) => s.promptIndex === local).map((s) => s.shadowSha),
+      // The live slot, for a turn that began before per-prompt starts were kept.
+      ...(state.prePromptWorkTree && state.prePromptWorkTree.promptIndex === local ? [state.prePromptWorkTree.sha] : []),
+    ];
     if (existing.length > 0) {
       // Pre-squash commits chain apart from the turn's other commits. One that
       // descends from a commit HEAD reaches would otherwise join ITS chain,
       // stand as `reachable`, and be dropped by the single range that follows.
-      const chainsApart = (shas: string[]) => [
-        ...chainsOf(repoPath, shas.filter((sha) => !intoSharedSquash(sha))),
-        ...chainsOf(repoPath, shas.filter((sha) => intoSharedSquash(sha))),
-      ];
-      const originalChains = chainsApart(existing);
+      //
+      // A commit HEAD does not reach, that a branch still holds, chains apart
+      // from the ones HEAD does reach. Built on top of one of them, it would
+      // otherwise join that chain, the chain would stand `reachable` for its
+      // reachable member, and the single range off HEAD would leave the branch
+      // out. Session df8cc9aa turn 42 (2026-10-04): a sub-agent's two commits
+      // were rebased onto main after the turn's own 62a18070 had landed there.
+      // They joined 62a18070's chain, nothing stood `stranded`, and every Stop
+      // after the rebase sent +88/-30 for a turn of "4 commits total +513/-58".
+      // A commit no branch holds stays where ancestry puts it: a commit reset
+      // away on top of a reachable one is not a branch of the turn.
       const refCache = new Map<string, boolean>();
+      // Every commit this pass may ask about, in one rev-list.
+      prefillHeldByABranch(repoPath, existing, refCache);
+      const onHead = (sha: string) => shas.includes(sha) || rewritesOf(sha, rewrites).some((r) => shas.includes(r));
+      // …and below none of the turn's commits that are on HEAD: an earlier
+      // commit of a chain whose tip was squashed (the rewrite names only the
+      // tip) is part of what HEAD holds, not a branch beside it.
+      const chainsApart = (list: string[]) => {
+        const plain = list.filter((sha) => !intoSharedSquash(sha));
+        const onHeadHere = plain.filter(onHead);
+        const offHead = plain.filter((sha) => !onHead(sha)
+          && heldByABranch(repoPath, sha, refCache)
+          && !onHeadHere.some((o) => o !== sha && isAncestor(repoPath, sha, o)));
+        return [
+          ...chainsOf(repoPath, plain.filter((sha) => !offHead.includes(sha))),
+          ...chainsOf(repoPath, offHead),
+          ...chainsOf(repoPath, list.filter((sha) => intoSharedSquash(sha))),
+        ];
+      };
+      const originalChains = chainsApart(existing);
       const standing = new Map(originalChains.map((c) => [c, chainStanding(repoPath, c, originalChains, shas, rewrites, refCache, c.members.some(intoSharedSquash))] as const));
       const stranded = originalChains.filter((c) => standing.get(c) === 'stranded').length;
       if (stranded > 0) {
@@ -544,7 +842,73 @@ export function preferCommitPatchForCommittedTurns(
               === git(repoPath, ['show', '-s', '--format=%P', sha]).out.trim(),
           )) || sha,
         ))];
-        const chains = chainsApart(surviving);
+        // A commit REDONE inside a chain is superseded too, not only a chain's
+        // first. Session d027b430 turn 7 merged main as ec4e1329, reset it
+        // away and merged again as e9f9d378 — same two parents — then bumped
+        // on top. ec4e1329 still chained to the turn's first commit, stood
+        // `stranded` beside the live chain, and sent its merge a second time.
+        // Same test as chainStanding's: same parents, no branch holds it, and
+        // the other is held, reachable or newer.
+        const parentsOf = (sha: string) => git(repoPath, ['show', '-s', '--format=%P', sha]).out.trim();
+        const committedAt = (sha: string) => Number(git(repoPath, ['show', '-s', '--format=%ct', sha]).out.trim()) || 0;
+        const redone = new Set(surviving.filter((sha) => {
+          if (intoSharedSquash(sha) || shas.includes(sha) || heldByABranch(repoPath, sha, refCache)) return false;
+          const mine = parentsOf(sha);
+          if (!mine) return false;
+          return surviving.some((other) => other !== sha && parentsOf(other) === mine
+            && (shas.includes(other) || heldByABranch(repoPath, other, refCache) || committedAt(other) > committedAt(sha)));
+        }));
+        // The same change twice: a commit and the squash the forge made of it.
+        // GitHub's squash-merge happens off this checkout, so no rewrite is
+        // recorded, and both can be the turn's — the branch commit it made and
+        // the squash it fetched and built on. Session 9f3d6bd2 turn 3 (#1936):
+        // 7ffb9263 stood as its own branch while aa7ad3a35, its squash, sat
+        // inside the range of the turn's main-line commits, and every line went
+        // out twice. Same patch-id, not on one line of history: one leaves.
+        // The one the turn built on stays — the squash with the release on top
+        // is what a range covers; the original stranded on its branch is not.
+        // Then the newer (a squash follows what it squashed), then sha order.
+        const patchIds = new Map<string, string>();
+        const patchIdOf = (sha: string): string => {
+          if (!patchIds.has(sha)) {
+            let id = '';
+            if (parentsOf(sha).split(' ').filter(Boolean).length === 1) {
+              const patch = git(repoPath, ['show', '--no-color', '--format=', sha]);
+              try {
+                id = patch.ok && patch.out.trim()
+                  ? execFileSync('git', ['patch-id', '--stable'], {
+                    cwd: repoPath, input: patch.out, encoding: 'utf-8', windowsHide: true,
+                    stdio: ['pipe', 'pipe', 'pipe'], timeout: 15_000, maxBuffer: 16 * 1024 * 1024,
+                  }).toString().trim().split(/\s+/)[0] || ''
+                  : '';
+              } catch { id = ''; }
+            }
+            patchIds.set(sha, id);
+          }
+          return patchIds.get(sha)!;
+        };
+        const kept = surviving.filter((sha) => !redone.has(sha));
+        const builtOn = (sha: string) => kept.some((o) => o !== sha && isAncestor(repoPath, sha, o));
+        const outranks = (a: string, b: string): boolean => {
+          const [ba, bb] = [builtOn(a), builtOn(b)];
+          if (ba !== bb) return ba;
+          const [ta, tb] = [committedAt(a), committedAt(b)];
+          return ta !== tb ? ta > tb : a > b;
+        };
+        const squashedAway = new Set(kept.filter((sha) => {
+          if (intoSharedSquash(sha)) return false;
+          const id = patchIdOf(sha);
+          if (!id) return false;
+          return kept.some((other) => other !== sha && patchIdOf(other) === id
+            && !isAncestor(repoPath, sha, other) && !isAncestor(repoPath, other, sha)
+            && outranks(other, sha));
+        }));
+        if (squashedAway.size > 0) {
+          deps.log?.('a commit and its forge squash are the same change — counted once', {
+            promptIndex: pm.promptIndex, dropped: [...squashedAway].map((sha) => sha.slice(0, 8)),
+          });
+        }
+        const chains = chainsApart(kept.filter((sha) => !squashedAway.has(sha)));
         // The row is stamped with the commit the page will show. A pre-squash
         // sha is superseded on the server: stamping it made the row's sha flip
         // between the orphan and nothing on alternate PATCHes.
@@ -553,7 +917,7 @@ export function preferCommitPatchForCommittedTurns(
           if (!pre) return tip;
           return rewritesOf(pre.squash, allRewrites).pop() || pre.squash;
         };
-        if (patchAcrossBranches(repoPath, pm, turnId, chains, stranded, deps, stampFor)) replaced++;
+        if (patchAcrossBranches(repoPath, pm, turnId, chains, stranded, deps, stampFor, turnShadow, workTreeShadows)) replaced++;
         continue;
       }
       // The host SQUASH-MERGED the turn's branch and deleted it, and the
@@ -597,7 +961,7 @@ export function preferCommitPatchForCommittedTurns(
             promptIndex: pm.promptIndex, turnId, carried: carried.length,
             commits: carried.map((c) => c.tip.slice(0, 8)),
           });
-          if (patchAcrossBranches(repoPath, pm, turnId, carried, 0, deps)) replaced++;
+          if (patchAcrossBranches(repoPath, pm, turnId, carried, 0, deps, undefined, turnShadow, workTreeShadows)) replaced++;
           continue;
         }
       }
@@ -757,6 +1121,7 @@ export function preferCommitPatchForCommittedTurns(
     if (!merge && shadow && deps.inheritedFiles) {
       try { inheritedFiles = deps.inheritedFiles(shadow, local, commitFiles, last); } catch { inheritedFiles = null; }
       gaveUp = inheritedFiles === null;
+      if (inheritedFiles) inheritedFiles = withStartDirt(repoPath, shadow, inheritedFiles);
     }
     const wholeTree = !merge && shadow && (!deps.inheritedFiles || gaveUp)
       ? deps.inheritedBaseline?.(shadow, local) || null : null;
@@ -791,6 +1156,7 @@ export function preferCommitPatchForCommittedTurns(
     // string, not undefined — see applyLedgerCaptures.
     pm.uncommittedDiff = '';
     pm.commitPatch = true;
+    delete pm.chatOnly;
     pm.commitSha = last;
     replaced++;
     applied(deps, pm);
@@ -803,5 +1169,56 @@ export function preferCommitPatchForCommittedTurns(
       commitLines: `+${scoped.linesAdded}/-${scoped.linesRemoved}`,
     });
   }
+  for (const pm of mappings) {
+    const shas = pm?.commitPatch ? covered.get(pm) : undefined;
+    if (shas && shas.length > 0) pm.patchCommits = shas;
+  }
+  stampCommittingTurns(state, mappings, deps);
   return replaced;
+}
+
+/**
+ * The turn that ran `git commit` keeps the commit on its row, and the commit
+ * card sits under it, even when the turn wrote nothing itself ("commit it",
+ * "open PR").
+ *
+ * The pass above stamps `commitSha` only together with a commit patch and
+ * declines a turn whose patch is empty; the shadow-window pass blanks such a
+ * row's stamp outright. Stop then sent `commitSha: null` over the stamp
+ * post-commit had sent, and no row held the commit. Session df8cc9aa turn 6
+ * committed turn 4's hooks.ts + tests and showed no commit at all.
+ *
+ * Only a row that wrote nothing — no files, no text, no counts — and carries
+ * no stamp is filled, from the commits ATTESTED to its turn (post-commit's
+ * `commitTurns`, rewrites it folded, squashes it went into). Content is never
+ * touched: the turns whose work is in the commit keep it, and read committed
+ * by another turn. The stamp is the commit as it stands now — through every
+ * recorded rewrite, and a squash a forge folded it into — the name the
+ * server's anchor pass matches.
+ */
+function stampCommittingTurns(
+  state: CommittedTurnState,
+  mappings: CommittedTurnMapping[],
+  deps: PreferCommitPatchDeps,
+): void {
+  const rewrites = Array.isArray(state.rewrittenCommits) ? state.rewrittenCommits : [];
+  const current = (sha: string) => rewritesOf(sha, rewrites).pop() || sha;
+  for (const pm of mappings || []) {
+    if (!pm || pm.commitSha) continue;
+    if (Array.isArray(pm.filesChanged) && pm.filesChanged.length > 0) continue;
+    if ((pm.diff || '').trim() || (pm.uncommittedDiff || '').trim()) continue;
+    if ((pm.linesAdded ?? 0) > 0 || (pm.linesRemoved ?? 0) > 0) continue;
+    const local = localTurnForServerRow(pm.promptIndex, state.promptIndexBase);
+    if (local === null) continue;
+    const turnId = state.promptTurnIds?.[local];
+    if (!turnId) continue;
+    const made: string[] = [];
+    for (const c of state.commitTurns || []) if (c?.turnId === turnId && HEX.test(c.sha || '')) made.push(current(c.sha));
+    for (const c of state.foldedCommitTurns || []) if (c?.turnId === turnId && HEX.test(c.sha || '')) made.push(current(c.sha));
+    for (const c of state.preSquashCommitTurns || []) if (c?.turnId === turnId && HEX.test(c.squash || '')) made.push(current(c.squash));
+    const stamp = made.pop();
+    if (!stamp) continue;
+    pm.commitSha = stamp;
+    deps.log?.('committing turn keeps its commit stamp', { promptIndex: pm.promptIndex, turnId, commit: stamp.slice(0, 8) });
+  }
 }

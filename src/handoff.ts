@@ -170,13 +170,19 @@ const TODO_VERB = 'fix|add|implement|update|change|refactor|handle|support|remov
 // Hedged / conversational phrasing signals a passing thought, not a firm TODO.
 const TODO_HEDGE = /\b(i believe|i think|i guess|maybe|probably|not sure|for now|nvm|never mind)\b/i;
 
+// "TODO list …", "TODO items …" talk about the list; "TODO `87ec29e1` …" names
+// an existing item — extracting it mints a duplicate that outlives the original.
+const TODO_REFERENCE = /^(?:lists?|items?|`?[0-9a-f]{8}`?)\b/i;
+
 export function extractTodosFromPrompts(prompts: string[]): string[] {
   const todos: string[] = [];
   const patterns = [
-    // Explicit markers — high precision, keep as-is.
-    /\bTODO[:\s]+(.+?)(?:\n|$)/gi,
-    /\bFIXME[:\s]+(.+?)(?:\n|$)/gi,
-    /\bNOTE[:\s]+(.+?)(?:\n|$)/gi,
+    // Explicit markers. With a colon in any case (`TODO:`, `todo:`, `Note:`);
+    // without one only in capitals (`TODO add retries`). Case-insensitive and
+    // colon-optional, "give me todo list short" became the TODO "list short"
+    // and "note that …" became one too — talk ABOUT the list, not an item.
+    /\b(?:TODO|FIXME|NOTE):\s*(.+?)(?:\n|$)/gi,
+    /\b(?:TODO|FIXME|NOTE)\s+(.+?)(?:\n|$)/g,
     // Intent phrasing, but ONLY when anchored to a dev verb, so plain
     // conversational instructions don't leak in.
     new RegExp(String.raw`\b(?:we )?(?:should|need(?:s)? to|have to|still need to) ((?:${TODO_VERB})\s+.+?)(?:\.|,|\n|$)`, 'gi'),
@@ -188,7 +194,7 @@ export function extractTodosFromPrompts(prompts: string[]): string[] {
       let match;
       while ((match = pattern.exec(prompt)) !== null) {
         const todo = match[1].trim();
-        if (todo.length > 5 && todo.length < 200 && !TODO_HEDGE.test(todo) && !todos.includes(todo)) {
+        if (todo.length > 5 && todo.length < 200 && !TODO_HEDGE.test(todo) && !TODO_REFERENCE.test(todo) && !todos.includes(todo)) {
           todos.push(todo);
         }
       }

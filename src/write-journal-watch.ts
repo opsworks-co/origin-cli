@@ -11,7 +11,7 @@ import * as crypto from 'crypto';
 import { acquireJournalLock, mutateJournal } from './journal-lock.js';
 import { normalizePath } from './paths.js';
 import {
-  serializeRecord, serializeTurnMark, serializeFence, parseJournal, parseJournalEntries, trimJournal,
+  serializeRecord, serializeTurnMark, serializeFence, parseJournal, parseJournalEntries, trimJournal, insertTurnMarkAt,
   type WriteRecord, type JournalEntry,
 } from './write-journal.js';
 import { shouldIgnoreFile, isOriginAutoManagedPath } from './ignore-patterns.js';
@@ -187,6 +187,33 @@ export function markTurn(journalPath: string, turnId: string, at = Date.now(), r
     fs.mkdirSync(path.dirname(journalPath), { recursive: true });
     mutateJournal(journalPath, () => fs.appendFileSync(journalPath, serializeTurnMark(reclaim && reclaim.length > 0 ? { at, turnId, reclaim } : { at, turnId })));
   } catch { /* best-effort, exactly like the writes */ }
+}
+
+/**
+ * Mark a turn that began in the past, at its place in the log (see
+ * `insertTurnMarkAt`). True when the journal now holds the mark.
+ *
+ * Under the mutation lock the watcher appends under, so no write lands between
+ * the read and the rename. Never throws.
+ */
+export function markTurnAt(journalPath: string, turnId: string, at: number, afterTurnId: string): boolean {
+  if (!journalPath || !turnId) return false;
+  try {
+    return mutateJournal(journalPath, () => {
+      let text = '';
+      try { text = fs.readFileSync(journalPath, 'utf-8'); } catch { return false; }
+      const out = insertTurnMarkAt(text, { at, turnId }, afterTurnId);
+      if (out === null) return false;
+      const temporary = `${journalPath}.tmp.${process.pid}.${crypto.randomUUID()}`;
+      try {
+        fs.writeFileSync(temporary, out);
+        fs.renameSync(temporary, journalPath);
+      } finally {
+        try { fs.unlinkSync(temporary); } catch { /* renamed */ }
+      }
+      return true;
+    });
+  } catch { return false; }
 }
 
 export function fenceJournal(journalPath: string, from?: string, to?: string): void {

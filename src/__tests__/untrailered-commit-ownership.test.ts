@@ -119,4 +119,41 @@ describe('commitBelongsToSession — no trailer', () => {
 
     expect(commitBelongsToSession(repo, ours, state, LOCAL)).toBe(true);
   });
+
+  // Committer dates have whole-second resolution and `startedAt` is floored to
+  // match, so a commit made just BEFORE the session, in the same second, used
+  // to read as the session's own. capture-e2e-rebase-replays-earlier-turn-commit
+  // flaked on it: the fixture's upstream commit shared the session's start
+  // second, and the rebasing turn was measured from upstream's tree.
+  describe('a commit dated inside the session\'s start second', () => {
+    const START_SEC = 1_790_893_400;
+    const startedAt = new Date(START_SEC * 1000 + 799).toISOString();
+    const commitAt = (subject: string, sec: number) => {
+      fs.appendFileSync(path.join(repo, 'f.txt'), `${subject}\n`);
+      git(repo, ['add', '.']);
+      git(repo, ['commit', '-q', '-m', subject], { GIT_COMMITTER_DATE: `@${sec} +0000`, GIT_AUTHOR_DATE: `@${sec} +0000` });
+      return git(repo, ['rev-parse', 'HEAD']);
+    };
+
+    it('is NOT ours when this session never recorded it — it predates the session', () => {
+      const sha = commitAt('fix: upstream edits scope.ts too', START_SEC);
+      const state: any = { sessionId: OURS, repoPath: repo, startedAt, sessionCommitShas: [] };
+
+      expect(commitBelongsToSession(repo, sha, state, LOCAL)).toBe(false);
+    });
+
+    it('is ours when this session recorded it', () => {
+      const sha = commitAt('fix: ours', START_SEC);
+      const state: any = { sessionId: OURS, repoPath: repo, startedAt, sessionCommitShas: [sha] };
+
+      expect(commitBelongsToSession(repo, sha, state, LOCAL)).toBe(true);
+    });
+
+    it('a second later the generous default stands', () => {
+      const sha = commitAt('fix: ours, hook never fired', START_SEC + 1);
+      const state: any = { sessionId: OURS, repoPath: repo, startedAt, sessionCommitShas: [] };
+
+      expect(commitBelongsToSession(repo, sha, state, LOCAL)).toBe(true);
+    });
+  });
 });

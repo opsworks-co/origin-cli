@@ -60,7 +60,9 @@ describe('post-commit commit ingest', () => {
 
     expect(block).toContain('additions: linesAdded');
     expect(block).toContain('deletions: linesRemoved');
-    expect(block).toContain('diff: diff');
+    // The patch rides through ingestPatchForCommit: whole hunks up to the
+    // limit plus `diffTruncated` when anything was cut (was `diff: diff`).
+    expect(block).toContain('...ingestPatchForCommit(diff)');
   });
 });
 

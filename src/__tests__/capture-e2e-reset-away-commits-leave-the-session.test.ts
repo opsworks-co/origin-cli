@@ -29,7 +29,7 @@ import http from 'http';
 import { execFile, execFileSync, spawn } from 'child_process';
 import { promisify } from 'util';
 import { fileURLToPath } from 'url';
-import { WINDOWS_SLOWDOWN, isWindows } from './helpers/windows-e2e.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { ingestRequests } from './helpers/golden-turns.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -44,6 +44,10 @@ let serverSession = '';
 let server: http.Server;
 let apiUrl = '';
 let tmpRoot = '';
+// A request this predicate matches is answered 503 and NOT recorded: the API
+// never accepted it, so the CLI's queue owns it until a later replay.
+let refuse: ((method: string, url: string, raw: string) => boolean) | null = null;
+const refused: Hit[] = [];
 
 function startFakeApi(): Promise<void> {
   return new Promise((resolve) => {
@@ -54,6 +58,13 @@ function startFakeApi(): Promise<void> {
         let body: any = null;
         try { body = raw ? JSON.parse(raw) : null; } catch { body = raw; }
         const u = req.url || '';
+        if (refuse?.(req.method || '', u, raw)) {
+          refused.push({ method: req.method || '', url: u, body });
+          res.statusCode = 503;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ error: 'unavailable' }));
+          return;
+        }
         hits.push({ method: req.method || '', url: u, body });
         res.setHeader('content-type', 'application/json');
         if (req.method === 'POST' && u.startsWith('/api/mcp/session/start')) {
@@ -189,7 +200,7 @@ function record(name: string, roles: Record<string, string>, repo: string) {
   }, null, 1) + '\n');
 }
 
-describe.skipIf(!haveDist || isWindows)('commits a session reset away leave it, through the built binary', () => {
+describe.skipIf(!haveDist)('commits a session reset away leave it, through the built binary', () => {
   beforeAll(async () => {
     await startFakeApi();
     tmpRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-e2e-reset-away-')));
@@ -422,6 +433,310 @@ describe.skipIf(!haveDist || isWindows)('commits a session reset away leave it, 
       expect(String(snapshot.diff || '')).not.toContain(MARKER);
       record('claude-code-background-wip-reset-away', { base, a, wip }, s.repo);
     } finally {
+      await s.killJournalWatcher();
+    }
+  }, 300_000 * WINDOWS_SLOWDOWN);
+
+  // Session 507dca76, turn 8: "wip" rebased onto a main that moved on, then
+  // reset to main and committed again with a version bump. The rebase result
+  // stayed on the turn beside the redo (squash-merged later), and the chip
+  // read "2 commits total +599/-11" for +301/-7.
+  it('a rebased WIP reset away and redone leaves the session; the redo stays', async () => {
+    serverSession = 'e2e-reset-away-rebased-0001';
+    const s = session('rebased');
+    const base = s.init();
+    const gitSync = (...args: string[]) => execFileSync('git', args, { cwd: s.repo, encoding: 'utf-8', stdio: 'pipe' }).trim();
+    // main moves on while the session's branch sits on base.
+    gitSync('checkout', '-q', '-b', 'fix');
+    gitSync('checkout', '-q', 'main');
+    fs.writeFileSync(path.join(s.repo, 'src', 'other.ts'), 'export const OTHER = 1;\n');
+    gitSync('add', '.'); gitSync('commit', '-q', '-m', 'main moved on');
+    gitSync('checkout', '-q', 'fix');
+    try {
+      await s.hook('session-start', { source: 'startup' });
+      await s.prompt('make claude see agents md');
+      await s.writes('tu-1', 'src/hooks.ts', 'export const AGENTS_MD = true;\n');
+      let wip = '';
+      await s.shell('tu-2', 'git add -A && git commit -m wip', async () => {
+        await s.git('add', '-A'); await s.git('commit', '-q', '-m', 'wip');
+        wip = await s.git('rev-parse', 'HEAD');
+      });
+      let rebased = '';
+      await s.shell('tu-3', 'git rebase main', async () => {
+        await s.git('rebase', '-q', 'main');
+        rebased = await s.git('rev-parse', 'HEAD');
+      });
+      expect(rebased).not.toBe(wip);
+      await s.writes('tu-4', 'src/version.ts', 'export const VERSION = 2;\n');
+      let redo = '';
+      await s.shell('tu-5', 'git reset main && git add -A && git commit -m "fix: claude sees agents md"', async () => {
+        await s.git('reset', '-q', 'main');
+        await s.git('add', '-A'); await s.git('commit', '-q', '-m', 'fix: claude sees agents md');
+        redo = await s.git('rev-parse', 'HEAD');
+      });
+      s.reply('Done.');
+      await s.hook('stop', { stop_hook_active: false });
+      await sleep(300);
+
+      const last = ingested(serverSession).filter((r) => r.body.gitCapture?.snapshot).at(-1);
+      expect(last, 'no Stop snapshot').toBeTruthy();
+      const g = last!.body.gitCapture;
+      expect(g.commitShas, 'the redo is the session\'s commit').toContain(redo);
+      expect(g.commitShas, 'the reset-away rebase result is still the session\'s').not.toContain(rebased);
+      expect(g.abandonedCommits, 'the reset-away rebase result was not sent as abandoned').toContain(rebased);
+      expect(g.abandonedCommits || [], 'the redo was sent as abandoned').not.toContain(redo);
+    } finally {
+      await s.killJournalWatcher();
+    }
+  }, 300_000 * WINDOWS_SLOWDOWN);
+
+  // Session df8cc9aa, turn 30: a sub-agent (Agent tool, worktree isolation)
+  // committed "WIP" 87c4cc36 on its OWN branch in its own worktree, reset it
+  // away and committed the work again. The reset is in that branch's reflog,
+  // not in the reflog of the branch the session's tree is on, so the WIP was
+  // never proven abandoned and the turn listed it beside the real commits:
+  // "3 commits net +680/-91" for +462/-60.
+  it('a sub-agent\'s WIP reset away and redone in its own worktree leaves the session; the redo stays', async () => {
+    serverSession = 'e2e-reset-away-subagent-0001';
+    const s = session('subagent');
+    s.init();
+    const agentTree = path.join(tmpRoot, 'subagent-worktrees', 'agent-a590');
+    fs.mkdirSync(path.dirname(agentTree), { recursive: true });
+    const inAgent = async (...args: string[]): Promise<string> => s.git('-C', agentTree, ...args);
+    try {
+      await s.hook('session-start', { source: 'startup' });
+      await s.prompt('yes do 1-3');
+      await s.shell('tu-1', `git worktree add -b fix/agent ${agentTree}`, async () => {
+        await s.git('worktree', 'add', '-q', '-b', 'fix/agent', agentTree);
+      });
+      let wip = '';
+      await s.shell('tu-2', `cd ${agentTree} && git add -A && git commit -m WIP`, async () => {
+        fs.writeFileSync(path.join(agentTree, 'src', 'watcher.ts'), `export const ${MARKER} = 1;\n`);
+        await inAgent('add', '-A'); await inAgent('commit', '-q', '-m', 'WIP');
+        wip = await inAgent('rev-parse', 'HEAD');
+      });
+      let redo = '';
+      await s.shell('tu-3', `cd ${agentTree} && git reset HEAD~1 && git commit -am "fix(capture): the watcher"`, async () => {
+        await inAgent('reset', '-q', 'HEAD~1');
+        fs.writeFileSync(path.join(agentTree, 'src', 'watcher.ts'), 'export const WATCHER_FIXED = 2;\n');
+        await inAgent('add', '-A'); await inAgent('commit', '-q', '-m', 'fix(capture): the watcher');
+        redo = await inAgent('rev-parse', 'HEAD');
+      });
+      expect(ingested(serverSession).some((r) => commitShasOf(r.body).includes(wip)),
+        'the sub-agent\'s WIP was never recorded on the session — the scenario does not reproduce').toBe(true);
+      s.reply('Done.');
+      await s.hook('stop', { stop_hook_active: false });
+      await sleep(300);
+
+      // What the server is left with: the last word on the sha list, and on
+      // each turn's commit.
+      const last = ingested(serverSession).filter((r) => Array.isArray(r.body.gitCapture?.commitShas)).at(-1);
+      expect(last, 'no gitCapture after the Stop').toBeTruthy();
+      const g = last!.body.gitCapture;
+      expect(g.commitShas, 'the redo is the session\'s commit').toContain(redo);
+      expect(g.commitShas, 'the reset-away WIP is still the session\'s').not.toContain(wip);
+      expect(g.abandonedCommits || [], 'the reset-away WIP was not sent as abandoned').toContain(wip);
+      expect(g.abandonedCommits || [], 'the redo was sent as abandoned').not.toContain(redo);
+      const rows = ingested(serverSession).flatMap((r) => (r.body.promptChanges || []) as any[]).filter((r) => r.promptIndex === 0);
+      expect(rows.at(-1)?.commitSha ?? null, 'the turn is badged with the reset-away WIP').not.toBe(wip);
+    } finally {
+      try { await s.git('worktree', 'remove', '--force', agentTree); } catch { /* gone */ }
+      await s.killJournalWatcher();
+    }
+  }, 300_000 * WINDOWS_SLOWDOWN);
+
+  // Session df8cc9aa, turn 26: the session's own commit 5ab32f7b, squash-merged
+  // on the forge as 8497e852. Not a reset — but the same question, "is this
+  // commit gone?", answered from two trees. Seen from main, 5ab32f7b was
+  // rewritten into 8497e852; seen from the branch still standing on 5ab32f7b,
+  // the rescue recorded 8497e852 -> 5ab32f7b. Both pairs went to the server,
+  // each commit was retired in favour of the other, and the turn showed none.
+  it('a commit squash-merged on the forge keeps ONE direction, whichever tree the rescue runs from', async () => {
+    serverSession = 'e2e-squash-two-trees-0001';
+    const s = session('squash-two-trees');
+    s.init();
+    const gitSync = (...args: string[]) => execFileSync('git', args, { cwd: s.repo, encoding: 'utf-8', stdio: 'pipe' }).trim();
+    gitSync('checkout', '-q', '-b', 'fix/deploy-waits');
+    const forge = path.join(tmpRoot, 'squash-two-trees-forge');
+    try {
+      await s.hook('session-start', { source: 'startup' });
+      await s.prompt('yes do both');
+      await s.writes('tu-1', 'src/deploy.ts', 'export const WAITS_FOR_BACKUP = true;\n');
+      let own = '';
+      await s.shell('tu-2', 'git add -A && git commit -m "fix(deploy): wait for a running backup"', async () => {
+        await s.git('add', '-A'); await s.git('commit', '-q', '-m', 'fix(deploy): wait for a running backup');
+        own = await s.git('rev-parse', 'HEAD');
+      });
+      // The forge: main moves on, then squash-merges the PR — a later commit,
+      // made outside the session (no hooks).
+      await sleep(1100);
+      execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '-q', forge, 'main'], { cwd: s.repo, stdio: 'pipe' });
+      const inForge = (...args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], { cwd: forge, encoding: 'utf-8', stdio: 'pipe' }).trim();
+      fs.writeFileSync(path.join(forge, 'src', 'other.ts'), 'export const OTHER = 1;\n');
+      inForge('add', '-A'); inForge('commit', '-q', '-m', 'main moved on');
+      inForge('merge', '-q', '--squash', 'fix/deploy-waits'); inForge('commit', '-q', '-m', 'fix(deploy): wait for a running backup (#2069)');
+      const squash = inForge('rev-parse', 'HEAD');
+      inForge('checkout', '-q', '--detach');
+      execFileSync('git', ['worktree', 'remove', '--force', forge], { cwd: s.repo, stdio: 'pipe' });
+      // The session looks at main (the squash reachable), then goes back to its branch.
+      await s.shell('tu-3', 'git checkout main', async () => { await s.git('checkout', '-q', 'main'); });
+      s.reply('Merged.');
+      await s.hook('stop', { stop_hook_active: false });
+      await s.prompt('one more look at the branch');
+      await s.shell('tu-4', 'git checkout fix/deploy-waits', async () => { await s.git('checkout', '-q', 'fix/deploy-waits'); });
+      s.reply('Looked.');
+      await s.hook('stop', { stop_hook_active: false });
+      await sleep(300);
+
+      const last = ingested(serverSession).filter((r) => Array.isArray(r.body.gitCapture?.commitShas)).at(-1);
+      expect(last, 'no gitCapture after the Stops').toBeTruthy();
+      const g = last!.body.gitCapture;
+      const pairs = (g.rewrittenCommits || []) as Array<{ from: string; to: string }>;
+      expect(pairs.some((p) => p.from === squash), 'the squash was recorded as rewritten into the commit it squashed').toBe(false);
+      // Whatever the server is told, one of the two must survive: no sha may
+      // be both the old side of a pair and the final survivor of another.
+      const froms = new Set(pairs.map((p) => p.from));
+      expect([own, squash].some((sha) => !froms.has(sha)), 'every copy was declared rewritten — the turn is left with no commit').toBe(true);
+    } finally {
+      try { execFileSync('git', ['worktree', 'remove', '--force', forge], { cwd: s.repo, stdio: 'pipe' }); } catch { /* gone */ }
+      await s.killJournalWatcher();
+    }
+  }, 300_000 * WINDOWS_SLOWDOWN);
+
+  // Session df8cc9aa rows 38/39 (2026-10-03). Turn 1 committed X on the PR
+  // branch while a sub-agent, in its own worktree, committed a WIP, reset it
+  // away and redid it. Turn 2 rebased X (X -> X') and committed Y. GitHub
+  // squash-merged the PR as S, the session's tree moved onto main, and the
+  // next Stop's rescue paired X' -> S and Y -> S. After that pairing turn 1 lost
+  // the card for the work it committed, and the reset-away WIP came back on it.
+  it('a PR squash shared by two turns keeps both turns\' cards, and a reset-away WIP stays gone', async () => {
+    serverSession = 'e2e-reset-away-shared-squash-0001';
+    const s = session('shared-squash');
+    const base = s.init();
+    const gitSync = (...args: string[]) => execFileSync('git', args, { cwd: s.repo, encoding: 'utf-8', stdio: 'pipe' }).trim();
+    gitSync('checkout', '-q', '-b', 'fix/api-tests');
+    const agentTree = path.join(tmpRoot, 'shared-squash-worktrees', 'agent-a97c');
+    fs.mkdirSync(path.dirname(agentTree), { recursive: true });
+    const forge = path.join(tmpRoot, 'shared-squash-forge');
+    const inAgent = async (...args: string[]): Promise<string> => s.git('-C', agentTree, ...args);
+    // The forge: commits made outside the session (no hooks), on main.
+    const onForge = (fn: (g: (...a: string[]) => string) => void) => {
+      execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '-q', '--detach', forge, 'main'], { cwd: s.repo, stdio: 'pipe' });
+      const g = (...a: string[]) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...a], { cwd: forge, encoding: 'utf-8', stdio: 'pipe' }).trim();
+      try { fn(g); } finally { execFileSync('git', ['worktree', 'remove', '--force', forge], { cwd: s.repo, stdio: 'pipe' }); }
+    };
+    try {
+      await s.hook('session-start', { source: 'startup' });
+      // ── Turn 1: the PR's commit, and a sub-agent's reset-away WIP ──────────
+      await s.prompt('yes do 1 and 2');
+      await s.writes('tu-1', 'src/snapshot.ts', 'export const SNAPSHOT = 1;\nexport const READS = 2;\n');
+      let own = '';
+      await s.shell('tu-2', 'git add -A && git commit -m "test(api): three tests stop timing out"', async () => {
+        await s.git('add', '-A'); await s.git('commit', '-q', '-m', 'test(api): three tests stop timing out');
+        own = await s.git('rev-parse', 'HEAD');
+      });
+      await s.shell('tu-3', `git worktree add -b test/subagent-reset-redo ${agentTree} ${base}`, async () => {
+        await s.git('worktree', 'add', '-q', '-b', 'test/subagent-reset-redo', agentTree, base);
+      });
+      // The WIP's own carrier (post-commit's PATCH naming it) does not get
+      // through: the write-ahead queue keeps it and replays it later — after
+      // the session has said the WIP was thrown away. Live, the queue replayed
+      // the session's uploads right after the Stop that paired the squash.
+      const WIP_SUBJECT = 'chore: subagent reset check (WIP)';
+      refuse = (method, url, raw) => method === 'PATCH' && url.startsWith(`/api/mcp/session/${serverSession}`) && raw.includes(WIP_SUBJECT);
+      let wip = '';
+      await s.shell('tu-4', `cd ${agentTree} && git add -A && git commit -m WIP`, async () => {
+        fs.writeFileSync(path.join(agentTree, 'src', 'subagent_check.ts'), `export const ${MARKER} = 1;\n`);
+        await inAgent('add', '-A'); await inAgent('commit', '-q', '-m', WIP_SUBJECT);
+        wip = await inAgent('rev-parse', 'HEAD');
+      });
+      let redo = '';
+      await s.shell('tu-5', `cd ${agentTree} && git reset --hard HEAD~1 && git commit -am redo`, async () => {
+        await inAgent('reset', '-q', '--hard', 'HEAD~1');
+        fs.writeFileSync(path.join(agentTree, 'src', 'subagent_check.ts'), 'export const SUBAGENT_REDO = 2;\n');
+        await inAgent('add', '-A'); await inAgent('commit', '-q', '-m', 'chore: subagent reset check (redo)');
+        redo = await inAgent('rev-parse', 'HEAD');
+      });
+      s.reply('Done: PR opened, the sub-agent check is redone.');
+      await s.hook('stop', { stop_hook_active: false });
+
+      // ── Turn 2: rebase the PR onto a main that moved, then a follow-up ─────
+      await s.prompt('is it merged?');
+      await sleep(1100);
+      onForge((g) => {
+        fs.writeFileSync(path.join(forge, 'src', 'other.ts'), 'export const OTHER = 1;\n');
+        g('add', '-A'); g('commit', '-q', '-m', 'main moved on'); g('update-ref', 'refs/heads/main', 'HEAD');
+      });
+      let rebased = '';
+      await s.shell('tu-6', 'git rebase main', async () => {
+        await s.git('rebase', '-q', 'main');
+        rebased = await s.git('rev-parse', 'HEAD');
+      });
+      expect(rebased).not.toBe(own);
+      await s.writes('tu-7', 'src/snapshot.ts', 'export const SNAPSHOT = 1;\n');
+      let follow = '';
+      await s.shell('tu-8', 'git commit -am "test(api): keep the default budget"', async () => {
+        await s.git('commit', '-q', '-am', 'test(api): keep the default budget');
+        follow = await s.git('rev-parse', 'HEAD');
+      });
+      s.reply('Not yet; pushed a follow-up.');
+      await s.hook('stop', { stop_hook_active: false });
+
+      // ── The forge squash-merges the PR; the session's tree moves onto main ─
+      await sleep(1100);
+      let squash = '';
+      onForge((g) => {
+        fs.writeFileSync(path.join(forge, 'src', 'later.ts'), 'export const LATER = 1;\n');
+        g('add', '-A'); g('commit', '-q', '-m', 'main moved on again');
+        g('merge', '-q', '--squash', 'fix/api-tests'); g('commit', '-q', '-m', 'test(api): three tests stop timing out (#2108)');
+        squash = g('rev-parse', 'HEAD');
+        g('update-ref', 'refs/heads/main', squash);
+      });
+      await s.prompt('merged now?');
+      await s.shell('tu-9', 'git checkout --detach main', async () => { await s.git('checkout', '-q', '--detach', 'main'); });
+      s.reply('Merged as #2108.');
+      await s.hook('stop', { stop_hook_active: false });
+      await sleep(300);
+
+      // What the CLI owes the server after the pairing: both copies of the PR
+      // folded into the squash, the WIP named as abandoned, and no attestation
+      // or turn stamp naming the WIP.
+      const pairingStop = ingested(serverSession)
+        .filter((r) => r.kind === 'patch' && Array.isArray(r.body.promptChanges) && (r.body.gitCapture as any)?.snapshot).at(-1);
+      expect(pairingStop, 'no Stop snapshot after the squash').toBeTruthy();
+      const g = pairingStop!.body.gitCapture as any;
+      const pairs = (g.rewrittenCommits || []) as Array<{ from: string; to: string }>;
+      expect(pairs, 'the rebased commit was not folded into the squash').toContainEqual({ from: rebased, to: squash });
+      expect(pairs, 'the follow-up was not folded into the squash').toContainEqual({ from: follow, to: squash });
+      expect(g.abandonedCommits || [], 'the reset-away WIP was not sent as abandoned').toContain(wip);
+      expect(g.commitShas || [], 'the reset-away WIP is still the session\'s').not.toContain(wip);
+      const attested = ((pairingStop!.body.commitTurns || []) as Array<{ sha: string }>).map((c) => c.sha);
+      expect(attested, 'a turn is attested to the reset-away WIP').not.toContain(wip);
+      const rows = (pairingStop!.body.promptChanges || []) as any[];
+      for (const pc of rows) expect(pc.commitSha ?? null, `turn ${pc.promptIndex} is stamped with the reset-away WIP`).not.toBe(wip);
+      expect(rows.find((pc) => pc.promptIndex === 0)?.commitSha, 'turn 1 lost its commit').toBe(squash);
+      expect(rows.find((pc) => pc.promptIndex === 1)?.commitSha, 'turn 2 lost its commit').toBe(squash);
+
+      // ...and then the queue replays the WIP's own carrier, which names the
+      // WIP and says nothing about the reset. The server has to hold the
+      // abandonment it was already told (apps/api
+      // session-shared-squash-after-reset-away-real-db.test.ts replays this).
+      expect(refused.some((h) => JSON.stringify(h.body).includes(WIP_SUBJECT)),
+        'the WIP\'s carrier was never sent — the scenario does not reproduce').toBe(true);
+      const beforeReplay = ingested(serverSession).length;
+      refuse = null;
+      await s.prompt('thanks');
+      await sleep(300);
+      const replayed = ingested(serverSession).slice(beforeReplay)
+        .filter((r) => JSON.stringify(r.body).includes(WIP_SUBJECT));
+      expect(replayed.length, 'the queue never replayed the WIP\'s carrier').toBeGreaterThan(0);
+      expect(replayed.some((r) => ((r.body.gitCapture as any)?.commitShas || []).includes(wip)),
+        'the replayed carrier does not name the WIP — the server fixture would test nothing').toBe(true);
+
+      record('claude-code-shared-squash-after-reset-away', { base, own, wip, redo, rebased, follow, squash }, s.repo);
+    } finally {
+      refuse = null;
+      try { await s.git('worktree', 'remove', '--force', agentTree); } catch { /* gone */ }
       await s.killJournalWatcher();
     }
   }, 300_000 * WINDOWS_SLOWDOWN);

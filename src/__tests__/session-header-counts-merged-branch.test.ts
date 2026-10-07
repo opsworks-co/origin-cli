@@ -62,9 +62,12 @@ beforeAll(() => {
 });
 afterAll(() => { try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ } });
 
-// Captured at import, before the fixture commits: the session was running
-// when they were made, which is what the no-recorded-shas case is about.
-const STARTED_AT = new Date().toISOString();
+// Before the fixture commits: the session was running when they were made,
+// which is what the no-recorded-shas case is about. Two seconds back, not
+// "now": a commit dated inside the session's start second is not the
+// session's unless it recorded it (commitBelongsToSession), and the fixture
+// commits within the second it is imported.
+const STARTED_AT = new Date(Date.now() - 2_000).toISOString();
 
 const sessionState = (shas: string[]) => ({
   sessionId: 'sess-hdr',

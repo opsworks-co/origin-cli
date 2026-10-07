@@ -34,17 +34,28 @@ const patch = (file: string, adds: string[]) => [
   ...adds.map((l) => `+${l}`),
 ].join('\n');
 
+const STARTED_AT = new Date().toISOString();
+/** A commit record from a launch before this state file was written. */
+const earlierLaunchCommit = { sha: 'a'.repeat(40), turnId: 't_earlier', at: new Date(Date.parse(STARTED_AT) - 3_600_000).toISOString(), via: 'post-commit' };
+/** A commit this launch made itself. */
+const ownCommit = { sha: 'b'.repeat(40), turnId: 't_own', at: new Date(Date.parse(STARTED_AT) + 60_000).toISOString(), via: 'post-commit' };
+
 /** Ended, two rows from this launch, a header that spans the whole session. */
-const relaunched = (rows: Array<Record<string, unknown>>, promptIndexBase: number | undefined) => ({
+const relaunched = (
+  rows: Array<Record<string, unknown>>,
+  promptIndexBase: number | undefined,
+  commitTurns: Array<Record<string, unknown>> | null = [earlierLaunchCommit, ownCommit],
+) => ({
   sessionId: SESSION_ID,
   sessionTag: 'relaunch',
   agentSlug: 'claude-code',
-  startedAt: new Date().toISOString(),
+  startedAt: STARTED_AT,
   status: 'ENDED',
   endedAt: new Date().toISOString(),
   activeTurn: null,
   prompts: ['full height', 'commit'],
   ...(promptIndexBase === undefined ? {} : { promptIndexBase }),
+  ...(commitTurns === null ? {} : { commitTurns }),
   filesChanged: ['web/Header.tsx', 'web/Hero.tsx', 'web/DossierViewer.tsx'],
   linesAdded: 59,
   linesRemoved: 0,
@@ -103,6 +114,27 @@ describe('verify-capture over a re-launched session', () => {
 
   it('still checks a resumed session that kept its earlier rows', async () => {
     write(relaunched([{ promptIndex: 0, filesChanged: [], diff: '', chatOnly: true }, ...thisLaunch], 23));
+    expect(await runGate()).toEqual({ failed: true, header: 1, elsewhere: 0 });
+  });
+
+  // The hold-back fired on `promptIndexBase > 0` with no row below the base —
+  // which an ADOPTED session matches too, though every commit it holds is its
+  // own and its header totals only those. The tell for rows elsewhere is a
+  // commit record older than this state file (ed0e33c8 had eleven).
+  it('still checks an adopted session whose every commit record is its own', async () => {
+    write(relaunched(thisLaunch, 23, [ownCommit]));
+    expect(await runGate()).toEqual({ failed: true, header: 1, elsewhere: 0 });
+  });
+
+  it('still checks a session with no commit records at all — the hold-back needs evidence', async () => {
+    write(relaunched(thisLaunch, 23, []));
+    expect(await runGate()).toEqual({ failed: true, header: 1, elsewhere: 0 });
+    write(relaunched(thisLaunch, 23, null));
+    expect(await runGate()).toEqual({ failed: true, header: 1, elsewhere: 0 });
+  });
+
+  it('a commit record with no usable date is not evidence of an earlier launch', async () => {
+    write(relaunched(thisLaunch, 23, [{ sha: 'c'.repeat(40), turnId: 't_undated' }]));
     expect(await runGate()).toEqual({ failed: true, header: 1, elsewhere: 0 });
   });
 });

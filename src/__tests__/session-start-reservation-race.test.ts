@@ -125,6 +125,15 @@ describe('isPendingReservation', () => {
 describe('the three halves are wired', () => {
   const src = hooksSource();
 
+  it('session-start tells the server the local id it reserved — a commit made under it carries it', () => {
+    expect(src).toMatch(/localSessionId: reservedSessionId\.startsWith\('local-'\) \? reservedSessionId : undefined/);
+  });
+
+  it('session-start keeps the provisional id on the registered row — its commits name it', () => {
+    expect(src).toMatch(/rememberLocalSessionId\(state, reservedSessionId\)/);
+    expect(src).toMatch(/carriedLocalSessionId = existingAtTag\.localSessionId/);
+  });
+
   it('session-start reserves BEFORE it calls the API', () => {
     const reserve = src.indexOf("'reserved state before registering'");
     const call = src.indexOf("'calling api.startSession'");

@@ -45,10 +45,11 @@ import os from 'os';
 import path from 'path';
 import { spawn, execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
-import { createShadowCommit, captureAgyDiff, captureGitState, commitDiffScopedToPrompt, captureShadowRangeDiff, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { throughLiveInstall } from './live-install-path.js';
+import { createShadowCommit, captureAgyDiff, captureGitState, commitDiffScopedToPrompt, captureShadowRangeDiff, filesChangedSinceShadow, readFileAtRev, shadowHeadOf, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
 import { renderAuthoredCommits } from './history-backfill.js';
 import { capDiff } from './diff-budget.js';
-import { shellWindowEdits, SHELL_WINDOW_SOURCE } from './shell-write-capture.js';
+import { shellWindowEdits, shellCommandNamesFile, SHELL_WINDOW_SOURCE } from './shell-write-capture.js';
 import { isOriginAutoManagedPath, shouldIgnoreFile } from './ignore-patterns.js';
 import { isInsideRepo, outOfRepoWrites, scopeDiffPathsToRepo } from './paths.js';
 import { newCaptureStamp } from './capture-stamp.js';
@@ -66,7 +67,7 @@ import { registerLogonAutoStart, type LogonAutoStartResult } from './utils/logon
 import { api } from './api.js';
 import { loadConfig, loadAgentConfig } from './config.js';
 import { debugLog, logSkipOnce } from './debug-log.js';
-import { isCliDaemon, signalOwnDaemon } from './utils/signal-own-daemon.js';
+import { isCliDaemon, isOwnDaemonAlive, signalOwnDaemon } from './utils/signal-own-daemon.js';
 import { ADAPTERS, countDiffLines, type TranscriptAdapter, type ScannedTranscript, type ParsedSession } from './transcript-adapters.js';
 import { writeWatchMeta, touchWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
 import { finalHunksForCaptures, computeFileLineMaps, type FileLineMap } from './final-state-blame.js';
@@ -84,7 +85,8 @@ import {
   type CommitMemoryEntry,
 } from './memory.js';
 import { extractTodosFromPrompts } from './handoff.js';
-import { parseMarkersFromTranscriptPath } from './origin-markers.js';
+import { readMarkerTurns, type MarkerTurn } from './origin-markers.js';
+import { commitDecisionsFor, commitEvidence, commitTurnDecisions, committedSessionMarkers, withTurnDiffs } from './committed-markers.js';
 import { anchorEditPositions, backfillWriteBaselines, chainWholeFileWrites, type PromptCapture } from './prompt-capture/index.js';
 import { compareResolverWithPasses, createTurnObserver, observeReconstruction, onlyDifferences } from './resolve-turn.js';
 
@@ -393,7 +395,7 @@ export interface WatchDeps {
   // Backfill decisions onto a session's already-written records. The sanctioned
   // exception to commit-record immutability: it fills EMPTY decisions only, for
   // agents that emit the marker after the commit has already been frozen.
-  enrichDecisions?: (repoPath: string, sessionId: string, decisions: string[]) => boolean;
+  enrichDecisions?: (repoPath: string, sessionId: string, decisionsFor: (commit: CommitMemoryEntry) => string[]) => boolean;
   // Unified diff of specific repo-relative files against HEAD, including
   // untracked files (rendered fully-added). The diff source for agents whose
   // transcript carries no edit content (Antigravity) and for brand-new files
@@ -699,10 +701,13 @@ function buildWatchMemoryEntry(
   const summary = summarizeFromCommitSubjects(subjects) || prompts[0]?.slice(0, 200) || '';
 
   // Explicit [Origin: Decision] markers are ground truth and need no LLM — the
-  // same source the commit path uses.
+  // same source the commit path uses, from the turns that made commits only.
   let decisions: string[] = [];
   try {
-    decisions = parseMarkersFromTranscriptPath(scanned.transcriptPath)?.decision || [];
+    decisions = committedSessionMarkers({
+      repoPath: prior.repoPath || workRoot, sessionId: scanned.sessionId,
+      transcriptPath: scanned.transcriptPath, commitShas: prior.sessionCommitShas,
+    })?.decision || [];
   } catch { /* best-effort */ }
 
   return {
@@ -747,6 +752,13 @@ function recordCommitMemory(
   prior: SessionWatchState,
   shas: string[],
   now: number,
+  turnCtx?: {
+    promptCount: number;
+    // Commit sha → the prompt index this watcher paired it with.
+    commitPrompt: ReadonlyMap<string, number>;
+    editsJsonByIndex?: ReadonlyMap<number, string>;
+    promptTimestamps?: number[];
+  },
 ): string[] {
   if (!deps.writeCommitMemoryEntry || !prior.repoPath || shas.length === 0) return [];
   if (!shouldWriteMemoryOnCommit(memoryUpdateTrigger())) return [];
@@ -765,14 +777,38 @@ function recordCommitMemory(
   // commit captured on macOS, where hooks fire and the hook path writes them —
   // the granular history a reader actually wants ("why", not just filenames)
   // was present on one platform and absent on the other.
-  let decisions: string[] = [];
+  //
+  // Each commit gets the turn that made it, not the whole transcript's set.
+  let turns: MarkerTurn[] = [];
   try {
-    decisions = parseMarkersFromTranscriptPath(scanned.transcriptPath)?.decision || [];
+    turns = readMarkerTurns(scanned.transcriptPath);
+    // What each turn changed as Origin captured it, beside what its edit tools
+    // wrote — the same addition the hook paths make. A turn that wrote only
+    // through the shell shows nothing in the transcript, so without this its
+    // decision is dropped from the commit a later turn made of its work.
+    if (turnCtx?.editsJsonByIndex) {
+      const times = promptTimesFor(turns, turnCtx.promptTimestamps, turnCtx.promptCount);
+      turns = withTurnDiffs(turns, turnDiffsFromEdits(turnCtx.editsJsonByIndex, times));
+    }
   } catch { /* best-effort, exactly as the hook path treats it */ }
+  // A transcript with no times (Cursor) cannot place a commit by its time, and
+  // the watcher has no hook record of when a turn started. It does know which
+  // prompt made each commit — it paired them itself — so name that turn,
+  // when both readers counted the same prompts and positions line up.
+  const byPosition = !!turnCtx && turns.length > 1 && turns.every((t) => t.startedAt === null)
+    && turns.length - 1 === turnCtx.promptCount;
+  const turnOf = (sha: string): number | undefined => {
+    const i = byPosition ? turnCtx!.commitPrompt.get(sha) : undefined;
+    return i === undefined ? undefined : i + 1; // turns[0] is before the first prompt
+  };
 
   for (const sha of shas.slice(-20)) {
     const facts = commitFacts(workRoot, sha);
     if (!facts) continue; // a sha this repo cannot resolve — record nothing
+    const decisions = commitTurnDecisions(turns, facts.committedAt, {
+      added: turns.length > 0 ? commitEvidence(workRoot || prior.repoPath, [sha]).get(sha)?.added : undefined,
+      turn: turnOf(sha),
+    });
     deps.writeCommitMemoryEntry(prior.repoPath, {
       commitSha: sha,
       sessionId: scanned.sessionId,
@@ -794,10 +830,93 @@ function recordCommitMemory(
   // this for the hook path only; the watcher is the path that captures Cursor
   // on Windows, so it needs the same backfill. Fills only empty decisions, so
   // it can never overwrite what a record already states.
-  if (decisions.length > 0 && deps.enrichDecisions) {
-    try { deps.enrichDecisions(prior.repoPath, scanned.sessionId, decisions); } catch { /* non-fatal */ }
+  if (turns.length > 0 && deps.enrichDecisions) {
+    try {
+      deps.enrichDecisions(prior.repoPath, scanned.sessionId, commitDecisionsFor(prior.repoPath, scanned.sessionId, turns, { turnOf }));
+    } catch { /* non-fatal */ }
   }
   return written;
+}
+
+/**
+ * The window for a turn whose baseline was taken in the SAME poll as the next
+ * turn's — null when it was not (the normal one-turn-per-poll path).
+ *
+ * Every baseline the watcher takes for prompts it first sees in one poll is the
+ * same snapshot, stamped with the same `capturedAt`. A turn that already had a
+ * successor when it was first seen had FINISHED by then, so its snapshot holds
+ * its own work and its `baseline..next` window is empty. The nearest honest
+ * start is the latest snapshot from an EARLIER poll (`fromSha`), or — when the
+ * session's first poll saw both turns — the HEAD that snapshot was cut on
+ * (`fromSha` null; the caller reads it off the shadow).
+ *
+ * That wider window also holds the work of every turn it spans (`spanTurns`):
+ * the earlier snapshot's own turn, which ran on after it, through the turn
+ * whose baseline ends the window, whose first writes it caught. So it is never
+ * credited wholesale — only the files this turn's own commands name.
+ */
+export function sharedPollWindow(
+  shadows: ReadonlyArray<Pick<PromptShadow, 'promptIndex' | 'baselineSha' | 'capturedAt'>>,
+  promptIndex: number,
+): { fromSha: string | null; spanTurns: number[] } | null {
+  const sorted = shadows.filter((s) => s.baselineSha).slice().sort((a, b) => a.promptIndex - b.promptIndex);
+  const own = sorted.find((s) => s.promptIndex === promptIndex);
+  const next = sorted.find((s) => s.promptIndex > promptIndex);
+  if (!own || !next || !own.capturedAt || own.capturedAt !== next.capturedAt) return null;
+  const before = sorted.filter((s) => s.promptIndex < promptIndex && s.capturedAt !== own.capturedAt).pop();
+  const startTurn = before ? before.promptIndex : 0;
+  const spanTurns: number[] = [];
+  for (let i = startTurn; i <= next.promptIndex; i++) spanTurns.push(i);
+  return { fromSha: before ? before.baselineSha : null, spanTurns };
+}
+
+/**
+ * Each turn's captured edits (editsJsonByIndex — tool calls and the shell
+ * window alike) as the hook state withTurnDiffs reads: a `+` line per line an
+ * edit's new content has that its old content did not, filed under the turn's
+ * submit time (promptTimesFor). The watcher has no completedPromptMappings;
+ * this is its copy.
+ */
+export function turnDiffsFromEdits(
+  editsJsonByIndex: ReadonlyMap<number, string>,
+  promptTimes: Array<number | null>,
+): Parameters<typeof withTurnDiffs>[1] {
+  const completedPromptMappings: Array<{ promptIndex: number; diff: string }> = [];
+  for (const [promptIndex, raw] of editsJsonByIndex) {
+    let edits: unknown;
+    try { edits = JSON.parse(raw)?.edits; } catch { continue; }
+    if (!Array.isArray(edits)) continue;
+    const added: string[] = [];
+    for (const e of edits as Array<{ oldContent?: unknown; newContent?: unknown }>) {
+      if (typeof e?.newContent !== 'string' || !e.newContent) continue;
+      const before = new Set(typeof e.oldContent === 'string' ? e.oldContent.split('\n') : []);
+      for (const l of e.newContent.split('\n')) if (!before.has(l)) added.push('+' + l);
+    }
+    if (added.length > 0) completedPromptMappings.push({ promptIndex, diff: added.join('\n') });
+  }
+  const promptSubmittedAt = promptTimes.map((t) => (t != null && t > 0 ? new Date(t).toISOString() : ''));
+  return { completedPromptMappings, promptSubmittedAt };
+}
+
+/**
+ * Each prompt's submit time (epoch ms) by the adapter's prompt index — what
+ * the hook path keeps as promptSubmittedAt. Only Antigravity's adapter fills
+ * promptTimestamps; the transcript.ts adapters (Claude, Cursor, Gemini,
+ * Copilot) leave it empty. Then the marker turns' own prompt times stand in, by
+ * position, but only when both readers counted the same prompts — a count
+ * that differs means the positions may not line up, and a diff filed under
+ * the wrong turn would hand its decision to a commit it had no part in.
+ */
+export function promptTimesFor(
+  turns: MarkerTurn[],
+  promptTimestamps: number[] | undefined,
+  promptCount: number,
+): Array<number | null> {
+  const given = promptTimestamps || [];
+  if (given.length === promptCount && given.some((t) => t > 0)) return given.map((t) => (t > 0 ? t : null));
+  // turns[0] is what came before the first prompt.
+  if (turns.length - 1 !== promptCount) return [];
+  return turns.slice(1).map((t) => t.startedAt);
 }
 
 /**
@@ -1192,12 +1311,17 @@ export async function reconcileSession(
         // END there is no attribution pass, so use the SHAs the agent itself
         // printed, resolved against the session's list for their full form.
         const endParsed = adapter.parse(scanned.transcriptPath);
-        const claimed = Object.values(endParsed?.promptCommitShas || {})
-          .flat()
-          .map((short) => (prior.sessionCommitShas || []).find((full) => full.startsWith(short)) || null)
-          .filter((x): x is string => !!x);
-        if (claimed.length > 0) {
-          recordCommitMemory(deps, adapter, scanned, prior, [...new Set(claimed)], now);
+        const commitPrompt = new Map<string, number>();
+        for (const [idx, shorts] of Object.entries(endParsed?.promptCommitShas || {})) {
+          for (const short of shorts) {
+            const full = (prior.sessionCommitShas || []).find((f) => f.startsWith(short));
+            if (full && !commitPrompt.has(full)) commitPrompt.set(full, Number(idx));
+          }
+        }
+        if (commitPrompt.size > 0) {
+          recordCommitMemory(deps, adapter, scanned, prior, [...commitPrompt.keys()], now, {
+            promptCount: endParsed?.userPrompts.length ?? 0, commitPrompt,
+          });
         }
       } catch (err) {
         debugLog('transcript-watch', 'session memory write failed (non-fatal)', { err: String(err) });
@@ -1871,15 +1995,36 @@ export async function reconcileSession(
   if ((parsed.promptsThatWroteViaShell || []).length > 0 && promptShadows.length > 0) {
     for (const idx of parsed.promptsThatWroteViaShell || []) {
       try {
-        const from = promptShadows.find((sh) => sh.promptIndex === idx)?.baselineSha;
-        if (!from) continue;
+        const own = promptShadows.find((sh) => sh.promptIndex === idx);
+        if (!own?.baselineSha) continue;
+        let from = own.baselineSha;
         const next = promptShadows
           .filter((sh) => sh.promptIndex > idx && sh.baselineSha)
           .sort((a, b) => a.promptIndex - b.promptIndex)[0];
         const to = next?.baselineSha || null;
-        const files = to
+        // Both baselines taken in ONE poll: this turn had finished before the
+        // watcher first saw it, so its baseline already holds its work and its
+        // own window is empty. Widen to the last snapshot from an EARLIER poll
+        // and keep only the files this turn's shell commands name — see
+        // sharedPollWindow. Files another turn in that span also names stay
+        // unclaimed: two turns could have written them and nothing says which.
+        const shared = to ? sharedPollWindow(promptShadows, idx) : null;
+        let namedHere: ((file: string) => boolean) | null = null;
+        if (shared) {
+          const earlier = shared.fromSha
+            ?? shadowHeadOf(repo.workRoot, own.baselineSha);
+          if (!earlier) continue;
+          from = earlier;
+          const commandsOf = (i: number) => parsed.promptShellWriteCommands?.[i] || [];
+          const mine = commandsOf(idx);
+          const others = shared.spanTurns.filter((i) => i !== idx).flatMap(commandsOf);
+          namedHere = (file) => mine.some((c) => shellCommandNamesFile(c, file, repo.workRoot))
+            && !others.some((c) => shellCommandNamesFile(c, file, repo.workRoot));
+        }
+        let files = to
           ? captureShadowRangeDiff(repo.workRoot, from, to).filesChanged
           : filesChangedSinceShadow(repo.workRoot, from);
+        if (namedHere) files = files.filter(namedHere);
         if (files.length === 0) continue;
         // Files this turn already carries from a real tool call — never
         // re-derive those; the agent's own payload is the precise record.
@@ -1923,6 +2068,7 @@ export async function reconcileSession(
         debugLog('transcript-watch', 'shell window edits captured', {
           agent: adapter.slug, promptIndex: idx, files: edits.length,
           bounded: to ? 'next-turn baseline' : 'working tree',
+          ...(namedHere ? { sharedPoll: 'files the turn\'s commands name' } : {}),
           source: SHELL_WINDOW_SOURCE,
         });
       } catch (err) {
@@ -2154,7 +2300,12 @@ export async function reconcileSession(
       const already = new Set(prior.recordedCommitShas || []);
       const pending = [...new Set(commitShaByIndex.values())].filter((sha) => !already.has(sha));
       if (pending.length > 0) {
-        const done = recordCommitMemory(deps, adapter, scanned, prior, pending, now);
+        const commitPrompt = new Map<string, number>();
+        for (const [i, sha] of commitShaByIndex) commitPrompt.set(sha, i);
+        const done = recordCommitMemory(deps, adapter, scanned, prior, pending, now, {
+          promptCount: parsed.userPrompts.length, commitPrompt,
+          editsJsonByIndex, promptTimestamps: parsed.promptTimestamps,
+        });
         recordedCommitShas = [...new Set([...recordedCommitShas, ...done])];
         if (done.length > 0) {
           debugLog('transcript-watch', 'commit memory written', {
@@ -2461,6 +2612,12 @@ export async function reconcileSession(
       ...(editsJsonByIndex.has(i) ? { editsJson: editsJsonByIndex.get(i) } : {}),
       ...(outOfRepoByIndex.has(i) ? { outOfRepoFiles: outOfRepoByIndex.get(i) } : {}),
       ...(commitShaByIndex.has(i) ? { commitSha: commitShaByIndex.get(i) } : {}),
+      // An agent with no usage per reply gets an estimated share per turn
+      // (ParsedSession.turnUsage), flagged so the page says "est.".
+      ...(() => {
+        const share = parsed.turnUsage?.find((t) => t.promptIndex === i)?.modelUsage;
+        return share && share.length > 0 ? { modelUsage: share, usageEstimated: true } : {};
+      })(),
       // The watcher re-reads the WHOLE transcript every poll and recomputes each
       // turn from scratch, so this payload IS the ground truth for the prompt —
       // the same guarantee Codex's rollout backfill makes. Without this flag the
@@ -3028,7 +3185,9 @@ export function anotherWatcherRunning(pidFile = watchPidFile()): boolean {
     const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
     if (!Number.isFinite(pid) || pid <= 0) return false;
     if (pid === process.pid) return false;
-    return isProcessAlive(pid);
+    // Alive AND ours — a stranger holding a dead watcher's pid is not a
+    // running watcher, and reading it as one kept a new watcher from starting.
+    return isOwnDaemonAlive(pid, isCliDaemon('transcript-watch'));
   } catch {
     return false;
   }
@@ -3076,7 +3235,7 @@ function cliEntryScript(): string {
     }
   } catch { /* fall through */ }
   try {
-    const here = path.dirname(fileURLToPath(import.meta.url));
+    const here = throughLiveInstall(path.dirname(fileURLToPath(import.meta.url)));
     const candidate = path.join(here, 'index.js');
     if (fs.existsSync(candidate)) return candidate;
   } catch { /* ignore */ }

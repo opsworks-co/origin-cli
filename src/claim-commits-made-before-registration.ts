@@ -255,12 +255,21 @@ export const CLAIM_WALK_LIMIT = 20;
  * of our own commits would read as a stranger's. Compare on the prefix, the
  * way post-rewrite's `owns()` does for abbreviated shas.
  */
-export function trailerNamesSession(body: string, sessionId?: string): boolean {
+export function trailerNamesSession(
+  body: string,
+  /** The session's id, or every id it answers to — its current id and the
+   *  `local-` id it ran under before promotion, whose commits name that one. */
+  sessionId?: string | ReadonlyArray<string | null | undefined>,
+): boolean {
   const named = (body || '').match(/^Origin-Session:\s*([^\s|]+)/mi)?.[1];
-  if (!named || !sessionId) return false;
+  const ids = (typeof sessionId === 'string' ? [sessionId] : (sessionId || []))
+    .filter((id): id is string => typeof id === 'string' && !!id);
+  if (!named || ids.length === 0) return false;
   const a = named.toLowerCase();
-  const b = sessionId.toLowerCase();
-  return a === b || b.startsWith(a) || a.startsWith(b);
+  return ids.some((id) => {
+    const b = id.toLowerCase();
+    return a === b || b.startsWith(a) || a.startsWith(b);
+  });
 }
 
 /** Probe the HEAD walk into candidates, ONE COMMIT AT A TIME.
@@ -271,7 +280,7 @@ export function trailerNamesSession(body: string, sessionId?: string): boolean {
  *  past it the stream simply ends, which claims less rather than more. */
 export function* streamClaimCandidates(
   deps: ClaimProbeDeps,
-  sessionId?: string,
+  sessionId?: string | ReadonlyArray<string | null | undefined>,
   limit: number = CLAIM_WALK_LIMIT,
   stopAtMs?: number,
   /** Injectable so a test can prove the budget is checked PER CANDIDATE and
@@ -348,7 +357,7 @@ export function claimCommitsMadeBeforeRegistration(
   /** The hook's cwd — a LINKED WORKTREE has its own HEAD and its own branch,
    *  so the walk must run here and not at the main checkout's repo root. */
   hookCwd: string,
-  state: { startedAt?: string; sessionCommitShas?: string[] },
+  state: { startedAt?: string; sessionCommitShas?: string[]; localSessionId?: string },
   sessionId: string,
   /** Repo-relative files the transcript says this conversation edited. Empty
    *  means no claim at all — see `CommitClaimInput.editedFiles`. */
@@ -399,7 +408,7 @@ export function claimCommitsMadeBeforeRegistration(
   try {
     peerShas = [];
     for (const peer of listSessionsForGitHookUnscoped(hookCwd, { failOnReadError: true }) || []) {
-      if (!peer || peer.sessionId === sessionId) continue;
+      if (!peer || peer.sessionId === sessionId || (state.localSessionId && peer.sessionId === state.localSessionId)) continue;
       for (const sha of peer.sessionCommitShas || []) peerShas.push(sha);
       for (const c of peer.commitTurns || []) if (c?.sha) peerShas.push(c.sha);
     }
@@ -496,7 +505,7 @@ export function claimCommitsMadeBeforeRegistration(
       return body == null ? 'Origin-Session: unreadable-commit-body' : body;
     },
     shasOwnedByOtherLiveSessions: () => peerShas,
-  }, sessionId, CLAIM_WALK_LIMIT, deadline, Date.now);
+  }, [sessionId, state.localSessionId], CLAIM_WALK_LIMIT, deadline, Date.now);
 
   return commitsToClaimOnLateRegistration({
     candidates,

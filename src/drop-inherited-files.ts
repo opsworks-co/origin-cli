@@ -23,6 +23,7 @@
  */
 import { turnWindowEndShadow } from './restored-from-history.js';
 import { localTurnForServerRow } from './turn-index.js';
+import type { TurnObservation } from './resolve-turn.js';
 
 export interface InheritedFilesState {
   /** LOCAL-numbered: index L is this launch's turn L. */
@@ -49,6 +50,8 @@ export interface InheritedFilesRow {
   emptiedOfInheritedFiles?: boolean;
   /** Files this pass removed, for trimWatchedEdits. Internal; never sent. */
   inheritedFiles?: string[];
+  /** Which pass filled the row — the source its post-drop observation reports under. */
+  diffSource?: string;
 }
 
 export interface DropInheritedFilesDeps {
@@ -67,7 +70,40 @@ export interface DropInheritedFilesDeps {
    * without it only commit-borne inheritance is dropped.
    */
   restoredFromHistory?: (fromShadow: string, toShadow: string | null, localTurn: number, files: string[]) => Set<string>;
+  /**
+   * Files the turn's editsJson carries on watched-only evidence (the write
+   * journal, a shell probe, the turn window). A row can name no files while
+   * its card still carries the journal's record of a pull — prod 6b770703
+   * turn 29 (e87a35d5). Optional: without it only the row's own files are
+   * checked.
+   */
+  watchedFiles?: (serverRow: number) => string[];
   log?: (event: string, data: Record<string, unknown>) => void;
+  /**
+   * Report a row this pass changed, under the source that filled it, so the
+   * resolver's latest observation for that source is the row AFTER the drop.
+   * Every pass observes before this one runs; without this the resolver kept
+   * resurrecting the inherited file — all 33 differences in ten days of
+   * side-by-side logs (resolver audit 3, 2026-09-27) were exactly that.
+   */
+  observe?: (promptIndex: number, observation: TurnObservation) => void;
+}
+
+/** The row as it now stands, reported under the source that filled it. */
+function observationAfterDrop(pm: InheritedFilesRow): TurnObservation {
+  const files = Array.isArray(pm.filesChanged)
+    ? (pm.filesChanged as unknown[]).filter((f): f is string => typeof f === 'string' && !!f)
+    : [];
+  const content = {
+    files,
+    diff: (pm.diff && pm.diff.trim()) ? pm.diff : (pm.uncommittedDiff || ''),
+    added: pm.linesAdded ?? 0,
+    removed: pm.linesRemoved ?? 0,
+    contentUnavailable: Array.isArray(pm.contentUnavailableFiles) ? [...pm.contentUnavailableFiles] : [],
+  };
+  if (pm.diffSource === 'ledger') return { source: 'ledger', outcome: 'applied', ...content };
+  if (pm.diffSource === 'turn-window') return { source: 'turn-window', outcome: 'applied', ...content };
+  return { source: 'reconstruction', ...content };
 }
 
 const norm = (f: string) => f.replace(/\\/g, '/');
@@ -76,6 +112,21 @@ const inSet = (set: Set<string>, file: string): boolean => {
   const f = norm(file);
   if (set.has(f)) return true;
   for (const s of set) if (s.endsWith(`/${f}`) || f.endsWith(`/${s}`)) return true;
+  return false;
+};
+
+/**
+ * A file in a set git produced (repo-relative paths). Exact: the suffix match
+ * above takes root `package.json` for `packages/api/package.json`, so a turn's
+ * own edit left the row whenever a pulled commit touched a nested file of the
+ * same name (review of e87a35d5). Only an absolute path, which git never
+ * produces, may end with one.
+ */
+const inGitSet = (set: Set<string>, file: string): boolean => {
+  const f = norm(file);
+  if (set.has(f)) return true;
+  if (!f.startsWith('/') && !/^[A-Za-z]:\//.test(f)) return false;
+  for (const s of set) if (f.endsWith(`/${s}`)) return true;
   return false;
 };
 
@@ -98,7 +149,7 @@ export function withoutFiles(diff: string | null | undefined, drop: Set<string>)
   if (!text) return text;
   return text.split(/(?=^diff --git )/m).filter((part) => {
     const f = sectionFile(part);
-    return !(f && inSet(drop, f));
+    return !(f && drop.has(f));
   }).join('');
 }
 
@@ -144,7 +195,9 @@ export function dropInheritedFilesFromTurns(
       const inFlight = !end && Array.isArray(state.prompts) && local === state.prompts.length - 1;
       if (!start?.shadowSha || (!end?.shadowSha && !inFlight)) continue;
       if (start.completeBaseline === false || end?.completeBaseline === false) continue;
-      const files = rowFiles(pm);
+      const own = rowFiles(pm);
+      const watched = deps.watchedFiles ? deps.watchedFiles(pm.promptIndex).map(norm) : [];
+      const files = [...new Set([...own, ...watched])];
       if (files.length === 0) continue;
       const inherited = end ? deps.inheritedFiles(start.shadowSha, end.shadowSha, local) : new Set<string>();
       const restored = deps.restoredFromHistory
@@ -152,15 +205,27 @@ export function dropInheritedFilesFromTurns(
         : new Set<string>();
       if (inherited.size === 0 && restored.size === 0) continue;
       const authored = deps.authoredFiles(local, pm.promptIndex);
-      const drop = new Set(files.filter((f) => (inSet(inherited, f) || inSet(restored, f)) && !inSet(authored, f)));
+      // Authorship keeps the generous match — erring there keeps a file.
+      const drop = new Set(files.filter((f) => (inGitSet(inherited, f) || inGitSet(restored, f)) && !inSet(authored, f)));
       if (drop.size === 0) continue;
+      // Only in the card: the row itself is left as it is. Its emptiness is
+      // not ours to decide — a shell-only turn's work lives in the card too —
+      // and trimWatchedEdits takes the inherited files' watched edits out.
+      if (!own.some((f) => drop.has(f))) {
+        pm.inheritedFiles = [...new Set([...(pm.inheritedFiles || []), ...drop])].sort();
+        changed += 1;
+        deps.log?.('inherited files dropped from an earlier turn\'s card', {
+          promptIndex: pm.promptIndex, files: pm.inheritedFiles.slice(0, 20), count: drop.size,
+        });
+        continue;
+      }
 
       pm.filesChanged = (Array.isArray(pm.filesChanged) ? pm.filesChanged : [])
-        .filter((f) => typeof f === 'string' && !inSet(drop, f));
+        .filter((f) => typeof f === 'string' && !drop.has(norm(f)));
       pm.diff = withoutFiles(pm.diff, drop);
       if (typeof pm.uncommittedDiff === 'string') pm.uncommittedDiff = withoutFiles(pm.uncommittedDiff, drop);
       if (Array.isArray(pm.contentUnavailableFiles)) {
-        pm.contentUnavailableFiles = pm.contentUnavailableFiles.filter((f) => !inSet(drop, f));
+        pm.contentUnavailableFiles = pm.contentUnavailableFiles.filter((f) => !drop.has(norm(f)));
       }
       const { added, removed } = countLines(`${pm.diff}\n${pm.uncommittedDiff || ''}`);
       pm.linesAdded = added;
@@ -182,6 +247,7 @@ export function dropInheritedFilesFromTurns(
       deps.log?.('inherited files dropped from an earlier turn', {
         promptIndex: pm.promptIndex, files: pm.inheritedFiles.slice(0, 20), count: drop.size, remaining,
       });
+      deps.observe?.(pm.promptIndex, observationAfterDrop(pm));
     } catch { /* leave the row as it was */ }
   }
   return changed;

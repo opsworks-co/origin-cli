@@ -30,6 +30,7 @@ import { getGitRoot } from '../session-state.js';
 import { gitOrNull } from '../utils/exec.js';
 import { getFileContext } from './file-context.js';
 import { getRepoMemory } from './repo-memory.js';
+import { HISTORY_KINDS, searchHistory, type HistoryKind } from '../history-search.js';
 
 interface PolicyData {
   id: string;
@@ -329,9 +330,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           repo_path: { type: 'string', description: "Path to the git repository (defaults to the server's working directory)" },
           session_limit: { type: 'number', description: 'Most recent session rollups to return (default 5, max 20)' },
           commit_limit: { type: 'number', description: 'Most recent commit entries to return (default 10, max 50)' },
-          include_detail: { type: 'boolean', description: 'Pull the token-heavy detail: decision text, open TODOs, per-file notes. Default false → digest + counts only.' },
+          include_detail: { type: 'boolean', description: 'Pull the token-heavy detail: decision text, open TODOs, per-file notes — plus `older`: the open TODOs and decisions of sessions too old to still be listed. Default false → digest + counts only.' },
           paths: { type: 'array', items: { type: 'string' }, description: 'Only return memory touching these files (suffix match, e.g. ["auth.ts"])' },
         },
+      },
+    },
+    {
+      name: 'search_history',
+      description: "Search THIS REPO's recorded history in your own words and get the most relevant records first: session summaries, commit records, decisions, open TODOs, and the prompts behind commits. Use it to answer \"why was this done\", \"has anyone tried X\", or \"what is left open about Y\" before reading code or git log. Ranked by word relevance (BM25); name the feature, symptom, or file you care about. Reads local git notes — no network, works offline, no account needed.",
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          query: { type: 'string', description: 'What you are looking for, e.g. "why does the stop hook retry" or "rateLimit login"' },
+          repo_path: { type: 'string', description: "Path to the git repository (defaults to the server's working directory)" },
+          limit: { type: 'number', description: 'Most results to return (default 10, max 30)' },
+          kinds: { type: 'array', items: { type: 'string', enum: [...HISTORY_KINDS] }, description: 'Only these record kinds' },
+        },
+        required: ['query'],
       },
     },
     {
@@ -616,6 +631,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           includeDetail: args?.include_detail as boolean | undefined,
           paths: (args?.paths as string[] | undefined) || [],
         });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
+    case 'search_history': {
+      try {
+        const query = String(args?.query ?? '').trim();
+        if (!query) throw new Error('query is required');
+        const limit = Math.min(Math.max(Number(args?.limit) || 10, 1), 30);
+        const kinds = (Array.isArray(args?.kinds) ? args.kinds : []).filter((k): k is HistoryKind => HISTORY_KINDS.includes(k as HistoryKind));
+        const result = searchHistory((args?.repo_path as string) || process.cwd(), query, { limit, kinds });
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       } catch (err: any) {
         return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };

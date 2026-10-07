@@ -209,6 +209,21 @@ describe('handlePrepareCommitMsg', () => {
     expect(matches.length).toBe(1);
   });
 
+  it('a message that QUOTES a trailer in its prose still gets one', async () => {
+    // Commit 85fe6022 (2026-09-26): the body named the incident commit's
+    // trailer, the substring fast path took it for the trailer itself, and the
+    // commit went out unstamped.
+    writeActiveSession(repo, { sessionId: 'abcdef1234567890', model: 'claude-sonnet-4', promptCount: 1 });
+    const msgFile = writeMsgFile(repo, 'fix: the reader\n\nThe commit carried `Origin-Session: abcdef123456` and was still refused.\n');
+
+    await handlePrepareCommitMsg(msgFile, 'message');
+
+    const out = fs.readFileSync(msgFile, 'utf-8');
+    expect(out.match(/^Origin-Session: abcdef123456 \| Claude Code \| 1 prompt/m)).not.toBeNull();
+    // The quoted one is prose, not a second trailer.
+    expect((out.match(/^Origin-Session:/gm) || []).length).toBe(1);
+  });
+
   it('preserves existing Co-Authored-By and Signed-off-by trailers', async () => {
     writeActiveSession(repo, { sessionId: 'abcdef1234567890', model: 'claude-sonnet-4', promptCount: 1 });
     const msgFile = writeMsgFile(

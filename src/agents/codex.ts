@@ -12,7 +12,7 @@ import { querySqlite } from '../utils/sqlite.js';
 import * as fzstd from 'fzstd';
 import { debugLog } from '../debug-log.js';
 import { buildCodexThreadByIdQuery, buildCodexThreadByCwdQuery } from '../codex-thread-query.js';
-import { IMAGE_PLACEHOLDER, codexUserPromptText } from '../transcript.js';
+import { IMAGE_PLACEHOLDER, codexUserPromptText, type ModelUsage } from '../transcript.js';
 
 // ─── Codex Session Data Discovery ─────────────────────────────────────────
 
@@ -20,7 +20,7 @@ export interface CodexSessionData {
   model: string;
   tokensUsed: number;
   inputTokens: number;     // NON-cached prompt tokens
-  outputTokens: number;    // visible output + reasoning (both billed at output rate)
+  outputTokens: number;    // output_tokens as reported — already includes reasoning
   cacheReadTokens?: number; // cached prompt portion — billed at the model's cached rate
   // True when the split above was not read from the rollout but derived from
   // SQLite's single `tokens_used` total (see codexSqliteTokenFallback). Stop
@@ -33,6 +33,11 @@ export interface CodexSessionData {
   cwd?: string;         // codex thread's actual cwd — drives repoPath correction
   rolloutPath?: string; // absolute path to the rollout JSONL(.zst) — feed to
                         // the new per-prompt PromptCapture extractor
+  // The counts above split by model, and again by prompt (`promptIndex` is the
+  // position in `prompts`). Read from the rollout only; absent on the SQLite
+  // fallback, which has no split.
+  modelUsage?: ModelUsage[];
+  turnUsage?: Array<{ promptIndex: number; modelUsage: ModelUsage[] }>;
 }
 
 /**
@@ -277,6 +282,7 @@ export function discoverCodexSessionData(
         prompt,
         prompts: rolloutResult.userPrompts,
         transcript: rolloutResult.transcript,
+        ...(rolloutResult.modelUsage && { modelUsage: rolloutResult.modelUsage, turnUsage: rolloutResult.turnUsage }),
         cwd: threadCwd || undefined,
         rolloutPath: absRolloutPath || undefined,
       };
@@ -439,7 +445,7 @@ export function getCodexPromptsTimeline(repoPath: string, threadId?: string): Pr
 
 // Exported for the pricing-regression test suite — it asserts that
 // a real rollout fixture parses into the documented token/cost shape
-// (non-cached input, cached reads, reasoning folded into output).
+// (non-cached input, cached reads, output with reasoning already inside it).
 // This is the only public consumer; production callers go through
 // `discoverCodexSessionData` above.
 // Produce a readable (tool, display) label for a Codex tool call. Codex
@@ -1386,6 +1392,13 @@ export function parseCodexRolloutLive(rolloutFile: string): {
   cacheReadTokens?: number;
   model?: string;
   toolCalls: number;
+  /**
+   * The rollout's last `task_complete`, when no user prompt came after it:
+   * the last turn is over. `promptCount` is how many prompts preceded it.
+   * An errored turn (Codex's usage limit) fires no Stop hook, so this is the
+   * only record that it ended (TODO 6d70bb43).
+   */
+  lastTurnEnd?: { at: number; promptCount: number; errored: boolean };
 } | null {
   try {
     let content: string;
@@ -1412,6 +1425,8 @@ export function parseCodexRolloutLive(rolloutFile: string): {
     let maxInputTokens = 0, maxOutputTokens = 0, maxTotalTokens = 0, maxCachedInputTokens = 0;
     let model: string | undefined;
     let toolCalls = 0;
+    let lastTaskComplete: { at: number; promptCount: number; errored: boolean } | null = null;
+    let liveChatId: string | undefined;
     const TRUNC = 2000;
     const truncate = (s: string) => s.length > TRUNC ? s.slice(0, TRUNC) + `… [+${s.length - TRUNC} chars]` : s;
 
@@ -1429,7 +1444,10 @@ export function parseCodexRolloutLive(rolloutFile: string): {
     for (const line of lines) {
       try {
         const event = JSON.parse(line);
-        const tokenUsage = event?.total_token_usage || event?.data?.total_token_usage || event?.payload?.info?.total_token_usage || event?.payload?.total_token_usage;
+        liveChatId ??= sessionMetaId(event);
+        // The same usage shapes parseCodexRollout reads — the two must agree,
+        // or the heartbeat's figure and the Stop figure for one rollout differ.
+        const tokenUsage = codexRunningUsage(event);
         if (tokenUsage) {
           const i = tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0;
           const o = tokenUsage.output_tokens || tokenUsage.completion_tokens || 0;
@@ -1532,6 +1550,9 @@ export function parseCodexRolloutLive(rolloutFile: string): {
               turns.push({ role: 'assistant', content: `[Output] ${truncate(out)}` });
             }
           }
+        } else if (ptype === 'task_complete') {
+          const at = Date.parse(String(event?.timestamp || ''));
+          if (Number.isFinite(at)) lastTaskComplete = { at, promptCount: promptTimestamps.length, errored: !!payload.error };
         } else if (ptype === 'item_completed' && payload?.item?.type === 'FileChange') {
           // Codex reports each applied file change with the content it moved —
           // and for a DELETE that content is the only record of what the file
@@ -1570,7 +1591,11 @@ export function parseCodexRolloutLive(rolloutFile: string): {
     // Codex's input_tokens INCLUDES cached, so subtract it. Mirrors
     // parseCodexRollout — keeps the heartbeat (live) and stop-hook token
     // definitions identical so a mid-session update can't disagree with the end.
-    const liveNonCachedInput = Math.max(0, maxInputTokens - maxCachedInputTokens);
+    // Plus the chat's auto-review threads, as parseCodexRollout counts them.
+    const review = reviewTotals(rolloutFile, liveChatId, []);
+    const liveNonCachedInput = Math.max(0, maxInputTokens - maxCachedInputTokens) + review.inputTokens;
+    maxOutputTokens += review.outputTokens;
+    maxCachedInputTokens += review.cacheReadTokens;
     return {
       userPrompts,
       promptTimestamps,
@@ -1584,8 +1609,255 @@ export function parseCodexRolloutLive(rolloutFile: string): {
       cacheReadTokens: maxCachedInputTokens,
       model,
       toolCalls,
+      ...(lastTaskComplete && lastTaskComplete.promptCount === promptTimestamps.length && { lastTurnEnd: lastTaskComplete }),
     };
   } catch { return null; }
+}
+
+/**
+ * The session's running usage total an event carries, in any of the shapes
+ * Codex has written. Both rollout parsers read it through here so the
+ * heartbeat's figure and the Stop figure agree.
+ *
+ * `token_usage_record` (Codex ≥0.154) is skipped: its `usage` is ONE model
+ * call's, not a running total, and a regular token_count line follows each
+ * one. Read as a total it made the running figure step backwards mid-session
+ * (27 of 336 local rollouts, 2026-09-29); the final figure never changed.
+ */
+function codexRunningUsage(event: any): any {
+  if (event?.type === 'token_usage_record') return undefined;
+  return event?.total_token_usage ||
+    event?.data?.total_token_usage ||
+    event?.payload?.info?.total_token_usage ||
+    event?.payload?.total_token_usage ||
+    event?.payload?.usage ||
+    event?.usage ||
+    event?.data?.usage;
+}
+
+/** One model call Codex's auto-review made for a chat. */
+export interface CodexReviewCall {
+  /** When the call finished (epoch ms), or NaN when the line has no time. */
+  at: number;
+  usage: ModelUsage;
+}
+
+/**
+ * Head classification of rollout files, by path. A rollout's first line
+ * (`session_meta`) never changes once written, so the heartbeat's repeated
+ * scans only open files they have not seen. `null` = not a review thread.
+ */
+const reviewParentByFile = new Map<string, string | null>();
+
+/** The first line of a rollout, or null while it is still being written. */
+function readFirstLine(file: string): string | null {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(file, 'r');
+    // session_meta carries the base instructions: ~20 KB typical, 48 KB max on
+    // this Mac's 336 rollouts. Read on until the newline, up to 1 MB.
+    const chunks: Buffer[] = [];
+    let total = 0;
+    while (total < 1024 * 1024) {
+      const buf = Buffer.alloc(64 * 1024);
+      const n = fs.readSync(fd, buf, 0, buf.length, total);
+      if (n <= 0) return null;
+      const nl = buf.subarray(0, n).indexOf(0x0a);
+      if (nl >= 0) { chunks.push(buf.subarray(0, nl)); return Buffer.concat(chunks).toString('utf-8'); }
+      chunks.push(buf.subarray(0, n));
+      total += n;
+    }
+    return null;
+  } catch { return null; } finally {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch { /* ignore */ }
+  }
+}
+
+/** The chat a rollout reviews for, when it is an auto-review thread. */
+function reviewParentOf(file: string): string | null {
+  const cached = reviewParentByFile.get(file);
+  if (cached !== undefined) return cached;
+  const head = readFirstLine(file);
+  if (head === null) return null; // not written yet — look again next time
+  let parent: string | null = null;
+  if (head.includes('guardian')) {
+    try {
+      const meta = JSON.parse(head)?.payload;
+      if (meta && JSON.stringify(meta.source ?? '').includes('guardian')) {
+        const id = meta.parent_thread_id || meta.forked_from_id;
+        if (typeof id === 'string' && id) parent = id;
+      }
+    } catch { /* malformed head */ }
+  }
+  reviewParentByFile.set(file, parent);
+  return parent;
+}
+
+/**
+ * Rollouts of the auto-review threads Codex ran for this chat.
+ *
+ * Codex's auto-review ("guardian") assesses the chat's risky actions in a
+ * thread of its own: its own rollout, `session_meta.source.subagent.other =
+ * 'guardian'`, `parent_thread_id` = the chat. It is filtered out as a session
+ * (#944), and its usage was then counted nowhere — neither in the chat nor in
+ * any turn (TODO 995c166e). A review thread starts on or after its chat, so
+ * only day directories from the chat's own day onwards are read. Compressed
+ * rollouts are skipped: Codex writes review threads as plain JSONL.
+ */
+export function findCodexReviewRollouts(chatRollout: string, chatId: string): string[] {
+  if (!chatId) return [];
+  // <codex>/sessions/YYYY/MM/DD/rollout-….jsonl, or — once Codex archives the
+  // chat — <codex>/archived_sessions/rollout-YYYY-MM-DDT….jsonl, while its
+  // reviews stay under sessions/. The file name carries the same local day
+  // as the directory it was written in.
+  let sessionsDir: string;
+  let chatDay: string;
+  if (path.basename(path.dirname(chatRollout)) === 'archived_sessions') {
+    const m = /^rollout-(\d{4})-(\d{2})-(\d{2})T/.exec(path.basename(chatRollout));
+    if (!m) return [];
+    sessionsDir = path.join(path.dirname(path.dirname(chatRollout)), 'sessions');
+    chatDay = `${m[1]}/${m[2]}/${m[3]}`;
+  } else {
+    const dayDir = path.dirname(chatRollout);
+    sessionsDir = path.dirname(path.dirname(path.dirname(dayDir)));
+    chatDay = path.relative(sessionsDir, dayDir).split(path.sep).join('/');
+  }
+  if (!/^\d{4}\/\d{2}\/\d{2}$/.test(chatDay)) return [];
+  const list = (dir: string): string[] => {
+    try { return fs.readdirSync(dir).filter((n) => /^\d+$/.test(n)).sort(); } catch { return []; }
+  };
+  const found: string[] = [];
+  for (const y of list(sessionsDir)) {
+    if (y < chatDay.slice(0, 4)) continue;
+    for (const m of list(path.join(sessionsDir, y))) {
+      if (`${y}/${m}` < chatDay.slice(0, 7)) continue;
+      for (const d of list(path.join(sessionsDir, y, m))) {
+        if (`${y}/${m}/${d}` < chatDay) continue;
+        const dir = path.join(sessionsDir, y, m, d);
+        let names: string[];
+        try { names = fs.readdirSync(dir); } catch { continue; }
+        for (const name of names) {
+          if (!name.endsWith('.jsonl')) continue;
+          const file = path.join(dir, name);
+          if (file !== chatRollout && reviewParentOf(file) === chatId) found.push(file);
+        }
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * Each model call in one auto-review rollout, with that call's own usage.
+ *
+ * The review thread's running total does NOT start at zero when it continues
+ * a compacted earlier review (one local rollout opens at 2.6M tokens), so its
+ * last figure is not this rollout's usage. The first usage line is its own
+ * `last_token_usage` (empty for such a snapshot: 0 of the 2.6M counted);
+ * every later one is the growth of the running total. A
+ * total that shrinks makes the whole rollout unreadable — none of it is
+ * counted rather than a wrong part of it.
+ */
+export function parseCodexReviewRollout(file: string): CodexReviewCall[] {
+  let content: string;
+  try { content = fs.readFileSync(file, 'utf-8'); } catch { return []; }
+  const read = (u: any) => {
+    const input = u?.input_tokens || u?.prompt_tokens || 0;
+    const cached = u?.cached_input_tokens || u?.prompt_tokens_details?.cached_tokens || 0;
+    const output = u?.output_tokens || u?.completion_tokens || 0;
+    return { input, cached, output, total: u?.total_tokens || (input + output) };
+  };
+  const calls: CodexReviewCall[] = [];
+  let prev: ReturnType<typeof read> | null = null;
+  let model = 'codex-auto-review';
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    let event: any;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (event?.type === 'turn_context' && typeof event.payload?.model === 'string' && event.payload.model) {
+      model = event.payload.model;
+    }
+    const running = codexRunningUsage(event);
+    if (!running) continue;
+    const cur = read(running);
+    if (prev && cur.total <= prev.total) continue;
+    let d: ReturnType<typeof read>;
+    if (prev) {
+      d = { input: cur.input - prev.input, cached: cur.cached - prev.cached, output: cur.output - prev.output, total: cur.total - prev.total };
+    } else {
+      const last = event?.payload?.info?.last_token_usage;
+      d = last ? read(last) : cur;
+      if (d.total > cur.total) d = cur;
+    }
+    const nonCached = d.input - d.cached;
+    if (nonCached < 0 || d.cached < 0 || d.output < 0) return [];
+    prev = cur;
+    // A continued thread opens with a snapshot of the compacted one: a running
+    // total and an empty last_token_usage, logged before any task starts.
+    if (nonCached + d.cached + d.output === 0) continue;
+    calls.push({
+      at: Date.parse(event?.timestamp ?? ''),
+      usage: { model, inputTokens: nonCached, outputTokens: d.output, cacheReadTokens: d.cached, cacheCreationTokens: 0, cacheCreation1hTokens: 0 },
+    });
+  }
+  return calls;
+}
+
+/**
+ * Parsed review calls by file, re-read only when the file's size or mtime
+ * moves: the watcher polls every 8 s and the heartbeat every 30 s, and one
+ * chat here had 11 review rollouts totalling 8.9 MB.
+ */
+const reviewCallsByFile = new Map<string, { size: number; mtimeMs: number; calls: CodexReviewCall[] }>();
+
+/** Every auto-review call Codex made for this chat, oldest first. */
+export function codexReviewCalls(chatRollout: string, chatId: string): CodexReviewCall[] {
+  const calls: CodexReviewCall[] = [];
+  for (const file of findCodexReviewRollouts(chatRollout, chatId)) {
+    try {
+      const st = fs.statSync(file);
+      let hit = reviewCallsByFile.get(file);
+      if (!hit || hit.size !== st.size || hit.mtimeMs !== st.mtimeMs) {
+        hit = { size: st.size, mtimeMs: st.mtimeMs, calls: parseCodexReviewRollout(file) };
+        reviewCallsByFile.set(file, hit);
+      }
+      calls.push(...hit.calls);
+    } catch { /* one bad file loses only itself */ }
+  }
+  return calls;
+}
+
+/**
+ * A chat's auto-review usage: totals, and each call placed on a prompt by
+ * position (the newest prompt that began at or before the call; the first
+ * one when either time is unknown).
+ */
+export function reviewTotals(chatRollout: string, chatId: string | undefined, promptStarts: readonly number[]): {
+  inputTokens: number; outputTokens: number; cacheReadTokens: number;
+  byPrompt: Map<number, ModelUsage[]>;
+} {
+  const out = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, byPrompt: new Map<number, ModelUsage[]>() };
+  if (!chatId) return out;
+  for (const call of codexReviewCalls(chatRollout, chatId)) {
+    let pos = 0;
+    if (Number.isFinite(call.at)) {
+      for (let i = 0; i < promptStarts.length; i++) if (promptStarts[i] <= call.at) pos = i;
+    }
+    const list = out.byPrompt.get(pos) ?? [];
+    out.byPrompt.set(pos, list);
+    list.push(call.usage);
+    out.inputTokens += call.usage.inputTokens;
+    out.outputTokens += call.usage.outputTokens;
+    out.cacheReadTokens += call.usage.cacheReadTokens;
+  }
+  return out;
+}
+
+/** The id a rollout's `session_meta` gives its thread. */
+function sessionMetaId(event: any): string | undefined {
+  if (event?.type !== 'session_meta') return undefined;
+  const id = event.payload?.id;
+  return typeof id === 'string' && id ? id : undefined;
 }
 
 export function parseCodexRollout(
@@ -1593,7 +1865,7 @@ export function parseCodexRollout(
   rolloutPath: string,
   threadId: string,
   opts: { verbose?: boolean } = {},
-): { tokensUsed: number; inputTokens: number; outputTokens: number; cacheReadTokens?: number; model?: string; turnCount: number; toolCalls: number; transcript?: string; userPrompts?: string[] } | null {
+): { tokensUsed: number; inputTokens: number; outputTokens: number; cacheReadTokens?: number; model?: string; turnCount: number; toolCalls: number; transcript?: string; userPrompts?: string[]; modelUsage?: ModelUsage[]; turnUsage?: Array<{ promptIndex: number; modelUsage: ModelUsage[] }> } | null {
   try {
     // Try to resolve the rollout file
     let rolloutFile = '';
@@ -1644,14 +1916,23 @@ export function parseCodexRollout(
     // the way out — the cost path needs them split (cached is billed
     // at $0.50/M for gpt-5.5, regular is $5/M).
     let maxCachedInputTokens = 0;
-    // Codex/gpt-5 reasoning tokens land in a separate field but are
-    // billed at the output rate. Add to outputTokens on the way out
-    // so neither the cost nor the tokensUsed total under-reports.
-    let maxReasoningOutputTokens = 0;
     let maxTotalTokens = 0;
     let model: string | undefined;
     let turnCount = 0;
     let toolCalls = 0;
+    // Who each token belongs to. The usage events are running totals, so each
+    // new high is the growth since the previous one: it goes to the prompt
+    // being answered (its position among the user prompts) and the model the
+    // newest turn_context names. The shares add up to the totals returned
+    // below by construction. A total that ever shrinks leaves no split at all.
+    let promptPos = -1;
+    let turnModel: string | undefined;
+    const usageByTurn = new Map<number, Map<string, ModelUsage>>();
+    let splitBroken = false;
+    // The chat's thread id and when each prompt began (same positions as
+    // promptPos), to find its auto-review threads and place their calls.
+    let chatId: string | undefined;
+    const promptStarts: number[] = [];
 
     // Build transcript from conversation events
     const turns: Array<{ role: string; content: string }> = [];
@@ -1693,14 +1974,8 @@ export function parseCodexRollout(
 
         // Extract token usage from TokenCountEvent or turn.completed events.
         // Codex emits multiple shapes across versions — check the union.
-        const tokenUsage =
-          event?.total_token_usage ||
-          event?.data?.total_token_usage ||
-          event?.payload?.info?.total_token_usage ||
-          event?.payload?.total_token_usage ||
-          event?.payload?.usage ||
-          event?.usage ||
-          event?.data?.usage;
+        chatId ??= sessionMetaId(event);
+        const tokenUsage = codexRunningUsage(event);
 
         if (tokenUsage) {
           const input = tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0;
@@ -1713,17 +1988,28 @@ export function parseCodexRollout(
             tokenUsage.cached_input_tokens ||
             tokenUsage.prompt_tokens_details?.cached_tokens ||
             0;
-          const reasoning =
-            tokenUsage.reasoning_output_tokens ||
-            tokenUsage.completion_tokens_details?.reasoning_tokens ||
-            tokenUsage.reasoning_tokens ||
-            0;
+          // Reasoning tokens are NOT added: `reasoning_output_tokens` (and the
+          // Chat Completions `completion_tokens_details.reasoning_tokens`) is a
+          // SUBSET of output_tokens, already billed inside it. Every real
+          // rollout shows total_tokens == input_tokens + output_tokens (1,076
+          // of 1,076 rows with reasoning, 2026-09-23). Adding it overstated
+          // Codex output by 13% at the median session and 48% at p90.
           const total = tokenUsage.total_tokens || (input + output);
           if (total > maxTotalTokens) {
+            const dInput = (input - cached) - (maxInputTokens - maxCachedInputTokens);
+            const dCached = cached - maxCachedInputTokens;
+            const dOutput = output - maxOutputTokens;
+            if (dInput < 0 || dCached < 0 || dOutput < 0) splitBroken = true;
+            const pos = Math.max(0, promptPos);
+            const who = turnModel || event?.payload?.model || model || 'codex';
+            const byModel = usageByTurn.get(pos) ?? new Map<string, ModelUsage>();
+            usageByTurn.set(pos, byModel);
+            const u = byModel.get(who) ?? { model: who, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0 };
+            byModel.set(who, u);
+            u.inputTokens += dInput; u.cacheReadTokens += dCached; u.outputTokens += dOutput;
             maxInputTokens = input;
             maxOutputTokens = output;
             maxCachedInputTokens = cached;
-            maxReasoningOutputTokens = reasoning;
             maxTotalTokens = total;
           }
         }
@@ -1736,6 +2022,7 @@ export function parseCodexRollout(
         const eventType = event?.type || event?.event || '';
         const payload = event?.payload;
         const payloadType = payload?.type || '';
+        if (eventType === 'turn_context' && typeof payload?.model === 'string' && payload.model) turnModel = payload.model;
 
         // ── New-shape Codex rollouts: response_item events ────────────────
         // Each conversation item is wrapped as {type: "response_item", payload: {...}}.
@@ -1754,6 +2041,7 @@ export function parseCodexRollout(
             const isUser = role === 'user' || role === 'human';
             const cleaned = isUser ? codexUserPromptText(text) : text;
             if (cleaned) turns.push({ role, content: cleaned });
+            if (isUser && cleaned?.trim()) { promptPos++; promptStarts.push(Date.parse(event?.timestamp ?? '')); }
           }
         } else if (payloadType === 'reasoning') {
           // Chain-of-thought summary — show as assistant reasoning so reviewers
@@ -1805,6 +2093,7 @@ export function parseCodexRollout(
               const isUser = role === 'user' || role === 'human';
               const cleaned = isUser ? codexUserPromptText(text) : text;
               if (cleaned) turns.push({ role, content: cleaned });
+              if (isUser && cleaned?.trim()) { promptPos++; promptStarts.push(Date.parse(event?.timestamp ?? '')); }
             }
           }
         } else if (
@@ -1848,14 +2137,14 @@ export function parseCodexRollout(
       }
     }
 
-    // Split cached out of input, fold reasoning into output. This is
+    // Split cached out of input. This is
     // the contract the rest of the pipeline expects:
     //   inputTokens     — NON-cached prompt tokens (billed at full
     //                     model input rate)
     //   cacheReadTokens — cached subset (billed at the cached rate,
     //                     e.g. $0.50/M for gpt-5.5)
-    //   outputTokens    — visible output + reasoning, both billed at
-    //                     the output rate
+    //   outputTokens    — output_tokens as reported, which already
+    //                     includes reasoning (billed at the output rate)
     //   tokensUsed      — non-cached input + output (incl. reasoning). EXCLUDES
     //                     cache reads, matching the platform contract every
     //                     other agent follows (Claude/Cursor/agy all report
@@ -1864,9 +2153,39 @@ export function parseCodexRollout(
     //                     ~14× less token-efficient than an identical Claude
     //                     session in the benchmark scorecard — an artifact of
     //                     the definition, not real work.
-    const nonCachedInputTokens = Math.max(0, maxInputTokens - maxCachedInputTokens);
-    const billableOutputTokens = maxOutputTokens + maxReasoningOutputTokens;
+    // Codex's auto-review threads spent tokens for this chat too. Each call
+    // goes to the prompt that was running when it finished (the newest prompt
+    // that began before it; the first prompt when its time is unknown), under
+    // the review model's own bucket.
+    const review = reviewTotals(rolloutFile, chatId, promptStarts);
+    for (const [pos, calls] of review.byPrompt) {
+      const byModel = usageByTurn.get(pos) ?? new Map<string, ModelUsage>();
+      usageByTurn.set(pos, byModel);
+      for (const c of calls) {
+        const u = byModel.get(c.model) ?? { model: c.model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0 };
+        byModel.set(c.model, u);
+        u.inputTokens += c.inputTokens; u.outputTokens += c.outputTokens; u.cacheReadTokens += c.cacheReadTokens;
+      }
+    }
+
+    const nonCachedInputTokens = Math.max(0, maxInputTokens - maxCachedInputTokens) + review.inputTokens;
+    const billableOutputTokens = maxOutputTokens + review.outputTokens;
     const grandTotalTokens = nonCachedInputTokens + billableOutputTokens;
+    maxCachedInputTokens += review.cacheReadTokens;
+
+    const split = (() => {
+      if (splitBroken || (maxTotalTokens === 0 && review.byPrompt.size === 0)) return {};
+      const sessionByModel = new Map<string, ModelUsage>();
+      const turnUsage = [...usageByTurn.entries()].sort(([a], [b]) => a - b).map(([promptIndex, byModel]) => {
+        for (const u of byModel.values()) {
+          const s = sessionByModel.get(u.model) ?? { ...u, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+          s.inputTokens += u.inputTokens; s.outputTokens += u.outputTokens; s.cacheReadTokens += u.cacheReadTokens;
+          sessionByModel.set(u.model, s);
+        }
+        return { promptIndex, modelUsage: [...byModel.values()] };
+      });
+      return { modelUsage: [...sessionByModel.values()], turnUsage };
+    })();
 
     return {
       tokensUsed: grandTotalTokens,
@@ -1878,6 +2197,7 @@ export function parseCodexRollout(
       toolCalls,
       transcript: turns.length > 0 ? JSON.stringify(withCommandExecutions(turns, lines)) : undefined,
       userPrompts: userPrompts.length > 0 ? userPrompts : undefined,
+      ...split,
     };
   } catch (err) {
     debugLog('codex', 'parseCodexRollout error', { error: String(err) });

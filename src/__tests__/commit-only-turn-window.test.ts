@@ -15,7 +15,7 @@ afterEach(() => { if (repo) fs.rmSync(repo, { recursive: true, force: true }); }
 
 // No agent-specific inference: actual prompt boundaries decide authorship.
 describe.each(['claude-code', 'cursor', 'codex', 'gemini', 'antigravity', 'devin'])('%s: commit-only turn', (agentSlug) => {
-  it('keeps shell-written files on the authoring turn and clears a stale PR-turn capture', () => {
+  it('keeps shell-written files on the authoring turn, clears the PR turn\'s stale capture, keeps its commit', () => {
     repo = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-commit-only-window-'));
     git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com');
     fs.writeFileSync(path.join(repo, 'large.ts'), 'unchanged context\n'.repeat(15000));
@@ -42,8 +42,12 @@ describe.each(['claude-code', 'cursor', 'codex', 'gemini', 'antigravity', 'devin
     expect(rows[0].diff!.length).toBeLessThan(2000);
     expect(rows[0].contentUnavailableFiles).toEqual([]);
     for (const row of rows.slice(1)) {
-      expect(row).toMatchObject({ filesChanged: [], diff: '', uncommittedDiff: '', linesAdded: 0, linesRemoved: 0, contentAuthoritative: true, diffSource: 'turn-window', commitSha: null });
+      expect(row).toMatchObject({ filesChanged: [], diff: '', uncommittedDiff: '', linesAdded: 0, linesRemoved: 0, contentAuthoritative: true, diffSource: 'turn-window' });
     }
+    // The PR turn ran the commit: it keeps the stamp (the card sits under it),
+    // with none of the authoring turn's content. The turn after it does not.
+    expect(rows[1].commitSha).toBe(sha);
+    expect(rows[2].commitSha).toBeNull();
     persistCompletedMappings({ state, promptMappings: rows as any });
     expect(state.completedPromptMappings[1]).toMatchObject({ contentAuthoritative: true, turnWindowCaptured: true, diffSource: 'turn-window', filesChanged: [], linesAdded: 0 });
   });

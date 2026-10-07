@@ -270,7 +270,10 @@ export function commitLineCounts(repoPath: string, sha: string): LineTotals | nu
   // Commit metadata describes everything Git recorded, including lockfiles
   // and generated files. Authored-diff filtering belongs to numstatTotals and
   // the patch layer, not the timeline's "commit total".
-  const rows = numstatByFile(['diff-tree', '--no-commit-id', '--numstat', '-r', '--root', sha], gitOpts, undefined, true);
+  // `-M`: plumbing `diff-tree` does not detect renames (porcelain `git show`
+  // does), so a moved-and-edited file counted as a whole delete plus a whole
+  // add — 3714563d (a 36-line edit to a moved script) stored +128/−112.
+  const rows = numstatByFile(['diff-tree', '--no-commit-id', '--numstat', '-M', '-r', '--root', sha], gitOpts, undefined, true);
   if (!rows) return null;
   if (rows.length > 0) return sumLineTotals(rows);
   // Silent: a merge, or a commit that changed nothing. Ask which.
@@ -521,6 +524,32 @@ export function captureGitState(
      * Only ever narrows what is measured; when absent, behaviour is unchanged.
      */
     preSessionBaseline?: string | null;
+    /**
+     * Build per-commit details (message, counts, patch — about eight git
+     * processes each, the patch at full context) only for commits this
+     * accepts. `commitShas` still lists every commit in range; the rest just
+     * carry no entry in `commitDetails`. Stop's session snapshot keeps only
+     * the details of commits the session owns, so building them for every
+     * other commit in `session-start..HEAD` was work thrown away on every
+     * Stop (see the caller in hooks/stop.ts). Absent = every commit, as before.
+     */
+    commitDetailsFor?: (sha: string) => boolean;
+    /**
+     * Skip `committedDiff` (the whole `baseline..HEAD` diff) and its numstat.
+     * For a caller that rebuilds the committed side itself: Stop's session
+     * snapshot replaces it with the session's own commits, so the range diff
+     * — 432 KB at full context on a day-old session — was discarded unread.
+     */
+    skipCommittedDiff?: boolean;
+    /**
+     * 'files': each commit's entry carries only its sha and `filesChanged`
+     * (a merge's resolution files, as in full mode) — no message, author,
+     * time, counts, pre-session split or patch. One batched `git log` instead
+     * of about eight processes per commit. For callers that read nothing
+     * else: Stop's session file list (sessionFilesAcrossRepos) spent 9.9 of
+     * 10.5 s building full details for 22 commits and read only file names.
+     */
+    commitDetailsLevel?: 'full' | 'files';
   },
 ): GitCaptureResult {
   const gitOpts = {
@@ -571,8 +600,37 @@ export function captureGitState(
 
   // 3. Capture per-commit metadata (message, author, files changed)
   const commitDetails: CommitInfo[] = [];
+  // Files-only: every commit's name list and parents in ONE process. No
+  // renames, so a rename lists both paths exactly as `diff-tree --name-only`
+  // (the full path below) does; a merge prints no names here and is resolved
+  // per commit through mergeOwnDiff, as in full mode.
+  const filesOnly = opts?.commitDetailsLevel === 'files';
+  const batchedFiles = new Map<string, { parents: number; files: string[] }>();
+  if (filesOnly && commitShas.length > 0) {
+    try {
+      const out = git(['log', '--no-renames', '--name-only', '--format=%x00%H %P', `${safeBefore}..${headAfter}`], gitOpts);
+      for (const block of out.split('\0').slice(1)) {
+        const [head, ...rest] = block.split('\n');
+        const [sha, ...parents] = head.trim().split(' ').filter(Boolean);
+        if (sha) batchedFiles.set(sha, { parents: parents.length, files: rest.map((l) => l.trim()).filter(Boolean) });
+      }
+    } catch { /* fall back to the per-commit path below */ }
+  }
   for (const sha of commitShas) {
     if (!HEX.test(sha)) continue;
+    if (opts?.commitDetailsFor && !opts.commitDetailsFor(sha)) continue;
+    const batched = filesOnly ? batchedFiles.get(sha) : undefined;
+    if (batched) {
+      let files = batched.files;
+      if (batched.parents > 1) {
+        try {
+          const merge = mergeOwnDiff(repoPath, sha);
+          if (merge) files = merge.filesChanged;
+        } catch { /* keep the batched list */ }
+      }
+      commitDetails.push({ sha, message: '', author: '', filesChanged: files, linesAdded: 0, linesRemoved: 0 });
+      continue;
+    }
     try {
       // %B — subject AND body. `%s` was the subject alone, which threw away the
       // `Origin-Session:` trailer our own prepare-commit-msg hook had just
@@ -604,7 +662,8 @@ export function captureGitState(
       let cRemoved = 0;
       try {
         const numstat = git(
-          ['diff-tree', '--no-commit-id', '--numstat', '-r', sha],
+          // -M: see commitLineCounts — without it a rename counts whole.
+          ['diff-tree', '--no-commit-id', '--numstat', '-M', '-r', sha],
           gitOpts,
         ).trim();
         for (const ln of numstat.split('\n')) {
@@ -802,7 +861,7 @@ export function captureGitState(
     // Committed changes since session start. From `workingTreeBase`, not the
     // raw baseline: on a diverged baseline that range is the OTHER branch's
     // commits, and this is the field Stop reads for a non-shadow baseline.
-    if (workingTreeBase !== headAfter) {
+    if (workingTreeBase !== headAfter && !opts?.skipCommittedDiff) {
       committedDiff = diffWithinBudget(['diff'], [`${workingTreeBase}..${headAfter}`], gitOpts, wantFullContext);
       committedStat = numstatTotals(['diff', '--numstat', `${workingTreeBase}..${headAfter}`], gitOpts);
     }
@@ -1508,6 +1567,105 @@ export function readFileAtRev(repoPath: string, sha: string, relPath: string): s
 }
 
 /**
+ * `git merge-file` of three texts: `ours` and `theirs` both changed `base`.
+ * Null on a conflict or any failure (binary content, a read error), so a caller
+ * can keep the answer it had.
+ */
+export function mergeFileContents(repoPath: string, base: string, ours: string, theirs: string): string | null {
+  let dir = '';
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-merge-file-'));
+    const p = (name: string, text: string) => { const f = path.join(dir, name); fs.writeFileSync(f, text); return f; };
+    const res = gitDetailed(['merge-file', '-p', p('ours', ours), p('base', base), p('theirs', theirs)], {
+      cwd: repoPath, timeoutMs: 10_000, maxBuffer: 10 * 1024 * 1024, allowNonZeroExit: true,
+    });
+    return res.status === 0 ? res.stdout : null;
+  } catch {
+    return null;
+  } finally {
+    if (dir) try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+}
+
+/**
+ * A file a tree move brought in, with the work the turn STARTED with laid on
+ * top — what the turn would have ended with had it written nothing to it.
+ *
+ * Inherited-file measuring takes a file's before-state from the commit a
+ * rebase, pull or checkout brought in, so what the move carried is not billed
+ * as the turn's. That commit knows nothing of work sitting uncommitted when the
+ * turn began. When a turn commits an earlier turn's work and rebases it over an
+ * upstream change to the same file, the replay puts that work back, and against
+ * the upstream bytes it reads as this turn's. Session 690e594c turn 1
+ * (2026-09-27) committed turn 0's +26 in user-prompt-submit.ts, rebased onto a
+ * main where #1937 had also edited the file, and was billed turn 0's lines; the
+ * files main left alone were fine, because for them start == end.
+ *
+ * `baselineSha` is the turn's shadow: HEAD then, plus the dirt, as a commit
+ * whose parent is that HEAD. Null — keep the inherited bytes — when the turn
+ * started clean on this file, the start is unreadable, or the merge conflicts.
+ */
+export function inheritedWithStartDirt(
+  repoPath: string,
+  baselineSha: string | null | undefined,
+  file: string,
+  started: string | null,
+  inherited: string | null,
+): string | null {
+  if (!baselineSha || !HEX.test(baselineSha) || started === null || inherited === null) return null;
+  return startDirtOnInherited(repoPath, shadowHeadOf(repoPath, baselineSha), file, started, inherited);
+}
+
+/**
+ * inheritedWithStartDirt for one capture pass: each baseline's HEAD is looked
+ * up once, not once per inherited file.
+ */
+export function startDirtReader(repoPath: string): (baselineSha: string, file: string, started: string, inherited: string) => string | null {
+  const heads = new Map<string, string | null>();
+  return (baselineSha, file, started, inherited) => {
+    if (!HEX.test(baselineSha)) return null;
+    if (!heads.has(baselineSha)) heads.set(baselineSha, shadowHeadOf(repoPath, baselineSha));
+    return startDirtOnInherited(repoPath, heads.get(baselineSha) ?? null, file, started, inherited);
+  };
+}
+
+/** inheritedWithStartDirt, for a caller that already knows the shadow's HEAD. */
+export function startDirtOnInherited(
+  repoPath: string,
+  head: string | null,
+  file: string,
+  started: string | null,
+  inherited: string | null,
+): string | null {
+  if (!head || started === null || inherited === null) return null;
+  const base = readFileAtRev(repoPath, head, file);
+  if (base === null || base === started) return null;
+  if (inherited === base) return started;
+  return mergeFileContents(repoPath, base, started, inherited);
+}
+
+/** The HEAD a shadow commit was cut on; null when `sha` is not a shadow. */
+export function shadowHeadOf(repoPath: string, sha: string): string | null {
+  if (!HEX.test(sha)) return null;
+  const opts = { cwd: repoPath, timeoutMs: 10_000 };
+  const subject = gitOrNull(['show', '-s', '--format=%s', sha], opts);
+  if (!subject || !/^origin shadow /.test(subject)) return null;
+  const head = gitOrNull(['rev-parse', '--verify', '-q', `${sha}^1`], opts);
+  return head && HEX.test(head) ? head : null;
+}
+
+/** Write `content` as a blob; its id, or null. */
+export function writeBlob(repoPath: string, content: string): string | null {
+  try {
+    const res = gitDetailed(['hash-object', '-w', '--stdin'], { cwd: repoPath, timeoutMs: 10_000, input: content });
+    const id = res.stdout.trim();
+    return res.status === 0 && HEX.test(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Files whose content differs between two commits — what a checkout from one
  * to the other rewrites on disk. Throws when git cannot answer, so a caller
  * can tell "nothing changed" from "could not ask".
@@ -1702,7 +1860,16 @@ function treeWithInheritedFiles(
   try {
     git(['read-tree', baseTree], indexOpts);
     for (const [file, rev] of sources) {
-      if (isUnsafeGitShowPath(file) || !HEX.test(rev)) return null;
+      if (isUnsafeGitShowPath(file)) return null;
+      // `blob:<id>`: content no commit holds (inheritedWithStartDirt). It
+      // keeps the mode the base tree gives the file.
+      const blob = /^blob:([a-fA-F0-9]+)$/.exec(rev);
+      if (blob) {
+        const mode = git(['ls-tree', '--full-tree', '-z', baseTree, '--', file], rootOpts).match(/^(\d{6}) blob /)?.[1] || '100644';
+        git(['update-index', '--add', '--cacheinfo', `${mode},${blob[1]},${file}`], indexOpts);
+        continue;
+      }
+      if (!HEX.test(rev)) return null;
       const entry = git(['ls-tree', '--full-tree', '-z', rev, '--', file], rootOpts);
       const m = entry.match(/^(\d{6}) blob ([a-fA-F0-9]+)\t/);
       if (m) git(['update-index', '--add', '--cacheinfo', `${m[1]},${m[2]},${file}`], indexOpts);

@@ -17,7 +17,7 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { WINDOWS_SLOWDOWN, isWindows } from './helpers/windows-e2e.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { commitFiles, createHarness, haveDist, numbered, sleep, waitFor, type Harness } from './helpers/stop-next-prompt-harness.js';
 
 const T = 120_000 * WINDOWS_SLOWDOWN;
@@ -32,7 +32,7 @@ async function interruptedTurnRow(h: Harness, command: string, effect: () => voi
   return h.rows().find((r: any) => r.promptIndex === 0);
 }
 
-describe.skipIf(!haveDist || isWindows)('git pathspec reverts stay the turn\'s work, through the built binary', () => {
+describe.skipIf(!haveDist)('git pathspec reverts stay the turn\'s work, through the built binary', () => {
   it('turn 1\'s `git checkout -- config.py` of the user\'s between-turn edit is turn 1\'s -2', async () => {
     const h = await createHarness('e2e-gitpath-gap-0001', 'e2e-gitpath-gap-srv-1');
     try {

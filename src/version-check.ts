@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
+import { throughLiveInstall } from './live-install-path.js';
 import { loadConfig } from './config.js';
 
 const CACHE_PATH = path.join(os.homedir(), '.origin', 'last-update-check.json');
@@ -104,7 +105,9 @@ export function getCurrentVersion(): string | null {
     // false). Use import.meta.url, the ESM equivalent (same pattern as
     // cli-version.ts). NOT cached — callers re-read every tick to notice an
     // `origin upgrade` that replaced package.json underneath a live daemon.
-    const here = path.dirname(fileURLToPath(import.meta.url));
+    // Through the npm name: under the symlinked install our own copy never
+    // changes, and a daemon must see the version `origin upgrade` put there.
+    const here = throughLiveInstall(path.dirname(fileURLToPath(import.meta.url)));
     const candidates = [
       path.join(here, '..', 'package.json'),
       path.join(here, '..', '..', 'package.json'),

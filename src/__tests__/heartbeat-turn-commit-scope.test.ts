@@ -79,7 +79,8 @@ describe('the heartbeat honours both', () => {
   );
   it('skips a turn Stop closed before deriving anything for it', () => {
     const body = src.slice(src.indexOf('async function pushInflightDiff'));
-    const skip = body.indexOf('if (turnIsClosed(state, promptIndex)) return;');
+    // Closed and not abandoned by a Stop that died before sending (00ced3dc).
+    const skip = body.indexOf('if (turnIsClosed(state, promptIndex) && !stopAbandonedTurn(state, promptIndex)) return;');
     const derive = body.indexOf('committedDiff');
     expect(skip).toBeGreaterThan(0);
     expect(skip).toBeLessThan(derive);

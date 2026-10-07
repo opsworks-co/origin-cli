@@ -182,6 +182,18 @@ describe('isServerTerminalDefinitive', () => {
     expect(isServerTerminalDefinitive({ status: 'DELETED' })).toBe(true);
   });
 
+  // Prod 2026-10-02: the API was overloaded at session start, so the session
+  // ran under its local id. The server answers NOT_FOUND for any id it has
+  // never seen, and the heartbeat took that for "deleted" and ended a live
+  // conversation 2 minutes in.
+  it('an unregistered local- session is never definitively terminal — NOT_FOUND means "not yet"', () => {
+    expect(isServerTerminalDefinitive({ status: 'NOT_FOUND' }, 'local-4f7a0e8a-5e8d-4d49-ac90-b85d07e3f7b7')).toBe(false);
+    expect(isServerTerminalDefinitive({ status: 'DELETED' }, 'local-4f7a0e8a')).toBe(false);
+    expect(isServerTerminalDefinitive({ archived: true }, 'local-4f7a0e8a')).toBe(false);
+    // A registered id keeps the old rule.
+    expect(isServerTerminalDefinitive({ status: 'NOT_FOUND' }, '17e0004b-aee0-4b0f-8e42-e8a430b54c42')).toBe(true);
+  });
+
   it('soft-terminal statuses are NOT definitive (keep the parent-alive grace)', () => {
     expect(isServerTerminalDefinitive({ status: 'COMPLETED', archived: false })).toBe(false);
     expect(isServerTerminalDefinitive({ status: 'ENDED' })).toBe(false);

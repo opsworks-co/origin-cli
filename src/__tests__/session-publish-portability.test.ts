@@ -120,7 +120,8 @@ describe('session context survives to another user via git', () => {
   it('refs backend: hot-path write stays local, publish puts it on the branch for a fresh clone', async () => {
     // Standalone-ish config: refs on the hot path, publishing on.
     vi.doMock('../config.js', () => ({
-      loadConfig: () => ({ sessionBackend: 'refs', pushStrategy: 'auto' }),
+      loadConfig: () => ({ sessionBackend: 'refs', pushStrategy: 'auto', notesIncludePrompts: true }),
+      loadRepoConfig: () => null,
     }));
     const { writeSessionFiles, pushSessionBranch } = await import('../local-entrypoint.js');
 
@@ -149,7 +150,8 @@ describe('session context survives to another user via git', () => {
     // including the one command that brings per-commit notes down (git clone
     // never fetches refs/notes/*).
     vi.doMock('../config.js', () => ({
-      loadConfig: () => ({ sessionBackend: 'refs', pushStrategy: 'auto' }),
+      loadConfig: () => ({ sessionBackend: 'refs', pushStrategy: 'auto', notesIncludePrompts: true }),
+      loadRepoConfig: () => null,
     }));
     const { writeSessionFiles, pushSessionBranch } = await import('../local-entrypoint.js');
 
@@ -170,7 +172,8 @@ describe('session context survives to another user via git', () => {
     // entirely because "the data is on the API" — which is no help to someone
     // who never signs in.
     vi.doMock('../config.js', () => ({
-      loadConfig: () => ({ apiKey: 'k', apiUrl: 'https://api.example', pushStrategy: 'auto' }),
+      loadConfig: () => ({ apiKey: 'k', apiUrl: 'https://api.example', pushStrategy: 'auto', notesIncludePrompts: true }),
+      loadRepoConfig: () => null,
     }));
     const { writeSessionFiles, pushSessionBranch } = await import('../local-entrypoint.js');
 
@@ -185,7 +188,8 @@ describe('session context survives to another user via git', () => {
 
   it('publishing many sessions keeps every one of them on the branch', async () => {
     vi.doMock('../config.js', () => ({
-      loadConfig: () => ({ sessionBackend: 'refs', pushStrategy: 'auto' }),
+      loadConfig: () => ({ sessionBackend: 'refs', pushStrategy: 'auto', notesIncludePrompts: true }),
+      loadRepoConfig: () => null,
     }));
     const { writeSessionFiles, pushSessionBranch } = await import('../local-entrypoint.js');
 
@@ -206,7 +210,8 @@ describe('session context survives to another user via git', () => {
     // The branch therefore has to EXIST locally — an earlier draft gated the
     // build on the push decision and left these users nothing to push.
     vi.doMock('../config.js', () => ({
-      loadConfig: () => ({ sessionBackend: 'refs', pushStrategy: 'prompt' }),
+      loadConfig: () => ({ sessionBackend: 'refs', pushStrategy: 'prompt', notesIncludePrompts: true }),
+      loadRepoConfig: () => null,
     }));
     const { writeSessionFiles, pushSessionBranch } = await import('../local-entrypoint.js');
 
@@ -223,9 +228,40 @@ describe('session context survives to another user via git', () => {
     expect(git(bare, 'for-each-ref', '--format=%(refname)')).toContain('refs/heads/origin-sessions');
   });
 
+  it('without the prompt opt-in the branch is built but not pushed (OR-48 default)', async () => {
+    // The branch carries prompt text; an absent notesIncludePrompts is the
+    // metadata-only default, the same rule as the pre-push hook.
+    vi.doMock('../config.js', () => ({
+      loadConfig: () => ({ sessionBackend: 'refs', pushStrategy: 'auto' }),
+      loadRepoConfig: () => null,
+    }));
+    const { writeSessionFiles, pushSessionBranch } = await import('../local-entrypoint.js');
+
+    writeSessionFiles(repo, baseData('default-1') as any);
+    pushSessionBranch(repo, 'default-1');
+
+    const local = git(repo, 'show', 'refs/heads/origin-sessions:sessions/default-1/metadata.json');
+    expect(JSON.parse(local).sessionId).toBe('default-1');
+    expect(git(bare, 'for-each-ref', '--format=%(refname)')).not.toContain('origin-sessions');
+  });
+
+  it('pushStrategy=always is an explicit publication choice, opt-in or not', async () => {
+    vi.doMock('../config.js', () => ({
+      loadConfig: () => ({ sessionBackend: 'refs', pushStrategy: 'always' }),
+      loadRepoConfig: () => null,
+    }));
+    const { writeSessionFiles, pushSessionBranch } = await import('../local-entrypoint.js');
+
+    writeSessionFiles(repo, baseData('always-1') as any);
+    pushSessionBranch(repo, 'always-1');
+
+    expect(git(bare, 'for-each-ref', '--format=%(refname)')).toContain('refs/heads/origin-sessions');
+  });
+
   it('pushStrategy=false publishes nothing (opt-out still works)', async () => {
     vi.doMock('../config.js', () => ({
-      loadConfig: () => ({ sessionBackend: 'refs', pushStrategy: 'false' }),
+      loadConfig: () => ({ sessionBackend: 'refs', pushStrategy: 'false', notesIncludePrompts: true }),
+      loadRepoConfig: () => null,
     }));
     const { writeSessionFiles, pushSessionBranch } = await import('../local-entrypoint.js');
 
@@ -239,7 +275,8 @@ describe('session context survives to another user via git', () => {
 
   it('branch backend still works end to end (explicit opt-in)', async () => {
     vi.doMock('../config.js', () => ({
-      loadConfig: () => ({ sessionBackend: 'branch', pushStrategy: 'auto' }),
+      loadConfig: () => ({ sessionBackend: 'branch', pushStrategy: 'auto', notesIncludePrompts: true }),
+      loadRepoConfig: () => null,
     }));
     const { writeSessionFiles, pushSessionBranch } = await import('../local-entrypoint.js');
 

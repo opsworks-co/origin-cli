@@ -37,7 +37,8 @@ describe('markTurnClosedOnDisk', () => {
 
     const after = read(statePath);
     expect(turnIsClosed(after, 1)).toBe(true);
-    expect(after).toEqual({ ...before, lastClosedTurnIndex: 1 });
+    // The turn is closed, and Stop's closing stamp names it (stopAbandonedTurn).
+    expect(after).toEqual({ ...before, lastClosedTurnIndex: 1, stopClosing: { turn: 1, at: expect.any(Number) } });
     // A Stop that dies after the mark has not claimed a row: the turn a tool
     // opened still reads as not closed BY STOP at the next prompt.
     expect(turnClosedByStop(after, 1)).toBe(false);

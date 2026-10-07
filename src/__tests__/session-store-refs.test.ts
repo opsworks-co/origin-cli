@@ -177,7 +177,9 @@ describe('session-store: refs backend', () => {
 
   it('publishes the BRANCH to the remote, not the session ref', async () => {
     vi.doMock('../config.js', () => ({
-      loadConfig: () => ({ sessionBackend: 'refs', pushStrategy: 'auto' }),
+      // The branch carries prompt text: pushed only with the opt-in (OR-48).
+      loadConfig: () => ({ sessionBackend: 'refs', pushStrategy: 'auto', notesIncludePrompts: true }),
+      loadRepoConfig: () => null,
     }));
     const { writeSessionFiles, pushSessionBranch } = await import('../local-entrypoint.js');
 

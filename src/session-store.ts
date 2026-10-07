@@ -68,7 +68,11 @@ export function shouldBuildSessionBranch(config: ReturnType<typeof loadConfig>):
   return (config?.pushStrategy || 'auto') !== 'false';
 }
 
-/** Should the built branch be sent to the remote? */
+/**
+ * The push-strategy half of "should the built branch be sent to the remote?".
+ * Pushing code uses `sessionBranchPushTarget` (prompt-privacy.ts), which also
+ * decides the prompt opt-in, the trigger and the destination.
+ */
 export function shouldPushSessionBranch(config: ReturnType<typeof loadConfig>): boolean {
   const strategy = config?.pushStrategy || 'auto';
   if (strategy === 'false') return false;   // never push

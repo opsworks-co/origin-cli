@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0",
+  "revision": {
+    "vcs": "git",
+    "id": "7d2e9a4c1f0b8e6d5c3a2b1f0e9d8c7b6a5f4e3d",
+    "diff_stats": {
+      "lines_added": 120,
+      "lines_removed": 14
+    }
+  },
+  "attribution_level": "commit",
+  "recorded_at": "2026-09-24T16:02:11Z",
+  "producer": {
+    "name": "origin-cli",
+    "version": "0.20260924.258"
+  },
+  "contributions": [
+    {
+      "evidence": "session_capture",
+      "agent": {
+        "id": "claude-code"
+      },
+      "model": {
+        "id": "claude-opus-4-6"
+      },
+      "session": {
+        "id": "8b1f3c2e-5d4a-4e6f-9a7b-0c1d2e3f4a5b",
+        "prompt_count": 3,
+        "diff_stats": {
+          "lines_added": 80,
+          "lines_removed": 10
+        }
+      }
+    },
+    {
+      "evidence": "session_capture",
+      "agent": {
+        "id": "codex"
+      },
+      "model": {
+        "id": "gpt-5.3-codex"
+      },
+      "session": {
+        "id": "c4d5e6f7-0a1b-4c2d-8e3f-9a0b1c2d3e4f",
+        "prompt_count": 1,
+        "diff_stats": {
+          "lines_added": 55,
+          "lines_removed": 4
+        }
+      }
+    }
+  ]
+}

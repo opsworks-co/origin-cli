@@ -34,6 +34,40 @@ export function commitLandedInTurn(
  * only replace an observed capture with a reconstructed one — and it did, with
  * a newer stamp each tick, so the reconstruction always won.
  */
+/**
+ * Stop marked `promptIndex` closed and then died before its row went out.
+ *
+ * Stop marks the turn closed on disk BEFORE it sends (markTurnClosedOnDisk),
+ * so no heartbeat tick can out-stamp its row — and the heartbeat then leaves a
+ * closed turn alone. A Stop killed in between (Codex's hook timeout, a crash)
+ * left the row at the last pre-Stop tick until the next prompt or session end
+ * (Origin TODO 00ced3dc).
+ *
+ * Abandoned only when ALL hold: Stop marked THIS turn, never recorded sending
+ * its row, never finished (the turn is still the active one — closeTurn clears
+ * it), and the mark is older than any Stop is allowed to run. A Stop that is
+ * merely slow is still inside that window and keeps the heartbeat silent.
+ */
+export function stopAbandonedTurn(
+  state: {
+    stopClosing?: { turn?: number; at?: number } | null;
+    stopSentTurnIndex?: number | null;
+    activeTurn?: { index?: number } | null;
+  },
+  promptIndex: number,
+  now: number = Date.now(),
+): boolean {
+  const mark = state.stopClosing;
+  if (!mark || mark.turn !== promptIndex || !Number.isFinite(mark.at as number)) return false;
+  if (Number.isInteger(state.stopSentTurnIndex as number) && (state.stopSentTurnIndex as number) >= promptIndex) return false;
+  if (state.activeTurn?.index !== promptIndex) return false;
+  return now - (mark.at as number) > STOP_ABANDONED_AFTER_MS;
+}
+
+// Longer than any Stop hook may run: Codex's is registered with 600 s
+// (enable.ts CODEX_STOP_HOOK_TIMEOUT_SEC), plus a minute of slack.
+export const STOP_ABANDONED_AFTER_MS = 11 * 60_000;
+
 export function turnIsClosed(
   state: { lastClosedTurnIndex?: number | null },
   promptIndex: number,

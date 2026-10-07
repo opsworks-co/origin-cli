@@ -115,3 +115,30 @@ export function withSessionStateLock<T>(statePath: string, action: () => T, time
   }
   try { return action(); } finally { lock.release(); }
 }
+
+/**
+ * Change a few fields of a session state file without losing anyone else's.
+ *
+ * For writers that own a handful of fields rather than the whole state — the
+ * heartbeat's budget flags, policy rules and Codex prompt mirror. They used to
+ * read the file, do their work (for the Codex mirror: shadow commits, seconds
+ * of git), and write back the object they read — unlocked and in place. Any
+ * field a hook saved in between was erased, and a hook reading mid-write could
+ * see a truncated file.
+ *
+ * Here the read happens INSIDE the hooks' state lock, `patch` edits that fresh
+ * copy, and the result is renamed into place. `patch` returns false to write
+ * nothing. Returns whether a write happened; throws only for I/O errors, which
+ * the caller already handles (a missing or unparseable file included).
+ */
+export function patchSessionStateFile(statePath: string, patch: (state: Record<string, any>) => boolean): boolean {
+  return withSessionStateLock(statePath, () => {
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+    if (!state || typeof state !== 'object' || Array.isArray(state)) return false;
+    if (!patch(state)) return false;
+    const tmp = `${statePath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
+    fs.renameSync(tmp, statePath);
+    return true;
+  });
+}

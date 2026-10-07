@@ -134,10 +134,19 @@ export function stateFileTakenOver(i: { ownSessionId: string; fileSessionId: str
 // a still-open IDE window keeps a heartbeat pinging an archived session forever
 // and `origin status` lists a session the web dashboard no longer shows — the
 // exact CLI/web drift users report.
+//
+// Except for a `local-` id: that session never registered (the API was down or
+// slow at session start), so the server has no row for it and answers
+// NOT_FOUND for every id it has never seen. That is "not yet", not "deleted".
+// Prod 2026-10-02: a live conversation was ended 2 minutes in this way while
+// getorigin.io was overloaded; its next Stop then adopted a stranger's archived
+// session, which took the conversation's prompts and commit.
 export function isServerTerminalDefinitive(
   resp: { status?: string; archived?: boolean } | null | undefined,
+  sessionId?: string,
 ): boolean {
   if (!resp) return false;
+  if (sessionId?.startsWith('local-')) return false;
   if (resp.archived === true) return true;
   return resp.status === 'NOT_FOUND' || resp.status === 'DELETED';
 }

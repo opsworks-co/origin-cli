@@ -4,7 +4,9 @@ import os from 'os';
 import path from 'path';
 import { loadConfig, loadAgentConfig, loadRepoConfig, listProfiles } from '../config.js';
 import { api } from '../api.js';
-import { loadSessionState, listActiveSessions, listAllActiveSessions, getGitRoot, getBranch, getHeadSha } from '../session-state.js';
+import { loadSessionState, listActiveSessions, listAllActiveSessions, getGitRoot, getBranch, getHeadSha, getCanonicalRepoPath } from '../session-state.js';
+import { listRecentShas } from '../history-backfill.js';
+import { SESSION_START_RECENT_SHAS } from './hooks.js';
 import { currentOwner, isForeignSession } from '../session-owner.js';
 import { describeSyncBlock, type SyncBlockCode } from '../sync-block.js';
 import { processPendingForeignAction } from './sessions.js';
@@ -20,6 +22,38 @@ function formatDuration(ms: number): string {
   if (m < 60) return `${m}m ${rem}s`;
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
+}
+
+/**
+ * How a capture destination reads to a person. Captures route by repo
+ * (the server's org-routing), so this is the org a session lives in, which
+ * can differ from the org the key was minted in.
+ */
+export function describeCaptureDestination(dest: { routed?: string; orgName?: string | null; orgId?: string | null } | null | undefined): string | null {
+  if (!dest?.routed) return null;
+  if (dest.routed === 'private') return 'your private workspace';
+  const name = dest.orgName || dest.orgId;
+  if (!name) return null;
+  return `${name}${dest.routed === 'team' ? ' (assigned repo)' : ''}`;
+}
+
+/** Ask the server where a session started in this repo would go. Null when it can't say. */
+async function previewCaptureDestination(repoPath: string): Promise<string | null> {
+  try {
+    const remote = gitDetailed(['remote', 'get-url', 'origin'], { cwd: repoPath });
+    const repoUrl = remote.status === 0 ? remote.stdout.trim() : '';
+    const shas = listRecentShas(repoPath, SESSION_START_RECENT_SHAS);
+    const res = await api.previewRoute({
+      repoPath: getCanonicalRepoPath(repoPath),
+      repoUrl: repoUrl || undefined,
+      recentShas: shas.length > 0 ? shas : undefined,
+    }) as any;
+    return describeCaptureDestination({ routed: res?.routed, orgName: res?.org?.name, orgId: res?.org?.id });
+  } catch {
+    // An older server has no route-preview (404), or the network blipped.
+    // The line is informational; leave it out rather than guess.
+    return null;
+  }
 }
 
 export async function statusCommand(opts: { global?: boolean; all?: boolean } = {}) {
@@ -83,7 +117,9 @@ export async function statusCommand(opts: { global?: boolean; all?: boolean } = 
     console.log(chalk.gray('    Check your connection, then re-run `origin status`'));
   } else if (connected && isSolo) {
     console.log(chalk.green('  ✅ Connected · Solo Developer'));
-    console.log(chalk.gray(`    📦 Personal workspace · All repos · All agents`));
+    // The key's own org. Sessions still land where each repo belongs; the
+    // Repository section below says where that is for this repo.
+    console.log(chalk.gray(`    📦 Key from your personal workspace · All repos · All agents`));
   } else if (connected) {
     const orgName = config!.orgName || config!.orgId || 'unknown';
     console.log(chalk.green(`  ✅ Connected · Team Member @ ${orgName}`));
@@ -215,10 +251,8 @@ export async function statusCommand(opts: { global?: boolean; all?: boolean } = 
       if (state.capturedTo) {
         // Captures route by repo assignment, so the org a session lives in
         // can differ from the org the key was minted in — say which.
-        const where = state.capturedTo.routed === 'private'
-          ? 'your private workspace'
-          : `${state.capturedTo.orgName || state.capturedTo.orgId}${state.capturedTo.routed === 'team' ? ' (assigned repo)' : ''}`;
-        console.log(chalk.gray(`    Captured to: ${chalk.white(where)}`));
+        const where = describeCaptureDestination(state.capturedTo);
+        if (where) console.log(chalk.gray(`    Captured to: ${chalk.white(where)}`));
       }
 
       if (state.transcriptPath) {
@@ -323,6 +357,10 @@ export async function statusCommand(opts: { global?: boolean; all?: boolean } = 
     }
     if (repoConfig?.agent) {
       console.log(chalk.gray(`    Agent link:  ${chalk.cyan(repoConfig.agent)}`));
+    }
+    if (connected) {
+      const dest = await previewCaptureDestination(repoPath);
+      if (dest) console.log(chalk.gray(`    Sessions go to: ${chalk.white(dest)}`));
     }
 
     // Check for origin-sessions branch (entrypoints)

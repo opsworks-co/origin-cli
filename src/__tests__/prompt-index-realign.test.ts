@@ -119,8 +119,12 @@ describe('homePromptIndexByText — the write-site guard', () => {
   });
 
   it('tolerates truncation and whitespace differences between the two records', () => {
-    const truncated = [{ promptIndex: 0, promptText: 'now fix the capture side so shell' }];
-    expect(homePromptIndexByText(0, 'now fix the capture side so shell writes get recorded', truncated)).toBe(0);
+    // session-end clips a mapping's text at 200 raw chars, with no marker.
+    const full = 'now fix the capture side so shell writes get recorded, '.repeat(6);
+    const truncated = [{ promptIndex: 0, promptText: full.slice(0, 200) }];
+    expect(homePromptIndexByText(0, full, truncated)).toBe(0);
+    const marked = [{ promptIndex: 0, promptText: 'now fix the capture side so shell...' }];
+    expect(homePromptIndexByText(0, 'now fix the capture side so shell writes get recorded', marked)).toBe(0);
     const spaced = [{ promptIndex: 0, promptText: 'now fix   the capture\nside' }];
     expect(homePromptIndexByText(0, 'now fix the capture side', spaced)).toBe(0);
   });

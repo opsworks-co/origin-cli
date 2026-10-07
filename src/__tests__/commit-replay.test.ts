@@ -90,6 +90,51 @@ describe('commitReplayKind', () => {
     expect(commitReplayKind(repo, 'f'.repeat(40))).toBeNull();
     expect(commitReplayKind(repo, 'not-a-sha')).toBeNull();
   });
+
+  // The reflog read is a subprocess with a timeout, and on a starved host it
+  // fails. post-commit took that failure for "not a replay" and attested a
+  // rebase pick to the turn that ran the rebase (capture-e2e-rebase-replays-
+  // earlier-turn-commit, once under load). Here `git reflog` always fails.
+  describe.skipIf(process.platform === 'win32')('when the reflog cannot be read', () => {
+    const savedPath = process.env.PATH;
+    let shim = '';
+    beforeEach(() => {
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf-8' }).trim();
+      shim = fs.mkdtempSync(path.join(os.tmpdir(), 'reflog-fails-'));
+      fs.writeFileSync(path.join(shim, 'git'),
+        `#!/bin/sh\ncase "$1" in reflog) exit 128 ;; esac\nexec "${realGit}" "$@"\n`, { mode: 0o755 });
+    });
+    afterEach(() => {
+      process.env.PATH = savedPath;
+      fs.rmSync(shim, { recursive: true, force: true });
+    });
+    const reflogFails = () => { process.env.PATH = `${shim}${path.delimiter}${savedPath}`; };
+
+    it('a pick made while the rebase is still running is a replay, from the markers', () => {
+      git('checkout', '-q', '-b', 'conflict');
+      write('a.ts', 'theirs\n'); commit('conflicting');
+      write('b.ts', 'second\n'); commit('second pick');
+      git('checkout', '-q', 'main');
+      write('a.ts', 'ours\n'); commit('main');
+      git('checkout', '-q', 'conflict');
+      tryGit('rebase', 'main');
+      write('a.ts', 'resolved\n');
+      git('add', 'a.ts');
+      // Commit the resolution by hand: the rebase is still running, as it is
+      // while git runs post-commit for a pick.
+      git('commit', '-q', '--no-edit');
+      const pick = head();
+      reflogFails();
+      expect(commitReplayKind(repo, pick)).toBe('rebase');
+    });
+
+    it('is unknown, not "not a replay", when no replay is running either', () => {
+      write('a.ts', 'a\nb\n');
+      const plain = commit('plain');
+      reflogFails();
+      expect(commitReplayKind(repo, plain)).toBe('unknown');
+    });
+  });
 });
 
 describe('replayInProgress', () => {

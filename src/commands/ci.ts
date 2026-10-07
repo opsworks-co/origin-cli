@@ -1,14 +1,13 @@
 import chalk from 'chalk';
 import { git, gitDetailed, runDetailed } from '../utils/exec.js';
-import { getGitRoot, getHeadSha } from '../session-state.js';
+import { getGitRoot } from '../session-state.js';
 
 const HEX = /^[a-fA-F0-9]{4,64}$/;
 const SAFE_REF = /^[a-zA-Z0-9_./~^-]+$/;
 import {
   generateCIReport,
   formatCIReport,
-  collectSquashMergeAttribution,
-  writeCombinedNote,
+  squashMergeAttribution,
   generateGitHubActionsWorkflow,
 } from '../ci-integration.js';
 
@@ -34,43 +33,48 @@ export async function ciCheckCommand(opts: { range?: string }): Promise<void> {
 }
 
 /**
- * `origin ci squash-merge <base-branch>` — Collect attribution from all commits
- * being squashed and write a combined note to the merge commit.
+ * `origin ci squash-merge --range <base-before-merge>..<source-tip> --target <squash-sha>`
+ * — carry the attribution of a squashed pull request's original commits to the
+ * squash commit. Both ends are explicit: after the merge HEAD is the squash
+ * commit, so `<base>..HEAD` no longer names the original commits, and guessing
+ * would write an empty or somebody else's note.
  */
-export async function ciSquashMergeCommand(baseBranch: string): Promise<void> {
+export async function ciSquashMergeCommand(
+  baseBranch: string | undefined,
+  opts: { range?: string; target?: string; skipUnlessSquash?: boolean; warnOnly?: boolean } = {},
+): Promise<void> {
   const repoPath = getGitRoot();
   if (!repoPath) {
     console.error(chalk.red('Not inside a git repository.'));
     process.exit(1);
   }
 
-  console.log(chalk.bold(`\nCollecting attribution from commits since ${baseBranch}...\n`));
-
-  const result = collectSquashMergeAttribution(repoPath, baseBranch);
-
-  if (!result.success) {
-    console.error(chalk.red(`  ${result.message}`));
+  if (!opts.range || !opts.target || baseBranch) {
+    console.error(chalk.red('  origin ci squash-merge needs the original commits and the squash commit:'));
+    console.error(chalk.red('    origin ci squash-merge --range <base-before-merge>..<source-tip> --target <squash-sha>'));
+    if (baseBranch) {
+      console.error(chalk.gray(`  "${baseBranch}" alone is ambiguous: after a squash merge <base>..HEAD holds no original commits.`));
+    }
     process.exit(1);
   }
 
-  console.log(chalk.gray(`  ${result.message}`));
-
-  if (result.combinedNote) {
-    // Write the combined note to HEAD (the squash merge commit)
-    const headSha = getHeadSha();
-    if (headSha) {
-      const written = writeCombinedNote(repoPath, headSha, result.combinedNote);
-      if (written) {
-        console.log(chalk.green(`\n  Combined attribution note written to ${headSha.slice(0, 8)}`));
-      } else {
-        console.log(chalk.yellow(`\n  Warning: Could not write combined note to ${headSha.slice(0, 8)}`));
-      }
-    } else {
-      console.log(chalk.yellow('\n  Warning: Could not determine HEAD SHA.'));
-      console.log(chalk.gray('  Combined note:'));
-      console.log(chalk.gray('  ' + result.combinedNote.split('\n').join('\n  ')));
-    }
+  console.log(chalk.bold(`\nCarrying attribution from ${opts.range} to ${opts.target}...\n`));
+  const result = squashMergeAttribution(repoPath, { range: opts.range, target: opts.target, skipUnlessSquash: opts.skipUnlessSquash });
+  for (const w of result.warnings || []) {
+    console.log(chalk.gray(`  note: ${w.code}${w.sha ? ` ${w.sha.slice(0, 12)}` : ''}${w.sessionId ? ` session ${w.sessionId}` : ''} — ${w.detail}`));
   }
+  if (!result.success) {
+    // --warn-only (post-merge automation): the repository could not carry the
+    // attribution this time. Say so loudly, write nothing, do not fail the
+    // merged pull request. A wrong invocation is never masked.
+    if (opts.warnOnly && result.failure === 'operational') {
+      console.warn(chalk.yellow(`  warning: attribution was not carried (--warn-only): ${result.message}`));
+      return;
+    }
+    console.error(chalk.red(`  ${result.message}`));
+    process.exit(1);
+  }
+  console.log(result.outcome === 'written' ? chalk.green(`  ${result.message}`) : chalk.gray(`  ${result.message}`));
 }
 
 /**

@@ -68,3 +68,42 @@ describe('a watched write needs a net change to count', () => {
     expect(recorded(s)).toEqual([['same.ts', 'create']]);
   });
 });
+
+// Origin TODO 9ee5de26: `printf >> b.py` recorded b.py; a later
+// `git checkout b.py` put it back, and that net-zero observation returned
+// before touching the ledger — so b.py's record outlived the revert.
+describe('a command that puts a file back clears its earlier record', () => {
+  it('the revert removes the file from this slot, and says the state changed', () => {
+    const s = state();
+    expect(recordProbedShellEdits(s, repo, baseline, 0, ['edited.ts'])).toBe(true);
+    expect(recorded(s)).toEqual([['edited.ts', 'write']]);
+
+    write('edited.ts', 'before\n'); // git checkout edited.ts
+    expect(recordProbedShellEdits(s, repo, baseline, 0, ['edited.ts'])).toBe(true);
+    expect(s.liveEdits).toEqual([]);
+  });
+
+  it('leaves other turns, other slots and other files alone', () => {
+    const s = state();
+    recordProbedShellEdits(s, repo, baseline, 0, ['edited.ts', 'created.ts']);
+    recordProbedShellEdits(s, repo, baseline, 1, ['edited.ts']);
+    recordProbedShellEdits(s, repo, baseline, 0, ['edited.ts'], { toolLabel: 'origin:write-journal', evidence: 'write_journal' });
+
+    write('edited.ts', 'before\n');
+    recordProbedShellEdits(s, repo, baseline, 0, ['edited.ts']);
+
+    const left = (s.liveEdits as any[]).map((e) => [e.promptIndex, e.toolName, e.edits.map((x: any) => x.file).sort()]);
+    expect(left).toEqual(expect.arrayContaining([
+      [0, expect.not.stringMatching(/write-journal/), ['created.ts']],
+      [1, expect.not.stringMatching(/write-journal/), ['edited.ts']],
+      [0, 'origin:write-journal', ['edited.ts']],
+    ]));
+    expect(left).toHaveLength(3);
+  });
+
+  it('a net-zero observation with nothing recorded still changes nothing', () => {
+    const s = state();
+    expect(recordProbedShellEdits(s, repo, baseline, 0, ['same.ts'])).toBe(false);
+    expect(s.liveEdits).toEqual([]);
+  });
+});

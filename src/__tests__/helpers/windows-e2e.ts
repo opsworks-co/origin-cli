@@ -47,6 +47,25 @@
 // Three files added after the sweep that skipped Windows at birth, with no
 // recorded miss, now run: carried-row-sheds-inherited-files, checkout-restop-
 // stays-empty, mid-turn-pull. A hold needs a Windows failure of its own.
+//
+// It happened again: between #1711 and #1961 fifteen more files were born with
+// `skipIf(!haveDist || isWindows)`, each copying the one before, while the
+// Windows job was switched off (Actions disabled since 2026-09-15). None of
+// them ever failed on Windows; the audit found no POSIX-only step — their
+// "shell commands" are transcript text, the work is done in Node, and the
+// `#!/bin/sh` git hooks some install are the same ones rebase-onto-own-squash
+// and replayed-commit already run under Git for Windows. They run again, and
+// capture-e2e-windows-gate.test.ts now refuses a Windows skip in any
+// capture-e2e file not listed here.
+
+/**
+ * capture-e2e files allowed to skip native Windows, each with the Windows
+ * failure that earned the hold. Add a file only with its own failure.
+ */
+export const WINDOWS_HELD: Readonly<Record<string, string>> = {
+  'capture-e2e-cursor-concurrent-start.test.ts': 'issue #1568 — the reservation-filed prompt is lost, ~1 run in 4',
+};
+
 export const isWindows = process.platform === 'win32';
 
 /** Multiply an explicit test/hook timeout by this. 1 everywhere but Windows. */

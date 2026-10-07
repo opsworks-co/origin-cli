@@ -340,6 +340,9 @@ export type ViolationCode =
   | 'line_counts_disagree_with_diff'
   | 'duplicate_file_section'
   | 'identical_change_in_two_turns'
+  // The row shows nothing while the turn's own hook-attested tool calls
+  // changed files that no row of the session carries. See verifySession.
+  | 'emptied_row_with_own_writes'
   // Session-level: the header the CLI keeps for the session disagrees with
   // the turns it is supposed to summarise. Reported at SESSION_LEVEL_INDEX.
   | 'header_file_unclaimed_by_turns'
@@ -456,6 +459,25 @@ export interface VerifiableTurn {
    * again instead of silently excused.
    */
   fileSetOnly?: boolean;
+  /**
+   * Files the turn's OWN hook-attested tool calls changed — a Claude Code /
+   * Cursor Edit or Write the post-tool-use hook saw succeed, with content that
+   * differs — less any the write journal saw put back within the turn. Set
+   * by the loader (verify-capture.ts) from the state file's `liveEdits`;
+   * absent means "not known", which is never a finding.
+   *
+   * Evidence about the TURN, not the row: it is what lets an emptied row be
+   * told from a chat-only one. Session ed0e33c8 row 23 was re-captured as
+   * chat-only over a turn that had written two files; only the header rule
+   * noticed, and #1719 holds that header back on a re-launched session.
+   */
+  ownWriteFiles?: string[] | null;
+  /**
+   * Files the turn wrote and put back before it ended (discarded-work.ts):
+   * the row is honestly empty of them, so they explain an own write the row
+   * does not show.
+   */
+  discardedFiles?: string[] | null;
   /**
    * When this row was written. Set by every producer via `stampCaptured`.
    *
@@ -718,6 +740,43 @@ export function verifySession(turns: VerifiableTurn[], header?: VerifiableHeader
 
   for (const t of graded) {
     if (t && Number.isInteger(t.promptIndex)) out.push(...verifyTurn(t));
+  }
+
+  // An EMPTIED row. The row shows nothing — no files, no text, no declared
+  // cut — while the turn's own hook-attested tool calls changed files, and no
+  // row of the session carries them. A chat-only turn and a turn whose
+  // capture was blanked render identically; the turn's own edit record is
+  // what tells them apart (TODO cb54d0ff, from the #1719 review).
+  //
+  // Explained, and so not a finding: a file the turn put back before it ended
+  // (`discardedFiles` — the row is honestly empty of it), a file written
+  // outside the repo, and a file some OTHER row of the session carries — a
+  // mid-turn prompt or a re-Stop can legitimately move a turn's work onto its
+  // neighbour, and the cross-turn rule below is the one that grades that.
+  // Session-level for that last reason: the row cannot answer it alone.
+  const namedBy = (t: VerifiableTurn): string[] => [
+    ...(t.filesChanged || []),
+    ...(t.contentUnavailableFiles || []),
+    ...(t.outOfRepoFiles || []),
+    ...parseUnifiedDiff(t.diff).files.map((f) => f.file),
+    ...parseUnifiedDiff(t.uncommittedDiff).files.map((f) => f.file),
+  ].filter((f): f is string => typeof f === 'string' && f.length > 0);
+  for (const t of graded) {
+    if (!t || !Number.isInteger(t.promptIndex)) continue;
+    const own = (t.ownWriteFiles || []).filter((f): f is string => typeof f === 'string' && f.length > 0);
+    if (own.length === 0 || namedBy(t).length > 0) continue;
+    const explained = new Set([...(t.discardedFiles || []), ...(t.outOfRepoFiles || [])]
+      .filter((f): f is string => typeof f === 'string').map(diffPathKey));
+    const elsewhere = new Set(graded.filter((o) => o !== t).flatMap(namedBy).map(diffPathKey));
+    const lost = own.filter((f) => !explained.has(diffPathKey(f)) && !elsewhere.has(diffPathKey(f)));
+    if (lost.length === 0) continue;
+    out.push({
+      code: 'emptied_row_with_own_writes',
+      severity: 'contradiction',
+      promptIndex: t.promptIndex,
+      detail: `row shows nothing, but the turn's own tool calls changed ${lost.length} file(s) that no row of the session carries`,
+      files: lost.slice(0, MAX_LISTED),
+    });
   }
 
   // Canonical change signatures see through tool-vs-git hunk grouping.

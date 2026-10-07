@@ -34,8 +34,12 @@ export interface DedupCandidate {
   promptSubmittedAt?: string[];
   promptResponses?: string[];
   liveEdits?: unknown[];
+  editHookPathsByTurn?: unknown[];
   lastClosedTurnIndex?: number;
   promptIndexBase?: number;
+  /** The `local-` id the session ran under before promotion — its early
+   *  commits' trailers name it. */
+  localSessionId?: string;
 }
 
 /**
@@ -94,6 +98,10 @@ export function carryForwardTurnState<T extends DedupCandidate>(state: T, dup: D
   if (Array.isArray(dup.liveEdits) && dup.liveEdits.length > (state.liveEdits?.length || 0)) {
     state.liveEdits = dup.liveEdits;
   }
+  if (Array.isArray(dup.editHookPathsByTurn)
+      && dup.editHookPathsByTurn.length > (state.editHookPathsByTurn?.length || 0)) {
+    state.editHookPathsByTurn = dup.editHookPathsByTurn;
+  }
   if (Number.isInteger(dup.lastClosedTurnIndex as number)
       && (dup.lastClosedTurnIndex as number) > (state.lastClosedTurnIndex ?? -1)) {
     state.lastClosedTurnIndex = dup.lastClosedTurnIndex;
@@ -109,6 +117,11 @@ export function carryForwardTurnState<T extends DedupCandidate>(state: T, dup: D
   if (Number.isInteger(dup.promptIndexBase as number)
       && (dup.promptIndexBase as number) > (state.promptIndexBase ?? 0)) {
     state.promptIndexBase = dup.promptIndexBase;
+  }
+  // Same session, so the same pre-promotion id: without it the commits made
+  // under that id read as a stranger's once this file replaces the old one.
+  if (!state.localSessionId && typeof dup.localSessionId === 'string' && dup.localSessionId.startsWith('local-')) {
+    state.localSessionId = dup.localSessionId;
   }
   return state;
 }

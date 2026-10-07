@@ -120,6 +120,63 @@ describe('worktree path scoping', () => {
     expect(sessionRepoRoots({})).toEqual([]);
   });
 
+  it('names a worktree file from the worktree even when the main checkout is listed first', () => {
+    // The main checkout contains every nested worktree, so "first containing
+    // root" named this file from main whenever main came first.
+    const abs = path.join(worktree, 'packages/cli/src/x.ts');
+    expect(scopeCapturedPath([main, worktree], abs)).toBe('packages/cli/src/x.ts');
+    expect(scopeCapturedPath([worktree, main], abs)).toBe('packages/cli/src/x.ts');
+    // A file of the main checkout itself is still main's.
+    expect(scopeCapturedPath([worktree, main], path.join(main, 'packages/cli/src/x.ts'))).toBe('packages/cli/src/x.ts');
+  });
+
+  it('a worktree session that discovered the MAIN checkout keeps naming its own files from its worktree', () => {
+    // Session 90eca883 (2026-09-23): repoPath is the worktree, and at turn 15 a
+    // command run in the main checkout recorded main as a discovered tree.
+    // sessionRepoRoots lists discovered trees first, so from turn 16 every
+    // transcript Write in the worktree was spelled
+    // `.claude/worktrees/<ours>/packages/cli/src/…` — the name the ledger's
+    // tool_call evidence never used, so the row's sections were dropped as
+    // written by no tool (TODO 7b6837f2).
+    const roots = sessionRepoRoots({
+      repoPath: worktree,
+      lastCwd: worktree,
+      discoveredWorkTrees: [{ path: main }],
+    });
+    expect(roots.map((r) => fs.realpathSync.native(r))).toContain(fs.realpathSync.native(main));
+    expect(scopeCapturedPath(roots, path.join(worktree, 'packages/cli/src/x.ts')))
+      .toBe('packages/cli/src/x.ts');
+  });
+
+  it('a multi-repo workspace still names a sub-repo file from the workspace', () => {
+    // Deepest-root is a rule about one repository's worktrees. A workspace
+    // session (repoPath = the workspace, repoPaths = the repos under it) named
+    // sub-repo files `<repo>/<file>` before, matching captureMultiRepoFiles,
+    // and must go on doing so.
+    const ws = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'origin-ws-'));
+    try {
+      const a = path.join(ws, 'repo-a');
+      const b = path.join(ws, 'repo-b');
+      for (const r of [a, b]) { fs.mkdirSync(r); git(r, 'init', '-q', '-b', 'main', '.'); }
+      const roots = sessionRepoRoots({ repoPath: ws, lastCwd: ws, repoPaths: [a, b] });
+      expect(scopeCapturedPath(roots, path.join(a, 'src', 'x.ts'))).toBe('repo-a/src/x.ts');
+      expect(scopeCapturedPath(roots, path.join(b, 'lib', 'y.ts'))).toBe('repo-b/lib/y.ts');
+    } finally {
+      try { fs.rmSync(ws, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('a repo attached from outside the session root keeps its own names', () => {
+    const other = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'origin-attached-'));
+    try {
+      git(other, 'init', '-q', '-b', 'main', '.');
+      const roots = sessionRepoRoots({ repoPath: main, lastCwd: main, repoPaths: [main, other] });
+      expect(scopeCapturedPath(roots, path.join(other, 'lib', 'y.ts'))).toBe('lib/y.ts');
+    } finally {
+      try { fs.rmSync(other, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
   it('scopes transcript files through a worktree discovered earlier in the session', () => {
     const roots = sessionRepoRoots({
       repoPath: main,

@@ -23,6 +23,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { buildCommitPayload, prefetchCommitPayloads } from '../history-backfill.js';
+import { commitLineCounts } from '../git-capture.js';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8' }).trim();
@@ -73,6 +74,45 @@ describe('prefetchCommitPayloads — batched reads equal the per-commit reads', 
       const batched = buildCommitPayload(dir, sha, prefetch);
       expect(batched, `payload for ${sha.slice(0, 8)}`).toEqual(perCommit);
     }
+  });
+
+  it("carries git's own line totals, so the server never counts a cut patch", () => {
+    // Prod 92408f51 (2026-09-25): the backfill sent a 500KB byte slice and no
+    // counts; the server counted the slice and stored +678 for +729.
+    const shas = shasNewestFirst();
+    const prefetch = prefetchCommitPayloads(dir, shas);
+    for (const sha of shas) {
+      const p = buildCommitPayload(dir, sha, prefetch)!;
+      const numstat = git(dir, 'diff-tree', '--no-commit-id', '--numstat', '-M', '-r', '--root', sha)
+        .split('\n').filter(Boolean).map((l) => l.split('\t'));
+      if (numstat.length === 0) continue; // the merge: asked separately below
+      const added = numstat.reduce((n, r) => n + Number(r[0]), 0);
+      const removed = numstat.reduce((n, r) => n + Number(r[1]), 0);
+      expect([p.additions, p.deletions], sha.slice(0, 8)).toEqual([added, removed]);
+      expect(p.diffTruncated).toBeUndefined();
+    }
+    // The merge's totals are its resolution (commitLineCounts), the same
+    // answer with and without the prefetch — the batched read has no rows
+    // for it and must not hand it 0/0.
+    const merge = git(dir, 'rev-parse', 'HEAD');
+    const mp = buildCommitPayload(dir, merge, prefetch)!;
+    const direct = commitLineCounts(dir, merge)!;
+    // A clean merge resolves nothing: 0/0 from both, and equal is the point.
+    expect([mp.additions, mp.deletions]).toEqual([direct.added, direct.removed]);
+  });
+
+  it('cuts an oversize patch at hunk boundaries and flags it, keeping the totals whole', () => {
+    // One file with a hunk far over the ingest limit.
+    fs.writeFileSync(path.join(dir, 'huge.json'), Array.from({ length: 6000 }, (_, i) => `${'x'.repeat(100)} ${i}`).join('\n') + '\n');
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-q', '-m', 'huge fixture');
+    const sha = git(dir, 'rev-parse', 'HEAD');
+    const p = buildCommitPayload(dir, sha)!;
+    expect(p.additions).toBe(6000);
+    expect(p.diffTruncated).toBe(true);
+    expect((p.diff || '').length).toBeLessThanOrEqual(500_000);
+    // Hunk-bounded: the text, if any, is a parseable diff, never a mid-line cut.
+    if (p.diff) expect(p.diff.startsWith('diff --git ')).toBe(true);
   });
 
   it('gives the merge its first-parent file list, not an empty one', () => {

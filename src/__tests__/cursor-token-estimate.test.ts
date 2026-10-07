@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   CURSOR_CHARS_PER_TOKEN,
   CURSOR_PROMPT_CONTEXT_MULTIPLIER,
+  cursorTranscriptLookupId,
   estimateCursorTokens,
   measureCursorJsonlTokens,
 } from '../agents/cursor.js';
@@ -76,5 +80,95 @@ describe('measureCursorJsonlTokens', () => {
     const r = measureCursorJsonlTokens(lines);
     expect(r.inputTokens).toBeGreaterThanOrEqual(900);
     expect(r.inputTokens).toBeLessThanOrEqual(1100);
+  });
+
+  it('reconstructs a missing Read result from disk and bills the next request as cache', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-tokens-'));
+    const file = path.join(dir, 'note.ts');
+    // ~1000 tokens of file body that Cursor never writes into the JSONL.
+    fs.writeFileSync(file, 'x'.repeat(3500));
+    const lines = [
+      JSON.stringify({
+        role: 'user',
+        message: { content: [{ type: 'text', text: 'read the note' }] },
+      }),
+      JSON.stringify({
+        role: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'ReadFile', input: { path: file } }] },
+      }),
+      JSON.stringify({
+        role: 'assistant',
+        message: { content: [{ type: 'text', text: 'ok' }] },
+      }),
+    ];
+    const r = measureCursorJsonlTokens(lines);
+    expect(r.inputTokens).toBeGreaterThanOrEqual(900);
+    expect(r.cacheReadTokens).toBeGreaterThan(0);
+    expect(r.tokensUsed).toBe(r.inputTokens + r.outputTokens);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not bill a Read of an image as its bytes decoded as text', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-tokens-'));
+    const file = path.join(dir, 'shot.png');
+    // PNG signature (NUL at byte 8) + 40 KB of body — ~11k tokens if counted as text.
+    fs.writeFileSync(file, Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d]),
+      Buffer.alloc(40_000, 0x41),
+    ]));
+    const r = measureCursorJsonlTokens([
+      JSON.stringify({
+        role: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Read', input: { path: file } }] },
+      }),
+      JSON.stringify({
+        role: 'assistant',
+        message: { content: [{ type: 'text', text: 'done' }] },
+      }),
+    ]);
+    expect(r.inputTokens).toBeLessThan(100);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('respects Read offset/limit so a slice is not billed as the whole file', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-tokens-'));
+    const file = path.join(dir, 'big.ts');
+    fs.writeFileSync(file, `${'line\n'.repeat(400)}end\n`);
+    const full = measureCursorJsonlTokens([
+      JSON.stringify({
+        role: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Read', input: { path: file } }] },
+      }),
+      JSON.stringify({
+        role: 'assistant',
+        message: { content: [{ type: 'text', text: 'done' }] },
+      }),
+    ]);
+    const sliced = measureCursorJsonlTokens([
+      JSON.stringify({
+        role: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Read', input: { path: file, offset: 1, limit: 2 } }] },
+      }),
+      JSON.stringify({
+        role: 'assistant',
+        message: { content: [{ type: 'text', text: 'done' }] },
+      }),
+    ]);
+    expect(full.inputTokens).toBeGreaterThan(sliced.inputTokens);
+    expect(sliced.inputTokens).toBeLessThan(20);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('cursorTranscriptLookupId', () => {
+  it('prefers the stable conversation_id over a rotating session_id', () => {
+    expect(cursorTranscriptLookupId({
+      session_id: 'turn-rotates-every-stop',
+      conversation_id: '6afa9d45-76ed-484a-baf2-7ef937885831',
+    })).toBe('6afa9d45-76ed-484a-baf2-7ef937885831');
+  });
+
+  it('falls back to session_id when conversation_id is absent', () => {
+    expect(cursorTranscriptLookupId({ session_id: 'only-session' })).toBe('only-session');
   });
 });

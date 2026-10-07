@@ -45,15 +45,32 @@ export function getCursorModelFromDb(conversationId: string): string | null {
 export interface CursorTranscriptData {
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
   tokensUsed: number;
   transcript: string;  // JSON stringified [{role, content}]
   jsonlPath: string;   // resolved on-disk path of the agent-transcript JSONL
 }
 
 /**
+ * The on-disk agent-transcript folder is Cursor's STABLE conversation_id.
+ * session_id rotates every turn and is not the JSONL name — preferring it
+ * made discoverCursorTranscript miss, and Stop fell through to a
+ * prompt-length guess (prod: 196 tokens / $0.00 on a 66-minute chat).
+ */
+export function cursorTranscriptLookupId(input: {
+  session_id?: unknown;
+  conversation_id?: unknown;
+}): string | undefined {
+  const conv = typeof input.conversation_id === 'string' ? input.conversation_id.trim() : '';
+  if (conv) return conv;
+  const sess = typeof input.session_id === 'string' ? input.session_id.trim() : '';
+  return sess || undefined;
+}
+
+/**
  * Resolve the on-disk path of a Cursor agent-transcript JSONL for a
- * conversation — same strict ID-anchored discovery + 30-minute staleness
- * guard discoverCursorTranscript uses, but returns the raw path so callers
+ * conversation — same strict ID-anchored discovery discoverCursorTranscript
+ * uses, but returns the raw path so callers
  * that need to RE-PARSE the JSONL (capturePromptEdits, which walks per-turn
  * tool calls into isolated PromptEdits) can read it directly. Cursor never
  * routes its agent-transcript path through `input.transcript_path`, so
@@ -84,19 +101,10 @@ export function findCursorTranscriptJsonl(conversationId?: string): string | nul
         conversationId, matches,
       });
     }
-    const transcriptFileFinal = matches[0];
-    try {
-      const stat = fs.statSync(transcriptFileFinal);
-      if (Date.now() - stat.mtimeMs > 30 * 60 * 1000) {
-        debugLog('cursor', 'findCursorTranscriptJsonl: matched file stale, refusing', {
-          conversationId, ageMs: Date.now() - stat.mtimeMs,
-        });
-        return null;
-      }
-    } catch {
-      return null;
-    }
-    return transcriptFileFinal;
+    // An exact conversation-id match IS that chat, even if the last turn
+    // ended more than 30 minutes ago. The stale refuse used to drop the
+    // file and send Stop down the prompt-length fallback ($0.00).
+    return matches[0];
   } catch {
     return null;
   }
@@ -137,18 +145,33 @@ export function findCursorSubagentJsonls(mainJsonlPath: string): string[] {
  *
  * Each line: { role: "user"|"assistant", message: { content: [{ type, text }] } }
  *
- * There are no token counts in these files. We estimate from billed-looking
- * text: user prompts, assistant text, thinking, tool-call args, and tool
- * results. Tool I/O *is* billed (it sits in the context window); an earlier
- * version skipped it and then multiplied user text by 3 to guess at file
- * context, which both undercounted tools and double-guessed reads.
+ * There are no token counts in these files. Cursor also records tool CALLS
+ * but almost never tool RESULTS, so a sum of visible text prices a
+ * 66-minute / 42-tool session at ~200 tokens / $0.00.
  *
- * Still an estimate — Cursor does not expose cache reads or the system
- * prompt / rules payload — so we keep a small multiplier on *user prompt
- * text only* for injected context that never appears in the JSONL.
+ * Estimate:
+ *   • user / assistant / thinking / tool-call args from the JSONL
+ *   • explicit tool_result blocks when present
+ *   • Read / ReadFile bodies reconstructed from disk (offset/limit aware)
+ *   • each assistant line is one billed request: new text is input,
+ *     everything already seen is a cache read (Cursor's real bill)
+ *
+ * Still an estimate — no system prompt, and Shell/Grep output cannot be
+ * recovered — so user prompt text keeps a small multiplier for injected
+ * rules that never appear in the JSONL.
  */
 export const CURSOR_CHARS_PER_TOKEN = 3.5;
 export const CURSOR_PROMPT_CONTEXT_MULTIPLIER = 2;
+/** Refuse to slurp a giant file into the estimate (binaries, generated). */
+export const CURSOR_RECONSTRUCT_MAX_BYTES = 2 * 1024 * 1024;
+export const CURSOR_RECONSTRUCT_MAX_CHARS = 200_000;
+
+export interface CursorTokenEstimate {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  tokensUsed: number;
+}
 
 export function estimateCursorTokens(counts: {
   userChars: number;
@@ -156,7 +179,7 @@ export function estimateCursorTokens(counts: {
   assistantChars: number;
   thinkingChars: number;
   toolUseChars: number;
-}): { inputTokens: number; outputTokens: number; tokensUsed: number } {
+}): CursorTokenEstimate {
   const inputTokens =
     Math.round(Math.max(counts.userChars, 0) / CURSOR_CHARS_PER_TOKEN) * CURSOR_PROMPT_CONTEXT_MULTIPLIER +
     Math.round(Math.max(counts.toolResultChars, 0) / CURSOR_CHARS_PER_TOKEN);
@@ -165,7 +188,7 @@ export function estimateCursorTokens(counts: {
       Math.max(counts.thinkingChars, 0) +
       Math.max(counts.toolUseChars, 0)) / CURSOR_CHARS_PER_TOKEN,
   );
-  return { inputTokens, outputTokens, tokensUsed: inputTokens + outputTokens };
+  return { inputTokens, outputTokens, cacheReadTokens: 0, tokensUsed: inputTokens + outputTokens };
 }
 
 function billedChars(value: unknown): number {
@@ -174,13 +197,83 @@ function billedChars(value: unknown): number {
   try { return JSON.stringify(value).length; } catch { return 0; }
 }
 
-/** Token buckets from Cursor JSONL lines — shared by discovery and tests. */
-export function measureCursorJsonlTokens(lines: string[]): ReturnType<typeof estimateCursorTokens> {
-  let userChars = 0;
-  let toolResultChars = 0;
-  let assistantChars = 0;
-  let thinkingChars = 0;
-  let toolUseChars = 0;
+function charsToTokens(chars: number): number {
+  return Math.round(Math.max(chars, 0) / CURSOR_CHARS_PER_TOKEN);
+}
+
+function isReadTool(name: unknown): boolean {
+  const n = String(name || '').toLowerCase();
+  return n === 'read' || n === 'readfile' || n === 'read_file';
+}
+
+function toolFilePath(input: unknown, cwd?: string): string | null {
+  if (!input || typeof input !== 'object') return null;
+  const rec = input as Record<string, unknown>;
+  const raw = rec.path ?? rec.file_path ?? rec.target_file ?? rec.filePath;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const p = raw.trim();
+  if (p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p)) return p;
+  if (!cwd) return null;
+  return path.resolve(cwd, p);
+}
+
+function reconstructReadChars(input: unknown, cwd?: string): number {
+  const filePath = toolFilePath(input, cwd);
+  if (!filePath) return 0;
+  try {
+    const st = fs.statSync(filePath);
+    if (!st.isFile() || st.size <= 0 || st.size > CURSOR_RECONSTRUCT_MAX_BYTES) return 0;
+    const buf = fs.readFileSync(filePath);
+    // An image or other binary file is not text the model read — counting its
+    // bytes as UTF-8 chars billed a 37 KB PNG as ~10k tokens on every request.
+    if (buf.subarray(0, 8192).includes(0)) return 0;
+    let text = buf.toString('utf-8');
+    const rec = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    const offset = typeof rec.offset === 'number' && rec.offset > 0 ? Math.floor(rec.offset) : 0;
+    const limit = typeof rec.limit === 'number' && rec.limit > 0 ? Math.floor(rec.limit) : 0;
+    if (offset || limit) {
+      const lines = text.split('\n');
+      const start = offset > 0 ? offset - 1 : 0;
+      text = lines.slice(start, limit ? start + limit : undefined).join('\n');
+    }
+    return Math.min(text.length, CURSOR_RECONSTRUCT_MAX_CHARS);
+  } catch {
+    return 0;
+  }
+}
+
+function toolResultChars(block: any): number {
+  if (typeof block?.content === 'string') return block.content.length;
+  if (Array.isArray(block?.content)) {
+    return billedChars(block.content.map((b: any) => typeof b === 'string' ? b : (b?.text || b?.content || '')).filter(Boolean).join('\n'));
+  }
+  if (block?.content) return billedChars(block.content);
+  return 0;
+}
+
+/**
+ * Token buckets from Cursor JSONL. Reconstructs missing Read results and
+ * bills each assistant line as a request (new text = input, prior = cache).
+ */
+export function measureCursorJsonlTokens(lines: string[], opts: { cwd?: string } = {}): CursorTokenEstimate {
+  let pendingFreshChars = 0;
+  let pendingResultChars = 0;
+  let contextChars = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheReadTokens = 0;
+  let sawAssistant = false;
+
+  const billRequest = (outputChars: number) => {
+    const fresh = pendingFreshChars + pendingResultChars;
+    inputTokens += charsToTokens(fresh);
+    cacheReadTokens += charsToTokens(contextChars);
+    contextChars += fresh + outputChars;
+    outputTokens += charsToTokens(outputChars);
+    pendingFreshChars = 0;
+    pendingResultChars = 0;
+    sawAssistant = true;
+  };
 
   for (const line of lines) {
     if (!line.trim()) continue;
@@ -188,39 +281,63 @@ export function measureCursorJsonlTokens(lines: string[]): ReturnType<typeof est
     try { entry = JSON.parse(line); } catch { continue; }
     const role = entry.role || 'unknown';
     const content = entry.message?.content;
-    const addToolResult = (raw: unknown) => { toolResultChars += billedChars(raw); };
 
     if (typeof content === 'string') {
-      if (role === 'user') userChars += content.length;
-      else assistantChars += content.length;
+      if (role === 'user') pendingFreshChars += content.length * CURSOR_PROMPT_CONTEXT_MULTIPLIER;
+      else if (role === 'assistant') billRequest(content.length);
       continue;
     }
     if (!Array.isArray(content)) continue;
+
+    if (role === 'user') {
+      for (const c of content as any[]) {
+        if (c?.type === 'text' && typeof c.text === 'string') {
+          pendingFreshChars += c.text.length * CURSOR_PROMPT_CONTEXT_MULTIPLIER;
+        } else if (c?.type === 'tool_result') {
+          pendingResultChars += toolResultChars(c);
+        }
+      }
+      continue;
+    }
+    if (role !== 'assistant') continue;
+
+    let outputChars = 0;
+    let sameMessageResults = 0;
+    let reconstructed = 0;
     for (const c of content as any[]) {
       const t = c?.type;
-      if (t === 'text' && typeof c.text === 'string') {
-        if (role === 'user') userChars += c.text.length;
-        else assistantChars += c.text.length;
-      } else if (t === 'thinking') {
-        thinkingChars += billedChars(c.thinking || c.text || '');
-      } else if (t === 'tool_use') {
-        toolUseChars += billedChars(c.input ?? c.arguments ?? '');
+      if (t === 'text' && typeof c.text === 'string') outputChars += c.text.length;
+      else if (t === 'thinking') outputChars += billedChars(c.thinking || c.text || '');
+      else if (t === 'tool_use') {
+        outputChars += billedChars(c.input ?? c.arguments ?? '');
+        if (isReadTool(c.name)) reconstructed += reconstructReadChars(c.input ?? c.arguments, opts.cwd);
       } else if (t === 'tool_result') {
-        if (typeof c.content === 'string') addToolResult(c.content);
-        else if (Array.isArray(c.content)) {
-          addToolResult(c.content.map((b: any) => typeof b === 'string' ? b : (b?.text || b?.content || '')).filter(Boolean).join('\n'));
-        } else if (c.content) addToolResult(c.content);
+        sameMessageResults += toolResultChars(c);
       }
     }
+    // Fixture / rare shape: a tool_result recorded on the assistant line is
+    // treated as this request's input. Reconstructed Read bodies arrive AFTER
+    // the call, so they wait for the next request (or flush at the end).
+    pendingResultChars += sameMessageResults;
+    billRequest(outputChars);
+    pendingResultChars += reconstructed;
   }
-  return estimateCursorTokens({ userChars, toolResultChars, assistantChars, thinkingChars, toolUseChars });
+
+  if (!sawAssistant && pendingFreshChars + pendingResultChars > 0) {
+    inputTokens += charsToTokens(pendingFreshChars + pendingResultChars);
+  } else if (pendingResultChars > 0) {
+    inputTokens += charsToTokens(pendingResultChars);
+    cacheReadTokens += charsToTokens(contextChars);
+  }
+
+  return { inputTokens, outputTokens, cacheReadTokens, tokensUsed: inputTokens + outputTokens };
 }
 
 export function discoverCursorTranscript(conversationId?: string, hookCwd?: string, opts: { verbose?: boolean } = {}): CursorTranscriptData | null {
   try {
-    // STRICT ID-anchored discovery + staleness guard live in the shared
-    // resolver so capturePromptEdits and this token/display parser agree on
-    // exactly which file is "the" transcript for this conversation.
+    // STRICT ID-anchored discovery lives in the shared resolver so
+    // capturePromptEdits and this token/display parser agree on exactly
+    // which file is "the" transcript for this conversation.
     const transcriptFileFinal = findCursorTranscriptJsonl(conversationId);
     if (!transcriptFileFinal) return null;
 
@@ -239,7 +356,7 @@ export function discoverCursorTranscript(conversationId?: string, hookCwd?: stri
     const truncate = (s: string) => s.length > TRUNC ? s.slice(0, TRUNC) + `… [+${s.length - TRUNC} chars]` : s;
 
     const turns: Array<{ role: string; content: string }> = [];
-    const estimated = measureCursorJsonlTokens(lines);
+    const estimated = measureCursorJsonlTokens(lines, { cwd: hookCwd });
 
     for (const line of lines) {
       try {
@@ -306,12 +423,14 @@ export function discoverCursorTranscript(conversationId?: string, hookCwd?: stri
       turns: turns.length,
       estimatedInputTokens: estimated.inputTokens,
       estimatedOutputTokens: estimated.outputTokens,
+      estimatedCacheReadTokens: estimated.cacheReadTokens,
       totalTokens: estimated.tokensUsed,
     });
 
     return {
       inputTokens: estimated.inputTokens,
       outputTokens: estimated.outputTokens,
+      cacheReadTokens: estimated.cacheReadTokens,
       tokensUsed: estimated.tokensUsed,
       transcript: JSON.stringify(turns),
       jsonlPath: transcriptFileFinal,

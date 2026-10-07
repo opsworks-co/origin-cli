@@ -5,11 +5,11 @@ import os from 'os';
 import { git, gitDetailed } from '../utils/exec.js';
 import { listSessionIds, readSessionFile } from '../session-store.js';
 import { searchPrompts, type PromptRecord } from '../local-db.js';
+import { readAttributionNoteBodies } from '../history-search.js';
 import { getGitRoot, type SessionState } from '../session-state.js';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 
-const HEX = /^[a-fA-F0-9]{4,64}$/;
 const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
 // ─── Types ───────────────────────────────────────────────────────────────
@@ -223,9 +223,26 @@ function searchSessionStateFiles(
 }
 
 /**
+ * The searchable prompt texts in one parsed note. Current notes nest
+ * everything under `origin` (see buildNoteObject in git-notes.ts); old ones
+ * were flat. A note written with prompt text withheld has no text to match.
+ */
+function notePrompts(data: any): { text: string; timestamp?: string; files?: string[] }[] {
+  const raw: any[] = Array.isArray(data.prompts) ? data.prompts : data.prompt ? [data.prompt] : [];
+  const prompts = raw
+    .map((p) => (typeof p === 'string'
+      ? { text: p }
+      : { text: p?.text || p?.prompt || '', timestamp: p?.timestamp, files: p?.files }))
+    .filter((p) => p.text);
+  if (prompts.length) return prompts;
+  const whole = data.fullPrompt || data.promptSummary;
+  return typeof whole === 'string' && whole ? [{ text: whole }] : [];
+}
+
+/**
  * Check git notes for prompt data.
  */
-function searchGitNotes(
+export function searchGitNotes(
   repoPath: string,
   query: string,
   opts: { limit: number; from?: Date; agent?: string },
@@ -233,60 +250,46 @@ function searchGitNotes(
   const results: SearchResult[] = [];
   const lowerQuery = query.toLowerCase();
 
-  {
-    const r = gitDetailed(['notes', '--ref=origin', 'list'], { cwd: repoPath });
-    if (r.status !== 0) return results;
-    const notesList = r.stdout.trim();
-    if (!notesList) return results;
+  for (const { commit: target, body: rawBody } of readAttributionNoteBodies(repoPath)) {
+    const body = rawBody.trim();
+    if (results.length >= opts.limit) break;
 
-    for (const line of notesList.split('\n').filter(Boolean)) {
-      if (results.length >= opts.limit) break;
-      const parts = line.trim().split(/\s+/);
-      const noteBlob = parts[0];
-      if (!noteBlob) continue;
-      const target = parts[1] || noteBlob;
-      if (!HEX.test(target)) continue;
-
-      {
-        const nr = gitDetailed(['notes', '--ref=origin', 'show', target], { cwd: repoPath });
-        if (nr.status !== 0) continue;
-        const noteContent = nr.stdout.trim();
-
-        // Try to parse as JSON
-        try {
-          const data = JSON.parse(noteContent);
-          const prompts = data.prompts || (data.prompt ? [data.prompt] : []);
-          for (const p of prompts) {
-            if (results.length >= opts.limit) break;
-            const text = typeof p === 'string' ? p : p.text || p.prompt || '';
-            if (text.toLowerCase().includes(lowerQuery)) {
-              // Date filter
-              if (opts.from && data.startedAt && new Date(data.startedAt) < opts.from) continue;
-              // Agent filter
-              if (opts.agent && !matchesAgent(data.model || '', data.agentName, opts.agent)) continue;
-
-              results.push({
-                sessionId: data.sessionId || target.slice(0, 12) || 'unknown',
-                agentName: data.agentName || agentFromModel(data.model || 'unknown'),
-                timestamp: data.startedAt || '',
-                filesChanged: data.filesChanged || [],
-                promptText: text,
-              });
-            }
-          }
-        } catch {
-          // Plain text note — search it directly
-          if (noteContent.toLowerCase().includes(lowerQuery)) {
-            results.push({
-              sessionId: target.slice(0, 12),
-              agentName: 'unknown',
-              timestamp: '',
-              filesChanged: [],
-              promptText: noteContent,
-            });
-          }
-        }
+    let parsed: any;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      // Plain text note — search it directly
+      if (body.toLowerCase().includes(lowerQuery)) {
+        results.push({
+          sessionId: target.slice(0, 12),
+          agentName: 'unknown',
+          timestamp: '',
+          filesChanged: [],
+          promptText: body,
+        });
       }
+      continue;
+    }
+
+    const data = parsed?.origin ?? parsed;
+    if (!data || typeof data !== 'object') continue;
+    const agentName = data.agentName || data.agent || '';
+    for (const p of notePrompts(data)) {
+      if (results.length >= opts.limit) break;
+      if (!p.text.toLowerCase().includes(lowerQuery)) continue;
+      const timestamp = p.timestamp || data.timestamp || data.startedAt || '';
+      // Date filter
+      if (opts.from && timestamp && new Date(timestamp) < opts.from) continue;
+      // Agent filter
+      if (opts.agent && !matchesAgent(data.model || '', agentName || undefined, opts.agent)) continue;
+
+      results.push({
+        sessionId: data.sessionId || target.slice(0, 12) || 'unknown',
+        agentName: agentName || agentFromModel(data.model || 'unknown'),
+        timestamp,
+        filesChanged: p.files || data.filesChanged || [],
+        promptText: p.text,
+      });
     }
   }
   return results;

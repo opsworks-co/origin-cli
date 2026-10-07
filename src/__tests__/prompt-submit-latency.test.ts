@@ -94,9 +94,21 @@ describe('buildAttributionContext caching', () => {
     buildAttributionContext(repo); // populate, so the file/dir exist
     const cf = cacheFileFor(repo);
     const head = git(repo, ['rev-parse', 'HEAD']);
-    fs.writeFileSync(cf, JSON.stringify({ head, context: 'SENTINEL-FROM-CACHE' }));
+    const { v } = JSON.parse(fs.readFileSync(cf, 'utf-8'));
+    fs.writeFileSync(cf, JSON.stringify({ v, head, context: 'SENTINEL-FROM-CACHE' }));
 
     expect(buildAttributionContext(repo)).toBe('SENTINEL-FROM-CACHE');
+  });
+
+  it('rebuilds an entry an older CLI wrote at the same HEAD', () => {
+    // The block's content changed (lockfiles left out); a cache from before
+    // that, at an unchanged HEAD, would otherwise keep serving the old lists.
+    buildAttributionContext(repo);
+    const cf = cacheFileFor(repo);
+    const head = git(repo, ['rev-parse', 'HEAD']);
+    fs.writeFileSync(cf, JSON.stringify({ head, context: 'OLD-CLI-SENTINEL' }));
+
+    expect(buildAttributionContext(repo)).not.toBe('OLD-CLI-SENTINEL');
   });
 
   it('ignores a cache entry from a different HEAD', () => {

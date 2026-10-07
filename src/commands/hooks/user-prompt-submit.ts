@@ -2,6 +2,7 @@
 //
 // Moved out of commands/hooks.ts mechanically: the text is unchanged, only its
 // home is. Shared helpers still live in hooks.ts and are imported from there.
+import { variantAllowsRepoContext } from '../../context-variant.js';
 import { discoverCodexSessionData, isKnownCodexInternalPrompt } from '../../agents/codex.js';
 import { findCursorTranscriptJsonl } from '../../agents/cursor.js';
 import { discoverGeminiTranscriptPath, readGeminiModel } from '../../agents/gemini.js';
@@ -9,12 +10,13 @@ import { isSpecificModel, sessionMatchesAgent } from '../../agents/registry.js';
 import { api, readAuthStatus } from '../../api.js';
 import { buildAttributionContext } from '../../attribution.js';
 import { BUDGET_BLOCKING_AGENTS, buildBudgetWarningBanner } from '../../budget-breach.js';
-import { contentionAdvice, detectContention, neverRanATurn, peerLastActivityMs } from '../../checkout-contention.js';
+import { contentionAdvice, detectContention, neverRanATurn, noteContendersGone, peerLastActivityMs } from '../../checkout-contention.js';
 import { ensureConfigDir, isConnectedMode, loadAgentConfig, loadConfig, loadRepoConfig, saveAgentConfig } from '../../config.js';
 import { assembleRepoContext } from '../../context-injection.js';
 import { debugLog } from '../../debug-log.js';
 import { retagDevinFromProcess } from '../../devin-cli.js';
 import { capDiff } from '../../diff-budget.js';
+import { rowLineCounts } from '../../turn-row-counts.js';
 import { MAX_PROMPT_DIFF_LEN, captureGitState, createShadowCommit, filesChangedSinceShadow, getDirtyFiles } from '../../git-capture.js';
 import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
 import { syncNotesForSessionStart } from '../../git-notes.js';
@@ -29,9 +31,10 @@ import { buildRepoBriefContext } from '../../repo-brief.js';
 import { carryForwardTurnState, findDuplicateStateForSession } from '../../session-dedup.js';
 import { isEmptyWorktreeBootstrap, restampWorktreeBootstrap } from '../../worktree-bootstrap.js';
 import { buildDurationBlockMessage, parseSessionLimits } from '../../session-limits.js';
-import { clearSessionState, closeTurn, discoverGitRoot, findPriorStateForConversation, getBranch, getCanonicalRepoPath, getGitCommonDir, getGitRoot, getHeadSha, getStatePath, getWorkingGitRoot, isHeartbeatAlive, isPendingReservation, isProvisionalSessionId, listActiveSessions, loadSessionState, markSkippedPromptBaselines, promptHistoryFromPriorState, recordPromptShadow, recordPromptSubmittedAt, resolveSessionBranch, samePromptText, saveSessionState, sessionTagFor, stampCaptured, startHeartbeat } from '../../session-state.js';
+import { clearSessionState, closeTurn, discoverGitRoot, markTurnClosedOnDisk, findPriorStateForConversation, getBranch, getCanonicalRepoPath, getGitCommonDir, getGitRoot, getHeadSha, getStatePath, getWorkingGitRoot, isHeartbeatAlive, isPendingReservation, isProvisionalSessionId, listActiveSessions, loadSessionState, markSkippedPromptBaselines, promptHistoryFromPriorState, promptsTheHookMissed, recordPromptShadow, recordPromptWorkTreeShadow, recordPromptSubmittedAt, resolveSessionBranch, samePromptText, saveSessionState, sessionTagFor, stampCaptured, startHeartbeat } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import { openTurnLiveness } from '../../turn-liveness.js';
+import { turnIsClosed } from '../../turn-commit-scope.js';
 import { samePath, sessionWorkTree } from '../../session-worktree.js';
 import { detectTools } from '../../tools-detector.js';
 import { estimateSessionCost, extractPromptFileMappings, formatTranscriptForDisplay, isKnownCursorInternalPrompt, parseTranscript, promptTextForEntry, readCopilotModel } from '../../transcript.js';
@@ -49,8 +52,9 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { turnIdForServerRow, turnStartForServerRow } from '../../turn-index.js';
-import { STABLE_SESSION_ID_AGENTS, captureStamp, currentSessionWorkTree, dropForeignCommitsFromCapture, inheritedBaselineForTurn, durableUpdate, ensureServerSession, ensureWriteJournal, filterUncommittedDiff, findStateForHook, findStateForHookInput, getWorkingTreeSha, hookLookupSessionId, journalHasMark, normalizeWorkspaceRoot, resolveAutoAgentSessionId, resumeEndedConversationState, serverRowForLocalTurn, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, turnIdFor, uncommittedExcludeUnion } from '../hooks.js';
+import { turnIdForServerRow, turnStartFields } from '../../turn-index.js';
+import { STABLE_SESSION_ID_AGENTS, agentsMdExpected, agentsMdLoadedInTranscript, recordAgentsMdObservation, archiveIsAnotherConversation, captureStamp, currentSessionWorkTree, dropForeignCommitsFromCapture, inheritedBaselineForTurn, durableUpdate, ensureServerSession, ensureWriteJournal, filterUncommittedDiff, findStateForHook, findStateForHookInput, getWorkingTreeSha, hookLookupSessionId, journalHasMark, normalizeWorkspaceRoot, resolveAutoAgentSessionId, resumeEndedConversationState, serverRowForLocalTurn, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, turnIdFor, uncommittedExcludeUnion } from '../hooks.js';
+import { budgetRowDiffs, withCutFiles } from '../../budgeted-row-diff.js';
 
 
 export function retroactiveTurnFiles(
@@ -477,6 +481,7 @@ export function selectRecoverableArchiveSession(
     if (opts.agentSlug && !sessionMatchesAgent(s, opts.agentSlug)) continue;
     // Don't recover a different Cursor chat's session (see note above).
     if (!cursorSessionReusable(opts.agentSlug, opts.incomingChatId, s.agentSessionId)) continue;
+    if (archiveIsAnotherConversation(opts.agentSlug, opts.incomingChatId, s.agentSessionId || s.claudeSessionId)) continue;
     if (age < bestAge) { best = s; bestAge = age; }
   }
   return best;
@@ -1339,6 +1344,9 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           // away. It is written at fold time and nowhere else; without it the
           // earliest turn is billed the whole squash again at every Stop.
           preSquashCommitTurns: priorState?.preSquashCommitTurns,
+          // Who made each commit a rewrite folded away — written at fold time
+          // only, like the list above (commitTurnOf).
+          foldedCommitTurns: priorState?.foldedCommitTurns,
           // Carry the local→server offset and the turn IDENTITIES with it.
           //
           // This literal is an explicit field list, and every field missing
@@ -1627,6 +1635,24 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
       });
       return;
     }
+    // Prompts whose own submit hook was killed before it saved them (an
+    // interrupt, a timeout) are in the transcript and not in our list. Put
+    // them in front of this prompt so it takes the index the transcript gives
+    // it — see promptsTheHookMissed. Claude Code only: other agents' parsers
+    // re-emit or fold prompts in ways this plain-growth check does not model.
+    let missedPrompts: string[] = [];
+    const missedFrom = (typeof input.transcript_path === 'string' && input.transcript_path) || state.transcriptPath;
+    if (agentSlug === 'claude-code' && missedFrom && state.prompts.length > 0) {
+      try {
+        const fromTranscript = parseTranscript(missedFrom, { since: state.startedAt, repoRoots: sessionRepoRoots(state) }).prompts;
+        missedPrompts = promptsTheHookMissed(state.prompts, fromTranscript, prompt);
+        if (missedPrompts.length > 0) {
+          debugLog('user-prompt-submit', 'recovered prompts whose submit hook never saved them', {
+            count: missedPrompts.length, firstIndex: state.prompts.length,
+          });
+        }
+      } catch { /* an unreadable transcript leaves the list as it was */ }
+    }
     // Write-ahead copy of the prompt list, BEFORE the git work below. Cursor
     // kills this hook when the next prompt overlaps a slow captureGitState /
     // shadow commit — session e24477e2: submit matched the session at 02:41
@@ -1639,11 +1665,37 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
     if (isConnectedMode() && state.sessionId && !String(state.sessionId).startsWith('local-')) {
       try {
         const earlyRedact = loadConfig()?.secretRedaction !== false;
-        const earlyPrompts = [...state.prompts, prompt].map((p) => (earlyRedact ? redactSecrets(p).redacted : p));
+        const earlyPrompts = [...state.prompts, ...missedPrompts, prompt].map((p) => (earlyRedact ? redactSecrets(p).redacted : p));
         const earlyPayload = { prompt: earlyPrompts.join('\n\n---\n\n') || undefined };
         prePersisted = persistUpdateBeforeWork(state.sessionId, earlyPayload, (e, m, d) => debugLog(e, m, d));
         debugLog('user-prompt-submit', 'prompts persisted before git capture', { promptCount: earlyPrompts.length });
       } catch { /* never block the prompt on a queue write */ }
+    }
+    // Does this submit END the previous turn? Decided once, here, and used both
+    // for the on-disk mark below and for closing the turn at the save.
+    //   - no open turn: Stop closed it, or this agent never opens one — the
+    //     previous list tail ends now (lastClosedTurnIndex at the save);
+    //   - an open turn the transcript shows dead (API error, interrupt);
+    //   - an open turn its Stop ALREADY closed. Work after a Stop (a background
+    //     task, a sub-agent still running) re-opens the list tail so that work
+    //     lands on it (#1726) — but that turn was over, and the next prompt is
+    //     not queued behind it. Session 9f3d6bd2 (2026-09-27): turn 2's Stop at
+    //     15:30:42, the sub-agent it launched ran a Bash call at 15:31:05 and
+    //     re-opened turn 2, and turn 3's prompt at 15:32 was taken as queued.
+    //     Every commit of turn 3 was then attested to turn 2, whose row read
+    //     +404/-8 beside its +259/-6 commit.
+    // A live open turn no Stop has closed is a queued interjection and stays open.
+    const openTurn = state.activeTurn && Number.isInteger(state.activeTurn.index) ? state.activeTurn : null;
+    const openTurnReopened = !!openTurn && openTurn.index <= (state.lastClosedTurnIndex ?? -1);
+    const openTurnDead = !!openTurn
+      && (openTurnReopened || openTurnLiveness(state.transcriptPath, openTurn.openedAt) === 'dead');
+    const endingTurn = openTurn ? (openTurnDead ? openTurn.index : null) : (state.prompts.length > 0 ? state.prompts.length - 1 : null);
+    // Closed on disk BEFORE the capture below stamps that turn's row — the same
+    // guard Stop takes (markTurnClosedOnDisk). Otherwise a heartbeat tick in
+    // between still reads the turn as open, re-derives it, and out-stamps this
+    // observed capture; the save that recorded the close came last (TODO 4e29fb67).
+    if (endingTurn != null && !turnIsClosed(state, endingTurn)) {
+      markTurnClosedOnDisk(state.repoPath || hookCwd, state.sessionTag, endingTurn);
     }
     // ── Per-prompt diff: capture previous prompt's changes before recording new prompt ──
     const repoPath = state.repoPath || hookCwd;
@@ -1852,15 +1904,17 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
             uncommittedDiff: filteredUncommitted,
             workingTreeDiff: prevGitCapture.workingTreeDiff || '',
           }), restoredDrop);
+          const budgeted = budgetRowDiffs(diffText, withoutFiles(filteredUncommitted, restoredDrop));
           const prevMapping = {
             promptIndex: prevPromptIdx,
             // …but the TEXT comes out of our own list, which is local-space.
             promptText: (state.prompts[prevLocalIdx] || '').slice(0, 1000),
-            filesChanged: prevFilesChanged,
-            diff: diffText.slice(0, 200_000),
-            uncommittedDiff: withoutFiles(filteredUncommitted, restoredDrop).slice(0, 200_000),
+            filesChanged: [...new Set([...prevFilesChanged, ...budgeted.cutFiles])],
+            diff: budgeted.diff,
+            uncommittedDiff: budgeted.uncommittedDiff,
             commitSha: prevCommitSha,
             treeSha: prevTreeSha,
+            ...withCutFiles([], budgeted.cutFiles),
           };
           if (!state.completedPromptMappings) state.completedPromptMappings = [];
           // Replace if same promptIndex exists — unless Stop's mapping must
@@ -1911,6 +1965,8 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
     // resulting per-prompt `uncommittedDiff` for each prompt is cumulative
     // (= "all changes since HEAD"), which means prompt N's mapping
     // appears to include prompt N-1's, N-2's, ... work too.
+    // The worktree start this submit took — never one a previous prompt left.
+    let workTreeStart: { path: string; sha: string } | null = null;
     if (freshSessionStartShadow && state.prePromptSha === freshSessionStartShadow) {
       // This same invocation created the session-start shadow a moment ago and
       // nothing since has touched the working tree, so it IS the correct
@@ -1927,6 +1983,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
       // used only by the shell-window capture, which needs both halves from
       // the same tree. See session-worktree.ts.
       recordWorkTreeBaseline(state, hookCwd);
+      workTreeStart = state.prePromptWorkTree ? { path: state.prePromptWorkTree.path, sha: state.prePromptWorkTree.sha } : null;
       const dirty = getDirtyFiles(repo);
       if (dirty.length > 0) {
         try {
@@ -1953,6 +2010,10 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
       }
     }
 
+    // Recovered prompts are over: nothing opened a turn for them, and the
+    // closing rule below (nothing open → everything before this prompt ended)
+    // covers them; markSkippedPromptBaselines records their missing start-state.
+    if (missedPrompts.length > 0) state.prompts.push(...missedPrompts);
     state.prompts.push(prompt);
     // Stamp the turn's start so the write journal can scope its records to it.
     // Without a boundary the journal is just a session-long list and claims
@@ -1991,6 +2052,9 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
       // failed dirty-tree snapshot must never authorize an empty correction.
       completeBaseline: Array.isArray(state.prePromptDirtyFiles) && state.prePromptDirtyFiles.length === 0,
     });
+    // …and the start of the linked worktree it is writing in, kept per prompt:
+    // a branch cut there is measured from it, not from repoPath's shadow.
+    if (workTreeStart) recordPromptWorkTreeShadow(state, state.prompts.length - 1, workTreeStart.path, workTreeStart.sha);
     // Stable identity for this turn, assigned once and never renumbered. The
     // server keys the PromptChange row on it, so a later reshuffle of the
     // prompt LIST cannot slide one turn's diff onto another turn's row.
@@ -2035,14 +2099,13 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
     // a219d616: turn 2 died on ECONNRESET at 14:11; the retry at 15:01 wrote
     // eight files and committed, all attested to turn 2. The transcript knows
     // (see turn-liveness.ts); ask it before deciding the new prompt must wait.
-    if (state.activeTurn && Number.isInteger(state.activeTurn.index)) {
-      const liveness = openTurnLiveness(state.transcriptPath, state.activeTurn.openedAt);
-      if (liveness === 'dead') {
-        debugLog('user-prompt-submit', 'open turn is dead in the transcript — closing it', {
-          index: state.activeTurn.index, openedAt: state.activeTurn.openedAt,
-        });
-        closeTurn(state, state.activeTurn.index);
-      }
+    if (openTurnDead && state.activeTurn && state.activeTurn.index === openTurn!.index) {
+      debugLog('user-prompt-submit', openTurnReopened
+        ? 'open turn was re-opened after its Stop — closing it'
+        : 'open turn is dead in the transcript — closing it', {
+        index: state.activeTurn.index, openedAt: state.activeTurn.openedAt,
+      });
+      closeTurn(state, state.activeTurn.index);
     }
     if (!state.activeTurn && newTurnIdx > 0) {
       state.lastClosedTurnIndex = Math.max(state.lastClosedTurnIndex ?? -1, newTurnIdx - 1);
@@ -2293,16 +2356,17 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           // Send accumulated per-prompt diffs so they appear immediately on the platform
           promptChanges: state.completedPromptMappings && state.completedPromptMappings.length > 0
             ? state.completedPromptMappings.map(pm => {
-                const dl = (pm.diff || '').split('\n');
                 return {
                   ...pm,
                   promptText: (pm.promptText || '').slice(0, 1000),
                   diff: capDiff(pm.diff, MAX_PROMPT_DIFF_LEN),
-                  linesAdded: dl.filter((l: string) => l.startsWith('+') && !l.startsWith('+++')).length,
-                  linesRemoved: dl.filter((l: string) => l.startsWith('-') && !l.startsWith('---')).length,
+                  // The row's own counts, never a recount of its capped text
+                  // (prod c085f0af turn 2: +729/-175 lowered to +81/-1 on
+                  // every prompt by this very map). See rowLineCounts.
+                  ...rowLineCounts(pm),
                   // Mappings are numbered by SERVER row; ids are local.
                   ...(turnIdForServerRow(state, pm.promptIndex) && { turnId: turnIdForServerRow(state, pm.promptIndex) }),
-                  ...(turnStartForServerRow(state, pm.promptIndex) && { createdAt: turnStartForServerRow(state, pm.promptIndex) }),
+                  ...turnStartFields(state, pm.promptIndex),
                   ...captureStamp(),
                   aiPercentage: 100,
                   checkpointType: 'auto',
@@ -2376,11 +2440,17 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
         state.activePolicies.map((p: string) => `- ${p}`).join('\n');
     }
 
-    // Inject repo-level context.
+    // Inject repo-level context — normally NOTHING here. This runs on EVERY
+    // prompt, and the memory / brief / handoff blocks are large enough that
+    // repeating them each turn would burn context for no new information.
     //
-    // Normally just attribution — this runs on EVERY prompt, and the memory /
-    // brief / handoff blocks are large enough that repeating them each turn
-    // would burn context for no new information.
+    // It used to re-send the attribution block every prompt ("X% of recent
+    // commits are AI-generated", recent AI activity, top AI-modified files).
+    // That was ~150 tokens a turn of repo-wide lists, identical from turn to
+    // turn, led in Origin's own repo by package-lock.json. None of it changed a
+    // decision; what an agent can act on is the history of the files in front
+    // of it, which the prompt-scoped retrieval below and the per-file card at
+    // tool time deliver.
     //
     // But when this turn auto-created the session, no sessionStart hook fired,
     // so nothing has EVER injected the full block for this session. Cursor
@@ -2396,11 +2466,9 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
         // sessionStart already injected the full block into THIS conversation
         // (its state just wasn't found above, so this turn auto-created a
         // session). Re-sending it would put the same digest in the same context
-        // window twice in one turn. Attribution still goes out below.
-        const attributionCtx = buildAttributionContext(repoPath);
-        if (attributionCtx) systemMsg += '\n\n' + attributionCtx;
+        // window twice in one turn.
         debugLog('user-prompt-submit', 'full repo context SKIPPED (already injected this conversation)', { conversationKey });
-      } else if (sessionJustAutoCreated) {
+      } else if (sessionJustAutoCreated && variantAllowsRepoContext()) {
         const repoContext = assembleRepoContext({
           brief: safeCtx(() => buildRepoBriefContext(repoPath)),
           attribution: safeCtx(() => buildAttributionContext(repoPath)),
@@ -2428,11 +2496,6 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
             length: repoContext.length,
           });
         }
-      } else {
-        const attributionCtx = buildAttributionContext(repoPath);
-        if (attributionCtx) {
-          systemMsg += '\n\n' + attributionCtx;
-        }
       }
     } catch {}
 
@@ -2447,7 +2510,9 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
     // digest is a summary of RECENT work, and a task-scoped hit on a six-month-
     // old session is exactly the record that digest left out.
     try {
-      const scoped = buildPromptScopedMemoryContext(repoPath, prompt, state.memoryHitsInjected || []);
+      const scoped = variantAllowsRepoContext()
+        ? buildPromptScopedMemoryContext(repoPath, prompt, state.memoryHitsInjected || [])
+        : null;
       if (scoped) {
         systemMsg += '\n\n' + scoped.block;
         state.memoryHitsInjected = [...(state.memoryHitsInjected || []), ...scoped.keys];
@@ -2474,7 +2539,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
     // call, and repeating this every prompt would be the nagging that makes
     // injected guidance get tuned out wholesale.
     try {
-      if (!state.memoryChecked && !state.memoryNudged && (state.prompts?.length || 0) >= 2) {
+      if (!state.memoryChecked && !state.memoryNudged && (state.prompts?.length || 0) >= 2 && variantAllowsRepoContext()) {
         const escalation = buildMemoryEscalationContext(repoPath);
         if (escalation) {
           systemMsg += '\n\n' + escalation;
@@ -2484,6 +2549,30 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
         }
       }
     } catch { /* best-effort — a nudge must never break the turn */ }
+
+    // ── Did Claude really read AGENTS.md? ─────────────────────────────────
+    // Session start may have left Origin's framework / repo context out of
+    // the hook on the PREDICTION that Claude loads AGENTS.md. The transcript
+    // says whether it did, from the second prompt on. If it did not (a remote
+    // switch-off, a moved setting), deliver what was left out now, and record
+    // the answer so the next session start does not predict wrong again.
+    try {
+      if (agentSlug === 'claude-code' && !state.agentsMdObserved && state.transcriptPath
+        && (state.agentsMdOmission || agentsMdExpected(repoPath))) {
+        const loaded = agentsMdLoadedInTranscript(state.transcriptPath, repoPath);
+        if (loaded !== null) {
+          recordAgentsMdObservation(loaded);
+          state.agentsMdObserved = true;
+          const pending = state.agentsMdOmission;
+          if (pending && !pending.settled) {
+            if (!loaded) systemMsg += '\n\n' + pending.text;
+            state.agentsMdOmission = { ...pending, settled: true, loaded };
+          }
+          try { saveSessionState(state, state.repoPath || hookCwd, state.sessionTag); } catch { /* re-checks next prompt */ }
+          debugLog('user-prompt-submit', 'AGENTS.md load observed', { loaded, delivered: !!pending && !loaded });
+        }
+      }
+    } catch { /* best-effort — must never break the turn */ }
 
     if (systemMsg) {
       const payload = buildContextInjectionPayload(agentSlug, 'UserPromptSubmit', systemMsg);
@@ -2523,8 +2612,13 @@ export function noteCheckoutContention(state: SessionState): boolean {
       })()),
       neverRanATurn: neverRanATurn(p),
     }));
+    // Rivals recorded earlier that are no longer live: gone as of this turn's
+    // start, which this hook stamped just before calling us (the rival was
+    // ENDED or absent when we looked, so it wrote nothing in between).
+    const gone = noteContendersGone(state, new Set(peers.map((p: { sessionId: string }) => p.sessionId)),
+      typeof state.currentTurnStartedAt === 'number' ? state.currentTurnStartedAt : Date.now());
     const report = detectContention(state, tree, peers);
-    if (!report.contested) return false;
+    if (!report.contested) return gone;
 
     const ids = new Set(state.contendingSessionIds || []);
     let added = false;

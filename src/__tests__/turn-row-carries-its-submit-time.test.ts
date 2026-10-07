@@ -113,12 +113,12 @@ describe('every writer of a turn row sends the submit time', () => {
     const at = src.indexOf('const perPromptUpdate = {');
     expect(at).toBeGreaterThan(-1);
     const block = src.slice(at, src.indexOf('promptText: latestPromptText', at));
-    expect(block).toContain('createdAt: turnStartForServerRow(s, latestPromptRow)');
+    expect(block).toContain('...turnStartFields(s, latestPromptRow)');
   });
 
   it('Stop, session-end, user-prompt-submit and post-commit replays attach it beside the turn id', () => {
     for (const mod of ['stop', 'session-end', 'user-prompt-submit', 'post-commit']) {
-      expect(hookModuleSource(mod), mod).toContain('createdAt: turnStartForServerRow(state, pm.promptIndex)');
+      expect(hookModuleSource(mod), mod).toContain('...turnStartFields(state, pm.promptIndex)');
     }
   });
 

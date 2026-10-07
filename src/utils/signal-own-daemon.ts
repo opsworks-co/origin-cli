@@ -78,6 +78,40 @@ export function signalOwnDaemon(
   return 'signalled';
 }
 
+/**
+ * Is `pid` still the daemon we started? The READ side of signalOwnDaemon.
+ *
+ * `process.kill(pid, 0)` alone answers "is something alive at this number",
+ * and after a SIGKILL or a sleep-killed daemon that something is a stranger:
+ * read as "our daemon is running", nothing restarts it until the stranger
+ * exits (Origin TODO 7e5c5571).
+ *
+ * `stampedAtMs` / `freshWithinMs`: a daemon that re-stamps its pid file each
+ * tick proves itself by a recent stamp — no stranger writes our file — and the
+ * common case (the daemon really is alive) then costs no `ps`, which on
+ * Windows is a ~1 s process snapshot inside a hook.
+ *
+ * When the command line cannot be read, the answer stays what it always was
+ * (alive): starting a second daemon on a box whose `ps` is blocked is its own
+ * question (TODO 0caf3c77). Never throws.
+ */
+export function isOwnDaemonAlive(
+  pid: number,
+  isOurs: (command: string) => boolean,
+  opts: { stampedAtMs?: number; freshWithinMs?: number } = {},
+  deps: SignalDeps = REAL,
+): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  // EPERM: alive, but another user's — never a daemon we started.
+  try { deps.kill(pid, 0); } catch { return false; }
+  if (opts.stampedAtMs != null && opts.freshWithinMs != null
+    && Date.now() - opts.stampedAtMs < opts.freshWithinMs) return true;
+  let info: { ppid: number; command: string } | null = null;
+  try { info = deps.processInfo(pid); } catch { info = null; }
+  if (!info || !info.command) return true;
+  try { return isOurs(info.command); } catch { return true; }
+}
+
 /** The heartbeat daemon `startHeartbeat` spawns for `sessionId`: `node …/heartbeat.js <sessionId> …`. */
 export function isHeartbeatFor(sessionId: string): (command: string) => boolean {
   return (command) => !!sessionId && /heartbeat(\.[cm]?js)?\b/i.test(command) && command.includes(sessionId);

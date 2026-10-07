@@ -75,4 +75,59 @@ describe('sub-agent file attribution', () => {
   it('returns undefined when the session spawned no sub-agents', () => {
     expect(buildSubagentSummary({ subagentSpawns: [] } as unknown as SessionState)).toBeUndefined();
   });
+
+  // Current Claude Code (dc58e5a9): the parent transcript holds NO isSidechain
+  // entry; each sub-agent runs in <session>/subagents/agent-<id>.jsonl, often in
+  // its own worktree, with agent-<id>.meta.json naming the Task call. Measured
+  // 2026-09-23 on session d74b8927: 5 spawns, all reported with no files.
+  function writeAgent(id: string, toolUseId: string | null, worktree: string, edits: Array<[string, string]>) {
+    const sub = path.join(dir, 'sess', 'subagents');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(sub, `agent-${id}.jsonl`), edits.map(([ts, file], n) => JSON.stringify({
+      type: 'assistant', isSidechain: true, agentId: id, cwd: worktree, uuid: `${id}-${n}`, timestamp: T(ts),
+      message: { id: `${id}-${n}`, role: 'assistant', model: 'claude-haiku-4-5', content: [{ type: 'tool_use', name: 'Edit', input: { file_path: file } }], usage: { input_tokens: 5, output_tokens: 5 } },
+    })).join('\n'));
+    if (toolUseId) fs.writeFileSync(path.join(sub, `agent-${id}.meta.json`), JSON.stringify({ toolUseId, agentType: 'general-purpose' }));
+  }
+  function writeParent() {
+    const parent = path.join(dir, 'sess.jsonl');
+    fs.writeFileSync(parent, [
+      { type: 'user', uuid: 'u1', timestamp: T('00'), message: { role: 'user', content: 'go' } },
+      { type: 'assistant', uuid: 'a2', timestamp: T('09'), message: { id: 'a2', role: 'assistant', model: 'claude-opus-4-8', content: [{ type: 'tool_use', name: 'Edit', input: { file_path: 'src/main.ts' } }], usage: { input_tokens: 1, output_tokens: 1 } } },
+    ].map((l) => JSON.stringify(l)).join('\n'));
+    return parent;
+  }
+  const spawn = (toolCallId: string) => ({ toolCallId, subagentType: 'general-purpose', description: null, prompt: null, promptIndex: 0, startedAt: T('02'), endedAt: T('08') });
+
+  it('reads sub-agent edits from <session>/subagents/, repo-relative to the worktree, scratch files dropped', () => {
+    const wt = path.join(dir, 'repo', '.claude', 'worktrees', 'agent-abc');
+    writeAgent('abc', 'toolu_A', wt, [['05', path.join(wt, 'src/auth.ts')], ['06', '/tmp/scratchpad/probe.py']]);
+    const r = parseTranscript(writeParent());
+    expect(r.subagentEdits.map((e) => e.file)).toEqual(['src/auth.ts']);
+    // A sub-agent's worktree edits are not the session's own changed files.
+    expect(r.filesChanged).toEqual(['src/main.ts']);
+    const state = { subagentSpawns: [spawn('toolu_A')] } as unknown as SessionState;
+    expect(buildSubagentSummary(state, r)![0].files).toEqual(['src/auth.ts']);
+  });
+
+  it('gives each of two CONCURRENT sub-agents only its own files (meta.json toolUseId)', () => {
+    const wtA = path.join(dir, 'repo', '.claude', 'worktrees', 'agent-aaa');
+    const wtB = path.join(dir, 'repo', '.claude', 'worktrees', 'agent-bbb');
+    writeAgent('aaa', 'toolu_A', wtA, [['04', path.join(wtA, 'src/a.ts')]]);
+    writeAgent('bbb', 'toolu_B', wtB, [['05', path.join(wtB, 'src/b.ts')]]);
+    const r = parseTranscript(writeParent());
+    // Same window for both: the time-window rule alone would give each [a, b].
+    const state = { subagentSpawns: [spawn('toolu_A'), spawn('toolu_B')] } as unknown as SessionState;
+    const [a, b] = buildSubagentSummary(state, r)!;
+    expect(a.files).toEqual(['src/a.ts']);
+    expect(b.files).toEqual(['src/b.ts']);
+  });
+
+  it('falls back to the time window when the agent has no meta.json', () => {
+    const wt = path.join(dir, 'repo');
+    writeAgent('old', null, wt, [['05', path.join(wt, 'src/x.ts')]]);
+    const r = parseTranscript(writeParent());
+    const state = { subagentSpawns: [spawn('toolu_Z')] } as unknown as SessionState;
+    expect(buildSubagentSummary(state, r)![0].files).toEqual(['src/x.ts']);
+  });
 });

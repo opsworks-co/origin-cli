@@ -9,7 +9,7 @@
 // the agent learns to skim the block; too tight and it never fires and the
 // feature is dead weight nobody notices. Both directions are pinned here.
 import { describe, it, expect } from 'vitest';
-import { extractMemoryTerms } from '../memory.js';
+import { extractMemoryTerms, effectiveMemoryTerms } from '../memory.js';
 
 const weightOf = (prompt: string, term: string): number =>
   extractMemoryTerms(prompt).find((t) => t.term === term)?.weight ?? 0;
@@ -73,5 +73,46 @@ describe('extractMemoryTerms', () => {
   it('does not treat a bare version or number as a path', () => {
     const terms = extractMemoryTerms('bump to 1.2 today').map((t) => t.term);
     expect(terms).not.toContain('1.2');
+  });
+
+  it('does not give a word in slashed prose the weight of a file', () => {
+    // "prompts/diffs/token" is a sentence, not a path. Its last word used to be
+    // indexed at basename weight and then doubled on any record that changed
+    // a file named tokens.ts.
+    expect(weightOf('the metadata from prompts/diffs/token counts', 'token')).toBeLessThan(4);
+    expect(weightOf('look at src/git-notes.ts', 'git-notes.ts')).toBe(8);
+  });
+});
+
+describe('effectiveMemoryTerms', () => {
+  const words = (n: number) => Array.from({ length: n }, (_, i) => `word${String.fromCharCode(97 + (i % 26))}${String.fromCharCode(97 + Math.floor(i / 26))}`);
+  const corpus = (n: number, shared: string) => Array.from({ length: n }, (_, i) => `record ${i} ${shared}`);
+
+  it('leaves a short prompt exactly as it was', () => {
+    const terms = extractMemoryTerms('a heartbeat tick replacing a hook capture row');
+    expect(effectiveMemoryTerms(terms, corpus(40, 'hook row capture'))).toEqual(terms);
+  });
+
+  it('makes each plain word of a long prompt worth less', () => {
+    const terms = words(48).map((term) => ({ term, weight: 2 }));
+    const out = effectiveMemoryTerms(terms, []);
+    expect(out.every((t) => t.weight === 0.5)).toBe(true);
+  });
+
+  it('drops a plain word most records share, once the prompt is long', () => {
+    const terms = [...words(20), 'session'].map((term) => ({ term, weight: 2 }));
+    const out = effectiveMemoryTerms(terms, corpus(20, 'session'));
+    expect(out.map((t) => t.term)).not.toContain('session');
+  });
+
+  it('keeps a path and an identifier at full weight in a long prompt', () => {
+    const terms = [
+      ...words(60).map((term) => ({ term, weight: 2 })),
+      { term: 'src/memory.ts', weight: 10 },
+      { term: 'searchMemoryForPrompt', weight: 4 },
+    ];
+    const out = effectiveMemoryTerms(terms, corpus(20, 'nothing'));
+    expect(out.find((t) => t.term === 'src/memory.ts')?.weight).toBe(10);
+    expect(out.find((t) => t.term === 'searchMemoryForPrompt')?.weight).toBe(4);
   });
 });

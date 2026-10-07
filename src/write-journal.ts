@@ -142,6 +142,44 @@ export function serializeTurnMark(mark: TurnMark): string {
   if (mark.reclaim && mark.reclaim.length > 0) o.c = mark.reclaim;
   return JSON.stringify(o) + '\n';
 }
+/**
+ * The log with `mark` put where its turn really began, for a turn whose mark
+ * was never written at the time (TODO e840ccd5).
+ *
+ * A message the user sends while a turn runs is absorbed into it, and its
+ * submit hook is what marks the log. When that hook is killed, nothing does:
+ * every later write sits inside the running turn's span, and the ledger bills
+ * the interrupted turn for the new prompt's work. Stop learns the moment from
+ * the transcript, so the mark goes in by POSITION: after `afterTurnId`'s mark,
+ * before the first entry at or after `mark.at` — or before the next turn's
+ * mark, which ends the span regardless.
+ *
+ * Null when nothing should change: the turn is already marked, or the turn it
+ * splits has no mark to anchor on.
+ */
+export function insertTurnMarkAt(text: string, mark: TurnMark, afterTurnId: string): string | null {
+  if (!mark.turnId || !afterTurnId || !Number.isFinite(mark.at)) return null;
+  const lines = (text || '').split('\n').filter((l) => l.trim().length > 0);
+  const parse = (line: string): Record<string, unknown> | null => {
+    try { const o = JSON.parse(line); return o && typeof o === 'object' ? o as Record<string, unknown> : null; } catch { return null; }
+  };
+  let anchor = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const o = parse(lines[i]);
+    if (!o || o.k !== 't') continue;
+    if (o.id === mark.turnId) return null;
+    if (o.id === afterTurnId) anchor = i;
+  }
+  if (anchor < 0) return null;
+  let at = lines.length;
+  for (let i = anchor + 1; i < lines.length; i++) {
+    const o = parse(lines[i]);
+    if (!o) continue;
+    if (o.k === 't' || (typeof o.t === 'number' && o.t >= mark.at)) { at = i; break; }
+  }
+  lines.splice(at, 0, serializeTurnMark(mark).trimEnd());
+  return lines.join('\n') + '\n';
+}
 export function serializeFence(at: number, from?: string, to?: string): string {
   const o: Record<string, unknown> = { k: 'f', t: at };
   if (from && to) { o.p = from; o.n = to; }
@@ -442,6 +480,8 @@ export interface TurnFileChange {
   size?: number;
   /** How many times the turn wrote this file. Churn, not net change. */
   writes: number;
+  /** Epoch ms of the turn's last record for this file. */
+  lastAt?: number;
   /**
    * Latest filesystem mtime observed for this file during the turn, epoch ms.
    *
@@ -513,6 +553,7 @@ export function turnFileChanges(entries: readonly JournalEntry[], turnId: string
       order.push(e.file);
     }
     cur.writes++;
+    cur.lastAt = e.at;
     cur.deleted = !!e.gone;
     cur.afterHash = e.gone ? null : (e.hash ?? null);
     if (typeof e.size === 'number') cur.size = e.size;

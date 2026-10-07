@@ -984,7 +984,7 @@ Clear all session memory for the current repo.
 origin context clear --memory-only
 ```
 
-Memory is stored in git notes (`refs/notes/origin-memory`) and travels with the repo automatically, in both directions, without anyone running anything by hand.
+Memory is stored in git notes (`refs/notes/origin-memory`). It holds session summaries, per-file notes and decisions — prompt-derived text — so it leaves the machine only for a repo or machine that opted in with `notesIncludePrompts: true`; without the opt-in it stays local. Once opted in it travels with the repo automatically, in both directions, without anyone running anything by hand.
 
 **Out** — pushed on the same triggers as attribution notes: session end, and the `pre-push` hook alongside your own push.
 
@@ -1004,7 +1004,7 @@ A plain `git pull` therefore *stages* memory; it becomes readable once something
 
 Two machines that both wrote memory are reconciled by unioning the payload — session rollups keyed by `sessionId` (newest write wins), commit records keyed by `commitSha` (frozen, first write wins). A plain `git notes merge` is deliberately **not** used: the whole payload is one note on the root commit, so any git-level strategy resolves the entire blob and would drop one machine's sessions wholesale.
 
-Pushing memory respects the same privacy switch as attribution notes — with `notesIncludePrompts: false` (in `.origin.json` or `~/.origin/config.json`) memory stays local to the machine that wrote it.
+Pushing memory respects the same privacy switch as prompt text in attribution notes: only a literal `notesIncludePrompts: true` publishes it — a boolean in `.origin.json` decides, otherwise `~/.origin/config.json`; an unreadable or invalid `.origin.json` means local only. Without it — the default — memory stays local to the machine that wrote it; memory a teammate published is still fetched and folded.
 
 ---
 
@@ -1449,7 +1449,7 @@ Origin uses a multi-layer hook system:
 | `pre-tool-use` | AI about to use a tool | Tool name, input |
 | `post-tool-use` | AI finished using a tool | Tool result, subagent tracking |
 | `git-post-commit` | After every git commit | Commit SHA, message, files, diff |
-| `git-pre-push` | Before git push | Pushes origin-sessions branch + attribution/memory/acceptance notes alongside |
+| `git-pre-push` | Before git push | Pushes attribution/acceptance notes (and memory notes with the prompt opt-in) to `origin` alongside; the origin-sessions branch only where the publication policy picks a destination (snapshot-only with `snapshotRepo`, never with `pushStrategy: "false"`) |
 | `git-post-rewrite` | After rebase/amend | Copies attribution notes to new SHAs |
 | `git-post-checkout` | After branch checkout/stash | Preserves attribution through stash ops; syncs notes into a fresh clone |
 | `git-post-merge` | After a `git pull` that merges | Folds fetched notes onto the live refs (local only, no network) |
@@ -1560,7 +1560,7 @@ trails/
 
 ### Git Notes Format
 
-Each AI-assisted commit gets a note under `refs/notes/origin`:
+Each AI-assisted commit gets a note under `refs/notes/origin`. By default it is metadata only — anyone with read access to the repository can read it — so it carries no prompt text, summary or markers, only the prompt's hash where it is provably the text the permissioned Origin record serves:
 
 ```json
 {
@@ -1568,7 +1568,8 @@ Each AI-assisted commit gets a note under `refs/notes/origin`:
     "sessionId": "local-f7a2b3",
     "model": "gemini-3-flash-preview",
     "promptCount": 5,
-    "promptSummary": "Add authentication middleware...",
+    "promptHash": "sha256:512d6c38f4066df65fc7c9606eee8e56db8f744938c23e1cb473524cb72a6947",
+    "promptTextWithheld": true,
     "tokensUsed": 15000,
     "costUsd": 0.45,
     "durationMs": 120000,
@@ -1578,8 +1579,78 @@ Each AI-assisted commit gets a note under `refs/notes/origin`:
 }
 ```
 
+Prompt text (`promptSummary`, `fullPrompt`, per-prompt `text`, `markers`, the prompt inside `editsJson`) is added only with the explicit opt-in `"notesIncludePrompts": true` — a boolean in `.origin.json` decides for the repo, otherwise `~/.origin/config.json`; an unreadable or invalid `.origin.json` means metadata only. The same opt-in lets memory notes be pushed automatically. The `origin-sessions` branch is never pushed with `pushStrategy: "false"`, goes only to a configured `snapshotRepo` (never also to `origin`), and otherwise to `origin` with the opt-in or `pushStrategy: "always"`. Older notes are not rewritten; `origin scrub-notes` removes their prompt text (see below). The hash identifies a prompt, it does not hide it — a short prompt can be guessed.
+
+**Sealed prompts (opt-in, per repo).** With `"notesEncryptPrompts": true` in the repo's `.origin.json` (a literal `true`; there is no machine-wide switch), the prompt text a note would carry is written ENCRYPTED instead of left out: `origin.sealed` holds `promptSummary`, `fullPrompt`, `markers` and per-prompt `text` as AES-256-GCM ciphertext under the repo's data key for the month. The key comes from Origin (`POST /api/note-keys/current`) and is cached in `~/.origin/note-keys.json` (owner-only) for up to 4 hours. `origin show` and `origin why` open sealed notes for anyone who can read the repo in Origin (`POST /api/note-keys/unwrap`, one call per month of history); without access they say the prompts are sealed. Losing repo access stops new keys; a cached key lasts at most 4 hours. No key (offline, no access) → the note is written metadata-only — prompt text never reaches git in clear. `notesIncludePrompts: true` in the same `.origin.json` wins (clear text); the machine-wide one in `~/.origin/config.json` does not apply to a repo that asks for sealing, so one person's setting never writes clear text into it — nor pushes its memory notes or `origin-sessions` branch. Every key hand-out is in the workspace's audit log.
+
 View notes: `git notes --ref=origin show <commit-sha>`
 Push notes: `git push origin refs/notes/origin`
+
+### Removing prompt text from older notes (`origin scrub-notes`)
+
+Earlier Origin versions could include prompt text in the repository's Git notes. New notes are metadata-only by default; `origin scrub-notes` rewrites the notes that were written before that default, or while `notesIncludePrompts: true` was on.
+
+```
+origin scrub-notes --dry-run                 # report only: writes nothing, contacts no remote
+origin scrub-notes                           # rewrite the local refs/notes/origin
+origin scrub-notes --push [--remote origin]  # rewrite it, then replace the same ref on one remote
+
+# only after reading a --dry-run with it (see "Truncated editsJson" below):
+origin scrub-notes --dry-run --drop-unprovable-edits
+origin scrub-notes --drop-unprovable-edits
+origin scrub-notes --push --remote origin --drop-unprovable-edits
+```
+
+What it does:
+
+- Reads every note blob reachable from `refs/notes/origin` — the current notes and every earlier version in the ref's history — in a few batched git calls.
+- Removes only the prompt carriers: `origin.promptSummary`, `origin.fullPrompt`, `origin.markers`, `origin.prompts[].text` and the `promptText` inside a valid `origin.prompts[].editsJson`. Everything else — `attribution_record`, code edits, files, stats, hashes, `originUrl`, unknown fields — is kept, and rewritten notes are marked `promptTextWithheld: true`. Notes that are already clean are not rewritten. A JSON note with no `origin` key at all — a record-only note (`attribution_record` only), a history-rewrite note (`attribution_record` + `origin_rewrite`), an old backfill object (`sessionId: "backfill-…"`, `agent`, `model`, …) — has none of these carriers and is kept byte for byte.
+- Writes the result as one new parentless notes commit: the old history is where the earlier prompt-bearing versions live, so it is not kept. Before anything live moves, the new commit is checked against the source: same commits annotated, same number of notes, untouched notes byte-identical, rewritten notes equal to their source minus prompt carriers. `refs/notes/origin` is then swapped with a compare-and-swap; if another writer moved it meanwhile, nothing changes. Commits, branches, tags and their SHAs are never touched.
+- Is all or nothing. A note it cannot prove clean — a truncated `editsJson` that still holds prompt text, invalid JSON, a body that is not a JSON object, an `origin` that is not an object, an unreadable or non-UTF-8 object, a carrier of an unexpected type — is listed by commit SHA and reason, and the command exits non-zero without rewriting or pushing anything. Nothing is guessed at and, without `--drop-unprovable-edits`, no data is dropped.
+- `--push` replaces exactly `refs/notes/origin` on one configured remote (default `origin`), with `--force-with-lease` on the tip the scan read and without running hooks. It first checks that the remote's ref is the local one; if the remote is missing the ref, has other notes, or changes before the push, it is not overwritten and the command exits non-zero. Other remotes are never pushed to automatically.
+- Never fetches. With git 2.45 or newer every local read runs with `GIT_NO_LAZY_FETCH=1`, so in a partial clone a missing note object is reported unreadable instead of being downloaded; with older git a partial clone is refused before anything is read. Use a full clone.
+- Prints only counts, commit SHAs and carrier names — never note content. After a rewrite it prints the old and new tips and the `git update-ref` command that undoes the local change (which restores the prompt text locally).
+
+**Truncated `editsJson` (`--drop-unprovable-edits`).** When a note grew past the size budget, the writer cut its `editsJson` and appended the marker `/* [origin: editsJson truncated for note portability] */`. If prompt text was already in the bytes that were kept, the value is an incomplete JSON prefix with part of a prompt inside it: the prompt cannot be removed without guessing where the JSON would have continued, and the code edits in it were never complete. By default such a note blocks the run (reason `edits_json_truncated`) and the result tells you to look at the option.
+
+`--drop-unprovable-edits` deletes that whole `origin.prompts[].editsJson` property — and only that. It applies only when the value is a string, ends with the exact marker above, and its kept bytes, read as JSON tokens, show a non-empty top-level `promptText`. The prompt entry's other fields (`files`, hashes, `treeSha`/`commitSha`), the rest of the note and `attribution_record` are kept, and the note is marked `promptTextWithheld: true`. This is lossy: the incomplete code-edit capture in that `editsJson` is gone from the note. It does not preserve code-edit evidence; it trades that already-incomplete capture for removing the prompt text. Everything else still blocks with the option: an invalid `editsJson` without the exact marker, a truncated prefix with invalid JSON tokens or raw control characters, a wrong carrier type, an unreadable or non-UTF-8 note, a prefix whose `promptText` cannot be read.
+
+Run `--dry-run --drop-unprovable-edits` first and read `editsJson dropped: N (truncated payloads containing prompt text)` — the number of whole `editsJson` values that would be deleted — next to the other counts. Apply or push with the same option only once that number is acceptable. The rewritten notes are checked independently before anything live moves: a missing `editsJson` is accepted only when the option was passed and its source value carries the exact marker and readable prompt text, and no neighbouring field changed.
+
+Exit code: `0` when the ref is clean, was rewritten, or (with `--dry-run`) can be rewritten; non-zero when any note blocks the rewrite, the remote does not match, a concurrent write was detected, or the push did not replace the remote ref.
+
+**Runbook.** Run the remediation from a new administrative clone, not from a working clone: an existing clone may hold local-only notes that a forced fetch would delete, and also old prompt-bearing notes that its next metadata push would publish again.
+
+1. Stop everything that writes or pushes Origin notes for the repository: agents with Origin hooks, CI jobs, scheduled syncs.
+2. If `notesIncludePrompts: true` is set in `.origin.json` or `~/.origin/config.json`, remove it.
+3. Upgrade to a CLI version that includes this command (`origin upgrade`).
+4. Make a fresh full clone (not `--filter`/partial) and fetch the remote notes ref into the empty local ref — no `+`, nothing local is replaced:
+   `git clone <url> notes-scrub && cd notes-scrub && git fetch origin refs/notes/origin:refs/notes/origin`
+5. In that clone, save the annotated commits first — `git notes --ref=origin list | cut -d' ' -f2 | sort > ../notes-targets.txt` — then run `origin scrub-notes --dry-run`. Read the counts and the blocked list; resolve every blocker before going on. If the only blockers are `edits_json_truncated`, run `origin scrub-notes --dry-run --drop-unprovable-edits` and read the `editsJson dropped` count: that many incomplete edit captures will be deleted whole. Decide on that number before going on.
+6. Still there, run `origin scrub-notes --push --remote origin` — with `--drop-unprovable-edits` only if you accepted the count in step 5.
+7. Verify from a second fresh clone, against the advertised notes ref only:
+   `git clone <url> notes-verify && cd notes-verify && git fetch origin refs/notes/origin:refs/notes/origin`
+   - run `origin scrub-notes --dry-run` there: it must report `0 to rewrite`, `0 blocked` and `0 earlier note versions not provably clean`;
+   - check that the annotated commits are exactly the ones saved in step 5: `git notes --ref=origin list | cut -d' ' -f2 | sort | diff - ../notes-targets.txt` prints nothing;
+   - spot-check a few notes (`git notes --ref=origin show <sha>`): `attribution_record`, `originUrl`, prompt hashes and the code edits in `editsJson` are still there.
+   If you seeded the old notes with a unique test marker, search only what the notes ref reaches: `git rev-list --objects refs/notes/origin | cut -d' ' -f1 | git cat-file --batch | grep -c <marker>` must print `0`. Do not search the whole object database for a phrase from a real prompt: code, tests and docs may legitimately contain it. This checks what the remote serves under `refs/notes/origin`, not that the hosting server erased unreachable objects.
+8. Repeat steps 4–7 for every other remote you control, each with its own explicit run.
+9. Only then deal with each existing clone, one at a time. Until it is handled, do not push metadata from it (`git push`, `origin push-metadata`): its local `refs/notes/origin` may still hold the old notes, and the normal notes push merges them back into the remote. For each clone, either
+   - keep its local-only notes: compare `git notes --ref=origin list` with the scrubbed remote ref fetched under a separate name (`git fetch origin refs/notes/origin:refs/scrub-review/origin`), save what is only local somewhere safe (it may contain prompt text), move the clone onto the scrubbed ref (`git update-ref refs/notes/origin refs/scrub-review/origin`), re-add the saved notes with `git notes --ref=origin add`, and run `origin scrub-notes --dry-run` in that clone. If it reports anything to rewrite, run `origin scrub-notes` (local only) and `--dry-run` again, until it reports `0 to rewrite`, `0 blocked` and `0 earlier note versions not provably clean`. Only then may that clone push metadata again; never force-push its ref; or
+   - knowingly drop them: `git update-ref refs/notes/origin <scrubbed remote tip>`.
+
+   Either way, delete `refs/scrub-review/origin` afterwards.
+
+**What it cannot do.** The rewrite does not reach copies outside the ref it replaces: clones that already fetched the old notes, forks, mirrors, bundles, backups, reflogs and object databases, and remotes you do not control keep the old content. Replacing the remote ref removes the old notes from what the remote advertises; it does not guarantee that the hosting server erases the objects right away. The old objects also stay in the local repository until git's normal cleanup — the command does not run `git gc`. Those copies need their own operator and data-retention procedures. Commit history and commit SHAs do not change.
+
+What happens to the old note history, concretely:
+
+- After the rewrite, the old notes commits and blobs are no longer reachable from `refs/notes/origin`, and a new fetch of that ref does not transfer them. They are not deleted by it.
+- On the hosting server, the old note versions can stay readable by a party that has repository/object access and knows the object ID until the server's own retention and garbage-collection procedure removes them. On GitHub, when that happens is decided by GitHub — not by Origin and not by the repository owner; ask the host's support if you need the objects purged.
+- Every clone that already fetched the old ref or its history keeps the old commits and blobs in its object database and reflogs until that clone is cleaned up by its own procedure (expiring reflogs and pruning, or deleting the clone).
+- Force-updating an advertised ref is not a secure erase, on the server or anywhere else.
+
+Disclosure for customers and pilots: *Earlier Origin versions could include prompt text in the repository's Git notes. New notes are now metadata-only by default, and we provide a tool to rewrite the controlled notes ref; this cannot recall copies already fetched into other clones, backups, forks, mirrors, or remotes outside your control.*
 
 ---
 

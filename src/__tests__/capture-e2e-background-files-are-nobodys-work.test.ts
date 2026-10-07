@@ -23,7 +23,7 @@ import http from 'http';
 import { execFile, execFileSync, spawn } from 'child_process';
 import { promisify } from 'util';
 import { fileURLToPath } from 'url';
-import { WINDOWS_SLOWDOWN, isWindows } from './helpers/windows-e2e.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { foldStopRows } from './helpers/fold-stop-rows.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -172,7 +172,7 @@ const rows = () => foldStopRows(hits
 const row = (i: number): any => rows().find((r) => r.promptIndex === i);
 const textOf = (r: any) => `${r?.diff || ''}\n${r?.uncommittedDiff || ''}`;
 
-describe.skipIf(!haveDist || isWindows)('files only a background job touched, through the built binary', () => {
+describe.skipIf(!haveDist)('files only a background job touched, through the built binary', () => {
   beforeAll(async () => {
     await startFakeApi();
     tmpRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-e2e-bgfiles-')));

@@ -1,3 +1,5 @@
+import zlib from 'zlib';
+
 // fetch() with a hard client-side timeout.
 //
 // The CLI's network calls run inside agent hooks that enforce a wall-clock
@@ -70,11 +72,45 @@ export function timeoutForPayload(bytes: number): number {
   return Math.min(DEFAULT_FETCH_TIMEOUT_MS + allowance, MAX_PAYLOAD_TIMEOUT_MS);
 }
 
+/**
+ * Bodies at or above this many bytes go out gzipped.
+ *
+ * The session PATCH is the big one: a whole session's diffs, editsJson and
+ * transcript, 0.7–3.8MB on a long session. Measured 2026-09-25 against prod with
+ * one real 1.3MB payload: the server handled it in ~0.3s (timed from inside the
+ * box), but sending it from a home connection took 2.6–9.5s. So the Stop hook's
+ * 8s fast-fail aborted it, and the turn stayed stale on the dashboard until the
+ * retry queue got it through. Gzipped it is 320KB and the whole round trip took
+ * 0.58s. JSON diffs compress about 4:1.
+ *
+ * express.json() inflates `Content-Encoding: gzip` by default (body-parser
+ * `inflate: true`), and its size limit applies to the INFLATED body, so any
+ * Origin server, old or new, reads this unchanged. Below the threshold the
+ * gzip header costs more than it saves, so small calls stay plain.
+ */
+export const GZIP_BODY_MIN_BYTES = 16 * 1024;
+
+/** Bytes a string body puts on the wire: gzipped at GZIP_BODY_MIN_BYTES and up, as-is below. */
+export function wireBytes(body: string): number {
+  const raw = Buffer.byteLength(body);
+  return raw < GZIP_BODY_MIN_BYTES ? raw : zlib.gzipSync(body).length;
+}
+
+function gzipLargeBody(opts: RequestInit): RequestInit {
+  const body = opts.body;
+  if (typeof body !== 'string' || Buffer.byteLength(body) < GZIP_BODY_MIN_BYTES) return opts;
+  const headers = new Headers(opts.headers);
+  if (headers.has('content-encoding')) return opts;
+  headers.set('Content-Encoding', 'gzip');
+  return { ...opts, headers, body: zlib.gzipSync(body) };
+}
+
 export function fetchWithTimeout(
   url: string,
   opts: RequestInit = {},
   timeoutMs: number = DEFAULT_FETCH_TIMEOUT_MS,
 ): Promise<Response> {
+  opts = gzipLargeBody(opts);
   // A caller-supplied signal means the caller owns cancellation — respect it
   // rather than layering a second controller on top.
   if (opts.signal) return fetch(url, opts);

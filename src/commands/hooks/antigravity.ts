@@ -2,7 +2,7 @@
 //
 // Moved out of commands/hooks.ts mechanically: the text is unchanged, only its
 // home is. Shared helpers still live in hooks.ts and are imported from there.
-import { agyArgs, estimateAntigravityUsage, parseAntigravityTranscript } from '../../antigravity-transcript.js';
+import { agyArgs, estimateAntigravityTurnUsage, estimateAntigravityUsage, parseAntigravityTranscript } from '../../antigravity-transcript.js';
 import { api } from '../../api.js';
 import { applyLedgerToMappings } from '../../capture-from-ledger.js';
 import { isConnectedMode, loadAgentConfig } from '../../config.js';
@@ -11,7 +11,8 @@ import { capDiff } from '../../diff-budget.js';
 import { MAX_PROMPT_DIFF_LEN, captureAgyDiff, createShadowCommit, gitIgnoredFiles, readFileAtRev } from '../../git-capture.js';
 import { extractCommitDiff } from '../../history-backfill.js';
 import { memoryUpdateTrigger, shouldWriteMemoryOnCommit, summarizeFromCommitSubjects, writeCommitMemory, writeSessionMemory } from '../../memory.js';
-import { parseMarkersFromTranscriptPath } from '../../origin-markers.js';
+import { readMarkerTurns } from '../../origin-markers.js';
+import { commitEvidence, commitTurnDecisions, committedSessionMarkers } from '../../committed-markers.js';
 import type { OriginMarkers } from '../../origin-markers.js';
 import { isInsideRepo as isInsideRepoNormalized, outOfRepoWrites, samePath as samePathNormalized } from '../../paths.js';
 import { getBranch, getHeadSha, loadSessionState, saveSessionState } from '../../session-state.js';
@@ -1076,10 +1077,18 @@ export async function handleAntigravity(event: string, input: Record<string, any
           if (synth?.summary) agySummary = synth.summary;
           const agyFileNotes = synth?.fileNotes && Object.keys(synth.fileNotes).length > 0 ? synth.fileNotes : undefined;
           // Decisions: explicit [Origin: Decision] markers (ground truth) + LLM-inferred.
+          // Markers only from the turns that made commits — this commit's
+          // record gets its own turn's, and any earlier turn's whose work is in
+          // it (committed-markers.ts).
           const agyDecisions: string[] = [];
           let agyMarkers: OriginMarkers | undefined;
+          let commitDecisions: string[] = [];
           try {
-            agyMarkers = parseMarkersFromTranscriptPath(transcriptPath);
+            const turns = readMarkerTurns(transcriptPath);
+            const committedAt = g('%cI') || new Date().toISOString();
+            const added = turns.length > 0 ? commitEvidence(repoPath, [commitSha]).get(commitSha)?.added : undefined;
+            commitDecisions = commitTurnDecisions(turns, committedAt, { added });
+            agyMarkers = committedSessionMarkers({ repoPath, sessionId, turns, commitShas: [commitSha] });
             for (const d of agyMarkers?.decision || []) if (d && !agyDecisions.includes(d)) agyDecisions.push(d);
           } catch { /* best-effort */ }
           for (const d of (synth?.decisions || [])) if (d && !agyDecisions.includes(d)) agyDecisions.push(d);
@@ -1113,7 +1122,10 @@ export async function handleAntigravity(event: string, input: Record<string, any
             writeCommitMemory(repoPath, {
               commitSha, sessionId, agentSlug: 'antigravity', message: g('%s') || '',
               filesChanged: cFiles, fileNotes: Object.keys(commitNotes).length > 0 ? commitNotes : undefined,
-              decisions: agyDecisions.length > 0 ? agyDecisions.slice(0, 6) : undefined,
+              decisions: (() => {
+                const own = [...new Set([...commitDecisions, ...(synth?.decisions || [])])];
+                return own.length > 0 ? own.slice(0, 6) : undefined;
+              })(),
               linesAdded: cAdd, linesRemoved: cDel, branch: branch || null,
               committedAt: g('%cI') || new Date().toISOString(),
             });
@@ -1195,6 +1207,7 @@ export async function handleAntigravity(event: string, input: Record<string, any
   if (pendingByIndex.size > 0) {
     debugLog(event, 'antigravity flushing offline captures', { indices: [...pendingByIndex.keys()] });
   }
+  const split = estimateAntigravityTurnUsage(parsed, usage);
   const promptChanges = parsed.prompts.map((p, i) => {
     // Real prompt time from the transcript. agy has no UserPromptSubmit hook, so
     // without this the server stamps the DB insert time (whenever the first Stop
@@ -1256,6 +1269,11 @@ export async function handleAntigravity(event: string, input: Record<string, any
       return { ...agyStamp, promptIndex: i, promptText: p, commitSha, uncommittedDiff: '', ...outside, ...createdAt };
     }
     return { ...agyStamp, promptIndex: i, promptText: p, ...outside, ...createdAt };
+  }).map((pc) => {
+    // agy records no usage: each turn carries its share of the session's
+    // text-length estimate, marked as one.
+    const share = split?.turnUsage.find((t) => t.promptIndex === pc.promptIndex)?.modelUsage;
+    return share ? { ...pc, modelUsage: share, usageEstimated: true } : pc;
   });
 
   // Synthesize the conversation transcript (turns of user/assistant messages)
@@ -1278,6 +1296,8 @@ export async function handleAntigravity(event: string, input: Record<string, any
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     tokensEstimated: true,
+    // The split the turns divide, so the server prices both with one table.
+    ...(split ? { modelUsage: split.modelUsage } : {}),
     costUsd,
     // agy has no usage payload of its own, so these were never sent and the
     // session detail rendered "0 tools" for turns that plainly ran several.

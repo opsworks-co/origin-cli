@@ -33,6 +33,7 @@ import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import { throughLiveInstall } from './live-install-path.js';
 import {
   readRolloutCwd,
   parseCodexRolloutLive,
@@ -54,7 +55,7 @@ import { ensureInProcessJournal, stopJournalWatcher, applyLedgerToProducerRows }
 import { sessionTagFor } from './session-state.js';
 import { loadConfig, loadAgentConfig } from './config.js';
 import { debugLog, logSkipOnce } from './debug-log.js';
-import { isCliDaemon, signalOwnDaemon } from './utils/signal-own-daemon.js';
+import { isCliDaemon, isOwnDaemonAlive, signalOwnDaemon } from './utils/signal-own-daemon.js';
 import { writeWatchMeta, touchWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
 import { compareResolverWithPasses, createTurnObserver, observeReconstruction, onlyDifferences } from './resolve-turn.js';
 
@@ -914,7 +915,9 @@ export function anotherWatcherRunning(pidFile = watchPidFile()): boolean {
     const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
     if (!Number.isFinite(pid) || pid <= 0) return false;
     if (pid === process.pid) return false;
-    return isProcessAlive(pid);
+    // Alive AND ours — a stranger holding a dead watcher's pid is not a
+    // running watcher, and reading it as one kept a new watcher from starting.
+    return isOwnDaemonAlive(pid, isCliDaemon('codex-watch'));
   } catch {
     return false;
   }
@@ -963,7 +966,7 @@ function cliEntryScript(): string {
   } catch { /* fall through */ }
   // Fallback: sibling index.js next to this module in dist/.
   try {
-    const here = path.dirname(fileURLToPath(import.meta.url));
+    const here = throughLiveInstall(path.dirname(fileURLToPath(import.meta.url)));
     const candidate = path.join(here, 'index.js');
     if (fs.existsSync(candidate)) return candidate;
   } catch { /* ignore */ }

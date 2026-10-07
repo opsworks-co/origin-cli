@@ -2,8 +2,10 @@
 //
 // Moved out of commands/hooks.ts mechanically: the text is unchanged, only its
 // home is. Shared helpers still live in hooks.ts and are imported from there.
+import { variantAllowsFileCards } from '../../context-variant.js';
 import { api } from '../../api.js';
 import { buildFileAttributionContext } from '../../attribution.js';
+import { buildFileCard, filesNamedByCommand } from '../../file-card.js';
 import { isConnectedMode, loadConfig } from '../../config.js';
 import { debugLog } from '../../debug-log.js';
 import { createShadowCommit, getDirtyFiles } from '../../git-capture.js';
@@ -17,8 +19,9 @@ import { candidateDirsFromCommand, samePath, worktreesAmongCandidates } from '..
 import { probeTree, touchedSince } from '../../shell-command-probe.js';
 import type { TreeProbe } from '../../shell-command-probe.js';
 import { commandWritesFiles, isShellTool, shellCommandText } from '../../shell-write-capture.js';
-import { commandMakesCommit } from '../../commit-command-in-flight.js';
+import { commandMakesCommit, gitAliasResolver } from '../../commit-command-in-flight.js';
 import { recordGitPathspecs } from '../../git-pathspec-names.js';
+import { commandMovesTree, filesMovedByCommand, markReflog, recordGitMovedFiles } from '../../git-moved-files.js';
 import { isSubagentSpawnTool } from '../../subagent-tools.js';
 import { recordWriteTree } from '../../session-write-trees.js';
 import { spawn } from 'child_process';
@@ -183,6 +186,54 @@ export async function attachReposForFiles(
   if (mutated) saveSessionState(state, saveCwd, state.sessionTag);
 }
 
+/**
+ * The files a tool call is about, for the per-file card. A shell command counts
+ * when it names a file: agents that read with `cat` or `sed -n` never touch a
+ * file tool (see filesNamedByCommand). Exported for testing.
+ */
+export function cardPathsForTool(
+  input: { tool_name?: string; tool_input?: unknown },
+  hookCwd: string,
+  filePaths: string[],
+  isFileTool: boolean,
+): string[] {
+  if (isShellTool(input.tool_name || '')) return filesNamedByCommand(shellCommandText(input.tool_input), hookCwd);
+  return isFileTool ? filePaths : [];
+}
+
+// How many files per session get looked up for a card. Each lookup is one
+// `git log` and at most one `git blame` (0.1-0.7 s on Origin's own repo), paid
+// once per file, so this bounds what cards can cost a session in total.
+export const FILE_CARDS_CHECKED_PER_SESSION = 25;
+
+/**
+ * Cards for the files this tool call names that this session has not been
+ * handed a card for yet. Marks each file checked whether or not it produced a
+ * card, so a file with no history is not looked up again. Mutates `state`.
+ */
+export function fileCardsForTool(
+  state: SessionState,
+  filePaths: string[],
+): string[] {
+  const roots = [currentSessionWorkTree(state), state.repoPath].filter((r): r is string => !!r);
+  if (!roots.length) return [];
+  const checked = new Set(state.fileCardsChecked || []);
+  const cards: string[] = [];
+  for (const fp of filePaths) {
+    if (!fp || checked.size >= FILE_CARDS_CHECKED_PER_SESSION) break;
+    const abs = path.isAbsolute(fp) ? fp : path.resolve(roots[0], fp);
+    const root = roots.find((r) => abs.startsWith(r + path.sep));
+    if (!root) continue;
+    const rel = abs.slice(root.length + 1).split(path.sep).join('/');
+    if (checked.has(rel)) continue;
+    checked.add(rel);
+    const card = buildFileCard(root, rel, { currentSessionId: state.sessionId });
+    if (card) cards.push(card);
+  }
+  state.fileCardsChecked = [...checked];
+  return cards;
+}
+
 export async function handlePreToolUse(rawInput: Record<string, any>, agentSlug?: string): Promise<void> {
   // Every agent names these fields differently; normalise before anything
   // reads them, or the handler quietly no-ops for agents it was not written
@@ -296,7 +347,7 @@ export async function handlePreToolUse(rawInput: Record<string, any>, agentSlug?
   // the file. The command itself is visible here, before it runs. On disk NOW
   // for the same reason as the claim above. See commit-command-in-flight.ts.
   try {
-    if (isShellTool(input.tool_name || '') && commandMakesCommit(shellCommandText(toolInput))) {
+    if (isShellTool(input.tool_name || '') && commandMakesCommit(shellCommandText(toolInput), gitAliasResolver(hookCwd))) {
       setCommitCommandInFlight(state, {
         at: new Date().toISOString(),
         ...(input.tool_call_id || input.tool_use_id ? { toolCallId: String(input.tool_call_id || input.tool_use_id) } : {}),
@@ -422,22 +473,49 @@ export async function handlePreToolUse(rawInput: Record<string, any>, agentSlug?
   const toolName = (input.tool_name || '').toLowerCase();
   const isReadStyle = ['read', 'view', 'open', 'cat', 'grep', 'glob'].some(t => toolName.includes(t));
   const isWriteStyle = ['edit', 'write', 'patch', 'create', 'insert', 'replace', 'notebook_edit'].some(t => toolName.includes(t));
-  if (agentSlug !== 'claude-code' && (isReadStyle || isWriteStyle)) {
+  const injected: string[] = [];
+
+  // ── Per-file history card ────────────────────────────────────────────────
+  // The first time this session reads or edits a file, hand the agent that
+  // file's history: agent commits, how much of their code is still here, what
+  // was largely replaced or reverted, and the latest note / decision / TODO.
+  // See file-card.ts. Codex renders hook stdout as warnings, so it is skipped.
+  const cardPaths = cardPathsForTool(input, hookCwd, filePaths, isReadStyle || isWriteStyle);
+  if (agentSlug !== 'codex' && cardPaths.length > 0 && variantAllowsFileCards()) {
+    try {
+      const cards = fileCardsForTool(state, cardPaths);
+      if (cards.length) {
+        injected.push(...cards);
+        debugLog('pre-tool-use', 'file card injected', { count: cards.length, checked: state.fileCardsChecked?.length });
+      }
+    } catch { /* enrichment — never block the tool call */ }
+  }
+
+  // Per-file too, so a context bake-off's `none` and `baseline` arms go without.
+  if (agentSlug !== 'claude-code' && (isReadStyle || isWriteStyle) && variantAllowsFileCards()) {
     const toolInput = input.tool_input || {};
     const filePath = toolInput.file_path || toolInput.path || toolInput.filePath || toolInput.filename || '';
     if (filePath && state.repoPath) {
       try {
         const fileCtx = buildFileAttributionContext(state.repoPath, filePath);
         if (fileCtx) {
-          // Output as JSON system message — Claude Code reads this from stdout
-          const output = JSON.stringify({ systemMessage: fileCtx });
-          process.stdout.write(output);
+          injected.push(fileCtx);
           debugLog('pre-tool-use', 'file attribution injected', { filePath, length: fileCtx.length });
         }
       } catch {
         // Non-fatal
       }
     }
+  }
+
+  // ONE payload: two JSON objects on stdout parse as neither. Claude Code
+  // shows a top-level `systemMessage` to the human only; the model reads
+  // hookSpecificOutput.additionalContext. Other agents read `systemMessage`.
+  if (injected.length) {
+    const text = injected.join('\n\n');
+    process.stdout.write(JSON.stringify(agentSlug === 'claude-code'
+      ? { hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: text } }
+      : { systemMessage: text }));
   }
 
   // ── Track files the agent has loaded into context ────────────────────────
@@ -627,12 +705,52 @@ export function recordLiveEdits(state: SessionState, input: Record<string, any>,
       toolName,
       capturedAt: new Date().toISOString(),
       edits,
+      ...(samePath(workRoot, repoPath) ? {} : { tree: workRoot }),
     });
     debugLog('post-tool-use', 'live edit captured', { promptIndex, tool: toolName, edits: edits.length });
     return true;
   } catch (err: any) {
     debugLog('post-tool-use', 'live capture failed (non-fatal)', { message: err?.message });
     return false;
+  }
+}
+
+/**
+ * The commit command this session announced at pre-tool-use has returned.
+ * Only its own call ends it: parallel tool calls finish in any order. A call
+ * that never reports back is dropped by age (COMMIT_COMMAND_TTL_MS). Ended,
+ * not deleted — the backgrounded post-commit may read it after this returns
+ * and asks whether it was live at the commit's time (see CommitCommandInFlight).
+ */
+function clearOwnCommitClaim(state: SessionState, input: Record<string, any>, saveCwd: string): boolean {
+  const claim = state.commitCommandInFlight;
+  if (!claim || claim.endedAt) return false;
+  const mine = claim.toolCallId;
+  const done = input.tool_call_id || input.tool_use_id;
+  if (mine && done && String(done) !== mine) return false;
+  setCommitCommandInFlight(state, { ...claim, endedAt: new Date().toISOString() });
+  try { saveSessionState(state, saveCwd, state.sessionTag); } catch { /* non-fatal */ }
+  return true;
+}
+
+/**
+ * A tool call FAILED. Claude Code reports that on its own event,
+ * PostToolUseFailure, and never fires PostToolUse for it — so a `git commit`
+ * that exited non-zero (a pre-commit hook refused, nothing staged) left its
+ * claim up until Stop, and any commit landing in this tree later in the turn,
+ * by anyone, read as this session's. Only the claim is settled here: a failed
+ * call wrote nothing the ledger should record.
+ */
+export async function handlePostToolUseFailure(rawInput: Record<string, any>, agentSlug?: string): Promise<void> {
+  const input = normalizeToolHookPayload(rawInput);
+  const hookCwd = input.cwd || process.cwd();
+  const found = findStateForHookInput(hookCwd, input, agentSlug);
+  if (!found) {
+    debugLog('post-tool-use-failure', 'ABORT: no session state');
+    return;
+  }
+  if (clearOwnCommitClaim(found.state, input, found.saveCwd)) {
+    debugLog('post-tool-use-failure', 'commit claim ended — the call failed', { tool: input.tool_name });
   }
 }
 
@@ -665,17 +783,7 @@ export async function handlePostToolUse(rawInput: Record<string, any>, agentSlug
     saveSessionState(state, saveCwd, state.sessionTag);
   }
 
-  // The commit command this session announced at pre-tool-use has returned.
-  // Only its own call clears it: parallel tool calls finish in any order. A
-  // call that never reports back is dropped by age (COMMIT_COMMAND_TTL_MS).
-  if (state.commitCommandInFlight) {
-    const mine = state.commitCommandInFlight.toolCallId;
-    const done = input.tool_call_id || input.tool_use_id;
-    if (!mine || !done || String(done) === mine) {
-      setCommitCommandInFlight(state, null);
-      try { saveSessionState(state, saveCwd, state.sessionTag); } catch { /* non-fatal */ }
-    }
-  }
+  clearOwnCommitClaim(state, input, saveCwd);
 
   if (state.subagents && state.subagents.length > 0) {
     // Match the post-use to its pre-use record.
@@ -914,7 +1022,11 @@ export function beginShellProbe(state: SessionState, input: Record<string, any>)
     const toolName = String(input.tool_name || '');
     if (!isShellTool(toolName)) return;
     const toolInput = (input.tool_input && typeof input.tool_input === 'object') ? input.tool_input : {};
-    if (!commandWritesFiles(shellCommandText(toolInput))) return;
+    // A tree-moving command arms the probe even when it names no write: `gh
+    // pr merge --delete-branch` checks out and pulls, and without a probe the
+    // files it brings down are never recorded as git's (24e45142 turn 11).
+    const commandText = shellCommandText(toolInput);
+    if (!commandWritesFiles(commandText) && !commandMovesTree(commandText)) return;
     const promptIndex = currentTurnIndex(state);
     if (promptIndex == null || promptIndex < 0) return;
 
@@ -934,12 +1046,16 @@ export function beginShellProbe(state: SessionState, input: Record<string, any>)
     // The paths a mutating git command names are the turn's own, whatever the
     // probe window later sees — see git-pathspec-names.ts.
     recordGitPathspecs(state, promptIndex, shellCommandText(toolInput), currentSessionWorkTree(state) || state.repoPath);
+    const movesTree = commandMovesTree(shellCommandText(toolInput));
     for (const tree of treesToProbe(state, promptIndex)) {
       const p = probeTree(tree, deps);
       probes.push({
         toolCallId, promptIndex, tree, stamps: p.stamps, skipped: p.skipped,
         baselineSha: baselineShaForTree(state, tree, promptIndex) || undefined,
         command: cmdText || undefined,
+        // Only for a tree-moving command: one rev-parse, so the end of the
+        // probe can name what moved between the two commits.
+        ...(movesTree ? { headBefore: getHeadSha(tree) || undefined, reflogMark: markReflog(tree) || undefined } : {}),
       });
     }
     // APPEND, never replace. Agents issue tool calls in parallel, and this used
@@ -1053,6 +1169,23 @@ export function endShellProbe(state: SessionState, input: Record<string, any>): 
       const touched = touchedSince(
         { tree: before.tree, stamps: before.stamps, skipped: before.skipped }, after,
       );
+      // A tree-moving command: what it changed is git's. The dirty files whose
+      // stamps moved, PLUS every file that differs between HEAD before and
+      // after — a file a pull brings down ends clean, so the dirty-file probe
+      // alone never sees it (the live repro of TODO e87a35d5).
+      if (before.headBefore) {
+        const moved = [
+          ...touched,
+          ...filesMovedByCommand(before.tree, before.headBefore, getHeadSha(before.tree), before.reflogMark),
+        ];
+        if (moved.length > 0) {
+          recordGitMovedFiles(state, before.promptIndex, before.tree, moved);
+          changed = true;
+          debugLog('post-tool-use', 'tree-moving command — files recorded as git\'s', {
+            promptIndex: before.promptIndex, tree: before.tree, files: new Set(moved).size,
+          });
+        }
+      }
       if (touched.length === 0) continue;
       // Each probe's OWN index — pairing it with `probes[0]`'s was the same
       // mismatch by another route, since the baseline below is already

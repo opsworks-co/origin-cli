@@ -203,6 +203,31 @@ describe('a turn whose commits sit on several branches', () => {
       .toMatchObject({ branches: 2, stranded: 1 });
   });
 
+  it('names every commit the patch stands for, so the server accepts it whichever one the row wears', () => {
+    // Session 690e594c turn 6 (2026-09-27): the row wore the last branch's tip,
+    // Stop labelled its patch of both branches with the first, and the server
+    // refused every Stop as "a patch of another commit".
+    const { a1, a2, b1, state, mapping } = twoBranchTurn();
+    write('b.ts', 'b1\nb2\nb3\nb4\n');
+    git('add', 'b.ts'); git('commit', '--amend', '--no-edit', '-q');
+    const amended = git('rev-parse', 'HEAD');
+    const withRewrite = { ...state, rewrittenCommits: [{ from: b1, to: amended }] };
+    expect(preferCommitPatchForCommittedTurns(withRewrite, [mapping], repo)).toBe(1);
+    const covered = (mapping as { patchCommits?: string[] }).patchCommits || [];
+    expect(covered).toEqual(expect.arrayContaining([a1, a2, b1, amended]));
+    expect(covered).toContain((mapping as { commitSha?: string }).commitSha);
+  });
+
+  it('drops the list with the patch when a later pass declines the turn', () => {
+    const { state, mapping } = twoBranchTurn();
+    (mapping as { patchCommits?: string[] }).patchCommits = ['deadbeefdeadbeef'];
+    (mapping as { commitPatch?: boolean }).commitPatch = true;
+    write('b.ts', 'dirty\n');
+    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo)).toBe(0);
+    expect((mapping as { commitPatch?: boolean }).commitPatch).toBeUndefined();
+    expect((mapping as { patchCommits?: string[] }).patchCommits).toBeUndefined();
+  });
+
   it('still sends the turn once the tree has moved off every branch', () => {
     const { state, mapping } = twoBranchTurn();
     git('checkout', '-q', 'main');
@@ -273,5 +298,93 @@ describe('a turn whose commits sit on several branches', () => {
     expect(mapping.diff).toBe(commitDiffScopedToPrompt(repo, baseline, a2, ['a.ts', 'package.json'])!.diff);
     expect(log).toContain('ledger diff replaced by the commit patch');
     expect(log).not.toContain('ledger diff replaced by the commit patches of several branches');
+  });
+  it('a commit of nothing but Origin\'s context files never becomes the turn\'s commit', () => {
+    // Session c085f0af turn 4 (2026-09-25): the fix on the branch, then a
+    // `WIP origin context files (temporary)` commit of CLAUDE.md/AGENTS.md/
+    // GEMINI.md made to get the dirty tree past a rebase, stranded on the old
+    // branch name. post-commit stamped the WIP sha last; the several-branch
+    // pass scoped it to nothing and still named it the turn's commit.
+    const main = git('rev-parse', 'HEAD');
+    const baseline = createShadowCommit(repo, 'turn0') || main;
+    git('checkout', '-qb', 'fix-a');
+    write('a.ts', 'a1\na2\n');
+    const a1 = commitAll('fix: a');
+    git('checkout', '-qb', 'wip-context', 'main');
+    write('CLAUDE.md', '<!-- origin-managed -->\nOrigin: refreshed block\n<!-- origin-managed -->\n');
+    write('AGENTS.md', '<!-- origin-managed -->\nOrigin: refreshed block\n<!-- origin-managed -->\n');
+    const w1 = commitAll('WIP origin context files (temporary)');
+    git('checkout', '-q', 'fix-a');
+    const state = {
+      promptTurnIds: ['t_0'],
+      commitTurns: [{ sha: a1, turnId: 't_0' }, { sha: w1, turnId: 't_0' }],
+      promptShadows: [{ promptIndex: 0, shadowSha: baseline }],
+      prePromptSha: null,
+    };
+    const mapping = {
+      promptIndex: 0, filesChanged: ['a.ts'], uncommittedDiff: '', linesAdded: 1, linesRemoved: 0,
+      diff: 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1,2 @@\n a1\n+a2\n',
+      commitSha: w1,
+    };
+    const log: Array<[string, any]> = [];
+    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo, { log: (e, d) => log.push([e, d]) })).toBe(1);
+    expect(mapping.commitSha).toBe(a1);
+    expect(mapping.filesChanged).toEqual(['a.ts']);
+    const several = log.find(([e]) => e === 'ledger diff replaced by the commit patches of several branches');
+    expect(several?.[1]).toMatchObject({ branches: 1, primary: a1.slice(0, 8), commits: [a1.slice(0, 8), w1.slice(0, 8)] });
+  });
+});
+
+describe('a branch built on a reachable commit of the same turn', () => {
+  /** The turn commits A on `fix`; a branch `agent` is cut from A and holds two
+   *  commits of the turn; the turn commits B on `fix`. HEAD stays on `fix`. */
+  function branchOnOwnCommit() {
+    const main = git('rev-parse', 'HEAD');
+    const baseline = createShadowCommit(repo, 'turn0') || main;
+    git('checkout', '-qb', 'fix');
+    write('a.ts', 'a1\na2\n');
+    const a = commitAll('fix: a');
+    git('checkout', '-qb', 'agent');
+    write('s.ts', 's1\n');
+    const s1 = commitAll('feat: s1');
+    write('s.ts', 's1\ns2\ns3\n');
+    const s2 = commitAll('feat: s2');
+    git('checkout', '-q', 'fix');
+    write('b.ts', 'b1\nb2\n');
+    const b = commitAll('fix: b');
+    const state = {
+      promptTurnIds: ['t_0'],
+      commitTurns: [a, s1, s2, b].map((sha) => ({ sha, turnId: 't_0' })),
+      promptShadows: [{ promptIndex: 0, shadowSha: baseline }],
+      prePromptSha: null,
+    };
+    const mapping: any = { promptIndex: 0, filesChanged: [], diff: '', uncommittedDiff: '', linesAdded: 0, linesRemoved: 0 };
+    return { a, s1, s2, b, state, mapping };
+  }
+
+  // Session df8cc9aa row 42 (2026-10-04): a sub-agent's branch, rebased onto
+  // main after main took the turn's own commit, joined that commit's chain and
+  // stood reachable. Every Stop sent the main line's +88/-30 alone.
+  it('stays a branch of its own when another branch holds it', () => {
+    const { a, s1, s2, b, state, mapping } = branchOnOwnCommit();
+    const log: Array<[string, any]> = [];
+    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo, { log: (e, d) => log.push([e, d]) })).toBe(1);
+    expect([...mapping.filesChanged].sort()).toEqual(['a.ts', 'b.ts', 's.ts']);
+    expect([mapping.linesAdded, mapping.linesRemoved]).toEqual([1 + 1 + 3, 0]);
+    expect(mapping.diff).toContain('+s3');
+    expect(mapping.patchCommits).toEqual(expect.arrayContaining([a, s1, s2, b]));
+    const several = log.find(([e]) => e === 'ledger diff replaced by the commit patches of several branches');
+    expect(several?.[1]).toMatchObject({ branches: 2, stranded: 1 });
+  });
+
+  // The guard: a commit NO branch holds, on top of a reachable one, is not a
+  // branch of the turn — a commit reset away keeps the single range.
+  it('does not split off a commit no branch holds', () => {
+    const { state, mapping } = branchOnOwnCommit();
+    git('branch', '-D', 'agent');
+    const log: Array<[string, any]> = [];
+    expect(preferCommitPatchForCommittedTurns(state, [mapping], repo, { log: (e, d) => log.push([e, d]) })).toBe(1);
+    expect([...mapping.filesChanged].sort()).toEqual(['a.ts', 'b.ts']);
+    expect(log.some(([e]) => e === 'ledger diff replaced by the commit patch')).toBe(true);
   });
 });

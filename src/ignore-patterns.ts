@@ -11,17 +11,7 @@ const DEFAULT_IGNORE_PATTERNS = [
   '__pycache__/**',
   '*.pyc',
   '*.pyc.*',
-  // Lock files
-  'package-lock.json',
-  'yarn.lock',
-  'pnpm-lock.yaml',
-  'Cargo.lock',
-  'go.sum',
-  'Gemfile.lock',
-  'poetry.lock',
-  'composer.lock',
-  'Pipfile.lock',
-  'shrinkwrap.yaml',
+  // Lock files are NOT here — see LOCKFILE_NAMES below.
   // Generated / minified
   '*.generated.*',
   '*.min.js',
@@ -153,6 +143,38 @@ function globToRegex(pattern: string): RegExp {
     i++;
   }
   return new RegExp(`^${regex}$`);
+}
+
+// ─── Lock files ───────────────────────────────────────────────────────────
+//
+// A lock file is generated, but it is part of the turn's work: the turn that
+// bumps a version or adds a dependency changes it, and the commit carries it.
+// Leaving it out of turn diffs made every such turn read 2–3 lines short of
+// its own commit — session d97d7b2c turn 6, +434/-56 beside its commit's
+// +436/-58, the gap package-lock.json's two version lines — and the session
+// page had to explain the gap instead of the numbers agreeing. So capture
+// counts them, and only the places that choose files to SHOW an agent (the
+// repo's most-touched files, the per-file history card) leave them out with
+// isLockfile: every release bumps them, and reading that changes no decision.
+const LOCKFILE_NAMES = new Set([
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'bun.lock',
+  'bun.lockb',
+  'Cargo.lock',
+  'go.sum',
+  'Gemfile.lock',
+  'poetry.lock',
+  'uv.lock',
+  'composer.lock',
+  'Pipfile.lock',
+  'shrinkwrap.yaml',
+]);
+
+export function isLockfile(filePath: string): boolean {
+  return LOCKFILE_NAMES.has(path.basename(String(filePath).replace(/\\/g, '/')));
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────

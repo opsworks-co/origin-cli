@@ -19,7 +19,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { writeAgentRulesFile, ORIGIN_MANAGED_MARKER } from '../commands/hooks.js';
+import { agentRulesTarget, writeAgentRulesFile, ORIGIN_MANAGED_MARKER } from '../commands/hooks.js';
 
 const M = ORIGIN_MANAGED_MARKER;
 
@@ -125,7 +125,9 @@ describe('writeAgentRulesFile — multi-file refresh', () => {
     // A hand-written AGENTS.md that Origin has never claimed stays untouched.
     const handWritten = '# Contributor guide\n\nRun `pnpm test` before pushing.\n';
     write('AGENTS.md', handWritten);
-    write('CLAUDE.md', staleBlock('old'));
+    // A line of the user's own: an Origin-only CLAUDE.md beside a hand-written
+    // AGENTS.md is deleted instead (agents-md-claude.test.ts).
+    write('CLAUDE.md', '# Claude notes\n\n' + staleBlock('old'));
 
     writeAgentRulesFile('claude-code', 'FRESH', repo);
 
@@ -179,5 +181,35 @@ describe('writeAgentRulesFile — multi-file refresh', () => {
     expect(read('CLAUDE.md')).toContain('FRESH');
     expect(fs.readFileSync(path.join(fakeHome, '.cursor/rules/origin.md'), 'utf-8')).toBe('FRESH');
     expect(fs.existsSync(path.join(repo, '.cursor'))).toBe(false);
+  });
+
+  it('never creates CLAUDE.md in a repo that keeps its instructions in AGENTS.md alone', () => {
+    // Claude Code reads AGENTS.md only when a folder has NO CLAUDE.md. Creating
+    // one for Origin's notice would hide the user's AGENTS.md from Claude.
+    write('AGENTS.md', '# Use pnpm\n');
+    writeAgentRulesFile('claude-code', 'FRESH', repo);
+
+    expect(fs.existsSync(path.join(repo, 'CLAUDE.md'))).toBe(false);
+    expect(read('AGENTS.md')).toBe('# Use pnpm\n');
+    expect(agentRulesTarget('claude-code', repo)).toBeNull();
+  });
+
+  it('still refreshes an AGENTS.md that carries Origin\'s block, without creating CLAUDE.md', () => {
+    write('AGENTS.md', '# Use pnpm\n\n' + staleBlock('old'));
+    writeAgentRulesFile('claude-code', 'FRESH', repo, 'DURABLE');
+
+    expect(fs.existsSync(path.join(repo, 'CLAUDE.md'))).toBe(false);
+    // Codex reads AGENTS.md as its only channel: it keeps the full text.
+    expect(read('AGENTS.md')).toContain('FRESH');
+    expect(read('AGENTS.md')).toContain('# Use pnpm');
+  });
+
+  it('keeps writing an existing CLAUDE.md when AGENTS.md is there too', () => {
+    write('AGENTS.md', '# Use pnpm\n');
+    write('CLAUDE.md', '# Claude notes\n');
+    writeAgentRulesFile('claude-code', 'FRESH', repo);
+
+    expect(read('CLAUDE.md')).toContain('FRESH');
+    expect(read('CLAUDE.md')).toContain('# Claude notes');
   });
 });

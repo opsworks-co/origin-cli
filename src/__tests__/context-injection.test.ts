@@ -2,9 +2,9 @@
 // start. Attribution (commit-level) and memory (session-level) each carry a
 // "recent work" list and a "hot files" list — two near-duplicates the agent must
 // reconcile. assembleRepoContext deduplicates: when memory is present, attribution
-// collapses to just its AI-authorship headline.
+// goes entirely — its "X% AI-generated" headline changes no decision.
 import { describe, it, expect } from 'vitest';
-import { assembleRepoContext, attributionHeadline } from '../context-injection.js';
+import { assembleRepoContext } from '../context-injection.js';
 
 const ATTRIBUTION = `Repository AI context: 97% of recent commits (28/29) are AI-generated.
 Recent AI activity:
@@ -17,16 +17,10 @@ const MEMORY = `Prior work in this repo — 2 sessions (claude-code, antigravity
   Files: nice_script.py
 - Frequently touched: nice_script.py, bouncing_ball.py`;
 
-describe('attributionHeadline', () => {
-  it('returns just the AI-authorship headline line', () => {
-    expect(attributionHeadline(ATTRIBUTION)).toBe('Repository AI context: 97% of recent commits (28/29) are AI-generated.');
-  });
-});
-
 describe('assembleRepoContext', () => {
-  it('collapses attribution to its headline when memory is present (dedup)', () => {
+  it('drops attribution entirely when memory is present (dedup)', () => {
     const out = assembleRepoContext({ attribution: ATTRIBUTION, memory: MEMORY })!;
-    expect(out).toContain('Repository AI context: 97%');
+    expect(out).not.toContain('Repository AI context');
     // attribution's duplicate lists are dropped...
     expect(out).not.toContain('Recent AI activity');
     expect(out).not.toContain('Top AI-modified files');
@@ -41,21 +35,20 @@ describe('assembleRepoContext', () => {
     expect(out).toContain('Top AI-modified files');
   });
 
-  it('orders blocks: brief → attribution → memory → handoff', () => {
-    const out = assembleRepoContext({
+  it('orders blocks: brief → attribution → handoff without memory, brief → memory → handoff with it', () => {
+    const blocks = {
       brief: 'About this repository: a widget lib.',
       attribution: ATTRIBUTION,
-      memory: MEMORY,
       handoff: 'Previous session context (cursor, 5m ago):\nFiles in progress: auth.ts',
-    })!;
-    const iBrief = out.indexOf('About this repository');
-    const iAttr = out.indexOf('Repository AI context');
-    const iMem = out.indexOf('Prior work in this repo');
-    const iHand = out.indexOf('Previous session context');
-    expect(iBrief).toBeGreaterThanOrEqual(0);
-    expect(iBrief).toBeLessThan(iAttr);
-    expect(iAttr).toBeLessThan(iMem);
-    expect(iMem).toBeLessThan(iHand);
+    };
+    const bare = assembleRepoContext(blocks)!;
+    expect(bare.indexOf('About this repository')).toBeGreaterThanOrEqual(0);
+    expect(bare.indexOf('About this repository')).toBeLessThan(bare.indexOf('Repository AI context'));
+    expect(bare.indexOf('Repository AI context')).toBeLessThan(bare.indexOf('Previous session context'));
+
+    const withMemory = assembleRepoContext({ ...blocks, memory: MEMORY })!;
+    expect(withMemory.indexOf('About this repository')).toBeLessThan(withMemory.indexOf('Prior work in this repo'));
+    expect(withMemory.indexOf('Prior work in this repo')).toBeLessThan(withMemory.indexOf('Previous session context'));
   });
 
   it('returns null when every block is empty', () => {

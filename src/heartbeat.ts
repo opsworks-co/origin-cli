@@ -12,10 +12,11 @@
 // ---------------------------------------------------------------------------
 
 import fs from 'fs';
+import { commitMadeByOpenTurn } from './heartbeat-turn-commit.js';
 import { newCaptureStamp } from './capture-stamp.js';
 import { serverRowForLocalTurn } from './turn-index.js';
 import { promptChangesForSessionEnd } from './session-end-payload.js';
-import { commitLandedInTurn, turnIsClosed } from './turn-commit-scope.js';
+import { commitLandedInTurn, stopAbandonedTurn, turnIsClosed } from './turn-commit-scope.js';
 import { assessRestoreSafety } from './restore-safety.js';
 import os from 'os';
 import path from 'path';
@@ -23,14 +24,15 @@ import { execFileSync, spawn } from 'child_process';
 import { getCurrentVersion, shouldRestartForUpgrade } from './version-check.js';
 import { transcriptIdleWindowMs, HOOK_DRIVEN_IDLE_MS, turnInProgress } from './heartbeat-liveness.js';
 import { pruneRetiredStateFiles } from './session-state.js';
-import { changedFilesBetween, createShadowCommit, filesChangedSinceShadow, filesChangedSinceShadowOrNull, readFileAtRev, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN, captureGitState } from './git-capture.js';
+import { patchSessionStateFile } from './session-state-lock.js';
+import { changedFilesBetween, createShadowCommit, filesChangedSinceShadow, filesChangedSinceShadowOrNull, readFileAtRev, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN, captureGitState, startDirtReader } from './git-capture.js';
 import { combineApplyableTurnDiff, hasDuplicateFileSections } from './applyable-turn-diff.js';
 import { capDiff } from './diff-budget.js';
 import { applyLedgerToMappings } from './capture-from-ledger.js';
 import { preferCommitPatchForCommittedTurns } from './commit-patch-for-committed-turn.js';
 import { preferShadowRangeForTurns } from './prefer-shadow-range.js';
 import { filesClaimedByOtherLiveSessions, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn } from './commands/hooks.js';
-import { scopeUncommittedToOpenTurn } from './open-turn-uncommitted-scope.js';
+import { openTurnNarrowingBase, scopeUncommittedToOpenTurn } from './open-turn-uncommitted-scope.js';
 import { readJournalEntries, journalPathsForTag } from './write-journal-watch.js';
 import { ensureInProcessJournal, stateLedgerIsContended } from './ledger-producer.js';
 import { stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
@@ -40,6 +42,8 @@ import { ensureSqlite, querySqlite } from './utils/sqlite.js';
 import { isCodexInternalSubroutine, findCodexRolloutByCwd, parseCodexRolloutLive } from './agents/codex.js';
 import { parentLooksDead, heartbeatSuperseded, isServerTerminalDefinitive, stateFileTakenOver, sessionNeverStarted, NEVER_STARTED_GRACE_MS } from './heartbeat-liveness.js';
 import { debugLog } from './debug-log.js';
+import { codexTurnMissingItsStop } from './codex-missed-stop.js';
+import { replayInProgress } from './commit-replay.js';
 
 // Path of a file inside the git dir governing `repoPath` — worktree-aware
 // (a linked worktree's `.git` is a FILE; naive `<repoPath>/.git/<name>`
@@ -347,6 +351,30 @@ function getCurrentBranch(): string | null {
 }
 
 /**
+ * Does this daemon still own its session — the pid file exists and names it?
+ * Re-asked right before every send, not only at the top of the tick.
+ *
+ * session-end deletes the pid file and SIGTERMs the daemon, but it signals
+ * only a process whose command line it could read (signal-own-daemon.ts):
+ * under busybox `ps`, a `ps` timeout or a blocked PowerShell it leaves it
+ * running, and so does a second daemon that lost the pid-file race. Such a
+ * daemon checked ownership at the START of its tick and then went on to ping
+ * and PATCH — after /session/end, for up to one tick (TODO 0caf3c77). The
+ * server contains most of it (no revive of an intentionally ended row, no
+ * COMPLETED → RUNNING without a new turn, a stale capturedAt cannot replace
+ * content), but a stale payload may still fill a gap on an empty row. Not
+ * sending is the whole fix. A read failure answers "yes": today's behaviour.
+ */
+function stillOwnsSession(): boolean {
+  try {
+    if (!pidFile) return true;
+    if (!fs.existsSync(pidFile)) return false;
+    const parsed = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+    return !heartbeatSuperseded({ pidFileExists: true, pidFileOwner: Number.isFinite(parsed) ? parsed : null, myPid: process.pid });
+  } catch { return true; }
+}
+
+/**
  * Compute a live diff for the prompt that's currently in-flight and
  * push it to the server. Without this, the most-recently-submitted
  * prompt's diff stays empty on the dashboard until either the NEXT
@@ -395,8 +423,12 @@ async function pushInflightDiff(): Promise<void> {
       writeSnapshotDir?: string;
       sessionTag?: string;
       // Advanced by Stop (closeTurn). Read here so a turn Stop has finished is
-      // left alone — see turnIsClosed.
+      // left alone — see turnIsClosed — unless its Stop died before sending
+      // the row (stopAbandonedTurn).
       lastClosedTurnIndex?: number | null;
+      stopClosing?: { turn?: number; at?: number } | null;
+      stopSentTurnIndex?: number | null;
+      activeTurn?: { index?: number } | null;
       commitTurns?: Array<{ sha: string; turnId: string; at?: string }>;
       // Server row of this launch's turn 0. Every local-numbered field above
       // (prompts, shadows, ids) is lifted by it before it names a row.
@@ -440,7 +472,19 @@ async function pushInflightDiff(): Promise<void> {
     // with a NEWER stamp, so the reconstruction outranked the observed
     // capture for as long as the session stayed open. Codex and Gemini fire
     // no Stop and never close a turn, so this changes nothing for them.
-    if (turnIsClosed(state, promptIndex)) return;
+    if (turnIsClosed(state, promptIndex) && !stopAbandonedTurn(state, promptIndex)) return;
+    // A rebase, cherry-pick or `git am` stopped mid-way (a conflict, an `edit`
+    // stop) leaves HEAD on the replay's base and the picked commit's changes in
+    // the index and tree. `HEAD..worktree` is then the commit being replayed,
+    // not the turn's work: a tick in that window sent the rebasing turn every
+    // file of the earlier turn's commit (capture-e2e-rebase-replays-earlier-
+    // turn-commit, conflicted case — it failed whenever a tick fell between the
+    // conflict and `--continue`). Skip the tick; the next one, or Stop,
+    // measures the tree once the replay is done.
+    if (replayInProgress(repoPath)) {
+      debugLog('heartbeat', 'skip tick: a replay is in progress', { sessionId: state.sessionId, promptIndex });
+      return;
+    }
     const promptText = (prompts[promptIndex] || '').slice(0, 1000);
     const gitOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 5000, windowsHide: true };
     const isHex = (s: string) => /^[a-fA-F0-9]{7,40}$/.test(s);
@@ -655,9 +699,10 @@ async function pushInflightDiff(): Promise<void> {
     // the tick's PATCH lands after Stop's, which a slow host makes likely.
     if (uncommittedDiff) {
       uncommittedDiff = scopeUncommittedToOpenTurn(uncommittedDiff, {
-        changedSinceTurnStart: currentShadow?.shadowSha && isHex(currentShadow.shadowSha)
-          ? filesChangedSinceShadowOrNull(repoPath, currentShadow.shadowSha)
-          : null,
+        changedSinceTurnStart: (() => {
+          const base = openTurnNarrowingBase(state as any, promptIndex);
+          return base && isHex(base) ? filesChangedSinceShadowOrNull(repoPath, base) : null;
+        })(),
         claimedByOthers: (() => {
           try { return filesClaimedByOtherLiveSessions(state as any); } catch { return []; }
         })(),
@@ -722,16 +767,40 @@ async function pushInflightDiff(): Promise<void> {
     // (or a later heartbeat fills it in once the commit lands).
     let heartbeatCommitSha: string | null = null;
     let heartbeatTreeSha: string | null = null;
-    const ownCommits = state.sessionCommitShas || [];
+    const ownCommits = (state.sessionCommitShas || []).filter((sha) => isHex(sha));
     try {
-      if (prePromptSha && ownCommits.length > 0) {
-        // First own commit AFTER prePromptSha — i.e., a commit this
-        // prompt caused. Falls back to null if none yet.
-        const prePromptIdx = ownCommits.indexOf(prePromptSha);
-        const candidates = prePromptIdx >= 0
-          ? ownCommits.slice(prePromptIdx + 1)
-          : ownCommits;
-        heartbeatCommitSha = candidates[0] || null;
+      if (ownCommits.length > 0) {
+        // The commit the turn began from: the time-based baseline, else the
+        // turn's shadow resolved to the commit it was cut on, else the HEAD
+        // recorded at submit — which a turn Cursor never announced does not
+        // have (it keeps the previous turn's). See heartbeat-turn-commit.ts.
+        const shadowStart = (() => {
+          const sha = currentShadow?.shadowSha;
+          if (!sha || !isHex(sha)) return null;
+          try {
+            const [subject, parents] = execFileSync('git', ['show', '-s', '--format=%s%n%P', sha], gitOpts).toString().split('\n');
+            return subject.startsWith('origin shadow ') ? ((parents || '').split(' ')[0] || null) : sha;
+          } catch { return null; }
+        })();
+        const turnId = (state.promptTurnIds || [])[promptIndex];
+        const times = new Map<string, number>();
+        if (promptStartedAt > 0) {
+          try {
+            const out = execFileSync('git', ['log', '--no-walk', '--format=%H %ct', ...ownCommits], gitOpts).toString();
+            for (const ln of out.split('\n')) {
+              const m = ln.match(/^([0-9a-f]{7,40})\s+(\d+)$/);
+              if (m) times.set(m[1], Number(m[2]) * 1000);
+            }
+          } catch { /* no times: ancestry alone decides */ }
+        }
+        heartbeatCommitSha = commitMadeByOpenTurn({
+          ownCommits,
+          attested: (state.commitTurns || []).filter((c) => !!turnId && c.turnId === turnId).map((c) => c.sha),
+          start: timestampBaseline || shadowStart || prePromptSha,
+          promptStartedAt,
+          isAncestor,
+          commitTime: (sha) => times.get(sha) ?? null,
+        });
       }
       if (heartbeatCommitSha) {
         heartbeatTreeSha = execFileSync('git', ['rev-parse', `${heartbeatCommitSha}^{tree}`], gitOpts).toString().trim();
@@ -776,6 +845,7 @@ async function pushInflightDiff(): Promise<void> {
         ? (baselineSha: string, localTurn: number) =>
           inheritedBeforeStatesForTurn(state.repoPath as string, state as any, baselineSha, localTurn)
         : undefined,
+      startDirt: state.repoPath ? startDirtReader(state.repoPath as string) : undefined,
       observe: observer.observe,
     });
     // Empty shadow window: leftover HEAD..worktree is not this turn. Changed
@@ -808,7 +878,12 @@ async function pushInflightDiff(): Promise<void> {
     // Do not publish from the stale state snapshot after it closed this turn.
     // If the state disappeared or cannot be read, the outer catch skips sending.
     const latestState = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
-    if (turnIsClosed(latestState, promptIndex)) return;
+    if (turnIsClosed(latestState, promptIndex) && !stopAbandonedTurn(latestState, promptIndex)) return;
+    if (!stillOwnsSession()) return;
+    // The Git work above takes seconds on a busy host; a replay that started
+    // meanwhile left this tick measuring a half-replayed tree (see the check
+    // at the top).
+    if (replayInProgress(repoPath)) return;
 
     await fetchWithTimeout(`${apiUrl}/api/mcp/session/${sessionId}`, {
       method: 'PATCH',
@@ -832,7 +907,7 @@ async function pushInflightDiff(): Promise<void> {
             // The turn's submit time, recorded by the hook path, so a row this
             // tick creates is not stamped with the tick's own time.
             ...((state as { promptSubmittedAt?: string[] }).promptSubmittedAt?.[promptIndex]
-              ? { createdAt: (state as { promptSubmittedAt?: string[] }).promptSubmittedAt![promptIndex] }
+              ? { createdAt: (state as { promptSubmittedAt?: string[] }).promptSubmittedAt![promptIndex], createdAtIsTurnStart: true as const }
               : {}),
             promptText,
             // Content comes from `hbMapping`, which is either what was
@@ -850,9 +925,16 @@ async function pushInflightDiff(): Promise<void> {
             linesAdded: hbMapping.linesAdded,
             linesRemoved: hbMapping.linesRemoved,
             ...(hbMapping.diffSource ? { diffSource: hbMapping.diffSource } : {}),
-            ...((hbMapping as { commitPatch?: boolean }).commitPatch ? { commitPatch: true } : {}),
+            ...((hbMapping as { commitPatch?: boolean }).commitPatch
+              ? { commitPatch: true, ...((hbMapping as { patchCommits?: string[] }).patchCommits?.length ? { patchCommits: (hbMapping as { patchCommits?: string[] }).patchCommits } : {}) }
+              : {}),
             ...(hbMapping.contentUnavailableFiles
               ? { contentUnavailableFiles: hbMapping.contentUnavailableFiles }
+              : {}),
+            // Stop's verdict on what the turn put back travels with the row,
+            // [] included, or the server keeps a stale list.
+            ...(Array.isArray((hbMapping as { discardedFiles?: string[] }).discardedFiles)
+              ? { discardedFiles: (hbMapping as { discardedFiles?: string[] }).discardedFiles }
               : {}),
             checkpointType: 'auto',
             commitSha: (hbMapping as any).turnWindowCaptured && !String(hbMapping.diff || '').trim() ? null : heartbeatCommitSha,
@@ -943,6 +1025,7 @@ async function pushInflightCodexState(): Promise<void> {
       sessionId?: string;
       agentSessionId?: string;
       claudeSessionId?: string;
+      lastClosedTurnIndex?: number | null;
     };
     if ((state.agentSlug || '').toLowerCase() !== 'codex') return;
     if (!state.repoPath) return;
@@ -998,6 +1081,9 @@ async function pushInflightCodexState(): Promise<void> {
           // true prompt-submit time and lets pushInflightDiff pick the LAST
           // commit that landed before this prompt as the diff baseline.
           promptStartedAt?: number;
+          // Always true here: cut when this tick NOTICED the prompt, after
+          // Codex may already have edited — see openTurnNarrowingBase.
+          cutAfterTurnStart?: boolean;
         }> = Array.isArray(fresh.promptShadows) ? fresh.promptShadows : [];
         const have = new Set(existingShadows.map((s) => s.promptIndex));
 
@@ -1007,33 +1093,47 @@ async function pushInflightCodexState(): Promise<void> {
         // state at the START of that prompt (= end of previous prompt's work).
         const newCount = parsed.userPrompts.length;
         const prevCount = existing.length;
+        const added: typeof existingShadows = [];
         for (let i = prevCount; i < newCount; i++) {
           if (have.has(i)) continue;
           const shadowSha = createShadowCommit(fresh.repoPath, `prompt-${i}-${sessionId.slice(0, 8)}`);
           const ts = parsed.promptTimestamps?.[i] || 0;
           if (shadowSha) {
-            existingShadows.push({
+            added.push({
               promptIndex: i,
               shadowSha,
               capturedAt: new Date().toISOString(),
               promptStartedAt: ts > 0 ? ts : undefined,
+              cutAfterTurnStart: true,
             });
           }
         }
 
-        fresh.prompts = parsed.userPrompts;
-        fresh.promptShadows = existingShadows;
-        // Mirror promptStartedAt timestamps into a parallel array so
-        // pushInflightDiff can pick the right baseline without re-parsing
-        // the rollout each tick.
-        fresh.promptStartedAt = parsed.promptTimestamps?.slice(0, parsed.userPrompts.length) || [];
-        fs.writeFileSync(stateFile, JSON.stringify(fresh), { mode: 0o600 });
+        // The shadow commits above take seconds; a hook may have saved in
+        // that time. Apply only these fields, onto the file as it is NOW,
+        // under the hooks' lock — writing back `fresh` erased whatever the
+        // hook had saved (TODO 3e663e79).
+        patchSessionStateFile(stateFile, (onDisk) => {
+          const diskShadows: typeof existingShadows = Array.isArray(onDisk.promptShadows) ? onDisk.promptShadows : [];
+          const onDiskIdx = new Set(diskShadows.map((s) => s.promptIndex));
+          onDisk.promptShadows = [...diskShadows, ...added.filter((s) => !onDiskIdx.has(s.promptIndex))];
+          // Never shrink a prompt list a hook has since grown.
+          if (parsed.userPrompts.length >= (Array.isArray(onDisk.prompts) ? onDisk.prompts.length : 0)) {
+            onDisk.prompts = parsed.userPrompts;
+            // Mirror promptStartedAt timestamps into a parallel array so
+            // pushInflightDiff can pick the right baseline without re-parsing
+            // the rollout each tick.
+            onDisk.promptStartedAt = parsed.promptTimestamps?.slice(0, parsed.userPrompts.length) || [];
+          }
+          return true;
+        });
       } catch { /* non-fatal */ }
     }
 
     const promptsForPush = parsed.userPrompts.length > 0 ? parsed.userPrompts : existing;
     const joinedPrompt = promptsForPush.join('\n\n---\n\n');
 
+    if (!stillOwnsSession()) return;
     await fetchWithTimeout(`${apiUrl}/api/mcp/session/${sessionId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
@@ -1049,7 +1149,53 @@ async function pushInflightCodexState(): Promise<void> {
         status: 'RUNNING',
       }),
     });
+    runStopForCodexTurnThatHadNone(state, parsed, rollout.rolloutPath);
   } catch { /* best-effort */ }
+}
+
+/** Local turns this daemon already ran a Stop for — once each. */
+const codexStopsRun = new Set<number>();
+
+/**
+ * The rollout says the last turn ended long ago and no Stop closed it: Codex
+ * fires none for an errored turn (TODO 6d70bb43). Run the Stop hook for it, as
+ * Codex would have, so its row is sent. See codex-missed-stop.ts.
+ */
+function runStopForCodexTurnThatHadNone(
+  state: { repoPath?: string; prompts?: string[]; agentSessionId?: string; claudeSessionId?: string; lastClosedTurnIndex?: number | null },
+  parsed: { userPrompts: string[]; lastTurnEnd?: { at: number; promptCount: number; errored: boolean }; model?: string },
+  rolloutPath: string,
+): void {
+  const turn = codexTurnMissingItsStop({
+    lastTurnEnd: parsed.lastTurnEnd,
+    rolloutPrompts: parsed.userPrompts.length,
+    statePrompts: Math.max(state.prompts?.length || 0, parsed.userPrompts.length),
+    lastClosedTurnIndex: state.lastClosedTurnIndex,
+    now: Date.now(),
+    alreadyRan: codexStopsRun,
+  });
+  if (turn === null || !state.repoPath) return;
+  codexStopsRun.add(turn);
+  const cli = path.join(path.dirname(process.argv[1] || ''), 'index.js');
+  if (!fs.existsSync(cli)) return;
+  debugLog('heartbeat', 'codex turn ended with no Stop — running Stop for it', {
+    sessionId, promptIndex: turn, endedAt: new Date(parsed.lastTurnEnd!.at).toISOString(), errored: parsed.lastTurnEnd!.errored,
+  });
+  try {
+    const child = spawn(process.execPath, [cli, 'hooks', 'codex', 'stop'], {
+      cwd: state.repoPath, detached: true, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true, env: process.env,
+    });
+    child.on('error', () => { /* logged by the hook itself when it runs */ });
+    child.stdin?.end(JSON.stringify({
+      session_id: state.agentSessionId || state.claudeSessionId || undefined,
+      cwd: state.repoPath,
+      transcript_path: rolloutPath,
+      hook_event_name: 'Stop',
+      stop_hook_active: false,
+      ...(parsed.model && { model: parsed.model }),
+    }));
+    child.unref();
+  } catch { /* the next tick will not retry: once per turn */ }
 }
 
 /**
@@ -1403,6 +1549,19 @@ async function endSession() {
     } catch { /* best effort */ }
   }
 
+  // The session's last memory entry. For Claude Code this is the only real end
+  // there is — its SessionEnd hook is handled as a Stop — so without this the
+  // entry stayed whatever its last commit wrote. See session-memory-final.ts.
+  if (stateData?.repoPath) {
+    try {
+      const { writeFinalSessionMemory } = await import('./session-memory-final.js');
+      if (writeFinalSessionMemory({ ...stateData, sessionId: stateData.sessionId || sessionId })) {
+        const { publishMemoryNotes } = await import('./memory-transport.js');
+        await publishMemoryNotes(stateData.repoPath, 'heartbeat-end', { timeoutMs: 20_000 });
+      }
+    } catch { /* best effort — memory is nice-to-have */ }
+  }
+
   // Retire ALL state files for this session (multiple hooks can create
   // duplicates) — mark them ENDED, do NOT delete them.
   //
@@ -1677,7 +1836,10 @@ async function ping() {
     // auto-end don't need the API.
     await checkSessionLimits();
 
-    // Only ping API in connected mode
+    // Only ping API in connected mode — and only while still the owner:
+    // checkSessionLimits above can take a while, and session-end may have
+    // run meanwhile (see stillOwnsSession).
+    if (isConnected && !stillOwnsSession()) process.exit(0);
     if (isConnected) {
       const resp = await fetchWithTimeout(`${apiUrl}/api/mcp/session/${sessionId}/ping`, {
         method: 'POST',
@@ -1706,6 +1868,8 @@ async function ping() {
       // even mid-turn, instead of only at the next session start.
       if (data.budget && stateFile && fs.existsSync(stateFile)) {
         try {
+          // Read-only below (agent slug, repo path for the notices); every
+          // write goes through patchSessionStateFile.
           const raw = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
           const blocked = !!data.budget.blocked;
           const reason = blocked ? (data.budget.message || 'Hard budget cap exceeded') : undefined;
@@ -1716,18 +1880,22 @@ async function ping() {
           const warnReason = !blocked && (data.budget as any).warning
             ? (data.budget.message || 'Soft budget cap exceeded')
             : undefined;
-          if (
-            !!raw.budgetBlocked !== blocked ||
-            raw.budgetBlockReason !== reason ||
-            (raw.budgetWarnReason || undefined) !== warnReason
-          ) {
+          // Read-compare-write under the hooks' lock, on the file as it is now:
+          // user-prompt-submit writes budgetBlockReported / budgetWarnShownFor
+          // itself, and an unlocked write-back of an older read erased them.
+          patchSessionStateFile(stateFile, (raw) => {
+            if (
+              !!raw.budgetBlocked === blocked &&
+              raw.budgetBlockReason === reason &&
+              (raw.budgetWarnReason || undefined) === warnReason
+            ) return false;
             raw.budgetBlocked = blocked;
             raw.budgetBlockReason = reason;
             if (!blocked) raw.budgetBlockReported = undefined; // next episode reports again
             raw.budgetWarnReason = warnReason;
             if (!warnReason) raw.budgetWarnShownFor = undefined; // re-arm for the next episode
-            fs.writeFileSync(stateFile, JSON.stringify(raw), { mode: 0o600 });
-          }
+            return true;
+          });
           // One desktop notification per distinct warning (mid-session
           // soft-cap crossings shouldn't wait for the next prompt).
           if (warnReason && softWarnNotifiedFor !== warnReason) {
@@ -1800,19 +1968,20 @@ async function ping() {
       // needless state churn / mtime bumps.
       if (data.enforcementRules && stateFile && fs.existsSync(stateFile)) {
         try {
-          const raw = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
           const next = JSON.stringify(data.enforcementRules);
-          if (JSON.stringify(raw.enforcementRules || []) !== next) {
-            raw.enforcementRules = data.enforcementRules;
-            if (data.activePolicies) raw.activePolicies = data.activePolicies;
-            raw.enforcementRulesFetchedAt = Date.now();
-            fs.writeFileSync(stateFile, JSON.stringify(raw), { mode: 0o600 });
-          } else {
-            // Unchanged, but still mark fresh so pre-tool-use's TTL doesn't
+          // Every tick writes here (the freshness stamp below), so this was the
+          // widest window for erasing a hook's save: now read and written under
+          // the hooks' lock, via rename, touching only these fields.
+          patchSessionStateFile(stateFile, (raw) => {
+            if (JSON.stringify(raw.enforcementRules || []) !== next) {
+              raw.enforcementRules = data.enforcementRules;
+              if (data.activePolicies) raw.activePolicies = data.activePolicies;
+            }
+            // Unchanged or not, mark fresh so pre-tool-use's TTL doesn't
             // trigger a redundant refetch on a session the heartbeat covers.
             raw.enforcementRulesFetchedAt = Date.now();
-            fs.writeFileSync(stateFile, JSON.stringify(raw), { mode: 0o600 });
-          }
+            return true;
+          });
         } catch (err: unknown) {
           // "Next tick retries" is true of a transient failure and a silent
           // forever-loop for a persistent one (permissions, disk full). Name it.
@@ -1888,7 +2057,7 @@ async function ping() {
         process.exit(0);
       };
 
-      if (isServerTerminalDefinitive(data)) {
+      if (isServerTerminalDefinitive(data, sessionId)) {
         // Archived / deleted server-side → stop immediately, parent or not.
         dropLocalSessionAndExit(true);
       }
@@ -1954,6 +2123,9 @@ async function signalExit() {
 process.on('SIGTERM', signalExit);
 process.on('SIGINT', signalExit);
 process.on('SIGHUP', signalExit);
+// From here a SIGTERM ends the session properly. Before this line it kills the
+// daemon outright — the module takes over a second to load on a busy machine.
+debugLog('heartbeat', 'ready', { sessionId, pid: process.pid });
 
 // Safety: auto-exit after 24 hours (prevents zombie processes)
 setTimeout(() => { clearInterval(interval); process.exit(0); }, 24 * 60 * 60 * 1000);

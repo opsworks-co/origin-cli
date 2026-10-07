@@ -19,6 +19,7 @@
 import {
   readAllSessionMemory,
   readAllCommitMemory,
+  readArchivedMemory,
   sortByDateAsc,
   type SessionMemoryEntry,
   type CommitMemoryEntry,
@@ -42,9 +43,20 @@ export interface RepoMemoryResult {
   commitCount: number;
   sessions: Array<Record<string, unknown>>;
   commits: Array<Record<string, unknown>>;
+  /**
+   * Open TODOs and decisions of sessions older than the ones the note still
+   * holds. Only with `includeDetail` and no `paths` filter — an archived item
+   * records no files, so a path filter can never match it.
+   */
+  older?: {
+    openTodos: Array<{ text: string; sessionId: string; at: string }>;
+    decisions: Array<{ text: string; sessionId: string; at: string }>;
+  };
   /** Set when the notes ref exists but nothing matched the filter. */
   note?: string;
 }
+
+const OLDER_CAP = 30;
 
 const clamp = (n: number | undefined, dflt: number, max: number): number => {
   if (!Number.isFinite(n as number)) return dflt;
@@ -139,6 +151,17 @@ export function getRepoMemory(opts: RepoMemoryOptions): RepoMemoryResult {
       .slice(-commitLimit)
       .map((c) => digestCommit(c, detail)),
   };
+
+  if (detail && paths.length === 0) {
+    const archive = readArchivedMemory(repoPath);
+    const newest = (items: typeof archive.todos) => sortByDateAsc(items, (a) => a.at)
+      .slice(-OLDER_CAP)
+      .reverse()
+      .map((a) => ({ text: a.text, sessionId: (a.sessionId || '').slice(0, 8), at: a.at }));
+    if (archive.todos.length + archive.decisions.length > 0) {
+      result.older = { openTodos: newest(archive.todos), decisions: newest(archive.decisions) };
+    }
+  }
 
   if (totalSessions + totalCommits === 0) {
     result.note = 'No memory recorded for this repo yet.';

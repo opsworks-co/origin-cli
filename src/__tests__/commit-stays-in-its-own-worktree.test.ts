@@ -27,6 +27,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import { excludeSessionsFromOtherTrees } from '../commands/hooks.js';
 
 let root: string;
@@ -112,6 +113,64 @@ describe('excludeSessionsFromOtherTrees', () => {
       sibling,
     );
     expect(kept).toHaveLength(1);
+  });
+
+  describe('an UNCLAIMED tree keeps no neighbour', () => {
+    // 2026-09-27 14:02Z. Commit 9d583342 was made in `vigorous-rubin-91647c` by
+    // a conversation whose session had been ended by hand for a release, so no
+    // live session claimed that tree. The pool stayed whole; its one member was
+    // d027b430, home `capturing-corruption-33d0db`, mid-turn — and its trailer
+    // went on the sibling's commit, billing its turn 8 with three files.
+    const trees = () => {
+      const wt = path.join(root, '.claude', 'worktrees');
+      const capturing = path.join(wt, 'capturing-corruption-33d0db');
+      const vigorous = path.join(wt, 'vigorous-rubin-91647c');
+      fs.mkdirSync(capturing, { recursive: true });
+      fs.mkdirSync(vigorous, { recursive: true });
+      return { capturing, vigorous };
+    };
+
+    it('drops the session whose home is ANOTHER linked worktree — the 9d583342 shape', () => {
+      const { capturing, vigorous } = trees();
+      const neighbour = session('d027b430-cf40-4f8e-99a0-152a9cd1d9c3', capturing, capturing);
+      expect(excludeSessionsFromOtherTrees([neighbour], vigorous)).toEqual([]);
+    });
+
+    it('still keeps the main-checkout session that is about to move in (EnterWorktree)', () => {
+      const { capturing, vigorous } = trees();
+      const mover = session('sess-main-2', root, root);
+      const neighbour = session('d027b430-cf40-4f8e-99a0-152a9cd1d9c3', capturing, capturing);
+      expect(excludeSessionsFromOtherTrees([mover, neighbour], vigorous).map((s) => s.sessionId)).toEqual(['sess-main-2']);
+    });
+
+    it('keeps a neighbour last seen inside this tree, or one this path names', () => {
+      const { capturing, vigorous } = trees();
+      const movedIn = session('aaaaaaaa-1111-4000-8000-000000000000', capturing, path.join(vigorous, 'packages'));
+      expect(excludeSessionsFromOtherTrees([movedIn], vigorous)).toHaveLength(1);
+      const named = path.join(root, '.claude', 'worktrees', 'bbbbbbbb-2222-4000-8000-000000000000');
+      fs.mkdirSync(named, { recursive: true });
+      const owner = session('bbbbbbbb-2222-4000-8000-000000000000', capturing, capturing);
+      expect(excludeSessionsFromOtherTrees([owner], named)).toHaveLength(1);
+    });
+
+    it('keeps the main checkout\'s session for a worktree kept OUTSIDE it (real git)', () => {
+      const repo = path.join(root, 'real-main');
+      const outside = path.join(root, 'real-outside-wt');
+      const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, stdio: 'pipe' });
+      fs.mkdirSync(repo, { recursive: true });
+      git('init', '-q', '-b', 'main');
+      git('-c', 'user.name=T', '-c', 'user.email=t@x', 'commit', '-q', '--allow-empty', '-m', 'base');
+      git('worktree', 'add', '-q', '-b', 'side', outside);
+      const main = fs.realpathSync(repo);
+      const wt = fs.realpathSync(outside);
+      const home = session('sess-main-3', main, main);
+      expect(excludeSessionsFromOtherTrees([home], wt)).toHaveLength(1);
+      // …while a session living in a sibling worktree of the same repo is dropped.
+      const sib = path.join(root, 'real-sibling-wt');
+      git('worktree', 'add', '-q', '-b', 'sib', sib);
+      const sibling2 = session('sess-sib-3', fs.realpathSync(sib), fs.realpathSync(sib));
+      expect(excludeSessionsFromOtherTrees([sibling2], wt)).toEqual([]);
+    });
   });
 
   it('is inert when every candidate is already in this tree', () => {

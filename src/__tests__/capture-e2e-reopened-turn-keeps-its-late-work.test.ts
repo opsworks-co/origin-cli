@@ -252,5 +252,24 @@ describe.skipIf(!haveDist)('a turn re-opened after its Stop, through the built b
     const kept = JSON.parse(fs.readFileSync(stateFile(), 'utf-8')).completedPromptMappings.find((m: any) => m.promptIndex === 1);
     expect(kept?.filesChanged || [], 'a turn with no write record was billed for a stranger\'s write').toEqual([]);
     expect(kept?.chatOnly).toBe(true);
+
+    // ── …and the re-opened turn is OVER when the next prompt arrives ──────
+    // Turn 2's Stop had closed it; the late command re-opened it. The prompt
+    // just submitted is not queued behind it. Session 9f3d6bd2 (2026-09-27):
+    // a sub-agent's call after Stop re-opened turn 2, turn 3's prompt was taken
+    // as queued, and every commit of turn 3 was attested to turn 2.
+    expect(hooksLog()).toMatch(/open turn was re-opened after its Stop — closing it \{"index":1/);
+    const afterSubmit = JSON.parse(fs.readFileSync(stateFile(), 'utf-8'));
+    expect(afterSubmit.activeTurn?.index ?? null, 'the re-opened turn is still open after the next prompt').not.toBe(1);
+    // Turn 3's first tool call binds turn 3 — the id its commits are attested
+    // with. Write-shaped, so the binding is saved (see the Read note above).
+    const probe = { command: `mkdir -p ${outside}/t3` };
+    await run('pre-tool-use', { tool_name: 'Bash', tool_input: probe, tool_use_id: 'tu-t3' });
+    fs.mkdirSync(path.join(outside, 't3'), { recursive: true });
+    toolUse('tu-t3', 'Bash', probe);
+    await run('post-tool-use', { tool_name: 'Bash', tool_input: probe, tool_use_id: 'tu-t3', tool_response: { stdout: '', stderr: '', interrupted: false } });
+    const turn3 = JSON.parse(fs.readFileSync(stateFile(), 'utf-8'));
+    expect(turn3.activeTurn?.index, 'turn 3\'s work was bound to an earlier turn').toBe(2);
+    expect(turn3.activeTurn?.turnId).toBe(turn3.promptTurnIds[2]);
   }, 240_000 * WINDOWS_SLOWDOWN);
 });

@@ -123,9 +123,19 @@ describe('a write-journal watcher and the process that owns it', () => {
     const w = startWriteJournal(dir, journal);
     if (!w) return;
     try {
+      // Write again every half second until one is journaled. macOS's
+      // recursive watch (FSEvents) can drop a change made in the moment the
+      // stream starts — 2 of 15 runs under full CPU load wrote once, right
+      // after start, and never saw it. What this proves is that an unref'd
+      // watcher still journals, not that the first instant is covered.
       const deadline = Date.now() + 10_000;
-      fs.writeFileSync(path.join(dir, 'app.ts'), 'const a = 1;\n');
+      let n = 0;
+      let nextWrite = 0;
       while (Date.now() < deadline) {
+        if (Date.now() >= nextWrite) {
+          fs.writeFileSync(path.join(dir, 'app.ts'), `const a = ${++n};\n`);
+          nextWrite = Date.now() + 500;
+        }
         if (fs.existsSync(journal) && fs.readFileSync(journal, 'utf-8').includes('app.ts')) break;
         await new Promise((r) => setTimeout(r, 25));
       }

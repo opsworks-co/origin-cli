@@ -30,6 +30,12 @@
  *    `rebase (pick):`, `rebase (continue):`, `cherry-pick:`, against
  *    `commit:`, `commit (amend):`, `revert:` — and it is still there however
  *    late the background process reads it.
+ *  - Reading it is a `git` subprocess, and on a starved host that read can
+ *    fail (the 5 s timeout). A failed read is NOT "no entry": the e2e
+ *    capture-e2e-rebase-replays-earlier-turn-commit failed once under load
+ *    because post-commit took the timeout for "not a replay" and attested the
+ *    rebase pick to the turn that ran the rebase. So the read reports
+ *    `unreadable`, and the caller falls back to the markers.
  */
 import { execFileSync } from 'child_process';
 import fs from 'fs';
@@ -50,19 +56,38 @@ export function kindOfReflogSubject(subject: string): ReplayKind | null {
   return null;
 }
 
+/** What a replay check could tell: a replay kind, `null` for an ordinary commit, or that it could not tell. */
+export type ReplayVerdict = ReplayKind | null | 'unknown';
+
 /**
  * What wrote `sha`, from the OLDEST entry for it in HEAD's reflog — the one
  * that created it. Newer entries for the same sha are later visits (a checkout
- * back to it, `rebase (finish)`), not its origin. Null for an ordinary commit,
- * and whenever the reflog cannot answer: the caller then keeps today's
- * behaviour.
+ * back to it, `rebase (finish)`), not its origin.
+ *
+ * When the reflog cannot be read, the replay markers answer instead
+ * (`replayInProgress`): post-commit runs while git is still replaying, unless
+ * the hook backgrounded it and the replay has finished since. Only when
+ * neither can tell is the verdict `'unknown'` — never folded into `null`, so
+ * the caller decides what an unanswered question means.
  */
-export function commitReplayKind(repoPath: string, sha: string): ReplayKind | null {
+export function commitReplayKind(repoPath: string, sha: string): ReplayVerdict {
+  const created = readSubjectThatCreated(repoPath, sha);
+  if (created === undefined) return replayInProgress(repoPath) ?? 'unknown';
+  return created === null ? null : kindOfReflogSubject(created);
+}
+
+/** The subject of the OLDEST HEAD reflog entry for `sha` — the one that created it — or null. */
+export function reflogSubjectThatCreated(repoPath: string, sha: string): string | null {
+  return readSubjectThatCreated(repoPath, sha) ?? null;
+}
+
+/** As reflogSubjectThatCreated, but `undefined` when the reflog could not be read at all. */
+function readSubjectThatCreated(repoPath: string, sha: string): string | null | undefined {
   if (!repoPath || !/^[a-fA-F0-9]{40,64}$/.test(sha || '')) return null;
   let out: string;
   try {
     out = execFileSync('git', ['reflog', 'show', `-n${REFLOG_WINDOW}`, '--format=%H%x00%gs', 'HEAD', '--'], { ...READ, cwd: repoPath });
-  } catch { return null; }
+  } catch { return undefined; }
   const want = sha.toLowerCase();
   let created: string | null = null;
   for (const line of out.split('\n')) {
@@ -70,7 +95,7 @@ export function commitReplayKind(repoPath: string, sha: string): ReplayKind | nu
     if (nul < 0 || line.slice(0, nul).toLowerCase() !== want) continue;
     created = line.slice(nul + 1); // newest first — the last match is the oldest
   }
-  return created === null ? null : kindOfReflogSubject(created);
+  return created;
 }
 
 /**
@@ -84,7 +109,11 @@ export function replayInProgress(repoPath: string): ReplayKind | null {
     gitDir = execFileSync('git', ['rev-parse', '--git-dir'], { ...READ, cwd: repoPath }).trim();
   } catch { return null; }
   if (!gitDir) return null;
-  const dir = path.isAbsolute(gitDir) ? gitDir : path.resolve(repoPath, gitDir);
+  return replayInProgressInGitDir(path.isAbsolute(gitDir) ? gitDir : path.resolve(repoPath, gitDir));
+}
+
+/** replayInProgress for a git dir the caller already resolved (absolute). */
+export function replayInProgressInGitDir(dir: string): ReplayKind | null {
   if (fs.existsSync(path.join(dir, 'rebase-merge'))) return 'rebase';
   if (fs.existsSync(path.join(dir, 'rebase-apply'))) {
     return fs.existsSync(path.join(dir, 'rebase-apply', 'applying')) ? 'am' : 'rebase';

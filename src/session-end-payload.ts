@@ -1,5 +1,5 @@
 import { newCaptureStamp, stampReplayedMapping } from './capture-stamp.js';
-import { serverRowForLocalTurn, turnIdForServerRow, turnStartForServerRow } from './turn-index.js';
+import { serverRowForLocalTurn, turnIdForServerRow, turnStartFields } from './turn-index.js';
 
 /**
  * The per-turn rows the heartbeat daemon sends when it ends a session.
@@ -35,8 +35,15 @@ export function promptChangesForSessionEnd(stateData: {
       if (!m || typeof m !== 'object') return m;
       // The row's start time travels with it, so this replay cannot leave a
       // turn's createdAt at the time of its first write (see promptSubmittedAt).
-      const createdAt = m.createdAt ? undefined : turnStartForServerRow(stateData, m.promptIndex);
-      const withStart = createdAt ? { ...m, createdAt } : m;
+      // A mapping that already carries a createdAt keeps it. It is flagged as
+      // the submit time only when it IS that time — otherwise this final replay
+      // would send it unflagged and the server would clear the flag Stop set.
+      const start = turnStartFields(stateData, m.promptIndex);
+      const withStart = !m.createdAt
+        ? (start.createdAt ? { ...m, ...start } : m)
+        : (start.createdAt && Date.parse(String(m.createdAt)) === Date.parse(start.createdAt)
+          ? { ...m, createdAtIsTurnStart: true }
+          : m);
       // Persisted mappings use an ISO timestamp so the release gate can grade
       // them. The API ordering contract uses epoch milliseconds. Preserve the
       // time the content was actually captured; only an unstamped legacy row
@@ -52,7 +59,7 @@ export function promptChangesForSessionEnd(stateData: {
     ...newCaptureStamp('hb'),
     promptIndex: serverRowForLocalTurn(i, stateData.promptIndexBase),
     ...(stateData.promptTurnIds?.[i] ? { turnId: stateData.promptTurnIds[i] } : {}),
-    ...(stateData.promptSubmittedAt?.[i] ? { createdAt: stateData.promptSubmittedAt[i] } : {}),
+    ...(stateData.promptSubmittedAt?.[i] ? { createdAt: stateData.promptSubmittedAt[i], createdAtIsTurnStart: true } : {}),
     promptText: (p || '').slice(0, 1000),
     filesChanged: [],
     diff: '',

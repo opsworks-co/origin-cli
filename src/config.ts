@@ -55,10 +55,15 @@ export interface OriginConfig {
   // ANTHROPIC_API_KEY takes precedence when both are set.
   anthropicApiKey?: string;
   agentSlugs?: Record<string, string>; // Per-tool agent slug overrides (e.g. { cursor: 'cursor-frontend' })
-  // Include prompt text in git notes (refs/notes/origin). Default TRUE —
-  // blame-with-prompts travels with the repo. Privacy-sensitive setups
-  // set false (here per machine, or per repo via .origin.json) to keep
-  // notes metadata-only, and run `origin scrub-notes` for history.
+  // Publish prompt text through Git: prompt text, summary and markers in
+  // refs/notes/origin, the automatic push of memory notes, and the automatic
+  // push of the origin-sessions branch to the repository's `origin`.
+  // Default OFF (metadata only). Security-sensitive opt-in: only a literal
+  // `true` enables it — anyone with read access to the repository reads those
+  // refs. A boolean in .origin.json wins; an unreadable or invalid
+  // .origin.json means metadata only, whatever this says. `snapshotRepo` and
+  // `pushStrategy` decide the origin-sessions destination separately (see
+  // sessionBranchPushTarget in prompt-privacy.ts).
   notesIncludePrompts?: boolean;
   keyType?: 'solo' | 'team';       // solo = personal dev key, team = org-managed key
   accountType?: 'developer' | 'org'; // Account type of the key owner
@@ -172,7 +177,7 @@ export function ensureConfigDir() {
  * renames over the target. The chmod is unconditional so existing files
  * get their permissions fixed on the next save.
  */
-function writeSecret(filePath: string, data: string): void {
+export function writeSecret(filePath: string, data: string): void {
   // Temp name must be unique per call — not just per-process. Two concurrent
   // Node processes could share a PID namespace (containers, forks), and even
   // within one process, parallel saveConfig/saveAgentConfig calls would
@@ -262,7 +267,7 @@ export interface RepoConfig {
   ignorePatterns?: string[];
   trackTabCompletions?: boolean;
   secretScan?: boolean;  // Pre-commit secret scanning (default: true)
-  notesIncludePrompts?: boolean;  // Include prompt text in git notes (default: true)
+  notesIncludePrompts?: boolean;  // Publish prompt text through Git; only literal true opts in (default: metadata only)
 }
 
 export function loadRepoConfig(repoPath: string): RepoConfig | null {

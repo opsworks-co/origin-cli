@@ -15,7 +15,8 @@ import os from 'os';
 import path from 'path';
 import { createShadowCommit } from '../git-capture.js';
 import { dropInheritedFilesFromTurns, type InheritedFilesRow } from '../drop-inherited-files.js';
-import { inheritedFilesForTurn } from '../commands/hooks.js';
+import { inheritedFilesForTurn, trailerNamesSessionTurn } from '../commands/hooks.js';
+import { watchedOnlyEditFiles } from '../commands/hooks/stop.js';
 import { filesRestoredFromHistory } from '../restored-from-history.js';
 
 let repo: string;
@@ -281,4 +282,238 @@ describe('a turn that only put files back to versions history already had', () =
     });
     expect(seen).toEqual([end.shadowSha, end.shadowSha]);
   });
+});
+
+// e87a35d5 / ec55247e. Prod 6b770703 turn 29 started on an abandoned PR head
+// and ran `git checkout main && git pull`; the pull brought another session's
+// #1750. The window 5718d5f2c → edf6d7e88 is DIVERGENT — the start is not an
+// ancestor of the end — and inheritedFilesForTurn answered nothing for any
+// such window, so every fixture that moved in a straight line was green on
+// the unfixed code. And the row named no files, so the pass skipped it while
+// its card still carried the journal's record of the pull.
+describe('a turn that leaves its PR branch for main', () => {
+  function divergentTurn() {
+    // The session's own PR branch, where the turn begins.
+    git(['checkout', '-qb', 'my-pr']);
+    write('a.ts', 'a1\na2 my pr\n');
+    git(['add', '-A']); git(['commit', '-qm', 'my PR']);
+    const s0 = boundary(0, 'turn0');
+    // Main moved on with another session's PR, then the turn checks it out.
+    git(['checkout', '-q', 'main']);
+    git(['merge', '-q', '--ff-only', upstream]);
+    const s1 = boundary(1, 'turn1');
+    return { s0, s1 };
+  }
+  const card = (files: string[]) => JSON.stringify({ edits: files.map((file) => ({ file, op: 'write', evidence: 'write_journal' })) });
+
+  it('reads the commits the end side brought in, though the window is not a straight line', () => {
+    const { s0, s1 } = divergentTurn();
+    // The precondition that matters: git itself says the start is not an ancestor.
+    expect(() => git(['merge-base', '--is-ancestor', s0.shadowSha, s1.shadowSha])).toThrow();
+    const state = stateFor([s0, s1]);
+    expect([...inheritedFilesForTurn(repo, state, s0.shadowSha, s1.shadowSha, 0)].sort()).toEqual(['b.ts', 'c.ts']);
+  });
+
+  it("marks the pulled files for the card on a row that names none, and leaves the row alone", () => {
+    const { s0, s1 } = divergentTurn();
+    const state = stateFor([s0, s1]);
+    const row: InheritedFilesRow = { promptIndex: 0, filesChanged: [], diff: '' };
+    const n = dropInheritedFilesFromTurns(state, [row], {
+      inheritedFiles: (from, to, local) => inheritedFilesForTurn(repo, state, from, to, local),
+      authoredFiles: () => new Set(),
+      watchedFiles: () => watchedOnlyEditFiles(card(['b.ts', 'c.ts'])),
+    });
+    expect(n).toBe(1);
+    expect(row.inheritedFiles).toEqual(['b.ts', 'c.ts']);
+    // Its emptiness is not this pass's to decide: a shell-only turn's work
+    // lives in the card.
+    expect(row.chatOnly).toBeUndefined();
+    expect(row.contentAuthoritative).toBeUndefined();
+    expect(row.filesChanged).toEqual([]);
+  });
+
+  it('keeps a pulled file the turn shows it authored', () => {
+    const { s0, s1 } = divergentTurn();
+    const state = stateFor([s0, s1]);
+    const row: InheritedFilesRow = { promptIndex: 0, filesChanged: [], diff: '' };
+    dropInheritedFilesFromTurns(state, [row], {
+      inheritedFiles: (from, to, local) => inheritedFilesForTurn(repo, state, from, to, local),
+      authoredFiles: () => new Set(['c.ts']),
+      watchedFiles: () => ['b.ts', 'c.ts'],
+    });
+    expect(row.inheritedFiles).toEqual(['b.ts']);
+  });
+
+  it('names nothing for a backward checkout — the end is the fork', () => {
+    git(['checkout', '-qb', 'ahead']);
+    write('b.ts', 'b1\nb2 ahead\n');
+    git(['add', '-A']); git(['commit', '-qm', 'someone ahead'], { GIT_COMMITTER_EMAIL: 'x@y.z' });
+    const s0 = boundary(0, 'turn0');
+    git(['checkout', '-q', 'main']);
+    const s1 = boundary(1, 'turn1');
+    expect([...inheritedFilesForTurn(repo, stateFor([s0, s1]), s0.shadowSha, s1.shadowSha, 0)]).toEqual([]);
+  });
+});
+
+describe('watchedOnlyEditFiles', () => {
+  it('names only files the card holds on watched evidence', () => {
+    const raw = JSON.stringify({ edits: [
+      { file: 'pulled.ts', evidence: 'write_journal' },
+      { file: 'probed.ts', evidence: 'command_probe' },
+      { file: 'mine.ts', evidence: 'command_named' },
+      { file: 'tool.ts', evidence: 'tool_call' },
+      { file: 'noev.ts' },
+    ] });
+    expect(watchedOnlyEditFiles(raw).sort()).toEqual(['probed.ts', 'pulled.ts']);
+    expect(watchedOnlyEditFiles(undefined)).toEqual([]);
+    expect(watchedOnlyEditFiles('not json')).toEqual([]);
+  });
+});
+
+// Independent review of the e87a35d5 fix: three ways it took a turn's real
+// work. Each reproduced against the first version of the fix.
+describe('what the review found the first fix took', () => {
+  const nested = () => {
+    fs.mkdirSync(path.join(repo, 'packages', 'api'), { recursive: true });
+  };
+
+  it("keeps root package.json when a pulled commit changed packages/api/package.json (card)", () => {
+    nested();
+    write('package.json', '{"root":1}\n'); write('packages/api/package.json', '{"api":1}\n');
+    git(['add', '-A']); git(['commit', '-qm', 'pkgs']);
+    git(['checkout', '-qb', 'theirs']);
+    write('packages/api/package.json', '{"api":2}\n');
+    git(['add', '-A']); git(['commit', '-qm', 'their bump'], { GIT_COMMITTER_EMAIL: 'x@y.z' });
+    git(['checkout', '-q', 'main']);
+    const s0 = boundary(0, 'turn0');
+    write('package.json', '{"root":1,"lodash":1}\n'); // the turn's own shell edit
+    git(['merge', '-q', '--ff-only', 'theirs']);
+    const s1 = boundary(1, 'turn1');
+    const state = stateFor([s0, s1]);
+    const row: InheritedFilesRow = { promptIndex: 0, filesChanged: [], diff: '' };
+    dropInheritedFilesFromTurns(state, [row], {
+      inheritedFiles: (from, to, local) => inheritedFilesForTurn(repo, state, from, to, local),
+      authoredFiles: () => new Set(),
+      watchedFiles: () => ['package.json', 'packages/api/package.json'],
+    });
+    expect(row.inheritedFiles).toEqual(['packages/api/package.json']);
+  });
+
+  it('keeps root package.json in the ROW of a divergent turn', () => {
+    nested();
+    write('package.json', '{"root":1}\n'); write('packages/api/package.json', '{"api":1}\n');
+    git(['add', '-A']); git(['commit', '-qm', 'pkgs']);
+    git(['checkout', '-qb', 'theirs']);
+    write('packages/api/package.json', '{"api":2}\n');
+    git(['add', '-A']); git(['commit', '-qm', 'their bump'], { GIT_COMMITTER_EMAIL: 'x@y.z' });
+    git(['checkout', '-q', 'main']);
+    git(['checkout', '-qb', 'my-pr']);
+    write('a.ts', 'a1\nmine\n'); git(['add', '-A']); git(['commit', '-qm', 'my pr']);
+    const s0 = boundary(0, 'turn0');
+    write('package.json', '{"root":1,"lodash":1}\n');
+    git(['checkout', '-q', 'main']);
+    git(['merge', '-q', '--ff-only', 'theirs']);
+    const s1 = boundary(1, 'turn1');
+    const state = stateFor([s0, s1]);
+    // The row names both: its own root edit and the nested file the checkout
+    // brought in. Only the nested one is inherited.
+    const row: InheritedFilesRow = {
+      promptIndex: 0, filesChanged: ['package.json', 'packages/api/package.json'],
+      diff: 'diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n@@ -1 +1 @@\n-{"root":1}\n+{"root":1,"lodash":1}\n'
+        + 'diff --git a/packages/api/package.json b/packages/api/package.json\n--- a/packages/api/package.json\n+++ b/packages/api/package.json\n@@ -1 +1 @@\n-{"api":1}\n+{"api":2}\n',
+    };
+    dropInheritedFilesFromTurns(state, [row], {
+      inheritedFiles: (from, to, local) => inheritedFilesForTurn(repo, state, from, to, local),
+      authoredFiles: () => new Set(),
+    });
+    expect(row.filesChanged).toEqual(['package.json']);
+    expect(row.diff).toContain('lodash');
+    expect(row.diff).not.toContain('"api":2');
+    expect(row.inheritedFiles).toEqual(['packages/api/package.json']);
+  });
+
+  it("keeps a divergent turn's file that its own PR's squash landed, with no commitTurns record", () => {
+    const sid = '11111111-2222-4333-8444-555555555555';
+    git(['checkout', '-qb', 'my-pr']);
+    write('a.ts', 'a1\nearlier turn\n'); git(['add', '-A']); git(['commit', '-qm', 'earlier turn']);
+    const s0 = boundary(0, 'turn0');
+    write('x.ts', 'written by a script\n'); // command_probe: watched-only
+    git(['add', '-A']); git(['commit', '-qm', 'x']);
+    // GitHub squash-merges the PR onto main: new sha, GitHub committer, our trailer.
+    git(['checkout', '-q', 'main']);
+    git(['merge', '-q', '--squash', 'my-pr']);
+    git(['commit', '-qm', `my PR (#9)\n\nOrigin-Session: ${sid.slice(0, 12)} | Claude Code | 2 prompts`], {
+      GIT_COMMITTER_NAME: 'GitHub', GIT_COMMITTER_EMAIL: 'noreply@github.com',
+    });
+    const s1 = boundary(1, 'turn1');
+    const state = stateFor([s0, s1]);
+    expect([...inheritedFilesForTurn(repo, state, s0.shadowSha, s1.shadowSha, 0)]).not.toContain('x.ts');
+  });
+
+  // ffca44d8: the same squash, reached along a STRAIGHT line — the turn started
+  // on main, branched, landed its PR and pulled main. Another session's PR
+  // (#1642, b.ts/c.ts) landed on main in the same window and stays inherited.
+  const squashOnMain = (sid: string, turnPart: string) => {
+    git(['checkout', '-qb', 'my-pr']);
+    write('x.ts', 'written by a script\n'); // command_probe: watched-only
+    git(['add', '-A']); git(['commit', '-qm', 'x']);
+    git(['checkout', '-q', 'main']);
+    git(['merge', '-q', '--ff-only', upstream]);
+    git(['merge', '-q', '--squash', 'my-pr']);
+    git(['commit', '-qm', `my PR (#9)\n\n* x\n\nOrigin-Session: ${sid.slice(0, 12)} | Claude Code | 3 prompts${turnPart}`], {
+      GIT_COMMITTER_NAME: 'GitHub', GIT_COMMITTER_EMAIL: 'noreply@github.com',
+    });
+  };
+
+  it("keeps a straight-line turn's file that its own PR's squash landed, when the trailer names this turn", () => {
+    const sid = '11111111-2222-4333-8444-555555555555';
+    const s0 = boundary(0, 'turn0');
+    squashOnMain(sid, ' | turn 1');
+    const s1 = boundary(1, 'turn1');
+    const state = stateFor([s0, s1]);
+    const inherited = inheritedFilesForTurn(repo, state, s0.shadowSha, s1.shadowSha, 0);
+    expect([...inherited]).not.toContain('x.ts');
+    expect([...inherited].sort()).toEqual(['b.ts', 'c.ts']);
+  });
+
+  it('a later turn that pulls an EARLIER turn\'s squash still treats it as inherited', () => {
+    const sid = '11111111-2222-4333-8444-555555555555';
+    const s0 = boundary(0, 'turn0');
+    squashOnMain(sid, ' | turn 1'); // made by turn 1 — this window is turn 2's
+    const s1 = boundary(1, 'turn1');
+    const state = stateFor([{ ...s0, promptIndex: 1 }, { ...s1, promptIndex: 2 }], {
+      prompts: ['first', 'go ahead', 'next'], promptTurnIds: ['t_0', 't_1', 't_2'],
+    });
+    expect([...inheritedFilesForTurn(repo, state, s0.shadowSha, s1.shadowSha, 1)]).toContain('x.ts');
+  });
+
+  it('a straight-line squash whose trailer names no turn (older CLI) stays inherited', () => {
+    const sid = '11111111-2222-4333-8444-555555555555';
+    const s0 = boundary(0, 'turn0');
+    squashOnMain(sid, '');
+    const s1 = boundary(1, 'turn1');
+    expect([...inheritedFilesForTurn(repo, stateFor([s0, s1]), s0.shadowSha, s1.shadowSha, 0)]).toContain('x.ts');
+  });
+
+  it('a resumed session numbers its turns from promptIndexBase', () => {
+    const sid = '11111111-2222-4333-8444-555555555555';
+    const s0 = boundary(0, 'turn0');
+    squashOnMain(sid, ' | turn 8'); // server row 7 = local turn 0 of a launch based at 7
+    const s1 = boundary(1, 'turn1');
+    const state = stateFor([s0, s1], { promptIndexBase: 7 });
+    expect([...inheritedFilesForTurn(repo, state, s0.shadowSha, s1.shadowSha, 0)]).not.toContain('x.ts');
+  });
+});
+
+describe('trailerNamesSessionTurn', () => {
+  const me = { sessionId: '11111111-2222-4333-8444-555555555555' };
+  it.each([
+    ['Origin-Session: 11111111-222 | Claude Code | 3 prompts | turn 4', 4, true],
+    ['Origin-Session: 11111111-222 | Claude Code | 3 prompts | turn 4', 3, false],
+    ['Origin-Session: 11111111-222 | Claude Code | 3 prompts', 3, false],
+    ['Origin-Session: 99999999-222 | Claude Code | turn 4', 4, false],
+    // A squash: one line per squashed commit — the second names this turn.
+    ['* a\n\nOrigin-Session: 11111111-222 | Claude Code | turn 2\n\n* b\n\nOrigin-Session: 11111111-222 | Claude Code | turn 4', 4, true],
+    ['Origin-Session: 11111111-222 | Claude Code | turn 14', 4, false],
+  ])('%j turn %i → %s', (body, turn, want) => expect(trailerNamesSessionTurn(body as string, me, turn as number)).toBe(want));
 });

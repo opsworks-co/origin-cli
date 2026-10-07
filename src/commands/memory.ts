@@ -1,4 +1,4 @@
-import { readAllSessionMemory, readAllCommitMemory, clearSessionMemory, buildMemoryContext, sortByDateAsc } from '../memory.js';
+import { readAllSessionMemory, readAllCommitMemory, readArchivedMemory, clearSessionMemory, buildMemoryContext, sortByDateAsc } from '../memory.js';
 import { getGitRoot } from '../session-state.js';
 
 /**
@@ -45,6 +45,13 @@ export async function memoryShowCommand(options: { limit?: string }): Promise<vo
       console.log(`    TODOs: ${entry.openTodos.length} open`);
     }
     console.log('');
+  }
+
+  // What older sessions left behind: their rollups aged out of the note, their
+  // open TODOs and decisions did not.
+  const archive = readArchivedMemory(repoPath);
+  if (archive.todos.length + archive.decisions.length > 0) {
+    console.log(`  From older sessions: ${archive.todos.length} open TODO${archive.todos.length !== 1 ? 's' : ''}, ${archive.decisions.length} decision${archive.decisions.length !== 1 ? 's' : ''} (origin todo list shows the TODOs)\n`);
   }
 
   // Immutable per-commit log — frozen when each commit landed, never regenerated.

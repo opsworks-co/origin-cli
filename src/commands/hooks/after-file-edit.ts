@@ -9,8 +9,9 @@ import { debugLog } from '../../debug-log.js';
 import { capDiff } from '../../diff-budget.js';
 import { MAX_PROMPT_DIFF_LEN, captureGitState, createShadowCommit, getDirtyFiles } from '../../git-capture.js';
 import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
-import { closeTurn, getGitRoot, getHeadSha, getWorkingGitRoot, reconcilePromptHistory, recordPromptShadow, saveSessionState, stampCaptured } from '../../session-state.js';
+import { closeTurn, getGitRoot, getHeadSha, getWorkingGitRoot, movePromptIdentities, reconcilePromptHistoryPlaced, recordPromptShadow, saveSessionState, stampCaptured } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
+import { trimDiffText } from '../../ignore-patterns.js';
 import { countDiffLines } from '../../transcript-adapters.js';
 import { toRepoRelative } from '../../transcript-watch.js';
 import { parseTranscript } from '../../transcript.js';
@@ -19,8 +20,9 @@ import { execFileSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { ensureWriteJournal, filterUncommittedDiff, findStateForHook, findStateForHookInput, normalizeWorkspaceRoot, recordProbedShellEdits, sessionRepoRoots, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
+import { SHELL_PROBE_TOOL, ensureWriteJournal, filterUncommittedDiff, findStateForHook, findStateForHookInput, normalizeWorkspaceRoot, recordProbedShellEdits, sessionRepoRoots, sessionScopedCommittedDiff, uncommittedExcludeUnion } from '../hooks.js';
 import { newCaptureStamp } from '../../capture-stamp.js';
+import { budgetRowDiffs, withCutFiles } from '../../budgeted-row-diff.js';
 
 
 // Cursor's afterFileEdit names the file it just wrote. Its own ledger slot so
@@ -121,21 +123,38 @@ export function adoptUnannouncedPrompts(
   opts?: { now?: () => number; newId?: () => string; revealedBy?: string[] },
 ): number {
   const before = state.prompts?.length || 0;
-  const merged = reconcilePromptHistory(state.prompts, parsedPrompts, {
+  const { prompts: merged, placed } = reconcilePromptHistoryPlaced(state.prompts, parsedPrompts, {
     collapseTrailingRepeat: state.agentSlug === 'cursor',
   });
   if (merged.length <= before) return before - 1;
 
+  const newId = opts?.newId || (() => `t_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`);
+  // The transcript's numbering can put a prompt no hook saw AHEAD of the ones
+  // we store. Their turn ids, shadows and rows move with them — see
+  // movePromptIdentities.
+  if (movePromptIdentities(state, placed, merged.length, newId)) {
+    debugLog('after-file-edit', 'prompt list renumbered — each prompt kept its turn id and records', {
+      stored: before, now: merged.length, placed,
+    });
+  }
   state.prompts = [...merged];
   const idx = merged.length - 1;
+  // Where the announced turn sits now.
+  const announced = before > 0 ? placed[before - 1] : -1;
+  if (announced === idx) {
+    // Nothing new at the tail: the transcript only filled in a prompt BEHIND
+    // the open turn (or has not flushed the open one yet). The edit is still
+    // the open turn's — closing it and anchoring a "discovered" turn here
+    // would split one turn in two.
+    return idx;
+  }
 
   // The turn that was open belonged to the prompt before this one; close it so
   // any later `currentTurnIndex` binds the turn we just found instead.
-  if (before > 0) closeTurn(state, before - 1);
+  if (before > 0) closeTurn(state, announced);
 
-  const newId = opts?.newId || (() => `t_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`);
   if (!state.promptTurnIds) state.promptTurnIds = [];
-  for (let i = before; i <= idx; i++) {
+  for (let i = announced + 1; i <= idx; i++) {
     if (!state.promptTurnIds[i]) state.promptTurnIds[i] = newId();
   }
 
@@ -148,7 +167,8 @@ export function adoptUnannouncedPrompts(
   if (shadow) {
     state.prePromptSha = shadow;
     state.prePromptDirtyFiles = [];
-    recordPromptShadow(state, idx, shadow, { completeBaseline: false });
+    // Cut now, AFTER the edit that revealed the turn — already in this tree.
+    recordPromptShadow(state, idx, shadow, { completeBaseline: false, cutAfterTurnStart: true });
   }
   state.currentTurnStartedAt = (opts?.now || (() => Date.now()))();
   // Put the boundary in the JOURNAL too, exactly as user-prompt-submit does.
@@ -249,16 +269,152 @@ export function buildLiveEditPromptChanges(
  * means nothing was committed during the turn, and a HEAD outside its
  * ancestry (a checkout elsewhere) is no commit of this turn's either.
  */
+/**
+ * Undo git's C-style path quoting: `"a/caf\303\251.ts"` -> `a/café.ts`.
+ *
+ * Git quotes a path holding a byte it considers unusual — non-ASCII under the
+ * default `core.quotePath`, and `"`, `\`, tab or newline always — and escapes
+ * those bytes octally. The escapes are BYTES: a multi-byte UTF-8 character
+ * arrives as several of them and is decoded as a whole.
+ */
+export function unquoteGitPath(quoted: string): string {
+  if (quoted.length < 2 || !quoted.startsWith('"') || !quoted.endsWith('"')) return quoted;
+  const body = quoted.slice(1, -1);
+  const named: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 };
+  const bytes: number[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const oct = body[i] === '\\' ? /^[0-7]{3}/.exec(body.slice(i + 1, i + 4)) : null;
+    if (oct) { bytes.push(parseInt(oct[0], 8) & 0xff); i += 3; continue; }
+    if (body[i] === '\\' && body[i + 1] in named) { bytes.push(named[body[i + 1]]); i += 1; continue; }
+    bytes.push(...Buffer.from(body[i], 'utf-8'));
+  }
+  return Buffer.from(bytes).toString('utf-8');
+}
+
+/**
+ * The two paths a `diff --git` header names, unquoted — null when the line
+ * cannot be read as one. Each side is either C-quoted (`"a/…"`, see
+ * unquoteGitPath) or bare; a bare pair splits at the first ` b/`, as before.
+ */
+export function parseDiffGitHeader(line: string): { a: string; b: string } | null {
+  const rest = /^diff --git (.+)$/.exec(line)?.[1];
+  if (!rest) return null;
+  // One side: a C-quoted string (escapes skipped) or bare text.
+  const QUOTED = '"(?:[^"\\\\]|\\\\.)*"';
+  const m = new RegExp(`^(${QUOTED}|a/.*?) (${QUOTED}|b/.+)$`).exec(rest);
+  if (!m) return null;
+  const a = unquoteGitPath(m[1]);
+  const b = unquoteGitPath(m[2]);
+  if (!a.startsWith('a/') || !b.startsWith('b/')) return null;
+  return { a: a.slice(2), b: b.slice(2) };
+}
+
 /** The `diff --git` sections of `diffText` covering `files`, in order. */
 export function diffSectionsFor(diffText: string, files: ReadonlySet<string>): string {
   if (!diffText || files.size === 0) return '';
   const kept: string[] = [];
   for (const section of diffText.split(/^(?=diff --git )/m)) {
-    const m = section.split('\n', 1)[0]?.match(/^diff --git a\/(.*?) b\/(.+)$/);
-    if (!m) continue;
-    if (files.has(m[2]) || files.has(m[1])) kept.push(section.trimEnd());
+    if (!section.startsWith('diff --git ')) continue;
+    const names = parseDiffGitHeader(section.split('\n', 1)[0] || '');
+    // A header that cannot be read is KEPT: dropping it loses a real write
+    // outright, keeping it can at worst over-report one section.
+    if (names && !files.has(names.b) && !files.has(names.a)) continue;
+    // Newlines only, never trimEnd(). A file ending in a blank line ends its
+    // fullContext section with a lone-space context line; trimEnd() ate it,
+    // the hunk came up one line short of its @@ header, and `git apply`
+    // rejected the stored patch as corrupt.
+    kept.push(section.replace(/\n+$/, ''));
   }
-  return kept.join('\n').trim();
+  return trimDiffText(kept.join('\n'));
+}
+
+/**
+ * Files this producer has direct evidence for in one turn.
+ *
+ * The working-tree window is deliberately NOT evidence. It can contain a
+ * sibling session's write, or a file the transcript extractor missed. Before
+ * this scope existed, after-file-edit stored that whole window in `diff` and
+ * `uncommittedDiff`; `filesChanged` was the only boundary, so any later reader
+ * that inspected the blob directly could resurrect an unowned file.
+ *
+ * Three sources, all this turn's own:
+ *
+ *   • every path an after-file-edit call named this turn (`editHookPathsByTurn`),
+ *     plus the current payload. Paths only, never content, so no size cap: the
+ *     ledger declines an edit over LIVE_EDIT_CONTENT_MAX (96 KB) or past its
+ *     6 MB total, and scoping by the ledger alone dropped a big file edited
+ *     earlier in the turn from diff, uncommittedDiff AND filesChanged;
+ *   • edit-hook ledger entries (a state written before the path list existed);
+ *   • this turn's SHELL PROBE entries that are proof, not inference: a file
+ *     the command itself named (`command_named`), or one that changed inside
+ *     a write-shaped command's before/after window (`command_probe` on a turn
+ *     in `shellWriteTurns` — the rule user-prompt-submit already applies). A
+ *     forked Cursor subagent fires no Stop, so a sed / codegen / `git mv`
+ *     write left out here is never put back. A bare `command_probe` on a turn
+ *     that ran no write-shaped command stays out: on a shared checkout it is
+ *     a sibling's write that landed during one of our reads (6e9947a5).
+ *
+ * Another turn's entries, and the inferred slots (write journal, shell
+ * window), are never evidence here.
+ */
+export function afterFileEditFilesForTurn(
+  state: Pick<SessionState, 'liveEdits' | 'editHookPathsByTurn' | 'shellWriteTurns'>,
+  promptIndex: number,
+  currentFiles: readonly string[],
+): Set<string> {
+  const files = new Set(currentFiles.filter(Boolean));
+  for (const entry of state.editHookPathsByTurn || []) {
+    if (entry?.promptIndex !== promptIndex) continue;
+    for (const p of entry.paths || []) if (p) files.add(p);
+  }
+  const shellWrote = (state.shellWriteTurns || []).includes(promptIndex);
+  for (const entry of state.liveEdits || []) {
+    if (entry.promptIndex !== promptIndex) continue;
+    const hook = entry.toolName === EDIT_HOOK_TOOL;
+    if (!hook && entry.toolName !== SHELL_PROBE_TOOL) continue;
+    for (const edit of entry.edits || []) {
+      if (!edit?.file) continue;
+      if (hook || edit.evidence === 'command_named' || (edit.evidence === 'command_probe' && shellWrote)) {
+        files.add(edit.file);
+      }
+    }
+  }
+  return files;
+}
+
+/** Paths per-turn lists are kept for; older turns' lists are dropped. */
+const EDIT_HOOK_PATH_TURNS = 64;
+
+/**
+ * Remember, against turn `promptIndex`, the paths this after-file-edit call
+ * named. Content-free, so nothing is ever declined for size — see
+ * afterFileEditFilesForTurn.
+ */
+export function recordEditHookPaths(
+  state: Pick<SessionState, 'editHookPathsByTurn'>,
+  promptIndex: number,
+  paths: readonly string[],
+): void {
+  if (!Number.isInteger(promptIndex) || promptIndex < 0 || paths.length === 0) return;
+  const all = state.editHookPathsByTurn || [];
+  const prev = all.find((e) => e.promptIndex === promptIndex)?.paths || [];
+  const keep = all.filter((e) => e.promptIndex !== promptIndex).slice(-(EDIT_HOOK_PATH_TURNS - 1));
+  state.editHookPathsByTurn = [...keep, { promptIndex, paths: [...new Set([...prev, ...paths.filter(Boolean)])] }];
+}
+
+export function scopeAfterFileEditDiffs(
+  state: Pick<SessionState, 'liveEdits' | 'editHookPathsByTurn' | 'shellWriteTurns'>,
+  promptIndex: number,
+  currentFiles: readonly string[],
+  diff: string,
+  uncommittedDiff: string,
+): { files: Set<string>; diff: string; uncommittedDiff: string } {
+  const files = afterFileEditFilesForTurn(state, promptIndex, currentFiles);
+  return {
+    files,
+    diff: diffSectionsFor(diff, files),
+    uncommittedDiff: diffSectionsFor(uncommittedDiff, files),
+  };
 }
 
 /**
@@ -395,6 +551,9 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
       .filter((p): p is string => typeof p === 'string' && p.length > 0)
       .map((p) => toRepoRelative(state.repoPath!, p))
       .filter((p) => p && !path.isAbsolute(p));
+    // Before the ledger, which can decline the content for size: the path is
+    // this turn's regardless. See afterFileEditFilesForTurn.
+    recordEditHookPaths(state, promptIdx, edited);
     try {
       if (edited.length > 0) {
         // `editBaseline`, not `captureBaseline`: when this edit is the one that
@@ -423,7 +582,7 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
 
     const capture = captureGitState(state.repoPath, captureBaseline, { fullContext: true });
 
-    const filteredUncommitted = filterUncommittedDiff(
+    let filteredUncommitted = filterUncommittedDiff(
       capture.uncommittedDiff || '', uncommittedExcludeUnion(state),
     );
     // Windowed to the turn's own shadow, like the capture directly above.
@@ -437,6 +596,18 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
       uncommittedDiff: filteredUncommitted,
       workingTreeDiff: capture.workingTreeDiff || '',
     });
+    // The capture above is a whole-tree window. Cursor gave this hook a much
+    // stronger boundary: the exact file it wrote, accumulated with the exact
+    // files earlier after-file-edit calls named for this turn. Scope the BYTES,
+    // not only filesChanged. Otherwise a missed extractor path remains hidden
+    // inside both stored blobs and can be attributed later by a reader that
+    // does not re-apply the file list.
+    const scoped = scopeAfterFileEditDiffs(
+      state, promptIdx, edited, fullDiff, filteredUncommitted,
+    );
+    const editHookFiles = scoped.files;
+    fullDiff = scoped.diff;
+    filteredUncommitted = scoped.uncommittedDiff;
     // An empty window on the invocation that DISCOVERED this turn is not "no
     // work" — it is the shadow we just cut swallowing the write that revealed
     // the turn. Recover it against the tree it actually changed rather than
@@ -465,11 +636,19 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
     }
 
     const filesChanged = new Set<string>();
-    for (const m of fullDiff.matchAll(/^diff --git a\/(.*?) b\//gm)) {
-      if (m[1]) filesChanged.add(m[1]);
+    for (const section of fullDiff.split(/^(?=diff --git )/m)) {
+      const names = parseDiffGitHeader(section.split('\n', 1)[0] || '');
+      if (!names) continue;
+      // A rename can be named by either side. Keep only names the hook itself
+      // observed; the scoped section cannot introduce a third file.
+      if (editHookFiles.has(names.a)) filesChanged.add(names.a);
+      if (editHookFiles.has(names.b)) filesChanged.add(names.b);
     }
-    // Filesystem path the hook reported, if any — useful when the diff lags.
+    // Preserve the hook's direct path evidence when git's diff lags the write.
+    // Do not do this for every historical ledger file: a later write may have
+    // reverted one to its baseline, leaving no section to carry.
     for (const p of edited) filesChanged.add(p);
+    for (const p of contentUnavailable) filesChanged.add(p);
 
     if (!state.completedPromptMappings) state.completedPromptMappings = [];
     // HEAD is this turn's commit only when the turn moved it. Stamping HEAD
@@ -488,6 +667,17 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
         treeSha = execFileSync('git', ['rev-parse', `${madeSince}^{tree}`], { windowsHide: true, cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
       } catch { /* keep the prior tree */ }
     }
+    // Which commit this row goes out with, and why. A stamp here is sent
+    // before Stop and the server fills a null sha from it, so a wrong one
+    // sticks; without this line the row's commit had no stated source.
+    if (commitSha) {
+      debugLog('after-file-edit', 'row commit', {
+        promptIndex: promptIdx,
+        commit: commitSha.slice(0, 8),
+        from: madeSince ? 'head moved since the baseline' : 'the mapping already held it',
+        baseline: (captureBaseline || '').slice(0, 12),
+      });
+    }
 
     const promptText = (state.prompts?.[promptIdx] || '').slice(0, 1000);
     // The rescued write is an uncommitted working-tree change; the window it
@@ -495,15 +685,16 @@ export async function handleAfterFileEdit(input: Record<string, any>, agentSlug?
     // diff with no uncommitted half to match it.
     const uncommitted = (!filteredUncommitted && shadowSwallowedThisWrite)
       ? fullDiff : filteredUncommitted;
+    const budgeted = budgetRowDiffs(fullDiff, uncommitted);
     const mapping = {
       promptIndex: promptIdx,
       promptText,
-      filesChanged: Array.from(filesChanged),
-      diff: fullDiff.slice(0, 200_000),
-      uncommittedDiff: uncommitted.slice(0, 200_000),
+      filesChanged: [...new Set([...filesChanged, ...budgeted.cutFiles])],
+      diff: budgeted.diff,
+      uncommittedDiff: budgeted.uncommittedDiff,
       commitSha,
       treeSha,
-      ...(contentUnavailable.length > 0 ? { contentUnavailableFiles: contentUnavailable } : {}),
+      ...withCutFiles(contentUnavailable, budgeted.cutFiles),
     };
     const existingIdx = state.completedPromptMappings.findIndex((m) => m.promptIndex === promptIdx);
     if (existingIdx >= 0) {

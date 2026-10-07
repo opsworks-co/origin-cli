@@ -26,11 +26,15 @@ const HOOKS = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)), '..', 'commands', 'hooks.ts',
 );
 
+// Stop re-derives only the turns it can't reuse as saved (stop-reuse.ts), so
+// its passes take `liveMappings`; every turn still reaches the payload.
+const ledgerCall = (src: string) => src.indexOf('applyLedgerCaptures(state, liveMappings');
+
 describe('ledger ordering in handleStop', () => {
   const src = hooksSource();
 
   it('applies the ledger before the stop payload is constructed', () => {
-    const applied = src.indexOf('applyLedgerCaptures(state, promptMappings');
+    const applied = ledgerCall(src);
     const payload = src.indexOf('const stopUpdatePayload = {');
     expect(applied, 'applyLedgerCaptures call not found — update this guard').toBeGreaterThan(-1);
     expect(payload, 'stopUpdatePayload not found — update this guard').toBeGreaterThan(-1);
@@ -44,7 +48,7 @@ describe('ledger ordering in handleStop', () => {
   it('applies the ledger before the state round-trip too', () => {
     // The heartbeat re-sends from completedPromptMappings, so a ledger answer
     // that lands after this write is lost to every later producer.
-    const applied = src.indexOf('applyLedgerCaptures(state, promptMappings');
+    const applied = ledgerCall(src);
     const stateWrite = src.indexOf('state.completedPromptMappings = promptMappings.map');
     expect(stateWrite).toBeGreaterThan(-1);
     expect(applied).toBeLessThan(stateWrite);
@@ -77,12 +81,21 @@ describe('commit-patch ordering in handleStop', () => {
     // An earlier Stop skipped settled turns to save git calls. Session
     // 761adbe8's last Stop (Cursor sessionEnd) then re-sent turn 5 as
     // baseline..HEAD.
-    const ledger = src.indexOf('applyLedgerCaptures(state, promptMappings');
+    const ledger = ledgerCall(src);
     const start = src.indexOf('preferCommitPatchForCommittedTurns(');
     expect(start).toBeGreaterThan(ledger);
     const call = src.slice(start, start + 280);
     expect(call).not.toContain('currentPromptIndex');
     expect(call).not.toContain('lastStopAt');
+  });
+
+  it('the live slice is only ever cut by saved rows it reuses', () => {
+    // Anything but the reuse map shrinking the slice would drop a live turn's ledger answer.
+    const start = src.indexOf('const liveMappings =');
+    expect(start).toBeGreaterThan(-1);
+    const decl = src.slice(start, src.indexOf(';', start));
+    expect(decl).toContain('reuse.rows.has(pm.promptIndex)');
+    expect(decl).toContain(': promptMappings');
   });
 });
 

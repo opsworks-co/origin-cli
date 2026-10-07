@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "revision": {
+    "vcs": "git",
+    "id": "5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f",
+    "diff_stats": {
+      "lines_added": 18,
+      "lines_removed": 3
+    }
+  },
+  "attribution_level": "commit",
+  "recorded_at": "2026-09-25T09:30:00Z",
+  "producer": {
+    "name": "origin-cli",
+    "version": "0.20260924.258"
+  },
+  "contributions": [
+    {
+      "evidence": "session_capture",
+      "agent": {
+        "id": "claude-code"
+      },
+      "model": {
+        "id": "claude-opus-4-6"
+      },
+      "session": {
+        "id": "8b1f3c2e-5d4a-4e6f-9a7b-0c1d2e3f4a5b",
+        "reference_uri": "https://origin.example.com/sessions/8b1f3c2e-5d4a-4e6f-9a7b-0c1d2e3f4a5b",
+        "prompt_count": 40,
+        "iterations": [
+          {
+            "index": 17,
+            "prompt_hash": "sha256:512d6c38f4066df65fc7c9606eee8e56db8f744938c23e1cb473524cb72a6947",
+            "reference_uri": "https://origin.example.com/sessions/8b1f3c2e-5d4a-4e6f-9a7b-0c1d2e3f4a5b?prompt=17"
+          },
+          {
+            "index": 18,
+            "prompt_hash": "sha256:fe415a6ebb38d75f3ff8685e31a4ae1181db8f304f65cb8647f4f2a4e56257ea",
+            "reference_uri": "https://origin.example.com/sessions/8b1f3c2e-5d4a-4e6f-9a7b-0c1d2e3f4a5b?prompt=18"
+          }
+        ]
+      }
+    }
+  ]
+}

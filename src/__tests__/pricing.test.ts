@@ -62,6 +62,14 @@ describe('Anthropic Fable 5 pricing — $10/$50, not the bare-claude fallback', 
     expect(estimateCost('claude-fable-5', 0, 0, ONE_MILLION, 0)).toBeCloseTo(1.0, 4);
   });
 
+  it('Opus 5.5 is $4/$20 with $0.20/M cache reads, "[1m]" included — Opus 5 unchanged', () => {
+    expect(estimateCost('claude-opus-5-5', ONE_MILLION, ONE_MILLION)).toBeCloseTo(24, 4);
+    expect(estimateCost('claude-opus-5-5[1m]', ONE_MILLION, ONE_MILLION)).toBeCloseTo(24, 4);
+    expect(estimateCost('claude-opus-5-5', 0, 0, ONE_MILLION, 0)).toBeCloseTo(0.20, 4);
+    expect(estimateCost('claude-opus-5', ONE_MILLION, ONE_MILLION)).toBeCloseTo(30, 4);
+    expect(estimateCost('claude-opus-5[1m]', ONE_MILLION, ONE_MILLION)).toBeCloseTo(30, 4);
+  });
+
   it('bare "gemini" and gpt-5.5-pro cache reads price at their own rows', () => {
     // 'gemini' had no row and fell to the Sonnet default with Anthropic cache rates.
     expect(estimateCost('gemini', ONE_MILLION, ONE_MILLION)).toBeCloseTo(11.25, 4);

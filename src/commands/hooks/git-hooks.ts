@@ -10,14 +10,17 @@ import { api } from '../../api.js';
 import { clearBudgetLockNotice } from '../../budget-breach.js';
 import { isConnectedMode, loadAgentConfig, loadConfig, loadRepoConfig, saveConfig } from '../../config.js';
 import { debugLog } from '../../debug-log.js';
-import { foldStagedNotes, pushAcceptanceNotes, pushMemoryNotes, shouldIncludePromptText, syncNotesFromRemoteThrottled } from '../../git-notes.js';
+import { HOOK_PUBLISH_BUDGET_MS, describePublishResult, foldStagedNotes, publishAttributionNotes, pushAcceptanceNotes, pushMemoryNotes, resolveAutoPublishRemote, shouldIncludePromptText, syncNotesFromRemoteThrottled } from '../../git-notes.js';
 import { notifyRepoMemoryChanged } from '../../memory-transport.js';
-import { reconcileSessionBranchWithRemote } from '../../local-entrypoint.js';
+import { pushSessionBranchTo } from '../../local-entrypoint.js';
+import { sessionBranchPushTarget } from '../../prompt-privacy.js';
 import { decidePushBlock } from '../../push-block.js';
 import { isNonSecretAssignmentValue, isSkippedScanPath } from '../../secret-rules.js';
 import { getGitRoot, getWorkingGitRoot, gitDirFilePath, listActiveSessions, saveSessionState } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import { sessionRunningTheCommit } from '../../commit-command-in-flight.js';
+import { manuallyEndedSessionForTree } from '../../manual-session-end.js';
+import { pickEndedSessionByContent, recentlyEndedSessionsForTree, type EndedSessionOwner } from '../../ended-session-commit-owner.js';
 import { listSnapshots } from '../snapshot.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
@@ -827,7 +830,18 @@ export function sessionTouchedFiles(state: SessionState, repoPath: string): Set<
   return files;
 }
 
-export function pickActiveSessionForCommit(hookCwd: string): SessionState | null {
+export function pickActiveSessionForCommit(
+  hookCwd: string,
+  opts: {
+    /**
+     * Consider the session ended by hand in this tree whose conversation has
+     * not prompted again (manuallyEndedSessionForTree): its turn is still
+     * running. For the TRAILER only: post-commit must not record work on an
+     * ended session.
+     */
+    afterManualEnd?: boolean;
+  } = {},
+): SessionState | null {
   // Read the staged list up front: besides scoring overlap between several live
   // sessions (below), it's the evidence that lets an idle-but-unended session be
   // reconsidered when staleness would otherwise leave no candidate at all.
@@ -838,10 +852,52 @@ export function pickActiveSessionForCommit(hookCwd: string): SessionState | null
   // files), then narrows multiple candidates by last-seen lifecycle cwd.
   const activeSessions = listSessionsForGitHook(hookCwd, { commitFiles: stagedFiles });
   activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
-  if (activeSessions.length === 0) return null;
+  // The session ended by hand in this tree whose conversation has not prompted
+  // again: the turn that ran `sessions end` is still the one running, and a
+  // commit made now is its work (manuallyEndedSessionForTree). It ranks as a
+  // session whose turn is OPEN would: below a live session at work on these
+  // files right now — a commit announced by its shell, a staged file in its
+  // open turn's ledger, a turn open at all — and above a live session whose
+  // only claim is a FINISHED turn, or none. #1918 consulted it only when the
+  // tree had no live session; the commit it was written for (12b4e4eaa, PR
+  // #1911) was refused with a live session in the pool — b300fdf0, a quiet
+  // sibling conversation in the same worktree, "no open turn and no recorded
+  // turn touched any committed file" — and so still went out without a trailer.
+  const endedInTurn = (): SessionState | null => {
+    if (!opts.afterManualEnd) return null;
+    const ended = manuallyEndedSessionForTree(hookCwd);
+    if (!ended || activeSessions.some((s) => s.sessionId === ended.sessionId)) return null;
+    return ended;
+  };
+  if (activeSessions.length === 0) {
+    const ended = endedInTurn();
+    if (!ended) return null;
+    debugLog('prepare-commit-msg', 'attributed to the session ended by hand in this tree — its turn is still running', {
+      session: ended.sessionId.slice(0, 12), staged: stagedFiles.length,
+    });
+    return ended;
+  }
   if (activeSessions.length === 1) {
     const only = activeSessions[0];
     const verdict = loneSessionMayOwnCommit(only, stagedFiles);
+    // A turn open or a write in flight: the live session is at work now.
+    if (verdict.ok && (verdict.why === 'turn open' || verdict.why === 'in-flight edit')) return only;
+    // Its own shell announced this commit: that IS the evidence, even when the
+    // files are not in its ledger yet (edited and committed in one call).
+    // post-commit applies the same rule, so both hooks agree.
+    if (sessionRunningTheCommit([only], hookCwd, new Set(stagedFiles), (s) => inFlightEditedFiles(s as any)).session) {
+      debugLog('prepare-commit-msg', 'attributed by the commit command in flight', { session: only.sessionId.slice(0, 12), staged: stagedFiles.length });
+      return only;
+    }
+    // Not at work now. The turn ended by hand and still running outranks a
+    // finished turn's file overlap, and a session with nothing to say.
+    const ended = endedInTurn();
+    if (ended) {
+      debugLog('prepare-commit-msg', 'attributed to the session ended by hand in this tree — the live session is not at work on these files', {
+        session: ended.sessionId.slice(0, 12), live: only.sessionId.slice(0, 12), staged: stagedFiles.length, liveVerdict: verdict.why,
+      });
+      return ended;
+    }
     if (verdict.ok) return only;
     debugLog('prepare-commit-msg', 'skip: the only live session shows no evidence for the staged files', {
       session: only.sessionId.slice(0, 12), staged: stagedFiles.length, why: verdict.why,
@@ -887,6 +943,19 @@ export function pickActiveSessionForCommit(hookCwd: string): SessionState | null
           session: midTurn[0].sessionId.slice(0, 12), staged: staged.size,
         });
         return midTurn[0];
+      }
+      // No live session is at work on these files. With none mid-turn at all,
+      // the turn ended by hand and still running outranks the finished-turn
+      // overlap and the process/cwd/recency guesses below; a live session
+      // mid-turn keeps those rules.
+      if (!activeSessions.some((s) => s.activeTurn && Number.isInteger(s.activeTurn.index))) {
+        const ended = endedInTurn();
+        if (ended) {
+          debugLog('prepare-commit-msg', 'attributed to the session ended by hand in this tree — no live session is mid-turn', {
+            session: ended.sessionId.slice(0, 12), staged: staged.size, ofActive: activeSessions.length,
+          });
+          return ended;
+        }
       }
       const scored = activeSessions
         .map((s) => {
@@ -1020,7 +1089,21 @@ export async function handlePrepareCommitMsg(
       return;
     }
 
-    const state = pickActiveSessionForCommit(hookCwd);
+    let state = pickActiveSessionForCommit(hookCwd, { afterManualEnd: true });
+    // No live session owns it: a person may be committing what a session left
+    // uncommitted when it ended. Only its own recorded lines in the staged
+    // patch can say so — see ended-session-commit-owner.ts.
+    let endedOwner: EndedSessionOwner | null = null;
+    if (!state) {
+      endedOwner = endedSessionOwningStagedWork(hookCwd, repoPath);
+      if (endedOwner) {
+        state = endedOwner.state;
+        debugLog('prepare-commit-msg', 'attributed to an ended session whose recorded lines are staged', {
+          session: state.sessionId.slice(0, 12), endedAt: state.endedAt,
+          prompts: endedOwner.promptIndexes, matchedLines: endedOwner.matchedLines,
+        });
+      }
+    }
     if (!state) {
       debugLog('prepare-commit-msg', 'skip — no unambiguous active session');
       return;
@@ -1037,14 +1120,19 @@ export async function handlePrepareCommitMsg(
       return;
     }
     const shortId = state.sessionId.slice(0, 12);
-    if (existing.includes(`Origin-Session: ${shortId}`)) {
+    // A trailer LINE, not the substring: a message that quotes a trailer in
+    // its prose (a fix that names the incident commit's trailer — 85fe6022,
+    // 2026-09-26) matched here and went out with no trailer at all.
+    const trailerLine = new RegExp(`^Origin-Session:\\s*${shortId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'mi');
+    if (trailerLine.test(existing)) {
       debugLog('prepare-commit-msg', 'trailer already present for this session');
       return;
     }
 
-    // Find latest snapshot for the Origin-Snapshot trailer.
+    // Find latest snapshot for the Origin-Snapshot trailer. Not for an ended
+    // session: its last snapshot is from before the person's own edits.
     let latestSnapshotId: string | undefined;
-    if (state.sessionTag) {
+    if (state.sessionTag && !endedOwner) {
       try {
         const snapshots = listSnapshots(repoPath, state.sessionTag);
         if (snapshots.length > 0) latestSnapshotId = snapshots[snapshots.length - 1].id;
@@ -1062,9 +1150,13 @@ export async function handlePrepareCommitMsg(
       latestSnapshotId,
       state.agentSlug,
       state.subagentSpawns?.length || 0,
-      livePrompts(state).length > 0
-        ? serverRowForLocalTurn(livePrompts(state).length - 1, state.promptIndexBase) + 1
-        : null,
+      // An ended session's committing turn is not its last prompt: it is the
+      // latest turn whose recorded lines are in this commit.
+      endedOwner
+        ? serverRowForLocalTurn(Math.max(...endedOwner.promptIndexes), state.promptIndexBase) + 1
+        : livePrompts(state).length > 0
+          ? serverRowForLocalTurn(livePrompts(state).length - 1, state.promptIndexBase) + 1
+          : null,
     );
 
     // Use git interpret-trailers to add the trailers in-place. This handles:
@@ -1104,8 +1196,44 @@ export async function handlePrepareCommitMsg(
 }
 
 /**
+ * The session that ENDED in this tree whose recorded lines the staged patch
+ * adds, when exactly one did. Reads the staged patch only when there is a
+ * candidate at all.
+ */
+export function endedSessionOwningStagedWork(hookCwd: string, repoPath: string): EndedSessionOwner | null {
+  const seen = new Set<string>();
+  const candidates = [...recentlyEndedSessionsForTree(hookCwd), ...recentlyEndedSessionsForTree(repoPath)]
+    .filter((s) => !seen.has(s.sessionId) && seen.add(s.sessionId));
+  if (candidates.length === 0) return null;
+  // A live session that touched any staged file may be the author — the rules
+  // above declined to pick between such sessions, and an ended one must not
+  // settle it for them.
+  const staged = new Set(stagedCommitFiles(hookCwd));
+  const liveClaim = listSessionsForGitHook(hookCwd, { commitFiles: [...staged] })
+    .some((s) => [...sessionTouchedFiles(s, repoPath)].some((f) => staged.has(f)));
+  if (liveClaim) {
+    debugLog('prepare-commit-msg', 'ended-session check skipped — a live session touched a staged file', { staged: staged.size });
+    return null;
+  }
+  let patch = '';
+  try {
+    patch = execFileSync('git', ['diff', '--cached', '--no-color', '--no-ext-diff', '-U0'], {
+      windowsHide: true, cwd: hookCwd, encoding: 'utf-8', timeout: 10_000, maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch { return null; }
+  return pickEndedSessionByContent(candidates, patch);
+}
+
+/**
  * Called by .git/hooks/pre-push.
  * Pushes origin-sessions branch and refs/notes/origin alongside the user's push.
+ *
+ * Everything this hook publishes on its own goes to the configured `origin`
+ * only — never to the remote a push happens to target. refs/notes/origin can
+ * hold redacted prompt text (by default, and in older notes whatever the
+ * current setting), and a `git push upstream` to an open-source project or a
+ * customer's repository must not copy it there. `origin push-metadata <remote>`
+ * publishes elsewhere, deliberately.
  */
 export async function handlePrePush(): Promise<void> {
   debugLog('pre-push', '=== GIT HOOK INVOKED ===');
@@ -1125,19 +1253,16 @@ export async function handlePrePush(): Promise<void> {
     timeout: 15_000,
   };
 
-  // Check if remote exists
-  try {
-    execFileSync('git', ['remote', 'get-url', 'origin'], execOpts);
-  } catch {
-    debugLog('pre-push', 'SKIP: no remote');
-    return;
-  }
+  // Without an `origin` there is nowhere Origin publishes to automatically, but
+  // the push-block gate below still applies: governance covers the user's push
+  // whatever remote it targets.
+  const originRemote = resolveAutoPublishRemote(repoPath);
+  if (!originRemote) debugLog('pre-push', 'no origin remote: nothing is published automatically');
 
   // In connected mode, session data goes to the API — don't push
   // origin-sessions branch to repo remote (may be public).
   const config = loadConfig();
   const connected = !!(config?.apiKey && config?.apiUrl);
-  const strategy = config?.pushStrategy || 'auto';
 
   // ── Agent-disabled push gate ──────────────────────────────────────
   // When the org opted in (Org.pushBlockMode) and the developer's coding
@@ -1196,67 +1321,36 @@ export async function handlePrePush(): Promise<void> {
     }
   }
 
-  // Push the origin-sessions branch whenever prompt portability is on (the
-  // default) — connected OR standalone. The branch carries the full per-prompt
-  // payloads (+ diffs) that let AI blame survive a clone or a re-connect to a
-  // DIFFERENT Origin org: the server imports it on connect. This used to be
-  // skipped in connected mode ("data goes to the API"), which meant a repo
-  // connected to another org had no branch to import → no cross-org prompts/
-  // blame, and developers had to `git push origin origin-sessions` by hand.
-  // Privacy opt-out is the SAME flag that governs notes: notesIncludePrompts
-  // = false (per repo/machine) suppresses both. snapshotRepo / pushStrategy
-  // 'always' stay as explicit escape hatches.
-  const pushSessionsBranch =
-    shouldIncludePromptText(repoPath) || config?.snapshotRepo || strategy === 'always';
-  if (pushSessionsBranch) {
-    try {
-      execFileSync('git', ['rev-parse', 'refs/heads/origin-sessions'], execOpts);
-      // Every other clone's sessions live on the same branch. Without this
-      // the first clone to push won and every later push from every other
-      // clone was rejected non-fast-forward — silently, in this very catch —
-      // for as long as the repo lived.
-      const reconciled = reconcileSessionBranchWithRemote(repoPath, 'origin');
-      execFileSync('git', ['push', 'origin', 'origin-sessions', '--no-verify', '--quiet'], execOpts);
-      debugLog('pre-push', 'pushed origin-sessions', { reconciled });
-    } catch (err: any) {
-      debugLog('pre-push', 'origin-sessions push skipped', { message: err.message });
-    }
+  // Push the origin-sessions branch — connected OR standalone. The branch
+  // carries the full per-prompt payloads (+ diffs) that let AI blame survive a
+  // clone or a re-connect to a DIFFERENT Origin org: the server imports it on
+  // connect. It carries prompt text, so whether and where it goes is the one
+  // decision every path shares (sessionBranchPushTarget): never with
+  // pushStrategy 'false'; only to a configured snapshotRepo when there is one
+  // (never ALSO to `origin`); otherwise to `origin` with the prompt opt-in or
+  // pushStrategy 'always'. This push is the user's own, so it is the publish
+  // moment for pushStrategy 'prompt'.
+  const sessionsTarget = sessionBranchPushTarget(repoPath, config, 'pre-push');
+  if (!sessionsTarget) {
+    debugLog('pre-push', 'SKIP origin-sessions push: not allowed by the publication policy');
   } else {
-    debugLog('pre-push', 'SKIP origin-sessions push: prompt portability opted out');
+    const pushed = pushSessionBranchTo(repoPath, sessionsTarget);
+    debugLog('pre-push', pushed ? 'pushed origin-sessions' : 'origin-sessions push skipped', { target: sessionsTarget.kind });
   }
 
-  // Push refs/notes/origin if they exist
-  let hasLocalNotes = false;
-  try {
-    execFileSync('git', ['rev-parse', '--verify', '--quiet', 'refs/notes/origin'], execOpts);
-    hasLocalNotes = true;
-  } catch {
-    debugLog('pre-push', 'SKIP notes push: no local refs/notes/origin');
+  // Publish refs/notes/origin to origin through the shared publisher: no
+  // force, --no-verify, a bounded fetch → `notes merge -s ours` → retry on a
+  // non-fast-forward (distinct commits union; the local note wins on the SAME
+  // commit), all inside one hook-safe budget. Best-effort: a failure is logged
+  // and never blocks the code push — only the governance block above exits
+  // non-zero.
+  if (!originRemote) {
+    debugLog('pre-push', 'SKIP notes, memory and acceptance push: no origin remote');
+    debugLog('pre-push', '=== GIT HOOK COMPLETE ===');
+    return;
   }
-  if (hasLocalNotes) {
-    const pushNotes = () =>
-      execFileSync('git', ['push', 'origin', 'refs/notes/origin', '--no-verify', '--quiet'], execOpts);
-    try {
-      pushNotes();
-      debugLog('pre-push', 'pushed refs/notes/origin');
-    } catch (err: any) {
-      // Almost always a non-fast-forward rejection: another worktree or
-      // machine pushed newer notes since we last synced (each post-commit
-      // appends to the shared notes ref). Fetch the remote notes, merge them
-      // into ours, and retry the push ONCE. Strategy `ours` keeps the local
-      // note when both sides annotated the SAME commit — notes are per-commit
-      // JSON written by the committing machine, so ours is the authoritative
-      // one here and line-level strategies (cat_sort_uniq) would corrupt it.
-      try {
-        execFileSync('git', ['fetch', '--no-tags', 'origin', '+refs/notes/origin:refs/notes/origin-remote'], execOpts);
-        execFileSync('git', ['notes', '--ref=refs/notes/origin', 'merge', '-s', 'ours', 'refs/notes/origin-remote'], execOpts);
-        pushNotes();
-        debugLog('pre-push', 'pushed refs/notes/origin after merging remote notes');
-      } catch (retryErr: any) {
-        debugLog('pre-push', 'notes push skipped', { message: err.message, retryMessage: retryErr.message });
-      }
-    }
-  }
+  const notesResult = publishAttributionNotes(repoPath, originRemote, { budgetMs: HOOK_PUBLISH_BUDGET_MS });
+  debugLog('pre-push', 'refs/notes/origin publish', describePublishResult(notesResult));
 
   // Memory notes (refs/notes/origin-memory + its continuation brief). Same
   // trigger, same privacy gate as the attribution notes above — pushMemoryNotes

@@ -8,9 +8,10 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { BIN, commitFiles, createHarness, haveDist, numbered, sleep } from './helpers/stop-next-prompt-harness.js';
-import { isWindows } from './helpers/windows-e2e.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
+import { sessionIsRunningCommitHere } from '../commit-command-in-flight.js';
 
-const T = 120_000;
+const T = 120_000 * WINDOWS_SLOWDOWN;
 const FILE = 'src/shared.py';
 
 function gitHook(cwd: string, name: string, args: string[] = []): Promise<{ code: number | null; stderr: string }> {
@@ -23,7 +24,7 @@ function gitHook(cwd: string, name: string, args: string[] = []): Promise<{ code
   return new Promise((resolve) => child.on('close', (code) => resolve({ code, stderr })));
 }
 
-describe.skipIf(!haveDist || isWindows)('a commit made in the same shell call as its edit', () => {
+describe.skipIf(!haveDist)('a commit made in the same shell call as its edit', () => {
   it('wears the trailer of the session running the command, not of the one that touched the file yesterday', async () => {
     const h = await createHarness('e2e-commit-call-0001', 'e2e-commit-call-srv-1');
     try {
@@ -66,11 +67,14 @@ describe.skipIf(!haveDist || isWindows)('a commit made in the same shell call as
       expect(trailerAtCommit).not.toContain('sibling-e2e-');
       expect(h.hooksLog()).toContain('attributed by the commit command in flight');
 
-      // The call has returned and post-commit has saved: the claim is gone and
-      // stays gone, so a commit somebody makes by hand a minute later is not
-      // this session's on that account.
+      // The call has returned and post-commit has saved: the claim is ENDED and
+      // stays ended, so a commit somebody makes by hand a minute later is not
+      // this session's on that account — prepare-commit-msg treats an ended
+      // claim as over, and post-commit only honours it at the commit's time.
       const state = JSON.parse(fs.readFileSync(path.join(h.repo, '.git', 'origin-session-e2e-commit-c.json'), 'utf-8'));
-      expect(state.commitCommandInFlight ?? null).toBeNull();
+      expect(state.commitCommandInFlight?.endedAt).toBeTruthy();
+      expect(sessionIsRunningCommitHere(state, h.repo)).toBe(false);
+      expect(sessionIsRunningCommitHere(state, h.repo, undefined, Date.now(), Date.parse(state.commitCommandInFlight.endedAt) + 60_000)).toBe(false);
     } finally {
       await h.close();
     }

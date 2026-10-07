@@ -12,6 +12,7 @@ import { parentLooksDead, transcriptIdleWindowMs } from '../heartbeat-liveness.j
 import { captureGitState } from '../git-capture.js';
 import { writeSessionFiles } from '../local-entrypoint.js';
 import { api } from '../api.js';
+import { originOnlyClaudeMdHidesAgentsMd } from '../managed-block-diff.js';
 
 /**
  * The liveness signals `doctor` can see for a session, in the shape
@@ -140,6 +141,14 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
       }
     } else {
       console.log(chalk.green(`  ✓ No active session in current repo`));
+    }
+
+    // 1a. A CLAUDE.md holding only Origin's block hides the repo's AGENTS.md
+    // from Claude Code. Reported only — even --fix leaves the user's file alone.
+    if (originOnlyClaudeMdHidesAgentsMd(repoPath)) {
+      issues++;
+      console.log(chalk.yellow(`  ⚠ CLAUDE.md holds only Origin's block, so Claude Code does not load AGENTS.md`));
+      console.log(chalk.gray(`    Delete ${path.join(repoPath, 'CLAUDE.md')} to let Claude read AGENTS.md — Origin will not create it again`));
     }
 
     // 1b. Stuck session detection: old AND showing no sign of life.

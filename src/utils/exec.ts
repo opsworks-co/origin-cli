@@ -186,6 +186,26 @@ export function __resetGitIdentityProbe(): void {
 }
 
 /**
+ * The cached identity verdict for a repo, without probing: true/false when a
+ * probe already ran in this process, undefined when none has. For callers that
+ * must run the probe themselves — inside their own time budget — and then
+ * record it with recordGitIdentity.
+ */
+export function cachedGitIdentity(repoPath?: string): boolean | undefined {
+  return identityProbe.get(repoPath || '');
+}
+
+/** Record a probe a caller ran itself (`git var GIT_COMMITTER_IDENT`: exit 0 → true). */
+export function recordGitIdentity(repoPath: string | undefined, has: boolean): void {
+  identityProbe.set(repoPath || '', has);
+}
+
+/** The env gitIdentityEnv returns for a known verdict. */
+export function identityEnvFor(has: boolean): Record<string, string> {
+  return has ? {} : { ...ORIGIN_FALLBACK_IDENTITY };
+}
+
+/**
  * Env for a git command that writes an object.
  *
  * Returns `{}` when the machine already has an identity, so a real user's name

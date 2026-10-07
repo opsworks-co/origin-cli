@@ -7,6 +7,7 @@ import path from 'path';
 import { isConnectedMode, loadAgentConfig } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot, listActiveSessions, listAllActiveSessions, clearSessionState, stopHeartbeat, isHeartbeatAlive, sessionLastSignMs, hasHealthyHeartbeat, isSessionAlive } from '../session-state.js';
+import type { SessionState } from '../session-state.js';
 import { newCaptureStamp, stampReplayedMapping } from '../capture-stamp.js';
 import { git, gitOrNull } from '../utils/exec.js';
 import { currentOwner, isForeignSession, listForeignQueuedSessions, reportForeignSessionCount } from '../session-owner.js';
@@ -518,10 +519,8 @@ export async function sessionEndCommand(id: string) {
   // running hook may save its stale RUNNING state after the command returns.
   const matches = (sessionId: unknown): sessionId is string =>
     typeof sessionId === 'string' && id.length > 0 && sessionId.startsWith(id);
-  const matchedStates = [];
-  for (const state of listAllActiveSessions()) {
-    if (matches(state.sessionId)) matchedStates.push(state);
-  }
+  const liveStates = listAllActiveSessions().filter((state) => matches(state.sessionId));
+  const matchedStates: Array<SessionState | Record<string, any>> = [...liveStates];
   const mirrorDir = path.join(os.homedir(), '.origin', 'sessions');
   if (fs.existsSync(mirrorDir)) {
     for (const entry of fs.readdirSync(mirrorDir).filter(f => f.endsWith('.json'))) {
@@ -536,7 +535,32 @@ export async function sessionEndCommand(id: string) {
     process.exitCode = 1;
     return;
   }
-  for (const state of matchedStates) recordManualSessionEnd(state);
+  // A turn still OPEN when the session is ended from inside it is closed the
+  // way its Stop would have closed it — before the barrier goes up. Ended from
+  // inside a turn (the release recipe ends the releasing session mid-turn),
+  // the Stop that follows is a continuation and is skipped
+  // (skipManuallyEndedHook), so the turn's row never left this machine until
+  // the NEXT prompt's Stop: session c085f0af turn 5 ("merge and release it
+  // yourself", ended 2026-09-25 23:20 UTC) reached the server at 05:07 the
+  // next day, and until then the page numbered its turns 1, 2, 3, 4, 6.
+  for (const state of liveStates) {
+    const open = state.activeTurn;
+    if (!open || !Number.isInteger(open.index) || state.agentSlug !== 'claude-code' || !state.claudeSessionId) continue;
+    try {
+      const { handleStop } = await import('./hooks/stop.js');
+      await handleStop({
+        session_id: state.claudeSessionId,
+        transcript_path: state.transcriptPath || undefined,
+        cwd: state.lastCwd || state.repoPath,
+        hook_event_name: 'Stop',
+      }, 'claude-code');
+      console.log(chalk.gray(`  Closed turn ${open.index + 1}, which was still open.`));
+    } catch (err: any) {
+      console.log(chalk.yellow(`  Could not close the open turn ${open.index + 1}: ${err?.message || err}`));
+    }
+    break;
+  }
+  for (const state of matchedStates) recordManualSessionEnd(state as SessionState);
 
   // 1. Kill heartbeat FIRST — before ending on platform, so it can't re-ping
   try {
@@ -1110,6 +1134,8 @@ export async function sessionsSyncCommand(opts: { quiet?: boolean; markImported?
           branch: state.branch || undefined,
           hostname: agentConfig.hostname || undefined,
           importedFromPreviousAccount: opts.markImported === true,
+          // This queued session's commits carry its local id in their trailers.
+          localSessionId: state.sessionId.startsWith('local-') ? state.sessionId : undefined,
         });
         realSessionId = startRes.sessionId as string;
         // Persist the real id BEFORE attempting end, so an end failure (or a

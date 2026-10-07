@@ -36,6 +36,7 @@
 // but it does not close it either.
 
 import type { PromptEdit, PromptEditOp } from './prompt-capture/types.js';
+import { gitPathspecsNamed } from './git-pathspec-names.js';
 
 /** Stamped on every edit this module produces, so a bad claim is traceable. */
 export const SHELL_WINDOW_SOURCE = 'shell-window';
@@ -145,6 +146,36 @@ export function stripHeredocBodies(cmd: string): string {
     if (m) terminator = m[1];
   }
   return out.join('\n');
+}
+
+// Separators between the words of a shell command and of the scripts agents
+// pipe through it (`open('a.py','w')`, `--out=dist/x.js`): a path is one word.
+const COMMAND_WORD_SPLIT = /[\s;|&<>()`'",=]+/;
+
+/**
+ * Does `command` name `file` (repo-relative, forward slashes) as one of its
+ * words — `cat > retry.ts`, `sed -i … src/a.ts`, `python3 - <<'PY'` whose body
+ * opens `'src/a.ts'`, or the file's absolute path under `workRoot`?
+ *
+ * A WHOLE word, never a substring: `retry.ts` must not match `old-retry.ts`.
+ * A git pathspec naming the file's directory counts too (`git checkout -- src`),
+ * but a whole-tree one (`git checkout .`) names no particular file.
+ */
+export function shellCommandNamesFile(command: string, file: string, workRoot?: string): boolean {
+  const rel = String(file || '').replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!command || !rel) return false;
+  const root = workRoot ? workRoot.replace(/\\/g, '/').replace(/\/+$/, '') : '';
+  for (let word of command.replace(/\\/g, '/').split(COMMAND_WORD_SPLIT)) {
+    word = word.replace(/:\d+(?::\d+)?$/, '').replace(/^\.\//, '');
+    if (!word) continue;
+    if (word === rel) return true;
+    if (root && word === `${root}/${rel}`) return true;
+  }
+  try {
+    return gitPathspecsNamed(command, workRoot).some((p) => p !== '' && (p === rel || rel.startsWith(`${p}/`)));
+  } catch {
+    return false;
+  }
 }
 
 export interface ShellWindowDeps {

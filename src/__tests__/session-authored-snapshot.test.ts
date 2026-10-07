@@ -75,9 +75,12 @@ beforeAll(() => {
 });
 afterAll(() => { try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ } });
 
-// Captured at import, before the fixture commits: the session was running
-// when they were made, which is what the no-recorded-shas case is about.
-const STARTED_AT = new Date().toISOString();
+// Before the fixture commits: the session was running when they were made,
+// which is what the no-recorded-shas case is about. Two seconds back, not
+// "now": a commit dated inside the session's start second is not the
+// session's unless it recorded it (commitBelongsToSession), and the fixture
+// commits within the second it is imported.
+const STARTED_AT = new Date(Date.now() - 2_000).toISOString();
 
 const stateWith = (shas: string[]) => ({
   sessionId: 'sess-authored',
@@ -242,8 +245,9 @@ describe('renderAuthoredCommits', () => {
 describe('the header drops what the turn rows never count', () => {
   // The e2e (real binary, turn 5) found the header at +22 against turns
   // summing to +6: session-start had written Origin's own CLAUDE.md block and
-  // turn 2's `git add -A` committed it. Lockfiles take the same door.
-  it('a commit that swept in CLAUDE.md and a lockfile is credited with its real file only', () => {
+  // turn 2's `git add -A` committed it. A lockfile in the same commit is the
+  // turn's work, though — it counts, as it does on the turn's row.
+  it('a commit that swept in CLAUDE.md and a lockfile is credited with its real file and the lockfile', () => {
     git('checkout', '-q', '-b', 'bookkeeping', sessionStart);
     fs.writeFileSync(path.join(repo, 'CLAUDE.md'), '<!-- origin-managed -->\nOrigin: tracking\n<!-- origin-managed -->\n');
     fs.writeFileSync(path.join(repo, 'package-lock.json'), Array.from({ length: 50 }, (_, i) => `"dep${i}": "1"`).join('\n') + '\n');
@@ -253,10 +257,10 @@ describe('the header drops what the turn rows never count', () => {
     try {
       const snap = sessionAuthoredSnapshot(repo, stateWith([sha]));
       expect(snap.source).toBe('owned');
-      expect(snap.filesChanged).toEqual(['real.ts']);
-      expect([snap.linesAdded, snap.linesRemoved]).toEqual([2, 0]);
+      expect([...snap.filesChanged].sort()).toEqual(['package-lock.json', 'real.ts']);
+      expect([snap.linesAdded, snap.linesRemoved]).toEqual([52, 0]);
       expect(snap.diff).not.toContain('origin-managed');
-      expect(snap.diff).not.toContain('dep0');
+      expect(snap.diff).toContain('dep0');
     } finally {
       git('checkout', '-q', 'main');
     }

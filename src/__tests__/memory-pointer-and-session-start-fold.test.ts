@@ -101,6 +101,10 @@ beforeEach(() => {
 
   execFileSync('git', ['init', '--bare', upstream], { stdio: 'pipe' });
   execFileSync('git', ['clone', upstream, alice], { stdio: 'pipe' });
+  // Memory leaves the machine only with the prompt opt-in (OR-48); this
+  // fixture publishes it on purpose. Excluded so no fixture commit picks it up.
+  fs.writeFileSync(path.join(alice, '.origin.json'), JSON.stringify({ notesIncludePrompts: true }));
+  fs.appendFileSync(path.join(alice, '.git', 'info', 'exclude'), '\n.origin.json\n');
   muteHooks(alice);
   git(alice, 'config', 'user.email', 'alice@test.dev');
   git(alice, 'config', 'user.name', 'Alice');

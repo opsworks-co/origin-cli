@@ -14,13 +14,13 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { WINDOWS_SLOWDOWN, isWindows } from './helpers/windows-e2e.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 import { commitFiles, createHarness, haveDist, numbered, sleep, waitFor } from './helpers/stop-next-prompt-harness.js';
 
 const T = 150_000 * WINDOWS_SLOWDOWN;
 const MINE = 'src/mine.py';
 
-describe.skipIf(!haveDist || isWindows)('what the next prompt adds to a closed turn, through the built binary', () => {
+describe.skipIf(!haveDist)('what the next prompt adds to a closed turn, through the built binary', () => {
   it('a sibling session\'s write between Stop and the next prompt is not added to the closed turn', async () => {
     const h = await createHarness('e2e-late-sib-0001', 'e2e-late-sib-srv-1');
     const SIB = 'src/sib.py';
@@ -100,7 +100,15 @@ describe.skipIf(!haveDist || isWindows)('what the next prompt adds to a closed t
 
       const before = h.hits.length;
       await h.submit('thanks');
-      await sleep(36_000);
+      // The loop below passes when NO in-flight row arrives — which is also the
+      // fixed build's answer for a turn that wrote nothing — so on its own it
+      // cannot tell "the tick scoped the row" from "no tick ran" (TODO
+      // 857fceac). Prove a tick ran inside the open turn: its ping, then time
+      // for that tick's in-flight pass, which follows the ping in the same tick.
+      const pingsSinceSubmit = () => h.hits.slice(before)
+        .filter((x) => x.method === 'POST' && x.url === '/api/mcp/session/e2e-late-tick-srv-4/ping').length;
+      await waitFor(() => pingsSinceSubmit() > 0, 45_000 * WINDOWS_SLOWDOWN, 'a heartbeat tick inside the open turn');
+      await sleep(6_000 * WINDOWS_SLOWDOWN);
       const inFlight = h.hits.slice(before)
         .filter((x) => x.method === 'PATCH' && x.url.startsWith('/api/mcp/session/e2e-late-tick-srv-4'))
         .flatMap((x) => (Array.isArray(x.body?.promptChanges) ? x.body.promptChanges : []))

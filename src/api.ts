@@ -6,6 +6,7 @@ import { loadConfig } from './config.js';
 import { fetchWithTimeout, LLM_CALL_TIMEOUT_MS } from './fetch-timeout.js';
 import { cliVersion } from './cli-version.js';
 import { debugLog } from './debug-log.js';
+import { isBenchmarkClonePath } from './benchmark-clone.js';
 import { fitSessionUpdateForServer } from './session-update-size.js';
 
 function getConfig() {
@@ -205,6 +206,8 @@ export const api = {
   // Fetch an EXISTING bake-off (created in the web UI) so `--id` can run it
   // without creating a duplicate. Keyed by the 8-char shortId.
   getBakeOff: (shortId: string) => request(`/api/mcp/benchmarks/bakeoffs/${encodeURIComponent(shortId)}`),
+  // Context replay: store graded arms for the Benchmarks → Replays tab.
+  uploadReplayArms: (arms: unknown[], repo?: unknown) => request('/api/mcp/benchmarks/replays', { method: 'POST', body: JSON.stringify({ arms, repo }) }),
   // Runner daemon: atomically claim the next queued bake-off for this repo.
   claimBakeOff: (data: unknown) => request('/api/mcp/benchmarks/runner/claim', { method: 'POST', body: JSON.stringify(data) }),
   // Runner daemon: report a bake-off's run outcome (running → done | error).
@@ -225,6 +228,16 @@ export const api = {
   postSurvival: (data: unknown) =>
     request('/api/mcp/benchmarks/survival', { method: 'POST', body: JSON.stringify(data) }),
   // Origin Why: provenance for a single line — which session/prompt authored it.
+  // The repo named by its remote and path, resolved server-side in the org
+  // this user's captures for it go to — see GET /api/repos/why/resolve.
+  getWhyByRemote: (q: { sha: string; remote?: string; path?: string; file?: string; content?: string }) => {
+    const params = new URLSearchParams({ sha: q.sha });
+    if (q.remote) params.set('remote', q.remote);
+    if (q.path) params.set('path', q.path);
+    if (q.file) params.set('file', q.file);
+    if (q.content) params.set('content', q.content);
+    return request(`/api/repos/why/resolve?${params.toString()}`);
+  },
   getWhy: (repoId: string, q: { sha: string; file?: string; content?: string }) => {
     const params = new URLSearchParams({ sha: q.sha });
     if (q.file) params.set('file', q.file);
@@ -239,6 +252,11 @@ export const api = {
     body: { prNumber: number; frames: Array<{ file?: string; line?: number; sha?: string; content?: string }> },
   ) => request(`/api/repos/${repoId}/why/pr-comment`, { method: 'POST', body: JSON.stringify(body) }),
   getWhoami: () => request('/api/mcp/whoami'),
+  // Where a session started in this repo would land. Captures are routed by
+  // repo, not by the org the key was minted in, so `origin status` asks
+  // instead of guessing from the key. A dry run: the server creates nothing.
+  previewRoute: (data: { repoPath: string; repoUrl?: string; recentShas?: string[] }) =>
+    request('/api/mcp/route-preview', { method: 'POST', body: JSON.stringify(data) }),
   // Tell the server how many sessions from a PREVIOUS account are sitting
   // unimported locally, so the dashboard can show an import/forget banner.
   // Returns { pendingAction: 'import' | 'forget' | null } — the web-initiated
@@ -287,6 +305,12 @@ export const api = {
     hostname?: string;
     additionalRepoPaths?: string[];
     agentSessionId?: string;
+    /**
+     * The `local-<uuid>` id this session ran under before it reached the server.
+     * Its commits' `Origin-Session:` trailers carry that id; the server keeps it
+     * so they resolve to this session.
+     */
+    localSessionId?: string;
     importedFromPreviousAccount?: boolean;
     // The WORKING root (a linked worktree's own dir), as opposed to repoPath,
     // which is canonical. The server keeps it so the session page can tell a
@@ -405,8 +429,20 @@ export const api = {
       // Stored on Commit.patch so the dashboard can render this commit's
       // changes instead of the session aggregate.
       diff?: string;
+      // `diff` was cut to fit the ingest limit: the server marks the row
+      // clipped (Commit.patchClipLimit) so readers use `additions`/`deletions`
+      // — git's totals — instead of counting a text that is known short.
+      diffTruncated?: boolean;
     }>;
   }, reqOpts?: { timeoutMs?: number }) => {
+    // Every producer (post-commit, history sync, backfill, queue replay) goes
+    // through here: a benchmark clone's commits are a copy of another repo's
+    // and are never sent. Answered as "nothing unknown" so the history sync
+    // settles instead of retrying (benchmark-clone.ts).
+    if (isBenchmarkClonePath(data.repoPath)) {
+      debugLog('api', 'commit ingest skipped — benchmark clone', { repoPath: data.repoPath, commits: data.commits.length });
+      return { ingested: 0, skipped: 'benchmark-clone', unknownShas: [] as string[] };
+    }
     const res = await request('/api/mcp/commits/ingest', { method: 'POST', body: JSON.stringify(data) }, reqOpts?.timeoutMs);
     assertObj(res, 'ingestCommits');
     return res;
@@ -546,6 +582,12 @@ export const api = {
   // remote) still surface agent/model attribution on the commit detail
   // and per-file blame pages. Session-scoped: server resolves repo via
   // the session row. Fire-and-forget: never blocks session-end.
+  // Sealed prompts in git notes (note-seal.ts): this month's data key for the
+  // repo named by its remote/path, and the keys a set of sealed notes name.
+  noteKeyCurrent: (q: { remote?: string; path?: string }) =>
+    request('/api/note-keys/current', { method: 'POST', body: JSON.stringify(q) }, 8000) as Promise<{ kid: string; key: string; period: string; validUntil: string }>,
+  noteKeyUnwrap: (kids: string[]) =>
+    request('/api/note-keys/unwrap', { method: 'POST', body: JSON.stringify({ kids }) }, 8000) as Promise<{ keys: Record<string, string>; refused: string[] }>,
   importGitNote: (sessionId: string, sha: string, note: Record<string, unknown>) =>
     request(`/api/sessions/${sessionId}/import-note`, {
       method: 'POST',

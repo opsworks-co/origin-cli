@@ -142,6 +142,55 @@ describe('a turn that authored some of what it committed', () => {
   });
 });
 
+describe('a scoped diff the size cap cut', () => {
+  it('keeps every file numstat saw and names the ones the cut dropped', () => {
+    // Prod c085f0af turn 2 (2026-09-25): a 500KB golden fixture pushed the
+    // commit past MAX_DIFF_SIZE at the narrowest context the ladder tries, the
+    // whole-section cut kept 2 of 4 files, and the unit read its file list off
+    // that text — `f:2, a:729, r:175`, nothing declared partial. The server
+    // recounted +81/-1 from the two-file text and the heal persisted it.
+    // The turn starts on a clean tree, so its baseline is HEAD itself (a
+    // shadow is only cut when something is dirty).
+    const baseline = git('rev-parse', 'HEAD');
+    write('a.txt', 'one\n');
+    write('b.txt', Array.from({ length: 200 }, (_, i) => `line ${i}`).join('\n') + '\n');
+    git('add', '-A'); git('commit', '-qm', 'one small file, one big');
+    const files = commitFiles();
+    // A cap that fits a.txt's section and not b.txt's.
+    const scoped = commitDiffScopedToPrompt(repo, baseline, git('rev-parse', 'HEAD'), files, 300)!;
+    expect(scoped.diffTruncated).toBe(true);
+    expect(filesNamedInDiff(scoped.diff)).toEqual(['a.txt']);
+    // The counts are numstat's — whole — and were already right before the fix.
+    expect([scoped.linesAdded, scoped.linesRemoved]).toEqual([201, 0]);
+
+    const unit = commitTurnContentUnit(scoped, files, 'unused');
+    expect(unit.filesChanged).toEqual(['a.txt', 'b.txt']);
+    expect(unit.contentUnavailableFiles).toEqual(['b.txt']);
+    expect([unit.linesAdded, unit.linesRemoved]).toEqual([201, 0]);
+    // The text still names exactly the files it carries.
+    expect(unit.diff.match(/^diff --git /gm)!).toHaveLength(1);
+  });
+
+  it('an UNCUT scoped diff still reads its files off the text, cut list empty', () => {
+    // The turn edits a file the baseline already held, and adds one: the
+    // scoped render carries both whole, so the list is the text's.
+    write('a.txt', 'one\n');
+    git('add', '-A'); git('commit', '-qm', 'a.txt before the turn');
+    const baseline = git('rev-parse', 'HEAD');
+    write('a.txt', 'one\ntwo\n');
+    write('b.txt', 'three\n');
+    git('add', '-A'); git('commit', '-qm', 'both small');
+    const files = commitFiles();
+    const scoped = commitDiffScopedToPrompt(repo, baseline, git('rev-parse', 'HEAD'), files);
+    expect(scoped).not.toBeNull();
+    expect(scoped!.diffTruncated).toBe(false);
+    const unit = commitTurnContentUnit(scoped, files, 'unused');
+    expect(unit.filesChanged).toEqual(['a.txt', 'b.txt']);
+    expect(unit.contentUnavailableFiles).toEqual([]);
+    expect([unit.linesAdded, unit.linesRemoved]).toEqual([2, 0]);
+  });
+});
+
 describe('commitTurnContentUnit', () => {
   it('falls back to the commit’s own view when the commit cannot be scoped', () => {
     // A merge, or no usable baseline. `scoped` is null and the commit's view is

@@ -24,18 +24,24 @@ import { captureShadowWindow, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
 import { fitDiffToBudget } from './diff-budget.js';
 import { turnWindowEndShadow, turnWindowLateWork, withLateWork } from './restored-from-history.js';
 import { localTurnForServerRow } from './turn-index.js';
+import { contentionCoversTurn } from './checkout-contention.js';
 import type { TurnObservation } from './resolve-turn.js';
 
 export interface ShadowRangeState {
   /** LOCAL-numbered: index L is this launch's turn L. */
-  promptShadows?: Array<{ promptIndex: number; shadowSha: string; completeBaseline?: boolean }>;
+  promptShadows?: Array<{ promptIndex: number; shadowSha: string; completeBaseline?: boolean; cutAfterTurnStart?: boolean }>;
   /** Server row of this launch's turn 0 — see turn-index.ts. */
   promptIndexBase?: number | null;
   /** LOCAL prompt list — the last index is the turn still in flight. */
   prompts?: unknown[];
   contendingSessionIds?: string[];
+  contenderGoneAt?: Record<string, number>;
+  /** LOCAL-numbered submit time of each turn (ISO). */
+  promptSubmittedAt?: string[];
   /** LOCAL-numbered: the tree Stop closed turn L with — see restored-from-history.ts. */
   turnEndShadows?: Array<{ promptIndex: number; shadowSha: string; capturedAt: string; completeBaseline?: boolean; lateFiles?: string[] }>;
+  /** LOCAL-numbered tool-call edits; `tree` names a linked worktree that is not repoPath. */
+  liveEdits?: Array<{ promptIndex: number; tree?: string }>;
 }
 
 export interface ShadowRangeMapping {
@@ -108,10 +114,6 @@ export function preferShadowRangeForTurns(
     if (!deps.observe || !Array.isArray(mappings)) return;
     for (const pm of mappings) if (pm && Number.isInteger(pm.promptIndex)) declined(pm, reason);
   };
-  if (state.contendingSessionIds?.length) {
-    declineAll('another live session shares this working tree');
-    return 0;
-  }
   const shadows = state.promptShadows || [];
   if (shadows.length === 0 || !repoPath || !Array.isArray(mappings)) {
     declineAll('the session has no shadow window');
@@ -127,14 +129,39 @@ export function preferShadowRangeForTurns(
       if (!pm || !Number.isInteger(pm.promptIndex)) continue;
       const local = localTurnForServerRow(pm.promptIndex, state.promptIndexBase);
       if (local === null) { declined(pm, 'row predates this launch'); continue; }
+      // A rival covers the turns it could have written into — those that began
+      // before it was seen gone. Later turns are this session's alone.
+      const submitted = state.promptSubmittedAt?.[local];
+      if (contentionCoversTurn(state, submitted ? Date.parse(submitted) : undefined)) {
+        declined(pm, 'another live session shares this working tree');
+        continue;
+      }
+      // The window is repoPath's tree. A turn that also wrote in a linked
+      // worktree — a sub-agent's `.claude/worktrees/agent-*` — did work this
+      // window cannot see: empty, it would blank the row; changed, it would
+      // replace the row without those files. Session 9f3d6bd2 turn 1
+      // (2026-09-27): a background sub-agent wrote a 139-line test in its own
+      // worktree, and the row went out chat-only. Keep what the tool calls
+      // built.
+      if ((state.liveEdits || []).some((e) => e && e.promptIndex === local && typeof e.tree === 'string' && e.tree)) {
+        declined(pm, 'the turn wrote in a linked worktree this window does not cover');
+        deps.log?.('shadow window skipped — the turn wrote in a linked worktree', { promptIndex: pm.promptIndex });
+        continue;
+      }
       const start = shadows.find((s) => s.promptIndex === local);
       if (start?.completeBaseline === false) { declined(pm, 'the start shadow is not a complete baseline'); continue; }
+      // Cut when the turn was noticed, after it began writing (Cursor adoption,
+      // the Codex heartbeat): the window from it misses the turn's first edits,
+      // and "empty" would blank a row that holds them (TODO f7406e7e).
+      if (start?.cutAfterTurnStart) { declined(pm, 'the start shadow was cut after the turn began'); continue; }
       const from = start?.shadowSha || null;
       // A closed turn ends where its Stop saw the tree, not where the next
       // prompt found it: a background job can rewrite the tree in between
       // (session 874ff028). Falls back to the next turn's start shadow.
       const next = turnWindowEndShadow(state, local);
       if (next?.completeBaseline === false) { declined(pm, 'the next shadow is not a complete baseline'); continue; }
+      // …and as this turn's END it would pull the next turn's first edits in.
+      if (next?.cutAfterTurnStart) { declined(pm, 'the next shadow was cut after its turn began'); continue; }
       const to = next?.shadowSha || null;
       // A completed turn without the next shadow cannot be scoped to the
       // current worktree — that tree includes later turns. Only the in-flight

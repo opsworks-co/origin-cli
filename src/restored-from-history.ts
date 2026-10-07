@@ -193,7 +193,7 @@ export function filesRestoredFromHistory(
 
 type EndShadowState = {
   gitPathspecsByTurn?: Array<{ promptIndex: number; paths: string[] }>;
-  promptShadows?: Array<{ promptIndex: number; shadowSha: string; completeBaseline?: boolean }>;
+  promptShadows?: Array<{ promptIndex: number; shadowSha: string; completeBaseline?: boolean; cutAfterTurnStart?: boolean }>;
   turnEndShadows?: Array<{ promptIndex: number; shadowSha: string; capturedAt: string; completeBaseline?: boolean; lateFiles?: string[] }>;
 };
 
@@ -505,7 +505,7 @@ export function settleTurnEndShadow(state: EndShadowState, localIndex: number, c
 export function turnWindowEndShadow(
   state: EndShadowState,
   localIndex: number,
-): { shadowSha: string; completeBaseline?: boolean } | undefined {
+): { shadowSha: string; completeBaseline?: boolean; cutAfterTurnStart?: boolean } | undefined {
   const next = (state.promptShadows || []).find((s) => s.promptIndex === localIndex + 1);
   if (!next) return undefined;
   const end = (state.turnEndShadows || []).find((s) => s.promptIndex === localIndex);

@@ -141,6 +141,30 @@ describe('preferShadowRangeForTurns', () => {
     expect((mapping as ShadowRangeMapping).chatOnly).toBe(true);
   });
 
+  it("keeps a turn that wrote in a linked worktree the window cannot see", () => {
+    // Session 9f3d6bd2 turn 1: a sub-agent wrote a test in its own worktree.
+    // repoPath's window was empty (another checkout), and the row went out chat-only.
+    write('leftover.ts', 'seed\nstill dirty from an earlier turn\n');
+    const shadow0 = createShadowCommit(repo, 'turn0')!;
+    const shadow1 = createShadowCommit(repo, 'turn1')!;
+    const AGENT = ['diff --git a/src/agent.test.ts b/src/agent.test.ts', 'new file mode 100644', '--- /dev/null', '+++ b/src/agent.test.ts', '@@ -0,0 +1 @@', "+it('works', () => {});", ''].join('\n');
+    const row = (): ShadowRangeMapping => ({ promptIndex: 0, filesChanged: ['src/agent.test.ts'], diff: AGENT, linesAdded: 1, linesRemoved: 0 });
+    const state = (tree?: string) => ({
+      promptShadows: [{ promptIndex: 0, shadowSha: shadow0 }, { promptIndex: 1, shadowSha: shadow1 }],
+      prompts: ['fix it, and add a test', 'merge it'],
+      liveEdits: [{ promptIndex: 0, ...(tree ? { tree } : {}) }],
+    });
+    const seen: Array<[number, unknown]> = [];
+    const kept = row();
+    expect(preferShadowRangeForTurns(state('/repo/.claude/worktrees/agent-1'), [kept], repo, { observe: (i, o) => seen.push([i, o]) })).toBe(0);
+    expect(kept).toEqual(row());
+    expect(seen).toEqual([[0, { source: 'turn-window', outcome: 'declined', reason: 'the turn wrote in a linked worktree this window does not cover' }]]);
+    // The same edit in repoPath itself is still judged by the window.
+    const judged = row();
+    expect(preferShadowRangeForTurns(state(), [judged], repo)).toBe(1);
+    expect(judged.filesChanged).toEqual([]);
+  });
+
   it('replaces an unanchored @@ -1,N journal hunk with git\'s real line number', () => {
     // A clean tree cannot mint a shadow (createShadowCommit no-ops when the
     // tree matches HEAD). Leave leftover dirt sitting so the baseline is a
@@ -264,4 +288,36 @@ describe('preferShadowRangeForTurns', () => {
     expect(mapping.diff).toBe(LEDGER_NOTES);
     expect((mapping as ShadowRangeMapping).chatOnly).toBeUndefined();
   });
+
+  // TODO f7406e7e: a shadow cut when the turn was NOTICED (Cursor adoption,
+  // the Codex heartbeat) already holds the turn's first edit.
+  it('does not blank a turn whose start shadow was cut after it began writing', () => {
+    const shadow0 = createShadowCommit(repo, 'late0')!;
+    write('sessions.ts', INSERTED);                    // turn 1's edit…
+    const lateShadow1 = createShadowCommit(repo, 'late1')!; // …then the cut
+    const row: ShadowRangeMapping = { promptIndex: 1, filesChanged: ['sessions.ts'], diff: FAKE_HUNK, linesAdded: 2, linesRemoved: 0 };
+    const seen: Array<[number, unknown]> = [];
+    preferShadowRangeForTurns(
+      { promptShadows: [{ promptIndex: 0, shadowSha: shadow0 }, { promptIndex: 1, shadowSha: lateShadow1, cutAfterTurnStart: true }], prompts: ['a', 'b'] },
+      [row], repo, { observe: (i, o) => seen.push([i, o]) },
+    );
+    expect(row.filesChanged).toEqual(['sessions.ts']);
+    expect(row.diff).toBe(FAKE_HUNK);
+    expect(seen).toEqual([[1, { source: 'turn-window', outcome: 'declined', reason: 'the start shadow was cut after the turn began' }]]);
+  });
+
+  it("does not end a turn's window at the next turn's late-cut shadow", () => {
+    const shadow0 = createShadowCommit(repo, 'end0')!;
+    write('leftover.ts', 'seed\nturn 1 wrote this before anyone noticed it\n');
+    const lateShadow1 = createShadowCommit(repo, 'end1')!;
+    const row: ShadowRangeMapping = { promptIndex: 0, filesChanged: [], diff: '', linesAdded: 0, linesRemoved: 0 };
+    const seen: Array<[number, unknown]> = [];
+    preferShadowRangeForTurns(
+      { promptShadows: [{ promptIndex: 0, shadowSha: shadow0 }, { promptIndex: 1, shadowSha: lateShadow1, cutAfterTurnStart: true }], prompts: ['a', 'b'] },
+      [row], repo, { observe: (i, o) => seen.push([i, o]) },
+    );
+    expect(row.filesChanged).toEqual([]);
+    expect(seen).toEqual([[0, { source: 'turn-window', outcome: 'declined', reason: 'the next shadow was cut after its turn began' }]]);
+  });
 });
+

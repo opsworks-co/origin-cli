@@ -85,7 +85,7 @@ describe('published branch satisfies the platform importer’s contract', () => 
         git: { branch: 'main', headBefore: '', headAfter: headSha, commitShas: [headSha] },
         summary: '',
         originUrl: '',
-        changes: [{ promptIndex: 1, promptText: `prompt for ${id}`, filesChanged: ['a.py'], diff: '--- a\n+++ b\n' }],
+        changes: [{ promptIndex: 1, promptText: `prompt for ${id}`, filesChanged: ['a.py'], diff: '--- a\n+++ b\n', createdAt: '2026-05-01T10:02:00.000Z' }],
       } as any);
       publishSessionToBranch(repo, id);
     }
@@ -152,6 +152,9 @@ describe('published branch satisfies the platform importer’s contract', () => 
     expect(changes.sessionId).toBe('imp-one');
     expect(changes.changes[0].promptIndex).toBe(1);
     expect(changes.changes[0].promptText).toContain('prompt for imp-one');
+    // The importer dates the turn by this; without it every imported turn
+    // wore the import day.
+    expect(changes.changes[0].createdAt).toBe('2026-05-01T10:02:00.000Z');
   });
 
   it('publishing a second session does not evict the first from the tree', () => {

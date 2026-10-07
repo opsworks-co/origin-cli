@@ -15,7 +15,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { pickActiveSessionForCommit } from '../commands/hooks/git-hooks.js';
-import { COMMIT_COMMAND_TTL_MS, commandMakesCommit, sessionIsRunningCommitHere, sessionRunningTheCommit, workTreeTop } from '../commit-command-in-flight.js';
+import { COMMIT_COMMAND_TTL_MS, commandMakesCommit, gitAliasResolver, sessionIsRunningCommitHere, sessionRunningTheCommit, workTreeTop } from '../commit-command-in-flight.js';
 import { getStatePath, saveSessionState, setCommitCommandInFlight } from '../session-state.js';
 
 let repo = '';
@@ -213,6 +213,19 @@ describe('commandMakesCommit', () => {
     'env X=1 git commit -m x',
     'git --no-pager commit -m x',
     '(git commit -m x)',
+    // Spellings the old pattern could not see (7877e5f3).
+    '/usr/bin/git commit -m x',
+    'cd a && /opt/homebrew/bin/git commit -m x',
+    'git.exe commit -m x',
+    '"C:\\Program Files\\Git\\cmd\\git.exe" commit -m x',
+    'git -c "user.name=A B" commit -m x',
+    "git -c 'core.hooksPath=/dev/null' -C \"dir with space\" commit",
+    'bash -lc "git add -A && git commit -m x"',
+    'sudo git commit -m x',
+    'timeout 60 git commit -m x',
+    'git merge --continue',
+    'git status; git commit -m x',
+    'x=$(git commit -m x)',
   ])('yes: %s', (cmd) => expect(commandMakesCommit(cmd)).toBe(true));
 
   it.each([
@@ -232,6 +245,49 @@ describe('commandMakesCommit', () => {
     'git merge-tree --write-tree a b',
     'git merge-base a b',
     'git rev-parse commit',
+    'echo git commit',
+    'bash -lc "git status"',
+    'git -c "alias.x=commit" status',
+    'git log --grep="git commit"',
     '',
   ])('no: %s', (cmd) => expect(commandMakesCommit(cmd)).toBe(false));
+});
+
+describe('commandMakesCommit resolves git aliases', () => {
+  const aliases: Record<string, string> = { ci: 'commit -v', save: '!git add -A && git commit -m wip', st: 'status', loop: 'loop' };
+  const looked: string[] = [];
+  const resolve = (name: string) => { looked.push(name); return aliases[name] ?? null; };
+
+  it.each([['git ci -m x', true], ['git save', true], ['/usr/bin/git ci', true], ['git st', false], ['git nope', false], ['git loop', false]])(
+    '%s → %s', (cmd, want) => expect(commandMakesCommit(cmd as string, resolve)).toBe(want));
+
+  it('never looks a builtin up — git refuses an alias that shadows one', () => {
+    looked.length = 0;
+    commandMakesCommit('git status && git log -3 && git push', resolve);
+    expect(looked).toEqual([]);
+  });
+
+  it('reads the alias from the repo it runs in', () => {
+    git('config', 'alias.ci', 'commit -v');
+    expect(commandMakesCommit('git ci -m x', gitAliasResolver(repo))).toBe(true);
+    expect(commandMakesCommit('git cx -m x', gitAliasResolver(repo))).toBe(false);
+  });
+});
+
+describe('an ENDED claim — post-commit runs in the background and may read it after the call returned', () => {
+  const top = (d: string) => d;
+  const at = Date.parse('2026-09-24T14:00:55.218Z');
+  const ended = { commitCommandInFlight: { at: new Date(at).toISOString(), endedAt: new Date(at + 900).toISOString(), cwd: '/repo', turn: 0 } };
+  const now = at + 5_000;
+
+  it('is over for prepare-commit-msg, which only runs while the call is live', () => {
+    expect(sessionIsRunningCommitHere(ended, '/repo', top, now)).toBe(false);
+  });
+  it('counts for a commit made while it was live — git time is whole seconds', () => {
+    expect(sessionIsRunningCommitHere(ended, '/repo', top, now, Math.floor((at + 500) / 1000) * 1000)).toBe(true);
+  });
+  it('does not count for a commit made after the call returned, or before it began', () => {
+    expect(sessionIsRunningCommitHere(ended, '/repo', top, now, at + 30_000)).toBe(false);
+    expect(sessionIsRunningCommitHere(ended, '/repo', top, now, at - 30_000)).toBe(false);
+  });
 });

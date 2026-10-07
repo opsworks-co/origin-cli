@@ -23,7 +23,7 @@ describe('write-ahead prompt timeline', () => {
     expect(promptHistoryPayload(['resumed', 'next'], {
       promptIndexBase: 21, promptTurnIds: ['t_21', 't_22'], promptSubmittedAt: [at],
     }).promptChanges).toEqual([
-      { promptIndex: 21, promptText: 'resumed', turnId: 't_21', createdAt: at },
+      { promptIndex: 21, promptText: 'resumed', turnId: 't_21', createdAt: at, createdAtIsTurnStart: true },
       { promptIndex: 22, promptText: 'next', turnId: 't_22' },
     ]);
   });

@@ -5,6 +5,7 @@ import path from 'path';
 import http from 'http';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import { holdIdleConnections } from './helpers/fake-api-keepalive.js';
 
 const bin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../dist/index.js');
 let home = '';
@@ -35,6 +36,7 @@ it.each(['user-prompt-submit', 'stop'])('native %s resumes its archived chat wit
     res.setHeader('content-type','application/json');
     res.end(JSON.stringify({ok:true,models:{},sessionId:'unexpected-new-session'}));
   }); });
+  holdIdleConnections(server);
   await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
   const apiUrl=`http://127.0.0.1:${(server.address() as any).port}`;
   fs.writeFileSync(path.join(origin,'config.json'),JSON.stringify({apiUrl,apiKey:'org_sk_test_resume',orgId:'test',keyType:'team',accountType:'developer'}));

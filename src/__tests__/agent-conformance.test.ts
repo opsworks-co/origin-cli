@@ -25,7 +25,7 @@ import {
 // wired a hook that will run and do nothing.
 const HANDLED_EVENTS = new Set([
   'session-start', 'user-prompt-submit', 'stop', 'session-end',
-  'pre-tool-use', 'post-tool-use', 'after-file-edit',
+  'pre-tool-use', 'post-tool-use', 'post-tool-use-failure', 'after-file-edit',
 ]);
 
 /**
