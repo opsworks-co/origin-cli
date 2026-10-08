@@ -3,7 +3,7 @@ import { listSessionIds, readSessionFile } from '../session-store.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { git } from '../utils/exec.js';
 import chalk from 'chalk';
 import { getGitRoot, getBranch } from '../session-state.js';
@@ -616,8 +616,10 @@ export async function webCommand(opts: { port?: string }) {
 
     // Open browser
     try {
-      const openCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-      execSync(`${openCmd} ${url}`, { windowsHide: true, stdio: 'ignore' });
+      // argv, not a shell string. `start` is a cmd.exe builtin; its first
+      // quoted argument is the window title — Node quotes the '' as "".
+      if (process.platform === 'win32') execFileSync('cmd', ['/c', 'start', '', url], { windowsHide: true, stdio: 'ignore' });
+      else execFileSync(process.platform === 'darwin' ? 'open' : 'xdg-open', [url], { windowsHide: true, stdio: 'ignore' });
     } catch { /* ignore */ }
   });
 }

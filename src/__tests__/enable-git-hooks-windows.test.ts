@@ -71,11 +71,12 @@ describe('generated global git hooks', () => {
       'post-rewrite': e.writeGlobalPostRewriteHook,
       'pre-push': e.writeGlobalPrePushHook,
       'pre-commit': e.writeGlobalPreCommitHook,
+      'commit-msg': e.writeGlobalCommitMsgHook,
     };
   });
   afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
 
-  const names = ['post-merge', 'post-commit', 'post-checkout', 'post-rewrite', 'pre-push', 'pre-commit'];
+  const names = ['post-merge', 'post-commit', 'post-checkout', 'post-rewrite', 'pre-push', 'pre-commit', 'commit-msg'];
 
   it('every hook carries the Windows npm locations on PATH', () => {
     for (const n of names) {

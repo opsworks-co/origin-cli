@@ -22,8 +22,10 @@ export interface AgentDefinition {
   // model strings like "copilot-gpt4" must resolve to Copilot before the
   // generic gpt→Cursor rule fires — see resolveAgentDisplayName).
   displayName: string;
-  // Matches this agent's model strings (session↔agent matching).
-  modelPattern: RegExp;
+  // Matches this agent's model strings (session↔agent matching). Omitted for
+  // an agent with no models of its own (Antigravity runs Gemini models), which
+  // then matches by slug substring — see sessionMatchesAgent.
+  modelPattern?: RegExp;
   // pgrep pattern used to attribute work to a RUNNING agent process when
   // several sessions are active (post-commit / prepare-commit-msg paths).
   attributionPgrep?: string;
@@ -31,6 +33,20 @@ export interface AgentDefinition {
   // with zero sessions). Narrower list, tuned to CLI binaries only — desktop
   // apps (Cursor/VS Code) have helper processes that would false-positive.
   standalonePgrep?: string;
+  // The agent's tool identity outside this table: the `origin hooks <id>`
+  // subcommand and the attribution record's `agent.id`. Defaults to `slug`;
+  // only Claude differs (`claude` here, `claude-code` everywhere else).
+  toolId?: string;
+  // Older tool ids still found in the wild — a pre-rebrand install wrote
+  // `origin hooks windsurf` for what is now Devin. Recognized (so a stale entry
+  // is still Origin's and gets replaced), never written.
+  legacyToolIds?: string[];
+  // Does `origin enable` install hooks for this agent, and where?
+  //   'global'    — auto-detected; installs machine-wide or per repo.
+  //   'repo-only' — config lives in the repo (Aider's .aider.conf.yml): never
+  //                 auto-detected, only `origin enable --local --agent <id>`.
+  //   omitted     — no hook integration (attribution / display only).
+  hooks?: 'global' | 'repo-only';
 }
 
 // Order = display-name resolution precedence (specific/composite before
@@ -47,22 +63,46 @@ export const AGENTS: AgentDefinition[] = [
   // list and the sweeps took the first match), crediting Copilot for other
   // agents' work. `copilot.*cli` was the same trap by another route: it spans
   // any distance, so that daemon's path plus any later "cli" matched too.
-  { slug: 'copilot',  displayName: 'Copilot',     modelPattern: /copilot/i,                      attributionPgrep: 'pgrep -f "(^|[ /])(gh-)?copilot( |$)|github-copilot-cli|@github/copilot"', standalonePgrep: 'pgrep -f "(^|[ /])(gh-)?copilot( |$)|github-copilot-cli|@github/copilot"' },
+  { slug: 'copilot',  displayName: 'Copilot',     modelPattern: /copilot/i,                      attributionPgrep: 'pgrep -f "(^|[ /])(gh-)?copilot( |$)|github-copilot-cli|@github/copilot"', standalonePgrep: 'pgrep -f "(^|[ /])(gh-)?copilot( |$)|github-copilot-cli|@github/copilot"', hooks: 'global' },
   { slug: 'amp',      displayName: 'Amp',         modelPattern: /amp/i,                          attributionPgrep: 'pgrep -f "amp.*cli|/amp "',              standalonePgrep: 'pgrep -f "amp.*cli|/amp "' },
   { slug: 'junie',    displayName: 'Junie',       modelPattern: /junie|jetbrains/i,              attributionPgrep: 'pgrep -f "junie|jetbrains.*ai"' },
   { slug: 'opencode', displayName: 'Opencode',    modelPattern: /opencode/i,                     attributionPgrep: 'pgrep -f "opencode"',                    standalonePgrep: 'pgrep -f "opencode"' },
-  { slug: 'aider',    displayName: 'Aider',       modelPattern: /aider/i,                        attributionPgrep: 'pgrep -f "aider"',                       standalonePgrep: 'pgrep -f "bin/aider|aider.*--model"' },
-  { slug: 'devin',    displayName: 'Devin',       modelPattern: /devin|windsurf|codeium|cascade|swe-?\d/i, attributionPgrep: 'pgrep -f "devin"' },
-  { slug: 'codex',    displayName: 'Codex',       modelPattern: /codex/i,                        attributionPgrep: 'pgrep -f "codex"',                       standalonePgrep: 'pgrep -f "codex"' },
-  { slug: 'gemini',   displayName: 'Gemini CLI',  modelPattern: /gemini|google/i,                attributionPgrep: 'pgrep -f "gemini.*cli|/gemini "',        standalonePgrep: 'pgrep -f "gemini.*cli|bin/gemini"' },
-  { slug: 'claude',   displayName: 'Claude Code', modelPattern: /claude|anthropic|sonnet|opus|haiku/i, attributionPgrep: 'pgrep -f "claude.*stream-json"',    standalonePgrep: 'pgrep -f "claude.*stream-json"' },
-  { slug: 'cursor',   displayName: 'Cursor',      modelPattern: /cursor|composer|gpt|openai/i },
+  { slug: 'aider',    displayName: 'Aider',       modelPattern: /aider/i,                        attributionPgrep: 'pgrep -f "aider"',                       standalonePgrep: 'pgrep -f "bin/aider|aider.*--model"', hooks: 'repo-only' },
+  { slug: 'devin',    displayName: 'Devin',       modelPattern: /devin|windsurf|codeium|cascade|swe-?\d/i, attributionPgrep: 'pgrep -f "devin"', legacyToolIds: ['windsurf'], hooks: 'global' },
+  { slug: 'codex',    displayName: 'Codex',       modelPattern: /codex/i,                        attributionPgrep: 'pgrep -f "codex"',                       standalonePgrep: 'pgrep -f "codex"', hooks: 'global' },
+  { slug: 'gemini',   displayName: 'Gemini CLI',  modelPattern: /gemini|google/i,                attributionPgrep: 'pgrep -f "gemini.*cli|/gemini "',        standalonePgrep: 'pgrep -f "gemini.*cli|bin/gemini"', hooks: 'global' },
+  { slug: 'antigravity', displayName: 'Antigravity', hooks: 'global' },
+  { slug: 'claude',   displayName: 'Claude Code', modelPattern: /claude|anthropic|sonnet|opus|haiku/i, attributionPgrep: 'pgrep -f "claude.*stream-json"',    standalonePgrep: 'pgrep -f "claude.*stream-json"', toolId: 'claude-code', hooks: 'global' },
+  { slug: 'cursor',   displayName: 'Cursor',      modelPattern: /cursor|composer|gpt|openai/i, hooks: 'global' },
   { slug: 'continue', displayName: 'Continue',    modelPattern: /continue/i,                     attributionPgrep: 'pgrep -f "continue.*dev"' },
   { slug: 'rovo',     displayName: 'Rovo',        modelPattern: /rovo/i,                         attributionPgrep: 'pgrep -f "rovo.*dev"' },
   { slug: 'droid',    displayName: 'Droid',       modelPattern: /droid/i,                        attributionPgrep: 'pgrep -f "droid"' },
 ];
 
 const BY_SLUG = new Map(AGENTS.map((a) => [a.slug, a]));
+
+/** The agent's tool identity (`origin hooks <id>`, attribution `agent.id`). */
+export function toolIdOf(agent: AgentDefinition): string {
+  return agent.toolId ?? agent.slug;
+}
+
+/** Tool ids of agents `origin enable` installs hooks for, in AGENTS order. */
+export function hookToolIds(scope?: 'global' | 'repo-only'): string[] {
+  return AGENTS.filter((a) => (scope ? a.hooks === scope : !!a.hooks)).map(toolIdOf);
+}
+
+/**
+ * Every `hooks <id>` an Origin hook command can carry: the hook agents'
+ * current ids plus their legacy ones (stale installs must still read as ours).
+ */
+export function recognizedHookToolIds(): string[] {
+  return AGENTS.filter((a) => a.hooks).flatMap((a) => [toolIdOf(a), ...(a.legacyToolIds ?? [])]);
+}
+
+/** Every tool id a captured agentSlug may carry, current and legacy. */
+export function allToolIds(): string[] {
+  return AGENTS.flatMap((a) => [toolIdOf(a), ...(a.legacyToolIds ?? [])]);
+}
 
 export function agentDefinition(slug: string | undefined | null): AgentDefinition | undefined {
   return slug ? BY_SLUG.get(slug.toLowerCase()) : undefined;
@@ -148,7 +188,6 @@ export function resolveAgentDisplayName(model: string | undefined, agentSlug?: s
   // claude-haiku-4.5 came out "Claude Code"; a Codex session on gpt-5 → "Cursor").
   const slug = (agentSlug || '').toLowerCase();
   if (slug) {
-    if (slug === 'antigravity') return 'Antigravity';
     // Pipeline slugs like 'claude-code' map to the registry's 'claude' entry;
     // the legacy 'windsurf'/'cascade' slugs (pre-Devin rebrand, #766) map to
     // 'devin' so an old windsurf-slug session still resolves to Devin rather

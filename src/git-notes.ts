@@ -1042,13 +1042,44 @@ export interface PublishOptions {
  */
 type GitRun =
   | { kind: 'ok'; out: string }
-  | { kind: 'failed'; message: string }
+  | { kind: 'failed'; message: string; out: string }
   | { kind: 'not-started' }
   | { kind: 'timeout' };
 
 function isTimeout(err: unknown): boolean {
   const e = err as { code?: string };
   return e?.code === 'ETIMEDOUT';
+}
+
+type BudgetedGit = (args: string[], cap: number, env?: NodeJS.ProcessEnv) => GitRun;
+
+/**
+ * A git runner bound to one deadline: each command gets only the time that is
+ * left (never more than `cap`), and none starts once less than MIN_COMMAND_MS
+ * remains. A failed command keeps its stdout — `push --porcelain` reports
+ * per-ref results there even when it exits non-zero.
+ */
+function budgetedGitRunner(
+  repoPath: string,
+  deadline: number,
+  now: () => number,
+  exec: typeof execFileSync,
+): BudgetedGit {
+  return (args, cap, env) => {
+    const left = deadline - now();
+    if (left < MIN_COMMAND_MS) return { kind: 'not-started' };
+    try {
+      const out = exec('git', args, {
+        windowsHide: true, cwd: repoPath, stdio: 'pipe', encoding: 'utf-8',
+        timeout: Math.min(cap, left), ...(env ? { env } : {}),
+      });
+      return { kind: 'ok', out: String(out ?? '').trim() };
+    } catch (err) {
+      if (isTimeout(err)) return { kind: 'timeout' };
+      const stdout = (err as { stdout?: string | Buffer })?.stdout;
+      return { kind: 'failed', message: lastLine(err), out: stdout ? String(stdout).trim() : '' };
+    }
+  };
 }
 
 /**
@@ -1091,19 +1122,7 @@ export function publishAttributionNotes(
       ? `deadline exceeded: the publish budget ran out while ${step}`
       : `deadline exceeded: the publish budget ran out before ${step}`);
 
-  const run = (args: string[], cap: number, env?: NodeJS.ProcessEnv): GitRun => {
-    const left = deadline - now();
-    if (left < MIN_COMMAND_MS) return { kind: 'not-started' };
-    try {
-      const out = exec('git', args, {
-        windowsHide: true, cwd: repoPath, stdio: 'pipe', encoding: 'utf-8',
-        timeout: Math.min(cap, left), ...(env ? { env } : {}),
-      });
-      return { kind: 'ok', out: String(out ?? '').trim() };
-    } catch (err) {
-      return isTimeout(err) ? { kind: 'timeout' } : { kind: 'failed', message: lastLine(err) };
-    }
-  };
+  const run = budgetedGitRunner(repoPath, deadline, now, exec);
 
   try {
     // 1. Local notes. An ordinary non-zero exit is the answer "no such ref".
@@ -1172,6 +1191,270 @@ export function publishAttributionNotes(
   } catch (err) {
     // An injected runner or an fs call misbehaving: still never throw.
     return failed(lastLine(err));
+  }
+}
+
+// ─── Pre-push: every Origin ref in ONE push, inside ONE budget ───────────
+//
+// The pre-push hook used to publish its refs one after another — the
+// origin-sessions branch (fetch + push), refs/notes/origin, both memory refs,
+// the acceptance ref — each its own `git push` (a fresh connection: on SSH
+// another hardware-key touch), its own 15–30s timeout and its own
+// push → fetch → push retry. On a slow remote, or one that refuses
+// refs/notes/* outright (Gerrit, some Bitbucket setups), that held the user's
+// push for minutes, and did it again on every push.
+//
+// Now: ONE `git push --porcelain` offers every ref that exists locally. Only
+// the refs it rejected as non-fast-forward are fetched (ONE fetch), reconciled
+// locally the way each ref's own publisher does it, and pushed again (ONE
+// push). Everything shares one deadline; whatever does not fit is left to the
+// next push. A remote that refused every notes ref is remembered for a day.
+//
+// Ordering is unchanged: this still runs inside pre-push, before git sends
+// the user's branch, so the memory refs are on the remote before the branch
+// push's webhook asks the server to import them (memory-transport.ts).
+
+/** The whole pre-push publishing step: every push, fetch and merge in it. */
+export const PRE_PUSH_PUBLISH_BUDGET_MS = HOOK_PUBLISH_BUDGET_MS;
+/** How long a remote that refused refs/notes/* is left alone. */
+export const NOTES_REFUSED_TTL_MS = 24 * 60 * 60 * 1000;
+const NOTES_REFUSED_FILE = 'origin-notes-push-refused.json';
+
+/** One ref the pre-push publisher pushes to the same name on the remote. */
+export interface PrePushRef {
+  ref: string;
+  /** Where a non-fast-forward retry fetches the remote's tip to. */
+  staging: string;
+  /** Fold the fetched tip in so the retry fast-forwards. Local only; true when ready to retry. */
+  reconcile: () => boolean;
+}
+
+/**
+ * pushed / up-to-date: on the remote. rejected: non-fast-forward, still after
+ * the retry (or the retry did not fit). refused: the remote declined the ref
+ * itself ([remote rejected]). failed: anything else, including a push that
+ * never answered. not-attempted: the budget ran out before it was offered.
+ */
+export type PrePushRefOutcome = 'pushed' | 'up-to-date' | 'rejected' | 'refused' | 'failed' | 'not-attempted';
+
+export interface PrePushPublishResult {
+  outcomes: Record<string, PrePushRefOutcome>;
+  /** `git push` invocations that actually started. */
+  pushes: number;
+  /** The remote is remembered as refusing refs/notes/*; no notes ref was offered. */
+  notesSkipped: boolean;
+  /** This run found the remote refusing every notes ref and remembered it. */
+  notesRefusedRecorded: boolean;
+  deadlineExceeded: boolean;
+}
+
+export interface PrePushPublishOptions {
+  /** Offer the memory refs. Default: shouldIncludePromptText (the same gate as pushMemoryNotes). */
+  includeMemory?: boolean;
+  /** Non-notes refs to carry in the same push (the origin-sessions branch). */
+  extraRefs?: PrePushRef[];
+  /** Default PRE_PUSH_PUBLISH_BUDGET_MS. */
+  budgetMs?: number;
+  now?: () => number;
+  exec?: typeof execFileSync;
+}
+
+/** `git push --porcelain` stdout → destination ref → { flag, summary }. */
+export function parsePushPorcelain(out: string): Map<string, { flag: string; summary: string }> {
+  const result = new Map<string, { flag: string; summary: string }>();
+  for (const line of (out || '').split('\n')) {
+    const m = /^([ +\-*=!])\t([^\t]*)\t(.*)$/.exec(line.replace(/\r$/, ''));
+    if (!m) continue;
+    const dst = m[2].slice(m[2].lastIndexOf(':') + 1);
+    if (dst) result.set(dst, { flag: m[1], summary: m[3] });
+  }
+  return result;
+}
+
+function classifyPushLine(line: { flag: string; summary: string } | undefined): PrePushRefOutcome {
+  if (!line) return 'failed';
+  if (line.flag === '=') return 'up-to-date';
+  if (line.flag !== '!') return 'pushed';
+  if (line.summary.startsWith('[remote rejected]')) return 'refused';
+  if (line.summary.startsWith('[rejected]') && /non-fast-forward|fetch first/.test(line.summary)) return 'rejected';
+  return 'failed';
+}
+
+type GitOut = (args: string[]) => string | null;
+
+function plainGitOut(repoPath: string): GitOut {
+  return (args) => {
+    try {
+      return execFileSync('git', args, {
+        windowsHide: true, cwd: repoPath, stdio: 'pipe', timeout: 5_000, encoding: 'utf-8',
+      }).trim();
+    } catch {
+      return null;
+    }
+  };
+}
+
+/** The refusal file and this remote's key in it (a hash: the URL may carry credentials). */
+function notesRefusedLocation(repoPath: string, remote: string, gitOut: GitOut): { file: string; key: string } | null {
+  const common = gitOut(['rev-parse', '--git-common-dir']);
+  if (!common) return null;
+  const url = gitOut(['remote', 'get-url', remote]) || remote;
+  return {
+    file: path.join(path.resolve(repoPath, common), NOTES_REFUSED_FILE),
+    key: crypto.createHash('sha256').update(url).digest('hex').slice(0, 16),
+  };
+}
+
+function readNotesRefused(file: string): Record<string, { at: number; reason?: string }> {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function notesRefusedRecently(repoPath: string, remote: string, gitOut: GitOut, now: number): boolean {
+  const where = notesRefusedLocation(repoPath, remote, gitOut);
+  if (!where) return false;
+  const at = Number(readNotesRefused(where.file)[where.key]?.at);
+  return Number.isFinite(at) && now - at >= 0 && now - at < NOTES_REFUSED_TTL_MS;
+}
+
+function recordNotesRefused(repoPath: string, remote: string, gitOut: GitOut, now: number, reason: string): boolean {
+  const where = notesRefusedLocation(repoPath, remote, gitOut);
+  if (!where) return false;
+  try {
+    const all = readNotesRefused(where.file);
+    all[where.key] = { at: now, reason: redactRemoteCredentials(reason).slice(0, 200) };
+    fs.writeFileSync(where.file, JSON.stringify(all, null, 2) + '\n');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when `remote` refused every Origin notes ref within the last
+ * NOTES_REFUSED_TTL_MS. The note-write auto-push checks it too, so a Gerrit
+ * remote is not asked again after every agent turn either.
+ */
+export function remoteRefusesNotes(repoPath: string, remote: string, now: number = Date.now()): boolean {
+  return notesRefusedRecently(repoPath, remote, plainGitOut(repoPath), now);
+}
+
+/**
+ * Publish every Origin ref for the pre-push hook in one push. Never throws.
+ * See the section comment above for the shape; the per-ref reconcile on a
+ * non-fast-forward is each ref's own: `notes merge -s ours` for the per-commit
+ * refs (attribution, acceptance), the payload-level union for memory.
+ */
+export function publishPrePushRefs(
+  repoPath: string,
+  remote: string,
+  opts: PrePushPublishOptions = {},
+): PrePushPublishResult {
+  const now = opts.now ?? Date.now;
+  const exec = opts.exec ?? execFileSync;
+  const deadline = now() + (opts.budgetMs ?? PRE_PUSH_PUBLISH_BUDGET_MS);
+  const run = budgetedGitRunner(repoPath, deadline, now, exec);
+  const gitOut: GitOut = (args) => {
+    const r = run(args, 5_000);
+    return r.kind === 'ok' ? r.out : null;
+  };
+  const result: PrePushPublishResult = {
+    outcomes: {}, pushes: 0, notesSkipped: false, notesRefusedRecorded: false, deadlineExceeded: false,
+  };
+
+  try {
+    const notesMerge = (live: string, staging: string): boolean => {
+      let hasIdentity = cachedGitIdentity(repoPath);
+      if (hasIdentity === undefined) {
+        const probe = run(['var', 'GIT_COMMITTER_IDENT'], 5_000);
+        if (probe.kind === 'not-started' || probe.kind === 'timeout') return false;
+        hasIdentity = probe.kind === 'ok';
+        recordGitIdentity(repoPath, hasIdentity);
+      }
+      const merge = run(['notes', `--ref=${live}`, 'merge', '-s', 'ours', staging], PUBLISH_COMMAND_TIMEOUT_MS,
+        { ...process.env, ...identityEnvFor(hasIdentity) });
+      return merge.kind === 'ok';
+    };
+    const includeMemory = opts.includeMemory ?? shouldIncludePromptText(repoPath);
+    const candidates: PrePushRef[] = [
+      { ref: 'refs/notes/origin', staging: STAGED_NOTES.attribution.staging,
+        reconcile: () => notesMerge('refs/notes/origin', STAGED_NOTES.attribution.staging) },
+      ...(includeMemory ? MEMORY_NOTES_REFS.map(({ local, staging }): PrePushRef => ({
+        ref: local, staging,
+        reconcile: () => (local.endsWith('origin-memory')
+          ? reconcileMemoryWithRemote(repoPath, staging)
+          : reconcileMemoryBriefWithRemote(repoPath, staging)),
+      })) : []),
+      { ref: 'refs/notes/origin-acceptance', staging: STAGED_NOTES.acceptance.staging,
+        reconcile: () => notesMerge('refs/notes/origin-acceptance', STAGED_NOTES.acceptance.staging) },
+    ];
+
+    let notes: PrePushRef[] = [];
+    if (notesRefusedRecently(repoPath, remote, gitOut, now())) {
+      result.notesSkipped = true;
+    } else {
+      // One local probe for all of them. for-each-ref matches whole path
+      // components, so `refs/notes/origin` does not also list origin-memory.
+      const listed = run(['for-each-ref', '--format=%(refname)', ...candidates.map((c) => c.ref)], 5_000);
+      if (listed.kind === 'not-started' || listed.kind === 'timeout') result.deadlineExceeded = true;
+      const present = new Set((listed.kind === 'ok' ? listed.out : '').split('\n').map((l) => l.trim()).filter(Boolean));
+      notes = candidates.filter((c) => present.has(c.ref));
+    }
+    const refs = [...notes, ...(opts.extraRefs ?? [])];
+    if (refs.length === 0) return result;
+
+    const pushRefs = (batch: PrePushRef[]): void => {
+      const push = run(['push', '--porcelain', '--no-verify', remote, ...batch.map((r) => `${r.ref}:${r.ref}`)],
+        PUBLISH_COMMAND_TIMEOUT_MS);
+      if (push.kind === 'not-started') {
+        result.deadlineExceeded = true;
+        for (const r of batch) result.outcomes[r.ref] ??= 'not-attempted';
+        return;
+      }
+      result.pushes++;
+      if (push.kind === 'timeout') {
+        result.deadlineExceeded = true;
+        for (const r of batch) result.outcomes[r.ref] = 'failed';
+        return;
+      }
+      const lines = parsePushPorcelain(push.out);
+      for (const r of batch) result.outcomes[r.ref] = classifyPushLine(lines.get(r.ref));
+    };
+
+    pushRefs(refs);
+
+    // Every notes ref declined by the remote itself — Gerrit's "prohibited",
+    // a host hook that only lets branches through. Remember it unless the
+    // branch in the same push was declined too: then it is the whole push the
+    // remote refused, not the notes namespace.
+    const refusedNotes = notes.length > 0 && notes.every((n) => result.outcomes[n.ref] === 'refused');
+    const extraRefused = (opts.extraRefs ?? []).some((r) => result.outcomes[r.ref] === 'refused');
+    if (refusedNotes && !extraRefused) {
+      result.notesRefusedRecorded = recordNotesRefused(repoPath, remote, gitOut, now(),'remote rejected every refs/notes/* ref');
+    }
+
+    // Non-fast-forward: another clone published since we last synced. One
+    // fetch for all of them, reconcile each locally, one retry push.
+    const retry = refs.filter((r) => result.outcomes[r.ref] === 'rejected');
+    if (retry.length === 0 || result.deadlineExceeded) return result;
+    const fetch = run(['fetch', '--no-tags', '--quiet', remote, ...retry.map((r) => `+${r.ref}:${r.staging}`)],
+      PUBLISH_COMMAND_TIMEOUT_MS);
+    if (fetch.kind === 'not-started' || fetch.kind === 'timeout') {
+      result.deadlineExceeded = true;
+      return result;
+    }
+    if (fetch.kind === 'failed') return result;
+    const ready = retry.filter((r) => {
+      try { return r.reconcile(); } catch { return false; }
+    });
+    if (ready.length > 0) pushRefs(ready);
+    return result;
+  } catch {
+    return result;
   }
 }
 
@@ -1323,7 +1606,9 @@ export function writeGitNotes(
     // `origin` only — never the first-remote fallback memory uses (see
     // resolveAutoPublishRemote).
     const remote = resolveAutoPublishRemote(repoPath);
-    if (remote) {
+    if (remote && remoteRefusesNotes(repoPath, remote)) {
+      debugLog('git-notes', 'auto-push skipped: remote refused refs/notes/* recently');
+    } else if (remote) {
       const result = publishAttributionNotes(repoPath, remote, { budgetMs: HOOK_PUBLISH_BUDGET_MS, maxAttempts: 1 });
       debugLog('git-notes', 'auto-push refs/notes/origin', describePublishResult(result));
     }
@@ -1335,7 +1620,7 @@ export function writeGitNotes(
   // push doesn't also strand memory.
   try {
     const remote = resolvePushRemote(repoPath);
-    if (remote) pushMemoryNotes(repoPath, remote);
+    if (remote && !remoteRefusesNotes(repoPath, remote)) pushMemoryNotes(repoPath, remote);
   } catch {
     // Never block session-end.
   }

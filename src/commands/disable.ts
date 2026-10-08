@@ -5,6 +5,7 @@ import chalk from 'chalk';
 import { getGitRoot, clearSessionState } from '../session-state.js';
 import { MCP_SUPPORTED_AGENTS, uninstallMcpForAgent } from '../mcp/install.js';
 import { forgetEnabledRepo } from '../enabled-repos.js';
+import { restorePreviousHooksPath } from '../global-hooks-path.js';
 
 function removeOriginHooksFromFile(
   filePath: string,
@@ -224,6 +225,18 @@ export async function disableCommand(opts?: { global?: boolean }): Promise<void>
 
   if (removedCount === 0) {
     console.log(chalk.gray('  No Origin hooks found in any agent config.'));
+  }
+
+  // Global git hooks: hand core.hooksPath back — the dir the user had before
+  // `enable --global`, or unset — instead of leaving Origin's hooks firing.
+  if (isGlobal) {
+    try {
+      const r = restorePreviousHooksPath();
+      if (r.action === 'restored') console.log(chalk.green(`  ✓ Restored core.hooksPath to ${r.value}`));
+      else if (r.action === 'unset') console.log(chalk.green('  ✓ Removed Origin\'s global core.hooksPath'));
+    } catch (err: any) {
+      console.log(chalk.yellow(`  ⚠ Could not restore core.hooksPath: ${err.message}`));
+    }
   }
 
   // Clean up session state

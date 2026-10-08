@@ -37,6 +37,7 @@ import { readJournalEntries, journalPathsForTag } from './write-journal-watch.js
 import { ensureInProcessJournal, stateLedgerIsContended } from './ledger-producer.js';
 import { stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
 import { fetchWithTimeout } from './fetch-timeout.js';
+import { redactSessionPayloadContent } from './captured-diff-redaction.js';
 import { buildCodexThreadByIdQuery, buildCodexThreadByCwdQuery } from './codex-thread-query.js';
 import { ensureSqlite, querySqlite } from './utils/sqlite.js';
 import { isCodexInternalSubroutine, findCodexRolloutByCwd, parseCodexRolloutLive } from './agents/codex.js';
@@ -888,7 +889,8 @@ async function pushInflightDiff(): Promise<void> {
     await fetchWithTimeout(`${apiUrl}/api/mcp/session/${sessionId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-      body: JSON.stringify({
+      // Direct fetch, not api.updateSession — so redact the turn's content here.
+      body: JSON.stringify(redactSessionPayloadContent({
         promptChanges: [
           {
             // Provenance — the heartbeat re-sends a turn's content
@@ -941,7 +943,7 @@ async function pushInflightDiff(): Promise<void> {
             treeSha: heartbeatTreeSha,
           },
         ],
-      }),
+      })),
     });
   } catch { /* best-effort */ }
 }
@@ -1544,7 +1546,7 @@ async function endSession() {
           'Content-Type': 'application/json',
           'X-API-Key': apiKey,
         },
-        body: JSON.stringify(endPayload),
+        body: JSON.stringify(redactSessionPayloadContent(endPayload)),
       });
     } catch { /* best effort */ }
   }

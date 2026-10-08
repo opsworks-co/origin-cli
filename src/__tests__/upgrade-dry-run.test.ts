@@ -10,7 +10,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const execSync = vi.fn((cmd: string) => (cmd === 'npm root -g' ? '/usr/lib/node_modules\n' : ''));
-vi.mock('child_process', async (orig) => ({ ...(await orig<typeof import('child_process')>()), execSync }));
+const execFileSync = vi.fn((_file: string, _args?: readonly string[]) => '');
+vi.mock('child_process', async (orig) => ({ ...(await orig<typeof import('child_process')>()), execSync, execFileSync }));
 
 const restartCodexWatchIfStale = vi.fn(() => ({ restarted: false }));
 const restartTranscriptWatchIfStale = vi.fn(() => ({ restarted: false }));
@@ -30,6 +31,7 @@ function serverAdvertises(version: string) {
 
 beforeEach(() => {
   execSync.mockClear();
+  execFileSync.mockClear();
   restartCodexWatchIfStale.mockClear();
   restartTranscriptWatchIfStale.mockClear();
   hookConfigBases.mockClear();
@@ -44,7 +46,10 @@ afterEach(() => {
   process.exitCode = undefined;
 });
 
-const installCalls = () => execSync.mock.calls.map((c) => String(c[0])).filter((c) => c !== 'npm root -g');
+const installCalls = () => [
+  ...execSync.mock.calls.map((c) => String(c[0])).filter((c) => c !== 'npm root -g'),
+  ...execFileSync.mock.calls.map((c) => [c[0], ...(c[1] ?? [])].join(' ')),
+];
 
 describe('origin upgrade --dry-run', () => {
   it('reports what it WOULD install and installs nothing when an update exists', async () => {

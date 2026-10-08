@@ -31,6 +31,7 @@ import {
   agentDisplayName,
   backupExistingHooks,
   isOriginHookCommand,
+  ORIGIN_HOOK_COMMAND_TAIL,
   type AgentType,
   type HookConfigSpec,
 } from './commands/enable.js';
@@ -94,8 +95,6 @@ export function mentionsOriginCommand(value: unknown): boolean {
   return false;
 }
 
-const ORIGIN_COMMAND_TAIL = /\bhooks (claude-code|cursor|gemini|devin|windsurf|codex|copilot|antigravity|aider)\b/;
-
 /**
  * Drop the launcher prefix from Origin's command strings — `PATH=/…/bin:$PATH
  * origin hooks cursor stop` and `"C:\…\node.exe" "…\index.js" hooks cursor
@@ -109,7 +108,7 @@ const ORIGIN_COMMAND_TAIL = /\bhooks (claude-code|cursor|gemini|devin|windsurf|c
  */
 function stripLauncherPaths(value: any): any {
   if (typeof value === 'string') {
-    const m = value.match(ORIGIN_COMMAND_TAIL);
+    const m = value.match(ORIGIN_HOOK_COMMAND_TAIL);
     return m && m.index !== undefined ? value.slice(m.index) : value;
   }
   if (Array.isArray(value)) return value.map(stripLauncherPaths);
@@ -203,7 +202,7 @@ export function checkHookConfig(spec: HookConfigSpec, basePath: string): HookCon
   } catch {
     // Unparseable. Only claim it if Origin's marker is in there — otherwise
     // it's the user's broken file and rewriting it would destroy their config.
-    return ORIGIN_COMMAND_TAIL.test(raw)
+    return ORIGIN_HOOK_COMMAND_TAIL.test(raw)
       ? { ...base, state: 'unreadable', detail: 'file is not valid JSON' }
       : { ...base, state: 'absent' };
   }

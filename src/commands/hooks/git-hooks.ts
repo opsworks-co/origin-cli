@@ -1,4 +1,4 @@
-// Git hook handlers: pre-commit, prepare-commit-msg, pre-push, post-merge, post-checkout.
+// Git hook handlers: pre-commit, commit-msg, prepare-commit-msg, pre-push, post-merge, post-checkout.
 //
 // Moved out of commands/hooks.ts mechanically: the text is unchanged, only its
 // home is. Shared helpers still live in hooks.ts and are imported from there.
@@ -7,16 +7,17 @@ import { serverRowForLocalTurn } from '../../turn-index.js';
 import { replayInProgress } from '../../commit-replay.js';
 import { attributionPgrepChecks, resolveAgentDisplayName, sessionMatchesAgent } from '../../agents/registry.js';
 import { api } from '../../api.js';
+import { getPoliciesCached } from '../../policy-cache.js';
 import { clearBudgetLockNotice } from '../../budget-breach.js';
 import { isConnectedMode, loadAgentConfig, loadConfig, loadRepoConfig, saveConfig } from '../../config.js';
 import { debugLog } from '../../debug-log.js';
-import { HOOK_PUBLISH_BUDGET_MS, describePublishResult, foldStagedNotes, publishAttributionNotes, pushAcceptanceNotes, pushMemoryNotes, resolveAutoPublishRemote, shouldIncludePromptText, syncNotesFromRemoteThrottled } from '../../git-notes.js';
+import { MEMORY_NOTES_REFS, PRE_PUSH_PUBLISH_BUDGET_MS, foldStagedNotes, publishPrePushRefs, resolveAutoPublishRemote, syncNotesFromRemoteThrottled, type PrePushRef } from '../../git-notes.js';
 import { notifyRepoMemoryChanged } from '../../memory-transport.js';
-import { pushSessionBranchTo } from '../../local-entrypoint.js';
+import { pushSessionBranchTo, sessionBranchPrePushRef } from '../../local-entrypoint.js';
 import { sessionBranchPushTarget } from '../../prompt-privacy.js';
 import { decidePushBlock } from '../../push-block.js';
 import { isNonSecretAssignmentValue, isSkippedScanPath } from '../../secret-rules.js';
-import { getGitRoot, getWorkingGitRoot, gitDirFilePath, listActiveSessions, saveSessionState } from '../../session-state.js';
+import { getGitRoot, getWorkingGitRoot, listActiveSessions, saveSessionState } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import { sessionRunningTheCommit } from '../../commit-command-in-flight.js';
 import { manuallyEndedSessionForTree } from '../../manual-session-end.js';
@@ -192,6 +193,105 @@ export async function handleGitPostCheckout(prevHead: string, newHead: string, f
   }
 }
 
+interface PolicyViolation {
+  policyName: string;
+  policyType: string;
+  policyId?: string;
+  ruleId?: string;
+  action: string;
+  severity: string;
+  message: string;
+}
+
+/**
+ * Report violations to the API (Security tab), print warnings, and exit 1
+ * when any of them blocks. Shared by pre-commit and commit-msg.
+ */
+async function enforcePolicyViolations(
+  violations: PolicyViolation[],
+  ctx: { hook: 'pre-commit' | 'commit-msg'; repoPath: string; connected: boolean; filepath?: string },
+): Promise<void> {
+  const config = loadConfig();
+
+  // ── Report violations to API (Security tab) ──
+  if (ctx.connected) {
+    try {
+      const sessions = listActiveSessions(ctx.repoPath);
+      const activeSession = sessions[0];
+      const sessionId = activeSession?.sessionId;
+
+      // Report secret findings
+      const secretFindings = violations.filter(v => v.policyType === 'SECRET_SCAN');
+      if (sessionId && secretFindings.length > 0) {
+        await api.reportSecrets(sessionId, secretFindings.map(f => ({
+          type: 'GENERIC_SECRET',
+          severity: f.severity.toLowerCase(),
+          filePath: f.message.split(' in ')[1]?.split(' —')[0] || '',
+          lineNumber: 0,
+          match: f.message,
+          ruleName: f.policyName,
+        }))).catch(() => {});
+      }
+
+      // Report policy violations. policyType rides along so the stats
+      // violations-by-type histogram attributes these correctly — without
+      // it, every pre-commit report landed in the "UNKNOWN" bucket.
+      const policyViolations = violations.filter(v => v.policyId);
+      for (const v of policyViolations) {
+        await api.reportViolation({
+          machineId: config?.machineId || 'unknown',
+          policyId: v.policyId!,
+          policyType: v.policyType,
+          policyName: v.policyName,
+          description: `[${ctx.hook}] ${v.message}`,
+          filepath: ctx.filepath || undefined,
+          sessionId: sessionId && !sessionId.startsWith('local-') ? sessionId : undefined,
+        }).catch(() => {});
+      }
+    } catch (err: any) {
+      debugLog(ctx.hook, 'API report failed (non-fatal)', { message: err.message });
+    }
+  }
+
+  // ── Check if any violations have BLOCK action ──
+  const blockingViolations = violations.filter(
+    v => v.action.toUpperCase() === 'BLOCK' || v.policyType === 'SECRET_SCAN'
+  );
+  const warningViolations = violations.filter(
+    v => v.action.toUpperCase() !== 'BLOCK' && v.policyType !== 'SECRET_SCAN'
+  );
+
+  // Show warnings (non-blocking)
+  if (warningViolations.length > 0) {
+    process.stderr.write('\n');
+    process.stderr.write('\x1b[1;33m  ⚠ Origin: policy warnings\x1b[0m\n');
+    process.stderr.write('\n');
+    for (const v of warningViolations) {
+      process.stderr.write(`\x1b[33m    [${v.policyType}] ${v.policyName}\x1b[0m\n`);
+      process.stderr.write(`    ${v.message}\n\n`);
+    }
+  }
+
+  // Block commit if any blocking violations
+  if (blockingViolations.length > 0) {
+    process.stderr.write('\n');
+    process.stderr.write('\x1b[1;31m  ✗ Origin: commit blocked by policy\x1b[0m\n');
+    process.stderr.write('\n');
+
+    for (const v of blockingViolations) {
+      process.stderr.write(`\x1b[31m    [${v.policyType}] ${v.policyName}\x1b[0m\n`);
+      process.stderr.write(`    ${v.message}\n\n`);
+    }
+
+    process.stderr.write(`\x1b[33m  ${blockingViolations.length} violation${blockingViolations.length !== 1 ? 's' : ''} found. Commit blocked.\x1b[0m\n`);
+    process.stderr.write('\n');
+    process.stderr.write('\x1b[2m  To bypass: git commit --no-verify\x1b[0m\n');
+    process.stderr.write('\n');
+
+    process.exit(1);
+  }
+}
+
 export async function handlePreCommit(): Promise<void> {
   debugLog('pre-commit', '=== GIT HOOK INVOKED ===', { pid: process.pid, cwd: process.cwd() });
 
@@ -252,61 +352,34 @@ export async function handlePreCommit(): Promise<void> {
 
   const repoConfig = loadRepoConfig(repoPath);
 
-  const execOpts = {
-    encoding: 'utf-8' as const,
-    // hookCwd, NOT repoPath: git runs pre-commit from the top of the working
-    // tree where the commit is happening. For a linked-worktree commit,
-    // repoPath (getGitRoot collapses to the MAIN repo) has a different
-    // index — reading `git diff --cached` there scanned the wrong (usually
-    // empty) staged set, so CONTENT_FILTER/secret policies never ran on
-    // worktree commits.
-    cwd: hookCwd,
-    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-    maxBuffer: 10 * 1024 * 1024, // 10MB for large diffs
-  };
-
-  // Get staged diff (full context for CONTENT_FILTER matching)
-  let stagedDiff: string;
-  try {
-    stagedDiff = execFileSync('git', ['diff', '--cached'], execOpts).trim();
-  } catch (err: any) {
-    debugLog('pre-commit', 'ERROR: cannot read staged diff', { message: err.message });
-    return; // Don't block on error
+  // Get staged diff (full context for CONTENT_FILTER matching) and file list.
+  // hookCwd, NOT repoPath: git runs pre-commit from the top of the working
+  // tree where the commit is happening. For a linked-worktree commit,
+  // repoPath (getGitRoot collapses to the MAIN repo) has a different
+  // index — reading `git diff --cached` there scanned the wrong (usually
+  // empty) staged set, so CONTENT_FILTER/secret policies never ran on
+  // worktree commits.
+  // A file whose diff can't be read is named on stderr, not silently passed:
+  // the old single read swallowed an over-10 MB diff and let the whole
+  // commit through unscanned.
+  const staged = readStagedDiff(hookCwd);
+  for (const u of staged.unscanned) {
+    process.stderr.write(`\x1b[33m  ⚠ Origin: secret scan skipped ${u.file || 'the staged diff'} — ${u.reason}\x1b[0m\n`);
   }
+  const stagedDiff = staged.diff;
+  const stagedFiles = staged.files;
 
   if (!stagedDiff) {
     debugLog('pre-commit', 'SKIP: empty staged diff');
     return;
   }
 
-  // Get staged file list
-  let stagedFiles: string[] = [];
-  try {
-    const raw = execFileSync('git', ['diff', '--cached', '--name-only'], execOpts).trim();
-    stagedFiles = raw ? raw.split('\n') : [];
-  } catch { /* ignore */ }
-
-  // Get the commit message (from COMMIT_EDITMSG if available — works for commit-msg hook chain)
-  // gitDirFilePath: a worktree commit's COMMIT_EDITMSG lives in the
-  // per-worktree git dir, not at <mainRepo>/.git/.
-  let commitMessage = '';
-  try {
-    const msgFile = gitDirFilePath(hookCwd, 'COMMIT_EDITMSG');
-    if (fs.existsSync(msgFile)) {
-      commitMessage = fs.readFileSync(msgFile, 'utf-8').trim();
-    }
-  } catch { /* ignore */ }
+  // No commit message here: git runs pre-commit BEFORE it writes the new
+  // message, so COMMIT_EDITMSG still held the PREVIOUS commit's — a good
+  // message was blocked for its predecessor's sins and a bad one passed.
+  // COMMIT_MESSAGE policies are enforced in commit-msg (handleCommitMsg).
 
   // ── Collect all violations from all policy checkers ──
-  interface PolicyViolation {
-    policyName: string;
-    policyType: string;
-    policyId?: string;
-    ruleId?: string;
-    action: string;
-    severity: string;
-    message: string;
-  }
   const violations: PolicyViolation[] = [];
 
   // ── 1. Secret scanning (built-in, always runs unless disabled) ──
@@ -353,7 +426,7 @@ export async function handlePreCommit(): Promise<void> {
   const connected = isConnectedMode();
   if (connected) {
     try {
-      const policies = await api.getPolicies() as Array<{
+      const policies = await getPoliciesCached() as Array<{
         id: string;
         name: string;
         type: string;
@@ -444,47 +517,7 @@ export async function handlePreCommit(): Promise<void> {
               break;
             }
 
-            case 'COMMIT_MESSAGE': {
-              if (!commitMessage) break;
-              const requiredPattern = cond.pattern as string | undefined;
-              const blockedPattern = cond.blocked_pattern as string | undefined;
-
-              if (requiredPattern) {
-                try {
-                  const regex = new RegExp(requiredPattern);
-                  if (!regex.test(commitMessage)) {
-                    violations.push({
-                      policyName: policy.name,
-                      policyType: policy.type,
-                      policyId: policy.id,
-                      ruleId: rule.id,
-                      action: rule.action,
-                      severity: rule.severity,
-                      message: `Commit message does not match required format "${requiredPattern}"`,
-                    });
-                  }
-                } catch { /* invalid regex */ }
-              }
-
-              if (blockedPattern) {
-                try {
-                  const flags = (cond.caseSensitive === false) ? 'i' : '';
-                  const regex = new RegExp(blockedPattern, flags);
-                  if (regex.test(commitMessage)) {
-                    violations.push({
-                      policyName: policy.name,
-                      policyType: policy.type,
-                      policyId: policy.id,
-                      ruleId: rule.id,
-                      action: rule.action,
-                      severity: rule.severity,
-                      message: `Commit message matches blocked pattern "${blockedPattern}"`,
-                    });
-                  }
-                } catch { /* invalid regex */ }
-              }
-              break;
-            }
+            // COMMIT_MESSAGE is checked in commit-msg — see handleCommitMsg.
 
             case 'REQUIRE_REVIEW': {
               // Check file path patterns only at pre-commit (cost/duration not available yet)
@@ -524,83 +557,140 @@ export async function handlePreCommit(): Promise<void> {
     return;
   }
 
-  // ── Report violations to API (Security tab) ──
-  if (connected) {
-    try {
-      const sessions = listActiveSessions(repoPath);
-      const activeSession = sessions[0];
-      const sessionId = activeSession?.sessionId;
+  await enforcePolicyViolations(violations, { hook: 'pre-commit', repoPath, connected, filepath: stagedFiles[0] });
+}
 
-      // Report secret findings
-      const secretFindings = violations.filter(v => v.policyType === 'SECRET_SCAN');
-      if (sessionId && secretFindings.length > 0) {
-        await api.reportSecrets(sessionId, secretFindings.map(f => ({
-          type: 'GENERIC_SECRET',
-          severity: f.severity.toLowerCase(),
-          filePath: f.message.split(' in ')[1]?.split(' —')[0] || '',
-          lineNumber: 0,
-          match: f.message,
-          ruleName: f.policyName,
-        }))).catch(() => {});
+// ─── Git Hook: Commit-Msg (COMMIT_MESSAGE policies) ───────────────────────
+
+/**
+ * The message as git will record it: comment lines dropped and everything
+ * below a `--verbose` scissors line cut. git runs commit-msg BEFORE its own
+ * cleanup, so the file still holds the editor template. Exported for tests.
+ */
+export function commitMessageForPolicy(raw: string, commentChar = '#'): string {
+  const out: string[] = [];
+  for (const line of raw.split('\n')) {
+    if (line.startsWith(commentChar)) {
+      if (/^.\s-+ >8 -+\s*$/.test(line)) break;
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join('\n').trim();
+}
+
+/**
+ * COMMIT_MESSAGE rule check: `pattern` must match, `blocked_pattern` must not.
+ * Pure — the caller has already dropped policies scoped to other agents.
+ * Exported for tests.
+ */
+export function commitMessageViolations(
+  policies: Array<{ id: string; name: string; type: string; rules: Array<{ id: string; condition: string; action: string; severity: string }> }>,
+  commitMessage: string,
+): PolicyViolation[] {
+  const violations: PolicyViolation[] = [];
+  if (!commitMessage) return violations;
+  for (const policy of policies) {
+    if (policy.type !== 'COMMIT_MESSAGE') continue;
+    for (const rule of policy.rules) {
+      let cond: Record<string, any> = {};
+      try { cond = JSON.parse(rule.condition); } catch { continue; }
+      const requiredPattern = cond.pattern as string | undefined;
+      const blockedPattern = cond.blocked_pattern as string | undefined;
+      const base = {
+        policyName: policy.name,
+        policyType: policy.type,
+        policyId: policy.id,
+        ruleId: rule.id,
+        action: rule.action,
+        severity: rule.severity,
+      };
+
+      if (requiredPattern) {
+        try {
+          const regex = new RegExp(requiredPattern);
+          if (!regex.test(commitMessage)) {
+            violations.push({ ...base, message: `Commit message does not match required format "${requiredPattern}"` });
+          }
+        } catch { /* invalid regex */ }
       }
 
-      // Report policy violations. policyType rides along so the stats
-      // violations-by-type histogram attributes these correctly — without
-      // it, every pre-commit report landed in the "UNKNOWN" bucket.
-      const policyViolations = violations.filter(v => v.policyId);
-      for (const v of policyViolations) {
-        await api.reportViolation({
-          machineId: config?.machineId || 'unknown',
-          policyId: v.policyId!,
-          policyType: v.policyType,
-          policyName: v.policyName,
-          description: `[pre-commit] ${v.message}`,
-          filepath: stagedFiles[0] || undefined,
-          sessionId: sessionId && !sessionId.startsWith('local-') ? sessionId : undefined,
-        }).catch(() => {});
+      if (blockedPattern) {
+        try {
+          const flags = (cond.caseSensitive === false) ? 'i' : '';
+          const regex = new RegExp(blockedPattern, flags);
+          if (regex.test(commitMessage)) {
+            violations.push({ ...base, message: `Commit message matches blocked pattern "${blockedPattern}"` });
+          }
+        } catch { /* invalid regex */ }
       }
-    } catch (err: any) {
-      debugLog('pre-commit', 'API report failed (non-fatal)', { message: err.message });
     }
   }
+  return violations;
+}
 
-  // ── Check if any violations have BLOCK action ──
-  const blockingViolations = violations.filter(
-    v => v.action.toUpperCase() === 'BLOCK' || v.policyType === 'SECRET_SCAN'
-  );
-  const warningViolations = violations.filter(
-    v => v.action.toUpperCase() !== 'BLOCK' && v.policyType !== 'SECRET_SCAN'
-  );
+/**
+ * Called by the commit-msg hook with git's message file as $1 — the only
+ * point where the NEW message exists. Exit 1 blocks the commit.
+ */
+export async function handleCommitMsg(msgFile: string): Promise<void> {
+  debugLog('commit-msg', '=== GIT HOOK INVOKED ===', { msgFile });
 
-  // Show warnings (non-blocking)
-  if (warningViolations.length > 0) {
-    process.stderr.write('\n');
-    process.stderr.write('\x1b[1;33m  ⚠ Origin: policy warnings\x1b[0m\n');
-    process.stderr.write('\n');
-    for (const v of warningViolations) {
-      process.stderr.write(`\x1b[33m    [${v.policyType}] ${v.policyName}\x1b[0m\n`);
-      process.stderr.write(`    ${v.message}\n\n`);
-    }
+  const hookCwd = process.cwd();
+  const repoPath = getGitRoot(hookCwd);
+  if (!repoPath) {
+    debugLog('commit-msg', 'SKIP: not a git repo');
+    return;
+  }
+  if (!isConnectedMode()) return;
+
+  let raw = '';
+  try {
+    raw = fs.readFileSync(msgFile, 'utf-8');
+  } catch (err: any) {
+    debugLog('commit-msg', 'SKIP: cannot read message file', { message: err.message });
+    return;
+  }
+  let commentChar = '#';
+  try {
+    const configured = execFileSync('git', ['config', '--get', 'core.commentChar'], {
+      encoding: 'utf-8', cwd: hookCwd, stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    if (configured && configured !== 'auto') commentChar = configured;
+  } catch { /* unset — git's default '#' */ }
+  const commitMessage = commitMessageForPolicy(raw, commentChar);
+  if (!commitMessage) return; // git aborts an empty message itself
+
+  let violations: PolicyViolation[] = [];
+  try {
+    const policies = await api.getPolicies() as Array<{
+      id: string;
+      name: string;
+      type: string;
+      assignedAgents?: Array<{ id: string; name: string; slug: string }>;
+      rules: Array<{ id: string; condition: string; action: string; severity: string }>;
+    }>;
+    // Same per-agent scoping as pre-commit (policyAppliesToCommit).
+    const activeAgentSlugs = new Set(
+      listActiveSessions(repoPath)
+        .map((s) => (s.agentSlug || '').toLowerCase())
+        .filter(Boolean),
+    );
+    violations = commitMessageViolations(
+      policies.filter((p) => policyAppliesToCommit(p.assignedAgents, activeAgentSlugs)),
+      commitMessage,
+    );
+  } catch (err: any) {
+    debugLog('commit-msg', 'Policy fetch failed (non-fatal)', { message: err.message });
+    return; // Don't block on API failure
   }
 
-  // Block commit if any blocking violations
-  if (blockingViolations.length > 0) {
-    process.stderr.write('\n');
-    process.stderr.write('\x1b[1;31m  ✗ Origin: commit blocked by policy\x1b[0m\n');
-    process.stderr.write('\n');
-
-    for (const v of blockingViolations) {
-      process.stderr.write(`\x1b[31m    [${v.policyType}] ${v.policyName}\x1b[0m\n`);
-      process.stderr.write(`    ${v.message}\n\n`);
-    }
-
-    process.stderr.write(`\x1b[33m  ${blockingViolations.length} violation${blockingViolations.length !== 1 ? 's' : ''} found. Commit blocked.\x1b[0m\n`);
-    process.stderr.write('\n');
-    process.stderr.write('\x1b[2m  To bypass: git commit --no-verify\x1b[0m\n');
-    process.stderr.write('\n');
-
-    process.exit(1);
+  if (violations.length === 0) {
+    debugLog('commit-msg', 'PASS: no violations');
+    return;
   }
+
+  await enforcePolicyViolations(violations, { hook: 'commit-msg', repoPath, connected: true });
 }
 
 export function mapFindingSeverity(name: string): string {
@@ -722,6 +812,68 @@ export function parseStagedDiffLines(diff: string): Array<{ file: string; line: 
   }
 
   return result;
+}
+
+export interface StagedDiffRead {
+  diff: string;
+  files: string[];
+  /** Staged files whose diff could not be read, so went unscanned. `file` is '' when the file list itself failed. */
+  unscanned: Array<{ file: string; reason: string }>;
+}
+
+/**
+ * Read the staged diff for the pre-commit scan. Exported for tests.
+ *
+ * A normal commit takes one `git diff --cached`. When that fails — over the
+ * buffer or past the timeout — it falls back to one diff per staged file, so
+ * an oversized file costs only itself instead of the whole scan. Binary files
+ * cost nothing either way: git prints "Binary files … differ", not bytes.
+ */
+export function readStagedDiff(
+  cwd: string,
+  opts: { maxBuffer?: number; timeoutMs?: number; budgetMs?: number } = {},
+): StagedDiffRead {
+  const maxBuffer = opts.maxBuffer ?? 10 * 1024 * 1024;
+  const timeout = opts.timeoutMs ?? 10_000;
+  const budgetMs = opts.budgetMs ?? 60_000;
+  const run = (args: string[], t = timeout) => execFileSync('git', args, {
+    cwd, encoding: 'utf-8', windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], maxBuffer, timeout: t,
+  });
+  const why = (err: any): string => err?.code === 'ENOBUFS' ? `diff larger than ${Math.round(maxBuffer / 1024 / 1024)} MB`
+    : (err?.code === 'ETIMEDOUT' || err?.signal === 'SIGTERM') ? 'git diff timed out'
+    : `git diff failed (${String(err?.message || err).split('\n')[0]})`;
+
+  let files: string[];
+  try {
+    files = run(['diff', '--cached', '--name-only', '-z']).split('\0').filter(Boolean);
+  } catch (err: any) {
+    debugLog('pre-commit', 'ERROR: cannot list staged files', { message: err?.message });
+    return { diff: '', files: [], unscanned: [{ file: '', reason: why(err) }] };
+  }
+  if (files.length === 0) return { diff: '', files, unscanned: [] };
+
+  const diffArgs = ['diff', '--cached', '--no-color', '--no-ext-diff'];
+  try {
+    return { diff: run(diffArgs).trim(), files, unscanned: [] };
+  } catch (err: any) {
+    debugLog('pre-commit', 'whole staged diff unreadable — reading per file', { message: err?.message, files: files.length });
+  }
+
+  const parts: string[] = [];
+  const unscanned: StagedDiffRead['unscanned'] = [];
+  const deadline = Date.now() + budgetMs;
+  for (const file of files) {
+    const left = deadline - Date.now();
+    if (left <= 0) { unscanned.push({ file, reason: 'scan time budget used up' }); continue; }
+    try {
+      // --literal-pathspecs: a name like `a[1].ts` must not be read as a glob.
+      const part = run(['--literal-pathspecs', ...diffArgs, '--', file], Math.min(timeout, left)).trim();
+      if (part) parts.push(part);
+    } catch (err: any) {
+      unscanned.push({ file, reason: why(err) });
+    }
+  }
+  return { diff: parts.join('\n'), files, unscanned };
 }
 
 // ─── Git Hook: Pre-Push (F14) ─────────────────────────────────────────────
@@ -1330,56 +1482,55 @@ export async function handlePrePush(): Promise<void> {
   // (never ALSO to `origin`); otherwise to `origin` with the prompt opt-in or
   // pushStrategy 'always'. This push is the user's own, so it is the publish
   // moment for pushStrategy 'prompt'.
+  //
+  // Everything from here to the end shares ONE budget
+  // (PRE_PUSH_PUBLISH_BUDGET_MS): whatever does not fit is left to the next
+  // push, never allowed to hold this one for minutes.
+  const publishStart = Date.now();
+  const budgetLeft = () => Math.max(0, PRE_PUSH_PUBLISH_BUDGET_MS - (Date.now() - publishStart));
+  const extraRefs: PrePushRef[] = [];
   const sessionsTarget = sessionBranchPushTarget(repoPath, config, 'pre-push');
   if (!sessionsTarget) {
     debugLog('pre-push', 'SKIP origin-sessions push: not allowed by the publication policy');
-  } else {
-    const pushed = pushSessionBranchTo(repoPath, sessionsTarget);
+  } else if (sessionsTarget.kind === 'snapshot') {
+    // A different destination — its own push, inside the same budget.
+    const pushed = pushSessionBranchTo(repoPath, sessionsTarget, { timeoutMs: budgetLeft() });
     debugLog('pre-push', pushed ? 'pushed origin-sessions' : 'origin-sessions push skipped', { target: sessionsTarget.kind });
+  } else if (originRemote) {
+    // Rides in the same push as the notes below.
+    const ref = sessionBranchPrePushRef(repoPath, originRemote);
+    if (ref) extraRefs.push(ref);
+    else debugLog('pre-push', 'origin-sessions push skipped: no local branch');
+  } else {
+    debugLog('pre-push', 'origin-sessions push skipped: no origin remote');
   }
 
-  // Publish refs/notes/origin to origin through the shared publisher: no
-  // force, --no-verify, a bounded fetch → `notes merge -s ours` → retry on a
-  // non-fast-forward (distinct commits union; the local note wins on the SAME
-  // commit), all inside one hook-safe budget. Best-effort: a failure is logged
-  // and never blocks the code push — only the governance block above exits
-  // non-zero.
+  // refs/notes/origin, the memory refs (prompt-text gate), the acceptance ref
+  // and the origin-sessions branch, in ONE `git push` to origin: no force,
+  // --no-verify, and on a non-fast-forward one fetch → per-ref reconcile
+  // (`notes merge -s ours` for per-commit notes, the payload-level union for
+  // memory) → one retry. A remote that refused every notes ref is skipped for
+  // a day. Best-effort: never blocks the code push — only the governance
+  // block above exits non-zero. Still BEFORE git sends the branch, so memory
+  // is on the remote when the branch push's webhook triggers the import.
   if (!originRemote) {
     debugLog('pre-push', 'SKIP notes, memory and acceptance push: no origin remote');
     debugLog('pre-push', '=== GIT HOOK COMPLETE ===');
     return;
   }
-  const notesResult = publishAttributionNotes(repoPath, originRemote, { budgetMs: HOOK_PUBLISH_BUDGET_MS });
-  debugLog('pre-push', 'refs/notes/origin publish', describePublishResult(notesResult));
-
-  // Memory notes (refs/notes/origin-memory + its continuation brief). Same
-  // trigger, same privacy gate as the attribution notes above — pushMemoryNotes
-  // handles the non-fast-forward retry itself, with a payload-level merge
-  // instead of `notes merge` (the payload is one note on the root commit, so a
-  // git-level strategy would drop the other machine's sessions wholesale).
   try {
-    pushMemoryNotes(repoPath, 'origin');
-    debugLog('pre-push', 'pushed memory notes');
+    const published = publishPrePushRefs(repoPath, originRemote, { extraRefs, budgetMs: budgetLeft() });
+    debugLog('pre-push', 'published Origin refs', { ...published });
     // The branch push that follows fires a webhook only where the GitHub App
     // (or a GitLab hook) is installed, and never for the notes ref itself.
     // Tell the server directly so the Memory tab reflects this push, not the
-    // next one. Bounded — a slow API must not stall the developer's push.
-    if (shouldIncludePromptText(repoPath)) {
-      await notifyRepoMemoryChanged(repoPath, 'pre-push', { remote: 'origin' });
+    // next one — when memory actually moved. Bounded — a slow API must not
+    // stall the developer's push.
+    if (MEMORY_NOTES_REFS.some(({ local }) => published.outcomes[local] === 'pushed')) {
+      await notifyRepoMemoryChanged(repoPath, 'pre-push', { remote: originRemote });
     }
   } catch (err: any) {
-    debugLog('pre-push', 'memory notes push skipped', { message: err?.message });
-  }
-
-  // Acceptance notes (refs/notes/origin-acceptance). Session-end pushes these
-  // too, but only right after a backfill actually wrote something — this is the
-  // catch-all for a machine that annotated commits and then pushed later.
-  // Separate try so a memory failure above doesn't strand them.
-  try {
-    pushAcceptanceNotes(repoPath, 'origin');
-    debugLog('pre-push', 'pushed acceptance notes');
-  } catch (err: any) {
-    debugLog('pre-push', 'acceptance notes push skipped', { message: err?.message });
+    debugLog('pre-push', 'Origin refs publish errored', { message: err?.message });
   }
 
   debugLog('pre-push', '=== GIT HOOK COMPLETE ===');

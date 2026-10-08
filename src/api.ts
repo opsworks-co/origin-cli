@@ -8,6 +8,7 @@ import { cliVersion } from './cli-version.js';
 import { debugLog } from './debug-log.js';
 import { isBenchmarkClonePath } from './benchmark-clone.js';
 import { fitSessionUpdateForServer } from './session-update-size.js';
+import { redactSessionPayloadContent } from './captured-diff-redaction.js';
 
 function getConfig() {
   const config = loadConfig();
@@ -342,7 +343,9 @@ export const api = {
   updateSession: async (id: string, data: any, reqOpts?: { timeoutMs?: number }) => {
     // Every producer's PATCH passes here, so this is where a turn's editsJson
     // is held to the server's size limit (see session-update-size.ts).
-    const fitted = fitSessionUpdateForServer(data, (fit) => debugLog('api', 'editsJson fitted to the server limit', { sessionId: id, ...fit }));
+    // It is also where a turn's diffs and editsJson lose their secrets — the
+    // one place every producer's content passes on its way out.
+    const fitted = fitSessionUpdateForServer(redactSessionPayloadContent(data), (fit) => debugLog('api', 'editsJson fitted to the server limit', { sessionId: id, ...fit }));
     const res = await request(
       `/api/mcp/session/${id}`,
       { method: 'PATCH', body: JSON.stringify(fitted) },
@@ -365,7 +368,7 @@ export const api = {
     return res as { imported?: number; skipped?: number; healed?: number; noRepo?: number; disabled?: boolean };
   },
   endSession: async (data: any) => {
-    const res = await request('/api/mcp/session/end', { method: 'POST', body: JSON.stringify(data) });
+    const res = await request('/api/mcp/session/end', { method: 'POST', body: JSON.stringify(redactSessionPayloadContent(data)) });
     assertObj(res, 'endSession');
     return res;
   },

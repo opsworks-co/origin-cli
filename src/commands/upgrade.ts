@@ -1,6 +1,6 @@
 import chalk from 'chalk';
 import crypto from 'crypto';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import { findExecutable } from '../utils/exec.js';
 import { compareVersions } from '../version-check.js';
 import { installGlobalAtomically } from '../atomic-global-install.js';
@@ -232,7 +232,7 @@ function healHookConfigsWithInstalledCode(): void {
     return;
   }
   try {
-    const out = execSync(`"${process.execPath}" "${entry}" hooks repair`, {
+    const out = execFileSync(process.execPath, [entry, 'hooks', 'repair'], {
       windowsHide: true,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -402,11 +402,9 @@ async function getLatestVersion(): Promise<{ version: string; url: string; sha25
       return null;
     }
 
-    const url = data.url || TARBALL_URL;
-
-    // URL pinning: only allow downloads from getorigin.io
-    if (!url.startsWith('https://getorigin.io/')) {
-      console.log(chalk.red(`\n  Untrusted download URL rejected: ${url}`));
+    const url = trustedDownloadUrl(data.url || TARBALL_URL);
+    if (!url) {
+      console.log(chalk.red(`\n  Untrusted download URL rejected: ${data.url}`));
       return null;
     }
 
@@ -425,6 +423,20 @@ async function getLatestVersion(): Promise<{ version: string; url: string; sha25
   }
 }
 
+/**
+ * URL pinning for the tarball the server points at: https, host getorigin.io,
+ * default port, no credentials. Returns the parsed (normalized) href, or null.
+ * A prefix check alone let `https://getorigin.io/$(cmd)` through, and the URL
+ * then went into a shell string — so it ran before the SHA-256 check.
+ */
+export function trustedDownloadUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  let u: URL;
+  try { u = new URL(raw); } catch { return null; }
+  if (u.protocol !== 'https:' || u.hostname !== 'getorigin.io' || u.port !== '' || u.username || u.password) return null;
+  return u.href;
+}
+
 // ─── Installation ──────────────────────────────────────────────────────────
 
 function downloadAndInstall(url: string, expectedSha256: string, expectedVersion: string): boolean {
@@ -433,7 +445,8 @@ function downloadAndInstall(url: string, expectedSha256: string, expectedVersion
 
   try {
     console.log(chalk.gray('  Downloading...'));
-    execSync(`curl -fsSL "${url}" -o "${tgzPath}"`, { windowsHide: true,
+    // argv, not a shell string: the URL comes from the server.
+    execFileSync('curl', ['-fsSL', url, '-o', tgzPath], { windowsHide: true,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 30_000,

@@ -4,6 +4,7 @@ import { REWRITE_NOTE_KEY, rebuildRewrittenNote, type RewriteWarning } from './h
 import { noteLockWaitOverride, withNoteWriteLock, type NoteLease, type NoteLockOptions } from './note-write-lock.js';
 import { cliVersion } from './cli-version.js';
 import { gitIdentityEnv, runDetailed } from './utils/exec.js';
+import { insertHookBlockAfterShebang } from './utils/hook-insert.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -298,7 +299,9 @@ function installPostRewriteHook(hooksDir: string): void {
       if (repaired) fs.writeFileSync(hookPath, repaired);
       return;
     }
-    // Append to existing hook
+    // Appended, unlike the other hooks (which go after the shebang): this
+    // block reads git's stdin pairs, and run first it would starve the
+    // user's own lines of them.
     fs.appendFileSync(hookPath, '\n' + ORIGIN_MARKER + '\n' + HOOK_PATH_SHIM + '\n' + CAPTURE_REWRITES + '\n'
       + backgroundedWithRewrites('origin hooks git-post-rewrite "$@"') + '\n');
   } else {
@@ -333,16 +336,16 @@ function installPostCheckoutHook(hooksDir: string): void {
       // Already installed
       return;
     }
-    // Append to existing hook
-    const append = [
-      '',
+    // Insert after the shebang: a user hook ending in `exit 0` never reaches
+    // an appended line. The subshell keeps the PATH shim out of the user's
+    // own lines that now run after it.
+    const block = [
       ORIGIN_MARKER,
-      HOOK_PATH_SHIM,
       'if [ "$3" = "1" ]; then',
-      '  origin hooks git-post-checkout "$@" >/dev/null 2>&1 &',
+      `  ( ${HOOK_PATH_SHIM}; origin hooks git-post-checkout "$@" >/dev/null 2>&1 & )`,
       'fi',
     ].join('\n') + '\n';
-    fs.appendFileSync(hookPath, append);
+    fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing, block));
   } else {
     fs.writeFileSync(hookPath, hookScript);
   }

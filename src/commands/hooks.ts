@@ -59,7 +59,7 @@ import { outOfRepoWrites, samePath as samePathNormalized, isInsideRepo as isInsi
 import { WORKTREE_BOOTSTRAP_MAX_AGE_MS } from '../worktree-bootstrap.js';
 // Moved to ./hooks/git-hooks.ts — imported for the dispatcher, re-exported so
 // every existing `from './commands/hooks.js'` import keeps resolving.
-import { GENERIC_ASSIGNMENT_RULES, PRE_COMMIT_PATTERNS, buildOriginTrailers, handleGitPostCheckout, handleGitPostMerge, handlePreCommit, handlePrePush, handlePrepareCommitMsg, isNullRef, mapFindingSeverity, matchGlobPreCommit, parseStagedDiffLines, pickActiveSessionForCommit, policyAppliesToCommit, preCommitBudgetDecision, sessionTouchedFiles, stagedCommitFiles } from './hooks/git-hooks.js';
+import { GENERIC_ASSIGNMENT_RULES, PRE_COMMIT_PATTERNS, buildOriginTrailers, commitMessageForPolicy, commitMessageViolations, handleCommitMsg, handleGitPostCheckout, handleGitPostMerge, handlePreCommit, handlePrePush, handlePrepareCommitMsg, isNullRef, mapFindingSeverity, matchGlobPreCommit, parseStagedDiffLines, pickActiveSessionForCommit, policyAppliesToCommit, preCommitBudgetDecision, sessionTouchedFiles, stagedCommitFiles } from './hooks/git-hooks.js';
 // Moved to ./hooks/post-commit.ts — imported for the dispatcher, re-exported so
 // every existing `from './commands/hooks.js'` import keeps resolving.
 import { RECENCY_TIEBREAK_MARGIN_MS, applyAuthoredTotals, commitAuthoredDelta, commitTurnContentUnit, countDiffSignLines, excludeSessionsFromOtherTrees, filesNamedInDiff, gitCommitDate, handlePostCommit, inFlightEditedFiles, listSessionsForGitHook, listSessionsForGitHookUnscoped, loneSessionMayOwnCommit, pathNamesSession, pickCommitUpdateTargets, pickIdleOwnerByFileEvidence, pickRecentDevinSessionForRepo, pickSessionByFileOverlap, pickSessionForCommit, pinCodexCommitToProducer, renderAuthoredCommits, resolvePromptForCommit, safePgrep, sessionAuthoredSnapshot, sessionDurationMs, sessionToDateCommittedSnapshot, sessionTouchedAnyCommitFile, sessionTrees, uniquePgrepMatch, worksInAnotherTree } from './hooks/post-commit.js';
@@ -96,7 +96,7 @@ export { EDIT_HOOK_TOOL, adoptUnannouncedPrompts, buildLiveEditPromptChanges, cu
 export { RECENCY_TIEBREAK_MARGIN_MS, applyAuthoredTotals, commitAuthoredDelta, commitTurnContentUnit, countDiffSignLines, excludeSessionsFromOtherTrees, filesNamedInDiff, gitCommitDate, handlePostCommit, inFlightEditedFiles, listSessionsForGitHook, listSessionsForGitHookUnscoped, loneSessionMayOwnCommit, pathNamesSession, pickCommitUpdateTargets, pickIdleOwnerByFileEvidence, pickRecentDevinSessionForRepo, pickSessionByFileOverlap, pickSessionForCommit, pinCodexCommitToProducer, renderAuthoredCommits, resolvePromptForCommit, safePgrep, sessionAuthoredSnapshot, sessionDurationMs, sessionToDateCommittedSnapshot, sessionTouchedAnyCommitFile, sessionTrees, uniquePgrepMatch, worksInAnotherTree };
 export type { FileEvidenceSession } from './hooks/post-commit.js';
 
-export { GENERIC_ASSIGNMENT_RULES, PRE_COMMIT_PATTERNS, buildOriginTrailers, handleGitPostCheckout, handleGitPostMerge, handlePreCommit, handlePrePush, handlePrepareCommitMsg, isNullRef, mapFindingSeverity, matchGlobPreCommit, parseStagedDiffLines, pickActiveSessionForCommit, policyAppliesToCommit, preCommitBudgetDecision, sessionTouchedFiles, stagedCommitFiles };
+export { GENERIC_ASSIGNMENT_RULES, PRE_COMMIT_PATTERNS, buildOriginTrailers, commitMessageForPolicy, commitMessageViolations, handleCommitMsg, handleGitPostCheckout, handleGitPostMerge, handlePreCommit, handlePrePush, handlePrepareCommitMsg, isNullRef, mapFindingSeverity, matchGlobPreCommit, parseStagedDiffLines, pickActiveSessionForCommit, policyAppliesToCommit, preCommitBudgetDecision, sessionTouchedFiles, stagedCommitFiles };
 import { backfillCodexPromptMappings } from '../codex-prompt-mapping.js';
 import { buildCodexThreadByCwdQuery } from '../codex-thread-query.js';
 import {
@@ -2517,26 +2517,65 @@ export function stripBom(s: string): string {
   return t.charCodeAt(0) === BOM ? t.slice(1).trim() : t;
 }
 
-async function readStdin(): Promise<Record<string, any>> {
+// How long stdin may stay silent before we stop waiting for it. An agent that
+// never closes its end of the pipe (or a hook run with an inherited, idle pipe)
+// would otherwise block the hook until the agent kills it. This is an IDLE
+// timeout — reset on every chunk — not a total cap, so a large payload (e.g. a
+// transcript) arriving slowly in many chunks is never cut short.
+export const STDIN_IDLE_TIMEOUT_MS = 3000;
+
+export function readStdin(
+  stream: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin,
+  idleTimeoutMs: number = STDIN_IDLE_TIMEOUT_MS,
+): Promise<Record<string, any>> {
   return new Promise((resolve) => {
     let data = '';
-    process.stdin.setEncoding('utf-8');
-    process.stdin.on('data', (chunk: string) => { data += chunk; });
-    process.stdin.on('end', () => {
+    let done = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (reason: 'end' | 'idle') => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      stream.removeListener('data', onData);
+      stream.removeListener('end', onEnd);
+      if (reason === 'idle') {
+        // Stop holding the pipe open so the process can exit on its own.
+        try { stream.pause(); } catch { /* ignore */ }
+        try { (stream as any).unref?.(); } catch { /* ignore */ }
+        if (data.length > 0) {
+          debugLog('stdin', 'WARNING: stdin went idle without closing — using what arrived', { dataLength: data.length, idleTimeoutMs });
+        } else {
+          debugLog('stdin', 'no stdin data before idle timeout, resolving empty', { idleTimeoutMs });
+        }
+      }
+      if (data.length === 0) { resolve({}); return; }
       try {
         const parsed = JSON.parse(stripBom(data));
         debugLog('stdin', 'parsed', { keys: Object.keys(parsed), cwd: parsed.cwd, session_id: parsed.session_id, model: parsed.model });
         resolve(parsed);
       } catch {
-        debugLog('stdin', 'parse-failed', { dataLength: data.length, preview: data.slice(0, 200) });
+        debugLog('stdin', 'parse-failed', { dataLength: data.length, preview: redactSecrets(data.slice(0, 200)).redacted });
         resolve({});
       }
-    });
-    // If stdin is already closed or not a TTY, resolve after a short timeout
-    if (process.stdin.isTTY) {
+    };
+    const armIdle = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => finish('idle'), idleTimeoutMs);
+    };
+    const onData = (chunk: string | Buffer) => { data += chunk.toString(); armIdle(); };
+    const onEnd = () => finish('end');
+
+    // A TTY means nobody is piping a payload in.
+    if (stream.isTTY) {
       debugLog('stdin', 'isTTY=true, resolving empty');
+      done = true;
       resolve({});
+      return;
     }
+    stream.setEncoding('utf-8');
+    stream.on('data', onData);
+    stream.on('end', onEnd);
+    armIdle();
   });
 }
 

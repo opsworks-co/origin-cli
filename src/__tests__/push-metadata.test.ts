@@ -200,7 +200,7 @@ describe('origin push-metadata', () => {
     process.chdir(local);
     return handlePrePush().finally(() => process.chdir(origCwd)).then(() => {
       const after = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf-8') : '';
-      expect(after.slice(before.length)).toMatch(/refs\/notes\/origin publish \{"status":"failed"/);
+      expect(after.slice(before.length)).toMatch(/published Origin refs \{"outcomes":\{"refs\/notes\/origin":"failed"/);
       expect(after.slice(before.length)).not.toContain('s3cr3t');
     });
   });
@@ -416,7 +416,11 @@ describe('publish deadline', () => {
     vi.resetModules();
     vi.doMock('../git-notes.js', async () => {
       const actual = await vi.importActual<typeof import('../git-notes.js')>('../git-notes.js');
-      return { ...actual, publishAttributionNotes: (r: string, rem: string) => actual.publishAttributionNotes(r, rem, { budgetMs: 0 }) };
+      return {
+        ...actual,
+        publishPrePushRefs: (r: string, rem: string, o: Parameters<typeof actual.publishPrePushRefs>[2]) =>
+          actual.publishPrePushRefs(r, rem, { ...o, budgetMs: 0 }),
+      };
     });
     try {
       const { handlePrePush: prePush } = await import('../commands/hooks.js');
@@ -426,7 +430,7 @@ describe('publish deadline', () => {
       const before = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf-8').length : 0;
       process.chdir(local);
       await expect(prePush()).resolves.toBeUndefined();
-      expect(fs.readFileSync(logPath, 'utf-8').slice(before)).toMatch(/deadline exceeded/);
+      expect(fs.readFileSync(logPath, 'utf-8').slice(before)).toMatch(/"deadlineExceeded":true/);
       expect(remoteNote(c1)).toBeNull();
     } finally {
       process.chdir(origCwd);

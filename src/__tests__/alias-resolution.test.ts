@@ -126,9 +126,60 @@ describe('alias resolution', () => {
       env: { ...process.env, ORIGIN_SKIP_VERSION_CHECK: '1' },
     }).toString();
 
-    expect(output).toContain('Commands by purpose:');
     for (const group of ['SETUP', 'ATTRIBUTION', 'SESSIONS', 'TIME TRAVEL', 'HEALTH']) {
       expect(output, `group header \`${group}\` missing from --help`).toContain(group);
     }
+    // SETUP comes first — `login` / `enable` are what a new user needs.
+    expect(output.indexOf('  SETUP')).toBeLessThan(output.indexOf('  ATTRIBUTION'));
+    // Every visible command is assigned to a group: the OTHER catch-all only
+    // appears when someone registers a command without placing it.
+    expect(output, 'a command is not in any help group — add it to COMMAND_GROUPS').not.toMatch(/^\s+OTHER$/m);
+  });
+
+  it('root --help lists each command once (no duplicate flat list)', () => {
+    const output = execFileSync('node', [distPath, '--help'], {
+      stdio: ['ignore', 'pipe', 'pipe'], timeout: 8000,
+      env: { ...process.env, ORIGIN_SKIP_VERSION_CHECK: '1' },
+    }).toString();
+    // Commander's flat list used to precede the grouped list, so every
+    // command was printed twice.
+    expect(output.match(/^\s+login\b/gm)?.length).toBe(1);
+    expect(output.match(/^\s+blame\b/gm)?.length).toBe(1);
+    expect(output.match(/^Commands:/gm)?.length).toBe(1);
+    // Commander's own "Did you mean …?" still sees every command.
+    let stderr = '';
+    try {
+      execFileSync('node', [distPath, 'blmae'], {
+        stdio: ['ignore', 'pipe', 'pipe'], timeout: 8000,
+        env: { ...process.env, ORIGIN_SKIP_VERSION_CHECK: '1' },
+      });
+    } catch (err: any) {
+      stderr = err.stderr?.toString() ?? '';
+    }
+    expect(stderr).toContain('Did you mean blame?');
+  });
+
+  it('internal / repair commands are left out of --help but still run', () => {
+    const output = execFileSync('node', [distPath, '--help'], {
+      stdio: ['ignore', 'pipe', 'pipe'], timeout: 8000,
+      env: { ...process.env, ORIGIN_SKIP_VERSION_CHECK: '1' },
+    }).toString();
+    for (const cmd of ['codex-watch', 'transcript-watch', 'verify-capture', 'recapture', 'repair-merges', 'notes']) {
+      expect(output, `\`${cmd}\` should not be listed in --help`).not.toMatch(new RegExp(`^\\s+${cmd}\\b`, 'm'));
+      // Origin spawns / documents these by name — they must keep resolving.
+      execFileSync('node', [distPath, cmd, '--help'], {
+        stdio: ['ignore', 'pipe', 'pipe'], timeout: 8000,
+        env: { ...process.env, ORIGIN_SKIP_VERSION_CHECK: '1' },
+      });
+    }
+  });
+
+  it('`disable --help` describes what --global removes', () => {
+    const help = execFileSync('node', [distPath, 'disable', '--help'], {
+      stdio: ['ignore', 'pipe', 'pipe'], timeout: 8000,
+      env: { ...process.env, ORIGIN_SKIP_VERSION_CHECK: '1' },
+    }).toString();
+    expect(help).not.toMatch(/from ~\/\s*$/m);
+    expect(help).toContain('home directory');
   });
 });

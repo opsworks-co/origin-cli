@@ -10,11 +10,14 @@ import chalk from 'chalk';
 import { execSync, execFileSync } from 'child_process';
 import { run, runDetailed, findExecutable } from '../utils/exec.js';
 import { isWindows } from '../utils/platform.js';
+import { insertHookBlockAfterShebang } from '../utils/hook-insert.js';
 import { loadConfig, saveConfig, saveRepoConfig, isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
 import { mcpAgentsForEnable, installMcpForAgent, mcpServerCommand, mcpCapable } from '../mcp/install.js';
 import { recordEnabledRepo } from '../enabled-repos.js';
+import { hookToolIds, recognizedHookToolIds } from '../agents/registry.js';
+import { PREVIOUS_HOOKS_PATH_FILE, rememberPreviousHooksPath } from '../global-hooks-path.js';
 
 // ─── PATH Resolution ─────────────────────────────────────────────────────
 // Hooks run in a minimal shell environment where `origin` may not be in PATH.
@@ -234,9 +237,32 @@ function originCmd(cmd: string): string {
   }
   const binDir = getOriginBinPath();
   if (binDir && binDir !== '/usr/bin' && binDir !== '/bin') {
-    return `PATH=${binDir}:$PATH ${cmd}`;
+    return posixPathShim(binDir, cmd);
   }
   return cmd;
+}
+
+/**
+ * Escape a string for use INSIDE a POSIX double-quoted word: `"`, `$`, a
+ * backtick and a backslash are the only characters still special there.
+ */
+export function shDoubleQuoteEscape(s: string): string {
+  return s.replace(/["$`\\]/g, (c) => `\\${c}`);
+}
+
+/**
+ * The unix `PATH=<binDir>:$PATH <cmd>` launcher prefix, with binDir QUOTED.
+ *
+ * It used to be emitted bare, so a bin dir containing a space (`/Users/John
+ * Smith/.nvm/…/bin`) split the assignment into `PATH=/Users/John` followed by a
+ * "command" named `Smith/.nvm/…:$PATH` — every agent hook and git hook exited
+ * 127 and nothing was captured. `$PATH` stays inside the quotes unescaped so it
+ * still expands. Detection (isOriginHookCommand, hook-config-health) keys off
+ * the `hooks <agent>` tail, so the old bare form is still recognised and
+ * replaced on re-install.
+ */
+export function posixPathShim(binDir: string, cmd: string): string {
+  return `PATH="${shDoubleQuoteEscape(binDir)}:$PATH" ${cmd}`;
 }
 
 // True if a hook entry's command string is one Origin installed, in ANY shell
@@ -245,10 +271,14 @@ function originCmd(cmd: string): string {
 // agnostic `hooks <agent>` marker (NOT the literal `origin hooks`, which the
 // Windows form breaks) so idempotent re-install finds prior entries on every
 // platform. Pass `agent` to scope to one agent's entries; omit to match any.
+// The agent list comes from the registry (hook agents + legacy ids like
+// `windsurf`), so a new hook agent is recognized without editing this regex.
+export const ORIGIN_HOOK_COMMAND_TAIL = new RegExp(`\\bhooks (${recognizedHookToolIds().join('|')})\\b`);
+
 export function isOriginHookCommand(cmd: unknown, agent?: string): boolean {
   if (typeof cmd !== 'string') return false;
   if (agent) return cmd.includes(`hooks ${agent} `) || cmd.endsWith(`hooks ${agent}`);
-  return /\bhooks (claude-code|cursor|gemini|devin|windsurf|codex|copilot|antigravity|aider)\b/.test(cmd);
+  return ORIGIN_HOOK_COMMAND_TAIL.test(cmd);
 }
 
 // Absolute path to the origin launcher, for embedding in native-shell hooks
@@ -1445,7 +1475,7 @@ function filterOriginHooks(entries: any[]): any[] {
   });
 }
 
-const AGENTS: Record<AgentType, AgentConfig> = {
+export const AGENTS: Record<AgentType, AgentConfig> = {
   'claude-code': {
     name: 'Claude Code',
     configDir: '.claude',
@@ -1537,9 +1567,9 @@ function isInNpxCache(name: string): boolean {
   return false;
 }
 
-// Officially supported agents for auto-detection. Antigravity is included so
-// `origin enable` picks it up as Gemini-CLI users migrate to it.
-const SUPPORTED_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex', 'antigravity', 'devin', 'copilot'];
+// Officially supported agents for auto-detection: the registry's `hooks:
+// 'global'` agents. Aider ('repo-only') is installed only when named.
+export const SUPPORTED_AGENTS = hookToolIds('global') as AgentType[];
 
 function detectAgents(gitRoot: string): AgentType[] {
   const detected: AgentType[] = [];
@@ -1564,9 +1594,9 @@ function detectAgents(gitRoot: string): AgentType[] {
 
 // ─── Main Command ──────────────────────────────────────────────────────────
 
-// Agents that support global (~/) hook installation
-// Windsurf/Aider coming soon
-const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex', 'antigravity', 'devin', 'copilot'];
+// Agents that support global (~/) hook installation — the same registry set.
+// Aider's config is per-project, so it is excluded.
+export const GLOBAL_CAPABLE_AGENTS = hookToolIds('global') as AgentType[];
 
 export async function enableCommand(opts: { agent?: string; global?: boolean; local?: boolean; link?: string; agentSlug?: string; standalone?: boolean; mcp?: boolean }): Promise<void> {
   // Standalone mode doesn't require login
@@ -1753,6 +1783,7 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
     installGlobalGitHooks();
   } else {
     installGitPreCommitHook(basePath);
+    installGitCommitMsgHook(basePath);
     installGitPrepareCommitMsgHook(basePath);
     installGitPostCommitHook(basePath);
     installGitPrePushHook(basePath);
@@ -1982,7 +2013,7 @@ export function originBinCandidates(bin: string = resolveOriginBin()): string[] 
 function hookShimPreamble(): string {
   const candidates = originBinCandidates();
   const embedded = candidates.length
-    ? candidates.map((c) => `  "${c}" \\\n`).join('').replace(/ \\\n$/, '')
+    ? candidates.map((c) => `  "${shDoubleQuoteEscape(c)}" \\\n`).join('').replace(/ \\\n$/, '')
     : '  ""';
   return `# Ensure PATH includes common npm/node locations. The AppData entries are
 # spelled via $HOME (which Git Bash sets to /c/Users/<user>) rather than
@@ -2006,6 +2037,46 @@ if [ -z "$ORIGIN_BIN" ]; then
   done
 fi`;
 }
+
+/**
+ * The tail every global git hook shares: run the user's own hooks after
+ * Origin's. Two dirs, in order:
+ *   - the global hooks dir `core.hooksPath` named before `origin enable
+ *     --global` took it over, saved beside these hooks (global-hooks-path.ts).
+ *     Without it a user's `~/.githooks` silently stopped running.
+ *   - the repo's own `$(git-dir)/hooks`.
+ * When both are the same dir the hook runs once.
+ *
+ * `gate`: the hook can block the git command (pre-commit, commit-msg, pre-push,
+ * prepare-commit-msg), so a failing previous hook exits with its code.
+ * `feed` wraps an invocation that needs the hook's stdin re-supplied.
+ */
+function chainUserHooks(hook: string, opts: { gate?: boolean; feed?: (cmd: string) => string } = {}): string {
+  const feed = opts.feed ?? ((cmd: string) => cmd);
+  return `# Chain to the user's previous global hooks dir and the repo's own hooks
+PREV_HOOK=""
+PREV_HOOKS_DIR="\$(cat "\$(dirname "\$0")/${PREVIOUS_HOOKS_PATH_FILE}" 2>/dev/null)"
+case "$PREV_HOOKS_DIR" in "~"|"~/"*) PREV_HOOKS_DIR="$HOME\$(printf '%s' "$PREV_HOOKS_DIR" | cut -c2-)" ;; esac
+LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/${hook}"
+if [ -n "$PREV_HOOKS_DIR" ] && [ -f "$PREV_HOOKS_DIR/${hook}" ] && [ -x "$PREV_HOOKS_DIR/${hook}" ]; then
+  _origin_prev_real="\$(cd "$PREV_HOOKS_DIR" 2>/dev/null && pwd -P)"
+  if [ "$_origin_prev_real" != "\$(cd "\$(dirname "\$0")" 2>/dev/null && pwd -P)" ]; then
+    PREV_HOOK="$PREV_HOOKS_DIR/${hook}"
+    if [ "$_origin_prev_real" = "\$(cd "\$(dirname "$LOCAL_HOOK")" 2>/dev/null && pwd -P)" ]; then LOCAL_HOOK=""; fi
+  fi
+fi
+if [ -n "$PREV_HOOK" ]; then
+  ${feed('"$PREV_HOOK" "$@"')}${opts.gate ? ' || exit $?' : ''}
+fi
+if [ -n "$LOCAL_HOOK" ] && [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
+  ${feed('"$LOCAL_HOOK" "$@"')}
+fi`;
+}
+
+/** pre-push gets the refs on stdin; with two hooks chained both need them. */
+const CAPTURE_PRE_PUSH_STDIN = 'if [ -t 0 ]; then ORIGIN_HOOK_STDIN=""; else ORIGIN_HOOK_STDIN="$(cat)"; fi';
+const withPrePushStdin = (cmd: string) =>
+  `{ if [ -n "$ORIGIN_HOOK_STDIN" ]; then printf '%s\\n' "$ORIGIN_HOOK_STDIN"; fi; } | ${cmd}`;
 
 // Write the global pre-commit hook into an Origin-managed hooks dir.
 // Shared by installGlobalGitHooks (origin enable) and the lazy heal in
@@ -2040,11 +2111,8 @@ if [ -n "$ORIGIN_BIN" ]; then
   fi
 fi
 
-# Chain to local repo hooks if they exist
-LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/pre-push"
-if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
-  "$LOCAL_HOOK" "$@"
-fi
+${CAPTURE_PRE_PUSH_STDIN}
+${chainUserHooks('pre-push', { gate: true, feed: withPrePushStdin })}
 `;
   fs.writeFileSync(prePushPath, prePushContent);
   fs.chmodSync(prePushPath, '755');
@@ -2067,14 +2135,39 @@ if [ -n "$ORIGIN_BIN" ]; then
   fi
 fi
 
-# Chain to local repo hooks if they exist
-LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/pre-commit"
-if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
-  "$LOCAL_HOOK" "$@"
-fi
+${chainUserHooks('pre-commit', { gate: true })}
 `;
   fs.writeFileSync(preCommitPath, preCommitContent);
   fs.chmodSync(preCommitPath, '755');
+}
+
+// Write the global commit-msg hook — enforces COMMIT_MESSAGE policies. It has
+// to be commit-msg: git runs pre-commit before it writes the new message, so
+// COMMIT_EDITMSG there still holds the PREVIOUS commit's. Same exit-code
+// propagation as pre-commit.
+export function writeGlobalCommitMsgHook(globalHooksDir: string): void {
+  const commitMsgPath = path.join(globalHooksDir, 'commit-msg');
+  const commitMsgContent = `#!/bin/sh
+# origin-global-commit-msg
+# Installed by: origin enable --global
+# Checks the commit message against COMMIT_MESSAGE policies — blocks commit on a violation
+#
+# git passes: $1 = path to the message file
+
+${hookShimPreamble()}
+
+if [ -n "$ORIGIN_BIN" ]; then
+  "$ORIGIN_BIN" hooks git-commit-msg "$1"
+  RESULT=$?
+  if [ $RESULT -ne 0 ]; then
+    exit $RESULT
+  fi
+fi
+
+${chainUserHooks('commit-msg', { gate: true })}
+`;
+  fs.writeFileSync(commitMsgPath, commitMsgContent);
+  fs.chmodSync(commitMsgPath, '755');
 }
 
 // Write the global post-checkout hook. Git runs post-checkout after `git clone`,
@@ -2112,11 +2205,7 @@ if [ -n "$ORIGIN_BIN" ]; then
   "$ORIGIN_BIN" hooks git-post-checkout "$1" "$2" "$3" >/dev/null 2>&1 &
 fi
 
-# Chain to local repo hooks if they exist
-LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/post-checkout"
-if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
-  "$LOCAL_HOOK" "$@"
-fi
+${chainUserHooks('post-checkout')}
 
 exit 0
 `;
@@ -2144,11 +2233,7 @@ if [ -n "$ORIGIN_BIN" ]; then
   ORIGIN_COMMIT_SHA="$_origin_commit_sha" "$ORIGIN_BIN" hooks git-post-commit >/dev/null 2>&1 &
 fi
 
-# Chain to local repo hooks if they exist
-LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/post-commit"
-if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
-  "$LOCAL_HOOK" "$@"
-fi
+${chainUserHooks('post-commit')}
 `;
   fs.writeFileSync(postCommitPath, postCommitContent);
   fs.chmodSync(postCommitPath, '755');
@@ -2176,11 +2261,7 @@ if [ -n "$ORIGIN_BIN" ]; then
   ${backgroundedWithRewrites('"$ORIGIN_BIN" hooks git-post-rewrite "$@"')}
 fi
 
-# Chain to local repo hooks if they exist
-LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/post-rewrite"
-if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
-  ${withRewritesOnStdin('"$LOCAL_HOOK" "$@"')}
-fi
+${chainUserHooks('post-rewrite', { feed: withRewritesOnStdin })}
 `;
   fs.writeFileSync(postRewritePath, postRewriteContent);
   fs.chmodSync(postRewritePath, '755');
@@ -2217,11 +2298,7 @@ if [ -n "$ORIGIN_BIN" ]; then
   "$ORIGIN_BIN" hooks git-post-merge >/dev/null 2>&1 &
 fi
 
-# Chain to local repo hooks if they exist
-LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/post-merge"
-if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
-  "$LOCAL_HOOK" "$@"
-fi
+${chainUserHooks('post-merge')}
 
 exit 0
 `;
@@ -2248,11 +2325,7 @@ if [ -n "$ORIGIN_BIN" ]; then
   "$ORIGIN_BIN" hooks git-prepare-commit-msg "$1" "$2" "$3" || true
 fi
 
-# Chain to local repo hook if present.
-LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/prepare-commit-msg"
-if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
-  "$LOCAL_HOOK" "$@"
-fi
+${chainUserHooks('prepare-commit-msg', { gate: true })}
 `;
   fs.writeFileSync(prepareCommitMsgPath, prepareCommitMsgContent);
   fs.chmodSync(prepareCommitMsgPath, '755');
@@ -2270,6 +2343,9 @@ function installGlobalGitHooks(): void {
 
   // Pre-commit hook — secret scanning + policy enforcement (blocks commits)
   writeGlobalPreCommitHook(globalHooksDir);
+
+  // Commit-msg hook — COMMIT_MESSAGE policy enforcement (blocks commits)
+  writeGlobalCommitMsgHook(globalHooksDir);
 
   // Post-checkout hook — pulls attribution notes down after a fresh clone.
   writeGlobalPostCheckoutHook(globalHooksDir);
@@ -2291,12 +2367,16 @@ function installGlobalGitHooks(): void {
   // to finish before reading the message file.
   writeGlobalPrepareCommitMsgHook(globalHooksDir);
 
-  // Set git config to use our global hooks directory
+  // Set git config to use our global hooks directory — after saving a hooks
+  // dir the user already had there, which the hooks above chain to and
+  // `origin disable --global` puts back.
   try {
+    const previous = rememberPreviousHooksPath(globalHooksDir);
     run('git', ['config', '--global', 'core.hooksPath', globalHooksDir]);
     console.log(chalk.green('\n  ✓ Global git hooks installed'));
     console.log(chalk.gray(`    Hooks directory: ${globalHooksDir}`));
     console.log(chalk.gray('    Local repo hooks are chained automatically'));
+    if (previous) console.log(chalk.gray(`    Your previous hooks dir (${previous}) is chained too, and restored on disable`));
     console.log(chalk.gray('    Attribution preserved through rebase/amend/cherry-pick'));
   } catch (err: any) {
     console.log(chalk.yellow(`\n  ⚠ Could not set global git hooks: ${err.message}`));
@@ -2376,6 +2456,12 @@ export function ensurePolicyHookInstalled(gitRoot: string): { installed: boolean
         if (fs.existsSync(resolvedDir) && !fs.existsSync(globalPostMerge)) {
           writeGlobalPostMergeHook(resolvedDir);
         }
+        // And commit-msg: dirs from before it existed enforce no
+        // COMMIT_MESSAGE policy at all once pre-commit stopped checking.
+        const globalCommitMsg = path.join(resolvedDir, 'commit-msg');
+        if (fs.existsSync(resolvedDir) && !fs.existsSync(globalCommitMsg)) {
+          writeGlobalCommitMsgHook(resolvedDir);
+        }
         const globalPreCommit = path.join(resolvedDir, 'pre-commit');
         if (fs.existsSync(resolvedDir) && !fs.existsSync(globalPreCommit)) {
           writeGlobalPreCommitHook(resolvedDir);
@@ -2392,6 +2478,8 @@ export function ensurePolicyHookInstalled(gitRoot: string): { installed: boolean
     // 2. Repo-local check.
     const hooksDir = path.join(gitRoot, '.git', 'hooks');
     upgradePostCommitHookScript(path.join(hooksDir, 'post-commit'), 'local');
+    // COMMIT_MESSAGE policies live in commit-msg; quietly, whatever pre-commit's state.
+    try { ensureLocalCommitMsgHook(hooksDir); } catch { /* non-fatal */ }
     const hookPath = path.join(hooksDir, 'pre-commit');
     const ORIGIN_MARKER = '# origin-pre-commit';
 
@@ -2413,8 +2501,10 @@ export function ensurePolicyHookInstalled(gitRoot: string): { installed: boolean
     const hookScript = originCmd('origin hooks git-pre-commit');
     if (fs.existsSync(hookPath)) {
       backupExistingHooks(hookPath);
-      const append = `\n${ORIGIN_MARKER}\n${hookScript}\n`;
-      fs.appendFileSync(hookPath, append);
+      // After the shebang, not appended: a user hook ending in `exit 0` never
+      // reached an appended line. `|| exit $?` keeps a failed scan blocking.
+      const block = `${ORIGIN_MARKER}\n${hookScript} || exit $?\n`;
+      fs.writeFileSync(hookPath, insertHookBlockAfterShebang(fs.readFileSync(hookPath, 'utf-8'), block));
     } else {
       const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript}\n`;
       fs.writeFileSync(hookPath, content);
@@ -2449,9 +2539,11 @@ export function installGitPreCommitHook(gitRoot: string): void {
       return;
     }
     backupExistingHooks(hookPath);
-    // Pre-commit must run synchronously (not &) — exit code blocks commit
-    const append = `\n${ORIGIN_MARKER}\n${hookScript}\n`;
-    fs.appendFileSync(hookPath, append);
+    // Pre-commit must run synchronously (not &) — exit code blocks commit.
+    // Inserted after the shebang (a user hook ending in `exit 0` never reaches
+    // an appended line), so `|| exit $?` carries a failed scan out.
+    const block = `${ORIGIN_MARKER}\n${hookScript} || exit $?\n`;
+    fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing, block));
   } else {
     const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript}\n`;
     fs.writeFileSync(hookPath, content);
@@ -2459,6 +2551,42 @@ export function installGitPreCommitHook(gitRoot: string): void {
 
   fs.chmodSync(hookPath, '755');
   console.log(chalk.green('  ✓ Git pre-commit hook installed (secret scanning)'));
+}
+
+// ─── Git Commit-Msg Hook (COMMIT_MESSAGE policies) ────────────────────────
+//
+// git hands commit-msg the NEW message as $1 — pre-commit runs before it is
+// written. Synchronous: a non-zero exit blocks the commit.
+
+/** Install (or leave) Origin's lines in `<hooksDir>/commit-msg`. True when written. */
+function ensureLocalCommitMsgHook(hooksDir: string): boolean {
+  const hookPath = path.join(hooksDir, 'commit-msg');
+  const ORIGIN_MARKER = '# origin-commit-msg';
+  const hookScript = originCmd(`origin hooks git-commit-msg "$1"`);
+
+  if (!fs.existsSync(hooksDir)) {
+    fs.mkdirSync(hooksDir, { recursive: true });
+  }
+  if (fs.existsSync(hookPath)) {
+    const existing = fs.readFileSync(hookPath, 'utf-8');
+    if (existing.includes(ORIGIN_MARKER)) return false;
+    backupExistingHooks(hookPath);
+    // After the shebang (a user hook ending in `exit 0` never reaches an
+    // appended line); `|| exit $?` keeps a violation blocking.
+    fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing, `${ORIGIN_MARKER}\n${hookScript} || exit $?\n`));
+  } else {
+    fs.writeFileSync(hookPath, `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript}\n`);
+  }
+  fs.chmodSync(hookPath, '755');
+  return true;
+}
+
+export function installGitCommitMsgHook(gitRoot: string): void {
+  if (ensureLocalCommitMsgHook(path.join(gitRoot, '.git', 'hooks'))) {
+    console.log(chalk.green('  ✓ Git commit-msg hook installed (commit message policies)'));
+  } else {
+    console.log(chalk.gray('  ✓ Git commit-msg hook already installed'));
+  }
 }
 
 // ─── Git Post-Commit Hook ─────────────────────────────────────────────────
@@ -2487,8 +2615,8 @@ export function installGitPrepareCommitMsgHook(gitRoot: string): void {
       console.log(chalk.gray('  ✓ Git prepare-commit-msg hook already installed'));
       return;
     }
-    const append = `\n${ORIGIN_MARKER}\n${hookScript}\n`;
-    fs.appendFileSync(hookPath, append);
+    // After the shebang: a user hook ending in `exit 0` never reaches an appended line.
+    fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing, `${ORIGIN_MARKER}\n${hookScript}\n`));
   } else {
     const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript}\n`;
     fs.writeFileSync(hookPath, content);
@@ -2563,11 +2691,13 @@ export function installGitPostCommitHook(gitRoot: string): void {
       }
       return;
     }
-    // Append to existing hook. Redirect the backgrounded child so it doesn't
-    // inherit git's stdout fd and stall a `git commit | tee` pipe (same fix as
-    // the global post-commit hook).
-    const append = `\n${ORIGIN_MARKER}\n${localPostCommitLines(hookScript)}`;
-    fs.appendFileSync(hookPath, append);
+    // Insert after the shebang, not appended: a user hook ending in `exit 0`
+    // (or `exec …`) never reached an appended line, so its commits went
+    // uncaptured. Redirect the backgrounded child so it doesn't inherit git's
+    // stdout fd and stall a `git commit | tee` pipe (same fix as the global
+    // post-commit hook).
+    const block = `${ORIGIN_MARKER}\n${localPostCommitLines(hookScript)}`;
+    fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing, block));
   } else {
     // Create new hook file
     const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${localPostCommitLines(hookScript)}`;
@@ -2600,10 +2730,11 @@ export function installGitPrePushHook(gitRoot: string): void {
       console.log(chalk.gray('  ✓ Git pre-push hook already installed'));
       return;
     }
-    // Backup and append to existing hook
+    // Backup, then insert after the shebang: a user hook ending in `exit 0`
+    // never reaches an appended line. `|| exit $?` keeps a push block blocking.
     backupExistingHooks(hookPath);
-    const append = `\n${ORIGIN_MARKER}\n${hookScript}\n`;
-    fs.appendFileSync(hookPath, append);
+    const block = `${ORIGIN_MARKER}\n${hookScript} || exit $?\n`;
+    fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing, block));
   } else {
     // Create new hook file
     const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript}\n`;

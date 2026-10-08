@@ -5,6 +5,7 @@ import { newCaptureStamp } from '../capture-stamp.js';
 import { turnIsClosed } from '../turn-commit-scope.js';
 import { openTurnNarrowingBase, scopeUncommittedToOpenTurn } from '../open-turn-uncommitted-scope.js';
 import { compareResolverWithPasses, createTurnObserver, observeReconstruction, onlyDifferences } from '../resolve-turn.js';
+import { redactSessionPayloadContent } from '../captured-diff-redaction.js';
 
 // Exercise the actual daemon function without starting its timers or exiting
 // this test process. External I/O is controlled so Stop can finish inside Git.
@@ -42,6 +43,7 @@ function harness(duringGit: (state: any) => void = () => {}, owns: () => boolean
     scopeUncommittedToOpenTurn, openTurnNarrowingBase, filesChangedSinceShadowOrNull: () => null, filesClaimedByOtherLiveSessions: () => [],
     // The resolver's side-by-side run is pure; the real functions, like the stamp.
     createTurnObserver, observeReconstruction, compareResolverWithPasses, onlyDifferences, debugLog: noop,
+    redactSessionPayloadContent,
     fetchWithTimeout: send, apiUrl: 'https://example.test', sessionId: 'session', apiKey: 'test',
     stillOwnsSession: owns,
     replayInProgress: replaying,

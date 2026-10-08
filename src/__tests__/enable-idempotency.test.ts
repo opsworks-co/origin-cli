@@ -33,6 +33,7 @@ import os from 'os';
 import path from 'path';
 import {
   installGitPreCommitHook,
+  installGitCommitMsgHook,
   installGitPrepareCommitMsgHook,
   installGitPostCommitHook,
   installGitPrePushHook,
@@ -62,6 +63,7 @@ interface HookUnderTest {
 
 const HOOKS: HookUnderTest[] = [
   { name: 'pre-commit',         install: installGitPreCommitHook,         hookFile: 'pre-commit',         marker: '# origin-pre-commit' },
+  { name: 'commit-msg',         install: installGitCommitMsgHook,         hookFile: 'commit-msg',         marker: '# origin-commit-msg' },
   { name: 'prepare-commit-msg', install: installGitPrepareCommitMsgHook,  hookFile: 'prepare-commit-msg', marker: '# origin-prepare-commit-msg' },
   { name: 'post-commit',        install: installGitPostCommitHook,        hookFile: 'post-commit',        marker: '# origin-post-commit' },
   { name: 'pre-push',           install: installGitPrePushHook,           hookFile: 'pre-push',           marker: '# origin-pre-push' },

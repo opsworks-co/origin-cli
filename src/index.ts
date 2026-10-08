@@ -1,96 +1,166 @@
 #!/usr/bin/env node
-import { Command, Option } from 'commander';
-import { loginCommand } from './commands/login.js';
-import { statusCommand } from './commands/status.js';
-import { policiesCommand } from './commands/policies.js';
-import { syncCommand } from './commands/sync.js';
-import { codexWatchCommand, ensureCodexWatchRunning } from './codex-watch.js';
-import { transcriptWatchCommand, ensureTranscriptWatchRunning } from './transcript-watch.js';
-import { whoamiCommand } from './commands/whoami.js';
-import { sessionsCommand, sessionDetailCommand, sessionEndCommand, sessionCleanCommand, sessionsSyncCommand, sessionsImportCommand, sessionsForgetCommand } from './commands/sessions.js';
-import { reviewCommand } from './commands/review.js';
-import { reviewPRCommand } from './commands/review-pr.js';
-import { intentReviewCommand } from './commands/intent-review.js';
-import { preReviewCommand } from './commands/pre-review.js';
-import { agentsCommand, agentCreateCommand } from './commands/agents.js';
-import { reposCommand, repoAddCommand } from './commands/repos.js';
-import { auditCommand } from './commands/audit.js';
-import { statsCommand } from './commands/stats.js';
-import { recapCommand } from './commands/recap.js';
-import { xrayCommand } from './commands/xray.js';
-import { enableCommand } from './commands/enable.js';
-import { disableCommand } from './commands/disable.js';
-import { benchmarkBakeoffCreateCommand } from './commands/benchmark-bakeoff.js';
-import { benchmarkRunnerCommand, benchmarkKeyCommand } from './commands/benchmark-runner.js';
-import { benchmarkSyncCommand } from './commands/benchmark.js';
-import { benchmarkReplayCommand, benchmarkReplaySyncCommand } from './commands/benchmark-replay.js';
-import { mcpServeCommand } from './commands/mcp.js';
-import { mcpInstallCommand, mcpStatusCommand } from './commands/mcp-install.js';
-import { linkCommand } from './commands/link.js';
-import { hooksCommand, handlePostCommit,
-  handleGitPostCheckout, handleGitPostMerge, handlePrePush, handlePreCommit, handlePrepareCommitMsg, handleHistorySync, handleMemoryBriefBackfill } from './commands/hooks.js';
-import { explainCommand } from './commands/explain.js';
-import { askCommand } from './commands/ask.js';
-import { promptsCommand } from './commands/prompts.js';
-import { whyCommand } from './commands/why.js';
-import { devinSessionsCommand, devinSyncCommand } from './commands/devin.js';
-import { chatCommand } from './commands/chat.js';
-import { webCommand } from './commands/web.js';
-import { doctorCommand } from './commands/doctor.js';
-import { verifyCaptureCommand } from './commands/verify-capture.js';
-import { resetCommand } from './commands/reset.js';
-import { cleanCommand } from './commands/clean.js';
-import { configGetCommand, configSetCommand, configListCommand } from './commands/config-cmd.js';
-import { resumeCommand } from './commands/resume.js';
-import { shareCommand } from './commands/share.js';
-import { blameCommand } from './commands/blame.js';
-import { scrubNotesCommand } from './commands/scrub-notes.js';
-import { pushMetadataCommand } from './commands/push-metadata.js';
-import { notesRepairCommand } from './commands/notes-repair.js';
-import { commitCommand } from './commands/commit.js';
-import { diffCommand } from './commands/diff.js';
-import { searchCommand } from './commands/search.js';
-import { searchHistoryCommand } from './commands/search-history.js';
-import { rewindCommand } from './commands/rewind.js';
-import { trailCommand, trailListCommand, trailCreateCommand, trailUpdateCommand, trailAssignCommand, trailLabelCommand } from './commands/trail.js';
-import { ciCheckCommand, ciSquashMergeCommand, ciGenerateWorkflowCommand, ciSessionCheckCommand } from './commands/ci.js';
-import { pluginListCommand, pluginInstallCommand, pluginRemoveCommand } from './commands/plugin.js';
-import { upgradeCommand } from './commands/upgrade.js';
-import { analyzeCommand } from './commands/analyze.js';
-import { handoffShowCommand, handoffClearCommand } from './commands/handoff.js';
-import { memoryShowCommand, memoryClearCommand } from './commands/memory.js';
-import { briefCommand } from './commands/repo-brief.js';
-import { todoListCommand, todoDoneCommand, todoShowCommand, todoAddCommand, todoRemoveCommand } from './commands/todo.js';
-import { explainCompareCommand } from './commands/explain.js';
-import { dbImportCommand, dbStatsCommand } from './commands/db.js';
-import { proxyInstallCommand, proxyUninstallCommand, proxyStatusCommand } from './commands/proxy.js';
-import { verifyCommand } from './commands/verify.js';
-import { verifyInstallCommand } from './commands/verify-install.js';
-import { repairHooksCommand } from './commands/repair-hooks.js';
-import { ignoreListCommand, ignoreAddCommand, ignoreRemoveCommand, ignoreTestCommand, ignoreRepoListCommand, ignoreRepoAddCommand, ignoreRepoRemoveCommand } from './commands/ignore.js';
-import { exportCommand } from './commands/export.js';
-import { compareCommand } from './commands/compare.js';
-import { reworkCommand } from './commands/rework.js';
-import { reportCommand } from './commands/report.js';
-import { logCommand } from './commands/log.js';
-import { showCommand } from './commands/show.js';
-import { attachCommand } from './commands/attach.js';
-import { recaptureCommand } from './commands/recapture.js';
-import { repairMergesCommand } from './commands/repair-merges.js';
-import { backfillCommand } from './commands/backfill.js';
-import { snapshotSaveCommand, snapshotListCommand, snapshotRestoreCommand, snapshotCleanCommand } from './commands/snapshot.js';
-import { promptStatusCommand } from './commands/prompt-status.js';
-import { shellPromptCommand } from './commands/shell-prompt.js';
-import {
-  issueCreateCommand, issueListCommand, issueShowCommand, issueUpdateCommand,
-  issueCloseCommand, issueReadyCommand, issueBlockedCommand,
-  issueDepAddCommand, issueDepRemoveCommand, issueDepTreeCommand, issueLinkCommand,
-} from './commands/issue.js';
-import { checkForUpdate } from './version-check.js';
+import { Command, Help, Option } from 'commander';
 import { BUILD_INFO } from './build-info.js';
 import { readFileSync, writeSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+
+// Every command module loads on first use, not at startup. Claude Code runs
+// `origin hooks …` twice per tool call (PreToolUse + PostToolUse), and statically
+// importing ~90 command modules to dispatch one of them was most of the cost of
+// each invocation. `lazy` keeps the call sites below unchanged: each name is a
+// stand-in that imports its module and forwards the call.
+type AnyFn = (...args: any[]) => any;
+function lazy<M, K extends keyof M>(load: () => Promise<M>, name: K) {
+  return async function (this: unknown, ...args: any[]): Promise<any> {
+    return ((await load())[name] as unknown as AnyFn).apply(this, args);
+  };
+}
+const loginCommand = lazy(() => import('./commands/login.js'), 'loginCommand');
+const statusCommand = lazy(() => import('./commands/status.js'), 'statusCommand');
+const policiesCommand = lazy(() => import('./commands/policies.js'), 'policiesCommand');
+const syncCommand = lazy(() => import('./commands/sync.js'), 'syncCommand');
+const codexWatchCommand = lazy(() => import('./codex-watch.js'), 'codexWatchCommand');
+const ensureCodexWatchRunning = lazy(() => import('./codex-watch.js'), 'ensureCodexWatchRunning');
+const transcriptWatchCommand = lazy(() => import('./transcript-watch.js'), 'transcriptWatchCommand');
+const ensureTranscriptWatchRunning = lazy(() => import('./transcript-watch.js'), 'ensureTranscriptWatchRunning');
+const whoamiCommand = lazy(() => import('./commands/whoami.js'), 'whoamiCommand');
+const sessionsCommand = lazy(() => import('./commands/sessions.js'), 'sessionsCommand');
+const sessionDetailCommand = lazy(() => import('./commands/sessions.js'), 'sessionDetailCommand');
+const sessionEndCommand = lazy(() => import('./commands/sessions.js'), 'sessionEndCommand');
+const sessionCleanCommand = lazy(() => import('./commands/sessions.js'), 'sessionCleanCommand');
+const sessionsSyncCommand = lazy(() => import('./commands/sessions.js'), 'sessionsSyncCommand');
+const sessionsImportCommand = lazy(() => import('./commands/sessions.js'), 'sessionsImportCommand');
+const sessionsForgetCommand = lazy(() => import('./commands/sessions.js'), 'sessionsForgetCommand');
+const reviewCommand = lazy(() => import('./commands/review.js'), 'reviewCommand');
+const reviewPRCommand = lazy(() => import('./commands/review-pr.js'), 'reviewPRCommand');
+const intentReviewCommand = lazy(() => import('./commands/intent-review.js'), 'intentReviewCommand');
+const preReviewCommand = lazy(() => import('./commands/pre-review.js'), 'preReviewCommand');
+const agentsCommand = lazy(() => import('./commands/agents.js'), 'agentsCommand');
+const agentCreateCommand = lazy(() => import('./commands/agents.js'), 'agentCreateCommand');
+const reposCommand = lazy(() => import('./commands/repos.js'), 'reposCommand');
+const repoAddCommand = lazy(() => import('./commands/repos.js'), 'repoAddCommand');
+const auditCommand = lazy(() => import('./commands/audit.js'), 'auditCommand');
+const statsCommand = lazy(() => import('./commands/stats.js'), 'statsCommand');
+const recapCommand = lazy(() => import('./commands/recap.js'), 'recapCommand');
+const xrayCommand = lazy(() => import('./commands/xray.js'), 'xrayCommand');
+const enableCommand = lazy(() => import('./commands/enable.js'), 'enableCommand');
+const disableCommand = lazy(() => import('./commands/disable.js'), 'disableCommand');
+const benchmarkBakeoffCreateCommand = lazy(() => import('./commands/benchmark-bakeoff.js'), 'benchmarkBakeoffCreateCommand');
+const benchmarkRunnerCommand = lazy(() => import('./commands/benchmark-runner.js'), 'benchmarkRunnerCommand');
+const benchmarkKeyCommand = lazy(() => import('./commands/benchmark-runner.js'), 'benchmarkKeyCommand');
+const benchmarkSyncCommand = lazy(() => import('./commands/benchmark.js'), 'benchmarkSyncCommand');
+const benchmarkReplayCommand = lazy(() => import('./commands/benchmark-replay.js'), 'benchmarkReplayCommand');
+const benchmarkReplaySyncCommand = lazy(() => import('./commands/benchmark-replay.js'), 'benchmarkReplaySyncCommand');
+const mcpServeCommand = lazy(() => import('./commands/mcp.js'), 'mcpServeCommand');
+const mcpInstallCommand = lazy(() => import('./commands/mcp-install.js'), 'mcpInstallCommand');
+const mcpStatusCommand = lazy(() => import('./commands/mcp-install.js'), 'mcpStatusCommand');
+const linkCommand = lazy(() => import('./commands/link.js'), 'linkCommand');
+const hooksCommand = lazy(() => import('./commands/hooks.js'), 'hooksCommand');
+const handlePostCommit = lazy(() => import('./commands/hooks.js'), 'handlePostCommit');
+const handleGitPostCheckout = lazy(() => import('./commands/hooks.js'), 'handleGitPostCheckout');
+const handleGitPostMerge = lazy(() => import('./commands/hooks.js'), 'handleGitPostMerge');
+const handlePrePush = lazy(() => import('./commands/hooks.js'), 'handlePrePush');
+const handlePreCommit = lazy(() => import('./commands/hooks.js'), 'handlePreCommit');
+const handleCommitMsg = lazy(() => import('./commands/hooks.js'), 'handleCommitMsg');
+const handlePrepareCommitMsg = lazy(() => import('./commands/hooks.js'), 'handlePrepareCommitMsg');
+const handleHistorySync = lazy(() => import('./commands/hooks.js'), 'handleHistorySync');
+const handleMemoryBriefBackfill = lazy(() => import('./commands/hooks.js'), 'handleMemoryBriefBackfill');
+const explainCommand = lazy(() => import('./commands/explain.js'), 'explainCommand');
+const askCommand = lazy(() => import('./commands/ask.js'), 'askCommand');
+const promptsCommand = lazy(() => import('./commands/prompts.js'), 'promptsCommand');
+const whyCommand = lazy(() => import('./commands/why.js'), 'whyCommand');
+const devinSessionsCommand = lazy(() => import('./commands/devin.js'), 'devinSessionsCommand');
+const devinSyncCommand = lazy(() => import('./commands/devin.js'), 'devinSyncCommand');
+const chatCommand = lazy(() => import('./commands/chat.js'), 'chatCommand');
+const webCommand = lazy(() => import('./commands/web.js'), 'webCommand');
+const doctorCommand = lazy(() => import('./commands/doctor.js'), 'doctorCommand');
+const verifyCaptureCommand = lazy(() => import('./commands/verify-capture.js'), 'verifyCaptureCommand');
+const resetCommand = lazy(() => import('./commands/reset.js'), 'resetCommand');
+const cleanCommand = lazy(() => import('./commands/clean.js'), 'cleanCommand');
+const configGetCommand = lazy(() => import('./commands/config-cmd.js'), 'configGetCommand');
+const configSetCommand = lazy(() => import('./commands/config-cmd.js'), 'configSetCommand');
+const configListCommand = lazy(() => import('./commands/config-cmd.js'), 'configListCommand');
+const resumeCommand = lazy(() => import('./commands/resume.js'), 'resumeCommand');
+const shareCommand = lazy(() => import('./commands/share.js'), 'shareCommand');
+const blameCommand = lazy(() => import('./commands/blame.js'), 'blameCommand');
+const scrubNotesCommand = lazy(() => import('./commands/scrub-notes.js'), 'scrubNotesCommand');
+const pushMetadataCommand = lazy(() => import('./commands/push-metadata.js'), 'pushMetadataCommand');
+const notesRepairCommand = lazy(() => import('./commands/notes-repair.js'), 'notesRepairCommand');
+const commitCommand = lazy(() => import('./commands/commit.js'), 'commitCommand');
+const diffCommand = lazy(() => import('./commands/diff.js'), 'diffCommand');
+const searchCommand = lazy(() => import('./commands/search.js'), 'searchCommand');
+const searchHistoryCommand = lazy(() => import('./commands/search-history.js'), 'searchHistoryCommand');
+const rewindCommand = lazy(() => import('./commands/rewind.js'), 'rewindCommand');
+const trailCommand = lazy(() => import('./commands/trail.js'), 'trailCommand');
+const trailListCommand = lazy(() => import('./commands/trail.js'), 'trailListCommand');
+const trailCreateCommand = lazy(() => import('./commands/trail.js'), 'trailCreateCommand');
+const trailUpdateCommand = lazy(() => import('./commands/trail.js'), 'trailUpdateCommand');
+const trailAssignCommand = lazy(() => import('./commands/trail.js'), 'trailAssignCommand');
+const trailLabelCommand = lazy(() => import('./commands/trail.js'), 'trailLabelCommand');
+const ciCheckCommand = lazy(() => import('./commands/ci.js'), 'ciCheckCommand');
+const ciSquashMergeCommand = lazy(() => import('./commands/ci.js'), 'ciSquashMergeCommand');
+const ciGenerateWorkflowCommand = lazy(() => import('./commands/ci.js'), 'ciGenerateWorkflowCommand');
+const ciSessionCheckCommand = lazy(() => import('./commands/ci.js'), 'ciSessionCheckCommand');
+const pluginListCommand = lazy(() => import('./commands/plugin.js'), 'pluginListCommand');
+const pluginInstallCommand = lazy(() => import('./commands/plugin.js'), 'pluginInstallCommand');
+const pluginRemoveCommand = lazy(() => import('./commands/plugin.js'), 'pluginRemoveCommand');
+const upgradeCommand = lazy(() => import('./commands/upgrade.js'), 'upgradeCommand');
+const analyzeCommand = lazy(() => import('./commands/analyze.js'), 'analyzeCommand');
+const handoffShowCommand = lazy(() => import('./commands/handoff.js'), 'handoffShowCommand');
+const handoffClearCommand = lazy(() => import('./commands/handoff.js'), 'handoffClearCommand');
+const memoryShowCommand = lazy(() => import('./commands/memory.js'), 'memoryShowCommand');
+const memoryClearCommand = lazy(() => import('./commands/memory.js'), 'memoryClearCommand');
+const briefCommand = lazy(() => import('./commands/repo-brief.js'), 'briefCommand');
+const todoListCommand = lazy(() => import('./commands/todo.js'), 'todoListCommand');
+const todoDoneCommand = lazy(() => import('./commands/todo.js'), 'todoDoneCommand');
+const todoShowCommand = lazy(() => import('./commands/todo.js'), 'todoShowCommand');
+const todoAddCommand = lazy(() => import('./commands/todo.js'), 'todoAddCommand');
+const todoRemoveCommand = lazy(() => import('./commands/todo.js'), 'todoRemoveCommand');
+const explainCompareCommand = lazy(() => import('./commands/explain.js'), 'explainCompareCommand');
+const dbImportCommand = lazy(() => import('./commands/db.js'), 'dbImportCommand');
+const dbStatsCommand = lazy(() => import('./commands/db.js'), 'dbStatsCommand');
+const proxyInstallCommand = lazy(() => import('./commands/proxy.js'), 'proxyInstallCommand');
+const proxyUninstallCommand = lazy(() => import('./commands/proxy.js'), 'proxyUninstallCommand');
+const proxyStatusCommand = lazy(() => import('./commands/proxy.js'), 'proxyStatusCommand');
+const verifyCommand = lazy(() => import('./commands/verify.js'), 'verifyCommand');
+const verifyInstallCommand = lazy(() => import('./commands/verify-install.js'), 'verifyInstallCommand');
+const repairHooksCommand = lazy(() => import('./commands/repair-hooks.js'), 'repairHooksCommand');
+const ignoreListCommand = lazy(() => import('./commands/ignore.js'), 'ignoreListCommand');
+const ignoreAddCommand = lazy(() => import('./commands/ignore.js'), 'ignoreAddCommand');
+const ignoreRemoveCommand = lazy(() => import('./commands/ignore.js'), 'ignoreRemoveCommand');
+const ignoreTestCommand = lazy(() => import('./commands/ignore.js'), 'ignoreTestCommand');
+const ignoreRepoListCommand = lazy(() => import('./commands/ignore.js'), 'ignoreRepoListCommand');
+const ignoreRepoAddCommand = lazy(() => import('./commands/ignore.js'), 'ignoreRepoAddCommand');
+const ignoreRepoRemoveCommand = lazy(() => import('./commands/ignore.js'), 'ignoreRepoRemoveCommand');
+const exportCommand = lazy(() => import('./commands/export.js'), 'exportCommand');
+const compareCommand = lazy(() => import('./commands/compare.js'), 'compareCommand');
+const reworkCommand = lazy(() => import('./commands/rework.js'), 'reworkCommand');
+const reportCommand = lazy(() => import('./commands/report.js'), 'reportCommand');
+const logCommand = lazy(() => import('./commands/log.js'), 'logCommand');
+const showCommand = lazy(() => import('./commands/show.js'), 'showCommand');
+const attachCommand = lazy(() => import('./commands/attach.js'), 'attachCommand');
+const recaptureCommand = lazy(() => import('./commands/recapture.js'), 'recaptureCommand');
+const repairMergesCommand = lazy(() => import('./commands/repair-merges.js'), 'repairMergesCommand');
+const backfillCommand = lazy(() => import('./commands/backfill.js'), 'backfillCommand');
+const snapshotSaveCommand = lazy(() => import('./commands/snapshot.js'), 'snapshotSaveCommand');
+const snapshotListCommand = lazy(() => import('./commands/snapshot.js'), 'snapshotListCommand');
+const snapshotRestoreCommand = lazy(() => import('./commands/snapshot.js'), 'snapshotRestoreCommand');
+const snapshotCleanCommand = lazy(() => import('./commands/snapshot.js'), 'snapshotCleanCommand');
+const promptStatusCommand = lazy(() => import('./commands/prompt-status.js'), 'promptStatusCommand');
+const shellPromptCommand = lazy(() => import('./commands/shell-prompt.js'), 'shellPromptCommand');
+const issueCreateCommand = lazy(() => import('./commands/issue.js'), 'issueCreateCommand');
+const issueListCommand = lazy(() => import('./commands/issue.js'), 'issueListCommand');
+const issueShowCommand = lazy(() => import('./commands/issue.js'), 'issueShowCommand');
+const issueUpdateCommand = lazy(() => import('./commands/issue.js'), 'issueUpdateCommand');
+const issueCloseCommand = lazy(() => import('./commands/issue.js'), 'issueCloseCommand');
+const issueReadyCommand = lazy(() => import('./commands/issue.js'), 'issueReadyCommand');
+const issueBlockedCommand = lazy(() => import('./commands/issue.js'), 'issueBlockedCommand');
+const issueDepAddCommand = lazy(() => import('./commands/issue.js'), 'issueDepAddCommand');
+const issueDepRemoveCommand = lazy(() => import('./commands/issue.js'), 'issueDepRemoveCommand');
+const issueDepTreeCommand = lazy(() => import('./commands/issue.js'), 'issueDepTreeCommand');
+const issueLinkCommand = lazy(() => import('./commands/issue.js'), 'issueLinkCommand');
+const checkForUpdate = lazy(() => import('./version-check.js'), 'checkForUpdate');
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -196,8 +266,8 @@ benchmark.command('sync')
   .action(benchmarkSyncCommand);
 
 program.command('disable')
-  .description('Remove Origin hooks')
-  .option('-g, --global', 'Remove global hooks from ~/  ')
+  .description('Stop tracking: remove Origin\'s agent hooks and MCP server from this repo (or machine-wide with --global)')
+  .option('-g, --global', 'Remove the machine-wide agent hooks in your home directory (~/.claude, ~/.cursor, ~/.gemini, ~/.codex, …) instead of this repo\'s')
   .action(disableCommand);
 program.command('link [slug]')
   .description('Link this repo to an Origin agent (set .origin.json)')
@@ -776,6 +846,7 @@ hooks.command('copilot <event>').description('Handle GitHub Copilot hook event')
 hooks.command('aider <event>').description('Handle Aider hook event').action((event) => hooksCommand(event, 'aider'));
 hooks.command('antigravity <event>').description('Handle Antigravity hook event').action((event) => hooksCommand(event, 'antigravity'));
 hooks.command('git-pre-commit').description('Handle git pre-commit hook (secret scan)').action(() => handlePreCommit());
+hooks.command('git-commit-msg <msgFile>').description('Handle git commit-msg hook (commit message policies)').action((msgFile: string) => handleCommitMsg(msgFile));
 hooks.command('git-prepare-commit-msg <msgFile> [source] [sha]')
   .description('Handle git prepare-commit-msg hook (writes Origin-Session trailer)')
   .action(async (msgFile: string, source?: string) => {
@@ -964,9 +1035,9 @@ program.command('codex-watch')
   .option('--once', 'Run a single poll cycle and exit (testing / cron)')
   .option('--quiet', 'Suppress status output')
   .option('--ensure', 'Spawn a detached watcher if none is running, then exit (logon auto-start)')
-  .action((opts: WatchOpts) => {
+  .action(async (opts: WatchOpts) => {
     if (!opts.ensure) return codexWatchCommand(opts);
-    const res = ensureCodexWatchRunning();
+    const res = await ensureCodexWatchRunning();
     if (!opts.quiet) console.log(res.started ? 'codex-watch: spawned' : `codex-watch: ${res.reason}`);
   });
 
@@ -975,9 +1046,9 @@ program.command('transcript-watch')
   .option('--once', 'Run a single poll cycle and exit (testing / cron)')
   .option('--quiet', 'Suppress status output')
   .option('--ensure', 'Spawn a detached watcher if none is running, then exit (logon auto-start)')
-  .action((opts: WatchOpts) => {
+  .action(async (opts: WatchOpts) => {
     if (!opts.ensure) return transcriptWatchCommand(opts);
-    const res = ensureTranscriptWatchRunning();
+    const res = await ensureTranscriptWatchRunning();
     if (!opts.quiet) console.log(res.started ? 'transcript-watch: spawned' : `transcript-watch: ${res.reason}`);
   });
 
@@ -1180,38 +1251,41 @@ context.command('clear')
   });
 
 // ─── Help categorization ────────────────────────────────────────────────
-// Every command does unique work and stays top-level. The long flat list in
-// `--help` is overwhelming, so we group commands by purpose in a custom help
-// section appended below the default command list. Commander still enumerates
-// every command above; this is purely extra guidance.
+// `origin --help` used to print commander's flat list of ~85 commands AND
+// this grouped list below it — every command twice, with internal watchers
+// and repair tools mixed in with `login`. The root help now prints ONLY the
+// grouped list (commander's flat list is suppressed in formatHelp below),
+// everyday commands first.
 //
 // Rule for picking groups: which primary job does a user have when they reach
-// for this command? A command appears in exactly one group.
+// for this command? A command appears in exactly one group. Every user-facing
+// command stays listed — hiding them as "aliases" was tried and reverted
+// (75fed45b): they each do distinct work.
 const COMMAND_GROUPS: Array<{ label: string; commands: string[] }> = [
   {
     label: 'SETUP',
-    commands: ['login', 'enable', 'disable', 'link', 'attach', 'whoami', 'status'],
+    commands: ['login', 'enable', 'status', 'whoami', 'link', 'attach', 'disable'],
   },
   {
     label: 'ATTRIBUTION',
-    commands: ['blame', 'diff', 'stats', 'compare', 'ask', 'why', 'prompts', 'search'],
+    commands: ['blame', 'why', 'ask', 'prompts', 'diff', 'stats', 'search', 'search-history', 'commit', 'xray', 'compare'],
   },
   {
     label: 'SESSIONS',
-    commands: ['sessions', 'session', 'session-compare', 'log', 'show', 'explain', 'share', 'resume'],
+    commands: ['sessions', 'session', 'explain', 'log', 'show', 'resume', 'share', 'session-compare', 'isolate'],
   },
   {
     label: 'REVIEW',
-    commands: ['review', 'review-pr', 'intent-review'],
+    commands: ['review', 'review-pr', 'intent-review', 'pre-review'],
   },
   {
     label: 'TRACKING',
     // `handoff`/`memory` are deprecated aliases folded under `context` — omitted.
-    commands: ['issue', 'todo', 'trail', 'context'],
+    commands: ['context', 'issue', 'todo', 'trail'],
   },
   {
     label: 'ANALYTICS',
-    commands: ['recap', 'report', 'analyze', 'rework'],
+    commands: ['recap', 'report', 'analyze', 'rework', 'benchmark'],
   },
   {
     label: 'TIME TRAVEL',
@@ -1219,19 +1293,22 @@ const COMMAND_GROUPS: Array<{ label: string; commands: string[] }> = [
   },
   {
     label: 'CHAT / AI',
-    commands: ['chat'],
+    commands: ['chat', 'mcp'],
   },
   {
     label: 'DATA',
-    commands: ['export', 'backfill', 'db'],
+    commands: ['export', 'backfill', 'push-metadata', 'scrub-notes', 'db'],
   },
   {
     label: 'GOVERNANCE',
-    commands: ['policies', 'audit', 'ignore'],
+    commands: ['policies', 'policy:versions', 'audit', 'ignore'],
   },
   {
     label: 'INTEGRATIONS',
-    commands: ['repos', 'agents', 'sync', 'config', 'proxy', 'ci', 'plugin', 'web'],
+    commands: [
+      'repos', 'repo:add', 'agents', 'agent:create', 'agent:versions', 'team', 'user', 'notifications',
+      'sync', 'config', 'proxy', 'ci', 'plugin', 'web', 'devin',
+    ],
   },
   {
     label: 'HEALTH',
@@ -1247,13 +1324,41 @@ const COMMAND_GROUPS: Array<{ label: string; commands: string[] }> = [
   },
 ];
 
+// Internal, repair and debug commands: still registered and fully working
+// (Origin spawns the watchers by name; support steps name the repair tools),
+// just not listed in `origin --help`. Deliberately NOT `{ hidden: true }` —
+// that would also drop them from the generated docs reference
+// (scripts/cli-docs-extract.mjs), which is meant to cover every command.
+const HELP_OMITTED_COMMANDS = new Set([
+  'codex-watch', 'transcript-watch', // background watchers Origin spawns itself
+  'verify-capture', 'recapture', 'repair-merges', 'notes', // capture/notes repair + debugging
+  'help', // commander's implicit `help [command]` — named in the footer instead
+]);
+
+program.configureHelp({
+  formatHelp(cmd, helper) {
+    // Root only: drop commander's flat "Commands:" list; the grouped list
+    // (addHelpText below) replaces it. Overriding visibleCommands itself
+    // would also empty commander's "Did you mean …?" suggestions.
+    if (cmd !== program) return Help.prototype.formatHelp.call(helper, cmd, helper);
+    const noCommands = Object.create(helper, { visibleCommands: { value: () => [] } }) as Help;
+    return Help.prototype.formatHelp.call(noCommands, cmd, noCommands);
+  },
+});
+
 program.addHelpText('after', () => {
   const allRegistered = new Map<string, Command>();
   for (const cmd of program.commands) {
+    if ((cmd as unknown as { _hidden?: boolean })._hidden) continue;
     allRegistered.set(cmd.name(), cmd);
   }
-  const lines: string[] = ['', 'Commands by purpose:'];
-  for (const group of COMMAND_GROUPS) {
+  // A new command nobody assigned to a group still shows up, under OTHER,
+  // rather than silently vanishing from help.
+  const grouped = new Set(COMMAND_GROUPS.flatMap((g) => g.commands));
+  const ungrouped = [...allRegistered.keys()].filter((n) => !grouped.has(n) && !HELP_OMITTED_COMMANDS.has(n));
+  const groups = ungrouped.length > 0 ? [...COMMAND_GROUPS, { label: 'OTHER', commands: ungrouped }] : COMMAND_GROUPS;
+  const lines: string[] = ['', 'Commands:'];
+  for (const group of groups) {
     const entries = group.commands
       .map((name) => allRegistered.get(name))
       .filter((cmd): cmd is Command => !!cmd)
@@ -1275,13 +1380,15 @@ program.addHelpText('after', () => {
           .map((sc: Command) => sc.name());
         if (subs.length === 0) return [row];
         const shown = subs.slice(0, 8).join(', ') + (subs.length > 8 ? ', …' : '');
-        return [row, `    ${' '.repeat(18)} \u2514 ${shown}`];
+        return [row, `    ${' '.repeat(18)} └ ${shown}`];
       });
     if (entries.length === 0) continue;
     lines.push('');
     lines.push(`  ${group.label}`);
     lines.push(...entries);
   }
+  lines.push('');
+  lines.push('Run `origin <command> --help` (or `origin help <command>`) for a command\'s options.');
   return lines.join('\n');
 });
 

@@ -3,6 +3,8 @@ import { git, gitDetailed, gitOrNull } from './utils/exec.js';
 import { loadConfig } from './config.js';
 import { sessionBranchPushTarget, type SessionBranchPushTarget } from './prompt-privacy.js';
 import { commitTreeMaybeSigned } from './signing.js';
+import type { PrePushRef } from './git-notes.js';
+import { redactPromptChangeContent, secretRedactionEnabled } from './captured-diff-redaction.js';
 import {
   getSessionBackend,
   readSessionFile,
@@ -338,7 +340,10 @@ function buildChangesJson(data: SessionWriteData): string {
   // `undefined` (not "" or null) so JSON.stringify omits them entirely —
   // keeps the payload compact AND keeps v1 importers from tripping on
   // unexpected empties.
-  const capped: PromptChange[] = data.changes.map((c) => {
+  // Secrets are redacted here too: this file is pushed to the repo's remote.
+  const redact = secretRedactionEnabled();
+  const capped: PromptChange[] = data.changes.map((raw) => {
+    const c = redact ? redactPromptChangeContent(raw) : raw;
     const out: PromptChange = {
       promptIndex: c.promptIndex,
       promptText: c.promptText,
@@ -708,15 +713,22 @@ export function publishSessionToBranch(repoPath: string, sessionId: string): boo
  *
  * Returns true when the local branch now contains the remote tip.
  */
-export function reconcileSessionBranchWithRemote(repoPath: string, remote = 'origin'): boolean {
+export function reconcileSessionBranchWithRemote(
+  repoPath: string,
+  remote = 'origin',
+  opts: { alreadyFetched?: boolean } = {},
+): boolean {
   const execOpts = { cwd: repoPath, timeoutMs: 20_000, maxBuffer: 5 * 1024 * 1024 };
   try {
     const local = gitOrNull(['rev-parse', `refs/heads/${BRANCH}`], execOpts);
     if (!local || !/^[a-fA-F0-9]+$/.test(local)) return false;
     // Fetch the remote tip into its tracking ref. A remote with no such
-    // branch is the first-push case — nothing to reconcile.
-    const fetched = gitDetailed(['fetch', '--quiet', '--no-tags', remote, `+refs/heads/${BRANCH}:refs/remotes/${remote}/${BRANCH}`], execOpts);
-    if (fetched.status !== 0) return true;
+    // branch is the first-push case — nothing to reconcile. The pre-push
+    // publisher fetches it alongside the notes refs and says so.
+    if (!opts.alreadyFetched) {
+      const fetched = gitDetailed(['fetch', '--quiet', '--no-tags', remote, `+refs/heads/${BRANCH}:refs/remotes/${remote}/${BRANCH}`], execOpts);
+      if (fetched.status !== 0) return true;
+    }
     const theirs = gitOrNull(['rev-parse', `refs/remotes/${remote}/${BRANCH}`], execOpts);
     if (!theirs || !/^[a-fA-F0-9]+$/.test(theirs)) return true;
     if (theirs === local) return true;
@@ -780,13 +792,34 @@ export function pushSessionBranch(repoPath: string, sessionId?: string): void {
 }
 
 /**
+ * The origin-sessions branch as one ref of the pre-push hook's single push to
+ * `remote` (publishPrePushRefs), or null when there is no local branch. No
+ * fetch up front: the branch is offered as-is, and only a non-fast-forward
+ * rejection fetches the remote tip (in the same fetch as the notes) and
+ * reconciles before the one retry.
+ */
+export function sessionBranchPrePushRef(repoPath: string, remote: string): PrePushRef | null {
+  if (gitDetailed(['rev-parse', '--verify', '--quiet', `refs/heads/${BRANCH}`], { cwd: repoPath, timeoutMs: 5_000 }).status !== 0) return null;
+  return {
+    ref: `refs/heads/${BRANCH}`,
+    staging: `refs/remotes/${remote}/${BRANCH}`,
+    reconcile: () => reconcileSessionBranchWithRemote(repoPath, remote, { alreadyFetched: true }),
+  };
+}
+
+/**
  * Push the local origin-sessions branch to a target `sessionBranchPushTarget`
  * chose — the only code that sends it anywhere, for the publish moments and
  * the pre-push hook alike. Never throws; true when the push ran clean.
  */
-export function pushSessionBranchTo(repoPath: string, target: SessionBranchPushTarget): boolean {
+export function pushSessionBranchTo(
+  repoPath: string,
+  target: SessionBranchPushTarget,
+  opts: { timeoutMs?: number } = {},
+): boolean {
   try {
-    const execOpts = { cwd: repoPath, timeoutMs: 15_000 };
+    const execOpts = { cwd: repoPath, timeoutMs: Math.min(15_000, opts.timeoutMs ?? 15_000) };
+    if (execOpts.timeoutMs < 1_000) return false; // the caller's budget is spent
     if (gitDetailed(['rev-parse', '--verify', '--quiet', `refs/heads/${BRANCH}`], execOpts).status !== 0) return false;
     if (target.kind === 'snapshot') {
       // '--' ends the options: the value was validated, this is defense in depth.

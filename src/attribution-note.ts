@@ -25,7 +25,7 @@ import {
   attributionRecordSchema,
   validateFull,
 } from './attribution-record.js';
-import { isSpecificModel } from './agents/registry.js';
+import { allToolIds, isSpecificModel } from './agents/registry.js';
 import { localTurnForServerRow, serverRowForLocalTurn } from './turn-index.js';
 import { isPromptHash, provablePromptHash } from './prompt-hash.js';
 
@@ -41,10 +41,7 @@ export const ATTRIBUTION_RECORD_PRODUCER = 'origin-cli';
  * replaces it with an Origin agent name — so anything outside this list is not
  * a tool identity and gives no record rather than a wrong one.
  */
-export const CANONICAL_AGENT_IDS: readonly string[] = [
-  'claude-code', 'cursor', 'codex', 'gemini', 'copilot', 'devin', 'antigravity',
-  'windsurf', 'aider', 'amp', 'junie', 'opencode', 'droid', 'rovo', 'continue',
-];
+export const CANONICAL_AGENT_IDS: readonly string[] = allToolIds();
 
 /**
  * What a writer knows about the session behind a note, gathered once per
