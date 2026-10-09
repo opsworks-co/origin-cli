@@ -80,7 +80,10 @@ describe('a turn whose commits were squash-merged and checked out from main', ()
     expect(preferCommitPatchForCommittedTurns(state, [mapping], repo)).toBe(1);
     expect([...(mapping.filesChanged as string[])].sort()).toEqual(['a.ts', 'b.ts', 'c.ts', 'd.ts']);
     const expected = commitDiffScopedToPrompt(repo, baseline, c3, ['a.ts', 'b.ts', 'c.ts', 'd.ts'])!;
-    expect(mapping.diff).toBe(expected.diff);
+    // Same content as one range. Since the forge squash is recognised, each
+    // chain is sent as its own patch (commit-patch-forge-squash-beside-a-
+    // reachable-commit.test.ts), and a union of sections ends in a newline.
+    expect(mapping.diff.trimEnd()).toBe(expected.diff.trimEnd());
     // baseline → last commit over those files: +1 a, +3 b, +1 c, +2 d.
     expect([mapping.linesAdded, mapping.linesRemoved]).toEqual([7, 0]);
     // The patch carries every file: the ledger's "could not read" list is

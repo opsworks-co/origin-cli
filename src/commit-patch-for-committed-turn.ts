@@ -212,6 +212,36 @@ function filesOfCommits(repoPath: string, shas: string[]): string[] {
   return [...seen];
 }
 
+/** `git patch-id --stable` of patch text, per commit; '' when git cannot answer. */
+function patchIds(repoPath: string, text: string): string[][] {
+  if (!text.trim()) return [];
+  try {
+    return execFileSync('git', ['patch-id', '--stable'], {
+      cwd: repoPath, input: text, encoding: 'utf-8', windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'], timeout: 15_000, maxBuffer: 16 * 1024 * 1024,
+    }).toString().split('\n').map((l) => l.trim().split(/\s+/)).filter((cols) => cols.length === 2 && !!cols[0]);
+  } catch { return []; }
+}
+
+/**
+ * The commit on HEAD's line that carries exactly `chain`'s patch and is none
+ * of the turn's own commits: the squash a forge made of that branch. Null when
+ * there is none, or git cannot say. Searched from the chain's parent, merges
+ * left out (a squash is a single-parent commit), and bounded.
+ */
+function forgeSquashOnHead(repoPath: string, chain: CommitChain, turnCommits: string[]): string | null {
+  const parent = git(repoPath, ['rev-parse', '--verify', '-q', `${chain.first}^1`]).out.trim();
+  if (!HEX.test(parent)) return null;
+  const want = patchIds(repoPath, git(repoPath, ['diff', '--no-color', parent, chain.tip]).out)[0]?.[0];
+  if (!want) return null;
+  const log = git(repoPath, ['log', '--no-merges', '--no-color', '-p', '--format=commit %H', '--max-count=300', `${parent}..HEAD`]);
+  if (!log.ok) return null;
+  for (const [id, sha] of patchIds(repoPath, log.out)) {
+    if (id === want && HEX.test(sha) && !turnCommits.some((t) => sameSha(t, sha))) return sha;
+  }
+  return null;
+}
+
 /** Commits of a turn that sit on one line of history: `first` is the oldest, `tip` the newest. */
 interface CommitChain { first: string; tip: string; members: string[] }
 
@@ -919,6 +949,48 @@ export function preferCommitPatchForCommittedTurns(
         };
         if (patchAcrossBranches(repoPath, pm, turnId, chains, stranded, deps, stampFor, turnShadow, workTreeShadows)) replaced++;
         continue;
+      }
+      // Part of the turn is on HEAD, and another part reached HEAD only as a
+      // squash the forge made of it. Session 353eb15f turn 6 (2026-10-08): a
+      // sub-agent committed the feature in its own worktree (2f550462 +
+      // 5d48361a, +857/-13), the PR was squash-merged on GitHub as 3b224fd2,
+      // and the turn then committed the version bump 26ee73ae on main. The
+      // branch chain stood `carried`, which only counts when NOTHING of the
+      // turn is reachable — here the bump was — so the single range below ran
+      // from the turn's shadow to the bump, met 3b224fd2 inside it as somebody
+      // else's commit, measured the feature's files from after it, and the
+      // turn read "+3 -3" under "3 commits net +860/-16".
+      //
+      // Each chain is measured on its own instead (patchAcrossBranches), which
+      // never counts the squash itself. Only where the squash is PROVEN: a
+      // commit on HEAD, not one of the turn's, carrying exactly the chain's
+      // patch. A commit reset away and redone also reads `carried`, and its
+      // redo is the turn's own commit on HEAD — crediting both would bill the
+      // work twice.
+      if (shas.length > 0) {
+        const reachableChains = originalChains.filter((c) => standing.get(c) === 'reachable');
+        // A reachable chain is measured by its own members; one reachable only
+        // through a recorded rewrite is left to the single range, as before.
+        const direct = reachableChains.every((c) => c.members.every((m) => shas.includes(m)));
+        const squashedIn = direct
+          ? originalChains
+            .filter((c) => standing.get(c) === 'carried' && !c.members.some(intoSharedSquash)
+              && filesOfCommits(repoPath, c.members).length > 0)
+            .map((c) => ({ chain: c, squash: forgeSquashOnHead(repoPath, c, existing) }))
+            .filter((x): x is { chain: CommitChain; squash: string } => x.squash !== null)
+          : [];
+        if (squashedIn.length > 0) {
+          deps.log?.('turn commits on HEAD plus a branch the forge squashed in — sending each chain\'s own patch', {
+            promptIndex: pm.promptIndex, turnId,
+            squashed: squashedIn.map((x) => `${x.chain.tip.slice(0, 8)}→${x.squash.slice(0, 8)}`),
+          });
+          // Squashed chains first: on a tie in commit time the row's stamp is the
+          // last chain listed, and the commit on HEAD is the one the page shows.
+          if (patchAcrossBranches(repoPath, pm, turnId, [...squashedIn.map((x) => x.chain), ...reachableChains], 0, deps, undefined, turnShadow, workTreeShadows)) {
+            replaced++;
+            continue;
+          }
+        }
       }
       // The host SQUASH-MERGED the turn's branch and deleted it, and the
       // session never saw a rewrite to record — the squash happened on the

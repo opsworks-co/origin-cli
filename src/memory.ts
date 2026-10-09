@@ -41,6 +41,23 @@ export interface SessionMemoryEntry {
   // Reviewer/run checks surfaced this session — from [Origin: Verify] markers.
   // "How do I run and confirm this?" is otherwise unrecoverable from the diff.
   verify?: string[];
+  // Decisions the agent recorded DELIBERATELY, through the MCP record_decision
+  // tool, rather than as an [Origin: Decision] marker in its prose. Their text
+  // is in `decisions` too, which is what every reader shows; they are kept
+  // here as well because every producer of this entry (commit, session end,
+  // the heartbeat's final write) rebuilds `decisions` from transcript markers,
+  // where a tool call's arguments never appear. writeSessionMemory carries
+  // these across each rewrite and folds them back into `decisions`.
+  recordedDecisions?: RecordedDecision[];
+}
+
+/** A decision recorded through the MCP record_decision tool — see SessionMemoryEntry. */
+export interface RecordedDecision {
+  /** `<choice> — <why>`, the marker's own shape. */
+  text: string;
+  /** Repo-relative files the decision is about, when the agent named them. */
+  files?: string[];
+  at: string;
 }
 
 // An IMMUTABLE record of a single commit — frozen when the commit lands and
@@ -851,6 +868,30 @@ export function withoutResolvedTodos(entry: SessionMemoryEntry, closures: readon
   return openTodos.length === entry.openTodos.length ? entry : { ...entry, openTodos };
 }
 
+/**
+ * Carry the session's deliberately recorded decisions (MCP record_decision)
+ * across a rewrite of its entry, and keep their text in `decisions`.
+ *
+ * Every producer rebuilds the entry from the transcript's markers, which never
+ * contain a tool call's arguments — so without this the next commit or the
+ * session's end would silently drop a decision the agent recorded on purpose.
+ * Union by text, first record wins. Pure + exported for testing.
+ */
+export function withRecordedDecisions(entry: SessionMemoryEntry, previous: SessionMemoryEntry | undefined): SessionMemoryEntry {
+  const byKey = new Map<string, RecordedDecision>();
+  for (const d of [...(previous?.recordedDecisions || []), ...(entry.recordedDecisions || [])]) {
+    if (!d || typeof d.text !== 'string' || !d.text.trim()) continue;
+    const key = todoClosureKey(d.text);
+    if (!byKey.has(key)) byKey.set(key, d);
+  }
+  if (byKey.size === 0) return entry;
+  const recorded = [...byKey.values()];
+  const decisions = [...(entry.decisions || [])];
+  const have = new Set(decisions.map((d) => todoClosureKey(d)));
+  for (const d of recorded) if (!have.has(todoClosureKey(d.text))) decisions.push(d.text);
+  return { ...entry, decisions, recordedDecisions: recorded };
+}
+
 export function writeSessionMemory(repoPath: string, entry: SessionMemoryEntry): void {
   try {
     // Don't accumulate memory for bake-off arms or repos the user excluded —
@@ -862,10 +903,10 @@ export function writeSessionMemory(repoPath: string, entry: SessionMemoryEntry):
     // session that reflects its latest state, not a duplicate per write.
     const idx = sessions.findIndex((e) => e.sessionId === entry.sessionId);
     const previous = idx >= 0 ? sessions[idx] : undefined;
-    const merged = withoutResolvedTodos(
+    const merged = withRecordedDecisions(withoutResolvedTodos(
       accumulateSessionWork(reconcileSessionWindow(entry, previous, commits), previous),
       closedTodos || [],
-    );
+    ), previous);
     if (idx >= 0) sessions[idx] = merged;
     else sessions.push(merged);
     // Prune commit records whose session is no longer recorded. Which sessions

@@ -24,6 +24,7 @@ import {
   type SessionMemoryEntry,
   type CommitMemoryEntry,
 } from '../memory.js';
+import { getOpenTodos } from '../todo.js';
 
 export interface RepoMemoryOptions {
   repoPath: string;
@@ -52,6 +53,17 @@ export interface RepoMemoryResult {
     openTodos: Array<{ text: string; sessionId: string; at: string }>;
     decisions: Array<{ text: string; sessionId: string; at: string }>;
   };
+  /**
+   * The repo's open TODOs — the list `origin todo list` shows: session
+   * leftovers, archived ones and typed ones (`origin todo add`, add_todo),
+   * with closures applied. A TODO someone has claimed finished but whose work
+   * has not reached the default branch yet is still open, marked `pending`.
+   * The per-session `openTodos` are what each session recorded, unaware of
+   * closures and of typed TODOs; this is the current state.
+   */
+  openTodoCount: number;
+  /** Only with `includeDetail` and no `paths` filter. */
+  openTodos?: Array<{ id: string; text: string; source: string; pending?: { reason: string; at: string } }>;
   /** Set when the notes ref exists but nothing matched the filter. */
   note?: string;
 }
@@ -140,10 +152,14 @@ export function getRepoMemory(opts: RepoMemoryOptions): RepoMemoryResult {
   const matchedSessions = sessions.filter((e) => touchesAny(e.filesChanged, paths));
   const matchedCommits = commits.filter((c) => touchesAny(c.filesChanged, paths));
 
+  let todos: ReturnType<typeof getOpenTodos> = [];
+  try { todos = getOpenTodos(repoPath); } catch { todos = []; }
+
   const result: RepoMemoryResult = {
     repoPath,
     sessionCount: totalSessions,
     commitCount: totalCommits,
+    openTodoCount: todos.length,
     sessions: sortByDateAsc(matchedSessions, (e) => e.endedAt)
       .slice(-sessionLimit)
       .map((e) => digestSession(e, detail)),
@@ -153,6 +169,10 @@ export function getRepoMemory(opts: RepoMemoryOptions): RepoMemoryResult {
   };
 
   if (detail && paths.length === 0) {
+    result.openTodos = todos.map((t) => ({
+      id: t.id, text: t.text, source: t.source,
+      ...(t.pending ? { pending: { reason: t.pending.reason, at: t.pending.at } } : {}),
+    }));
     const archive = readArchivedMemory(repoPath);
     const newest = (items: typeof archive.todos) => sortByDateAsc(items, (a) => a.at)
       .slice(-OLDER_CAP)
@@ -163,7 +183,7 @@ export function getRepoMemory(opts: RepoMemoryOptions): RepoMemoryResult {
     }
   }
 
-  if (totalSessions + totalCommits === 0) {
+  if (totalSessions + totalCommits + todos.length === 0) {
     result.note = 'No memory recorded for this repo yet.';
   } else if (paths.length > 0 && result.sessions.length === 0 && result.commits.length === 0) {
     result.note = `No memory entries touch: ${paths.join(', ')}`;

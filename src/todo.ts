@@ -376,8 +376,19 @@ export function getOpenTodos(repoPath?: string): TodoItem[] {
   if (repoPath) liftLocalClosuresIntoNotes(repoPath);
   const store = loadTodos();
   const local = repoPath ? store.items.filter(i => samePath(i.repoPath, repoPath)) : store.items;
-  const open = local.filter(i => i.status === 'open');
-  if (!repoPath) return open;
+  if (!repoPath) return local.filter(i => i.status === 'open');
+  // A typed TODO also sits in this machine's store, which a closure confirmed
+  // in the note (`[Origin: Closes]`, MCP close_todo) never touches — so the
+  // machine that typed it kept listing it after every other clone dropped it.
+  // Same for a pending claim: the note's copy carries the annotation, and the
+  // local copy is the one listed.
+  const closures = new Map(readTodoClosures(repoPath).filter(c => c?.key).map(c => [c.key, c] as const));
+  const open = local
+    .filter(i => i.status === 'open' && closures.get(todoClosureKey(i.text))?.state !== 'closed')
+    .map((i) => {
+      const c = closures.get(todoClosureKey(i.text));
+      return c && !i.pending ? { ...i, pending: { reason: c.reason, sessionId: c.sessionId, at: c.at } } : i;
+    });
 
   // Any record in the store — open, done, from whichever checkout of this repo
   // it was written in — supersedes the memory copy of the same TODO. The id is

@@ -6,6 +6,9 @@
 //     available with no network and no account.
 //   • SERVER-side: sessions, stats, policies, audit — the org's view.
 //
+// Plus three WRITE tools (add_todo, close_todo, record_decision) that record
+// into the same git-notes memory the hooks write — see memory-write.ts.
+//
 // This lived in packages/mcp-server until it was folded into the CLI. It was
 // never installed by `origin enable` and never shipped by the release
 // pipeline, so it sat unused at 0.1.0 for a month while the CLI shipped ~40
@@ -31,6 +34,7 @@ import { gitOrNull } from '../utils/exec.js';
 import { getFileContext } from './file-context.js';
 import { getRepoMemory } from './repo-memory.js';
 import { HISTORY_KINDS, searchHistory, type HistoryKind } from '../history-search.js';
+import { addTodoTool, closeTodoTool, recordDecisionTool } from './memory-write.js';
 
 interface PolicyData {
   id: string;
@@ -350,6 +354,46 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'add_todo',
+      description: "Leave an open TODO in THIS REPO's memory for work you are NOT doing now — a follow-up, a known gap, something to verify later — so the next agent or person sees it in get_repo_memory, search_history and `origin todo list`. Written to the repo's git notes (travels with the repo). An identical open TODO is returned instead of duplicated. Not for tracking your own in-progress steps.",
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          text: { type: 'string', description: 'The TODO, one self-contained sentence (max 500 characters)' },
+          repo_path: { type: 'string', description: "Path to the git repository (defaults to the server's working directory)" },
+        },
+        required: ['text'],
+      },
+    },
+    {
+      name: 'close_todo',
+      description: "Claim that you FINISHED an open TODO from this repo's memory. Recorded as pending — it closes only when the work reaches the default branch (by commit_sha, or by this session's Origin-Session trailer), so claim it when the work is done, not before. Name the TODO by its id (from get_repo_memory or `origin todo list`) or its text; an unclear match returns candidates instead of closing anything.",
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          todo: { type: 'string', description: 'The TODO id prefix (e.g. "511e4071") or its text' },
+          reason: { type: 'string', description: 'What was done to discharge it' },
+          commit_sha: { type: 'string', description: 'The commit carrying the work — confirms the closure as soon as it is on the default branch' },
+          repo_path: { type: 'string', description: "Path to the git repository (defaults to the server's working directory)" },
+        },
+        required: ['todo', 'reason'],
+      },
+    },
+    {
+      name: 'record_decision',
+      description: "Record a decision a future agent will need — a choice you made and why, that the code alone will not explain (a rejected alternative, a constraint, a deliberate trade-off). Stored on this session's entry in the repo's memory (git notes) and shown in get_repo_memory's decisions and search_history. Not for routine implementation details.",
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          decision: { type: 'string', description: 'The choice made, e.g. "kept the closure pending until merge"' },
+          why: { type: 'string', description: 'Why — the reason a later reader could not recover from the code' },
+          files: { type: 'array', items: { type: 'string' }, description: 'Repo-relative files the decision is about' },
+          repo_path: { type: 'string', description: "Path to the git repository (defaults to the server's working directory)" },
+        },
+        required: ['decision'],
+      },
+    },
+    {
       name: 'get_session',
       description: 'Get full details of a specific coding session including transcript, files changed, and review status',
       inputSchema: {
@@ -645,6 +689,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const kinds = (Array.isArray(args?.kinds) ? args.kinds : []).filter((k): k is HistoryKind => HISTORY_KINDS.includes(k as HistoryKind));
         const result = searchHistory((args?.repo_path as string) || process.cwd(), query, { limit, kinds });
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
+    // The write tools: a refusal comes back as { error }, never a throw.
+    case 'add_todo':
+    case 'close_todo':
+    case 'record_decision': {
+      try {
+        const run = name === 'add_todo' ? addTodoTool : name === 'close_todo' ? closeTodoTool : recordDecisionTool;
+        return { content: [{ type: 'text', text: JSON.stringify(run(args || {})) }] };
       } catch (err: any) {
         return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
       }

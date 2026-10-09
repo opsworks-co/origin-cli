@@ -132,11 +132,45 @@ async function deviceCodeLogin(apiUrl: string): Promise<{
   throw new Error('Login request timed out. Rerun `origin login`.');
 }
 
-export async function loginCommand(opts: { key?: string; url?: string; profile?: string; browser?: boolean }) {
+// Trade a one-time install token (minted by the dashboard for the one-line
+// installer) for a regular API key. The token is burned by this call, so a
+// failure here means "copy a fresh command", never "retry".
+export async function exchangeInstallToken(apiUrl: string, token: string): Promise<{ apiKey: string; profile: string | null }> {
+  let res: Response;
+  try {
+    res = await fetch(`${apiUrl}/api/cli-auth/install-token/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+  } catch (err: any) {
+    throw new Error(`Couldn't reach ${apiUrl} (${err?.cause?.code || err?.message || err})`);
+  }
+  const body = await res.json().catch(() => ({})) as { apiKey?: string; profile?: string | null; error?: string };
+  if (!res.ok || !body.apiKey) {
+    throw new Error(body.error || `Install token exchange failed (HTTP ${res.status})`);
+  }
+  return { apiKey: body.apiKey, profile: body.profile || null };
+}
+
+export async function loginCommand(opts: { key?: string; token?: string; url?: string; profile?: string; browser?: boolean }) {
   console.log(chalk.bold('\n🔑 Origin Login\n'));
 
   let url: string;
   let key: string;
+
+  // One-time install token: exchange it for a key, then take the exact
+  // `--key` path below (whoami check, config + profile save).
+  if (opts.token && !opts.key) {
+    const tokenUrl = (opts.url || 'https://getorigin.io').replace(/\/+$/, '');
+    try {
+      const exchanged = await exchangeInstallToken(tokenUrl, opts.token.trim());
+      opts = { ...opts, key: exchanged.apiKey, url: tokenUrl, profile: opts.profile || exchanged.profile || undefined };
+    } catch (err: any) {
+      console.log(chalk.red(`✗ ${err.message}`));
+      process.exit(1);
+    }
+  }
 
   // Force device-code flow when:
   //   - --browser flag is passed (explicit), OR

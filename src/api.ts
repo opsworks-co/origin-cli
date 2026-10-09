@@ -327,10 +327,16 @@ export const api = {
     // anything unparseable/future; every other caller omits it (defaults now).
     startedAt?: string;
   }) => {
+    // Machine health (hook configs, git hooks, CLI version) rides on this call
+    // for the admin Rollout view — cached for an hour, never throws, and left
+    // out when it can't be computed (machine-health.ts).
+    const health = await import('./machine-health.js')
+      .then((m) => m.machineHealthForUpload(data.repoPath))
+      .catch(() => undefined);
     // Single-key world: server federates session writes across the user's
     // memberships on read (see /api/me/* on the API). No client-side
     // mirroring needed — one POST, one session id, server handles the rest.
-    const res = await request('/api/mcp/session/start', { method: 'POST', body: JSON.stringify(data) });
+    const res = await request('/api/mcp/session/start', { method: 'POST', body: JSON.stringify(health ? { ...data, health } : data) });
     assertFields(res, 'startSession', ['sessionId']);
     return res;
   },

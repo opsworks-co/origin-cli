@@ -21,12 +21,19 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const distPath = path.resolve(here, '../../dist/index.js');
 
 function initialize(): Promise<any> {
+  return request();
+}
+
+/** initialize, then optionally one more request; resolves with the last response's result. */
+function request(followUp?: { method: string; params?: unknown }): Promise<any> {
+  const wantId = followUp ? 2 : 1;
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [distPath, 'mcp', 'serve'], {
       stdio: ['pipe', 'pipe', 'ignore'],
       env: { ...process.env },
     });
     let buf = '';
+    let sentFollowUp = false;
     const timer = setTimeout(() => { child.kill(); reject(new Error('timed out waiting for initialize response')); }, 30_000);
     child.stdout.on('data', (d) => {
       buf += d.toString();
@@ -35,7 +42,12 @@ function initialize(): Promise<any> {
         if (!line.trim()) continue;
         try {
           const msg = JSON.parse(line);
-          if (msg.id === 1) {
+          if (msg.id === 1 && followUp && !sentFollowUp) {
+            sentFollowUp = true;
+            child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+            child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: followUp.method, params: followUp.params ?? {} }) + '\n');
+          }
+          if (msg.id === wantId) {
             clearTimeout(timer);
             child.kill();
             resolve(msg.result);
@@ -80,5 +92,15 @@ describe('origin mcp serve — initialize', () => {
     const result = await initialize();
     expect(result.serverInfo?.name).toBe('origin-mcp-server');
     expect(result.serverInfo?.version).not.toBe('0.1.0');
+  }, 40_000);
+
+  it('advertises the memory write tools beside the read tools', async () => {
+    const result = await request({ method: 'tools/list' });
+    const names = (result.tools || []).map((t: any) => t.name);
+    for (const n of ['get_repo_memory', 'search_history', 'add_todo', 'close_todo', 'record_decision']) {
+      expect(names).toContain(n);
+    }
+    const close = result.tools.find((t: any) => t.name === 'close_todo');
+    expect(close.inputSchema.required).toEqual(['todo', 'reason']);
   }, 40_000);
 });

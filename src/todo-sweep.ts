@@ -131,6 +131,11 @@ export function recordPendingClosures(opts: {
   markers: string[];
   openTodos: { id: string; text: string }[];
   shas?: string[];
+  /**
+   * What was done, when the caller has it apart from the marker — the MCP
+   * close_todo tool does. A marker's own text is otherwise the reason.
+   */
+  reason?: string;
 }): number {
   const { repoPath, sessionId, markers, openTodos } = opts;
   if (!markers?.length || !openTodos?.length) return 0;
@@ -148,7 +153,7 @@ export function recordPendingClosures(opts: {
     claimed.add(key);
     closures.push({
       key, id: hit.id, text: hit.text,
-      reason: marker.slice(0, 300),
+      reason: (opts.reason?.trim() || marker).slice(0, 300),
       at, state: 'pending', sessionId,
       ...(opts.shas?.length ? { shas: opts.shas.slice(0, 20) } : {}),
     });

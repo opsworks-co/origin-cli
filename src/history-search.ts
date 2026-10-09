@@ -184,6 +184,16 @@ export function buildHistoryDocs(repoPath: string): HistoryDoc[] {
       kind: 'session', id: `session:${s.sessionId}`, title: firstLine(s.summary) || `session ${s.sessionId.slice(0, 8)}`,
       text, files: s.filesChanged || [], sessionId: s.sessionId, agent: s.agentSlug, at: s.endedAt || s.startedAt,
     });
+    // A decision the agent recorded on purpose (MCP record_decision) is also a
+    // record of its own, with the files it names — the files the session
+    // touched are not necessarily the ones the decision is about.
+    for (const d of s.recordedDecisions || []) {
+      if (!d?.text) continue;
+      docs.push({
+        kind: 'decision', id: `decision:${s.sessionId}:${d.text.trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 64)}`,
+        title: firstLine(d.text), text: d.text, files: d.files || [], sessionId: s.sessionId, agent: s.agentSlug, at: d.at,
+      });
+    }
   }
 
   for (const c of memory.commits) {

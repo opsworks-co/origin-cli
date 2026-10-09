@@ -24,6 +24,9 @@ vi.mock('../memory.js', () => ({
     [...list].sort((a, b) => String(dateOf(a) || '').localeCompare(String(dateOf(b) || ''))),
 }));
 
+const todos: any[] = [];
+vi.mock('../todo.js', () => ({ getOpenTodos: () => todos }));
+
 const { getRepoMemory } = await import('../mcp/repo-memory.js');
 
 const session = (over: Partial<any> = {}) => ({
@@ -41,7 +44,7 @@ const commit = (over: Partial<any> = {}) => ({
   branch: 'main', committedAt: '2026-08-13T11:05:00Z', ...over,
 });
 
-beforeEach(() => { sessions.length = 0; commits.length = 0; archive.todos = []; archive.decisions = []; });
+beforeEach(() => { todos.length = 0; sessions.length = 0; commits.length = 0; archive.todos = []; archive.decisions = []; });
 
 describe('getRepoMemory — empty and error cases', () => {
   it('returns an empty result with a note rather than throwing', () => {
