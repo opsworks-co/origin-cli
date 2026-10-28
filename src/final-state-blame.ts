@@ -37,7 +37,7 @@ export interface FinalHunk {
   lines: string[]; // contiguous run of that turn's surviving lines
 }
 
-interface Hunk {
+export interface Hunk {
   oldStart: number;
   oldCount: number;
   newStart: number;
@@ -68,6 +68,12 @@ export function parseUnifiedZero(diffText: string): Hunk[] {
   const hunks: Hunk[] = [];
   let cur: Hunk | null = null;
   let newCursor = 0;
+  // Rows still owed to the open hunk by its header. The body is read by these
+  // counts, not by prefix alone: an added line whose own text starts with `++`
+  // renders as `+++…`, and skipping it as a file header dropped that line and
+  // shifted every later addition in the hunk.
+  let oldLeft = 0;
+  let newLeft = 0;
   for (const line of diffText.split('\n')) {
     const m = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
     if (m) {
@@ -79,17 +85,27 @@ export function parseUnifiedZero(diffText: string): Hunk[] {
         added: [],
       };
       newCursor = cur.newStart;
+      oldLeft = cur.oldCount;
+      newLeft = cur.newCount;
       hunks.push(cur);
       continue;
     }
     if (!cur) continue;
-    if (line.startsWith('+++') || line.startsWith('---')) continue;
-    if (line.startsWith('+')) {
+    // Body exhausted: what follows is a header, `\ No newline`, or noise.
+    if (oldLeft === 0 && newLeft === 0) continue;
+    if (line.startsWith('+') && newLeft > 0) {
       cur.added.push({ line: newCursor, content: line.slice(1) });
       newCursor++;
+      newLeft--;
+    } else if (line.startsWith('-') && oldLeft > 0) {
+      oldLeft--;
+    } else if (line.startsWith(' ') && oldLeft > 0 && newLeft > 0) {
+      // A context row, should a caller pass a diff with context.
+      oldLeft--;
+      newLeft--;
+      newCursor++;
     }
-    // `-` rows consume old-side lines only; `\ No newline` and everything else
-    // is noise at unified=0.
+    // `\ No newline` and everything else is noise at unified=0.
   }
   return hunks;
 }

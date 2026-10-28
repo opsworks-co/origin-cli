@@ -95,6 +95,67 @@ describe('preferShadowRangeForTurns', () => {
     ]);
   });
 
+  describe('a window re-measured from what a stopped operation left (TODO 1de72a6e)', () => {
+    const RESOLVED = [
+      'diff --git a/sessions.ts b/sessions.ts',
+      '--- a/sessions.ts',
+      '+++ b/sessions.ts',
+      '@@ -1,3 +1,1 @@',
+      '-<<<<<<< HEAD',
+      '-line 12',
+      '-=======',
+      ' inserted a',
+      '',
+    ].join('\n');
+    const openTurn = (shadow0: string) => ({ promptShadows: [{ promptIndex: 0, shadowSha: shadow0 }], prompts: ['merge it'] });
+    // A shadow is cut over a dirty tree; a clean one yields none.
+    const turnStarts = (): string => {
+      write('leftover.ts', 'seed\nstill dirty from an earlier turn\n');
+      const shadow0 = createShadowCommit(repo, 'turn0');
+      expect(shadow0).toBeTruthy();
+      return shadow0!;
+    };
+
+    it('takes the re-measured diff, with files and counts read off it', () => {
+      const shadow0 = turnStarts();
+      write('sessions.ts', INSERTED);
+      const row: ShadowRangeMapping = { promptIndex: 0, filesChanged: [], diff: '' };
+      const asked: Array<[number, string, string | null, string]> = [];
+      const seen: unknown[] = [];
+      const n = preferShadowRangeForTurns(openTurn(shadow0), [row], repo, {
+        observe: (_i, o) => seen.push(o),
+        remeasureWindow: (local, from, to, diff) => { asked.push([local, from, to, diff]); return RESOLVED; },
+      });
+      expect(n, JSON.stringify(seen)).toBe(1);
+      expect(asked).toHaveLength(1);
+      expect(asked[0].slice(0, 3)).toEqual([0, shadow0, null]);
+      expect(asked[0][3]).toContain('+inserted a');
+      expect(row.diff).toBe(RESOLVED);
+      expect(row.filesChanged).toEqual(['sessions.ts']);
+      expect([row.linesAdded, row.linesRemoved]).toEqual([0, 3]);
+      expect(row.diffSource).toBe('turn-window');
+    });
+
+    it('a window that says nothing once re-measured blanks the row', () => {
+      const shadow0 = turnStarts();
+      write('sessions.ts', INSERTED);
+      const row: ShadowRangeMapping = { promptIndex: 0, filesChanged: ['sessions.ts'], diff: FAKE_HUNK, linesAdded: 2, linesRemoved: 0 };
+      expect(preferShadowRangeForTurns(openTurn(shadow0), [row], repo, { remeasureWindow: () => '' })).toBe(1);
+      expect(row.diff).toBe('');
+      expect(row.filesChanged).toEqual([]);
+      expect(row.chatOnly).toBe(true);
+    });
+
+    it('an unchanged answer leaves the window as git cut it', () => {
+      const shadow0 = turnStarts();
+      write('sessions.ts', INSERTED);
+      const row: ShadowRangeMapping = { promptIndex: 0, filesChanged: [], diff: '' };
+      preferShadowRangeForTurns(openTurn(shadow0), [row], repo, { remeasureWindow: (_l, _f, _t, diff) => diff });
+      expect(row.filesChanged).toEqual(['sessions.ts']);
+      expect([row.linesAdded, row.linesRemoved]).toEqual([2, 0]);
+    });
+  });
+
   it('reports a contended tree as a decline for every row', () => {
     const seen: Array<[number, unknown]> = [];
     preferShadowRangeForTurns(

@@ -271,6 +271,34 @@ describe('attribution record v1 versioning', () => {
     expect(newer.contributions[0].future_optional_field).toBeDefined();
   });
 
+  it.each(['line-level.json', 'mixed-line-and-commit.json'])(
+    'projects a newer 1.x %s with its line claims intact and unknown file and range properties dropped',
+    (file) => {
+      const original = example('valid', file);
+      const ranges = (r: any) => r.contributions.flatMap((c: any) => (c.files ?? []).flatMap((f: any) => f.ranges));
+      expect(ranges(original).some((r: any) => r.iteration_index !== undefined)).toBe(true);
+
+      const newer = structuredClone(original);
+      newer.schema_version = '1.3';
+      for (const c of newer.contributions) {
+        for (const f of c.files ?? []) {
+          f.future_file_field = { any: 'shape' };
+          for (const r of f.ranges) r.future_range_field = 1;
+        }
+      }
+      const input = structuredClone(newer);
+
+      const result = readRecord(newer);
+      expect(result.status).toBe('projected');
+      if (result.status !== 'projected') return;
+      expect(result.record.contributions.map((c: any) => c.files)).toEqual(original.contributions.map((c: any) => c.files));
+      expect(JSON.stringify(result.record)).not.toMatch(/future_/);
+      // The input is left untouched, its unknown properties included.
+      expect(newer).toEqual(input);
+      expect(ranges(newer).every((r: any) => r.future_range_field === 1)).toBe(true);
+    },
+  );
+
   it('refuses to interpret an unknown major as v1', () => {
     for (const version of ['2.0', '10.1']) {
       const record = example('valid', 'minimal.json');

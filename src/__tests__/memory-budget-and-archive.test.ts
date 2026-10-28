@@ -107,6 +107,27 @@ describe('settlePayload — what an evicted session still owes', () => {
     expect(out.closedTodos).toEqual([]);
   });
 
+  it('keeps a closure while the session that closed it is kept, so its TODO coming back stays closed', () => {
+    const text = 'Ask Cursor and Copilot for each cloud run status';
+    const closure = { key: todoClosureKey(text), id: 'x', text, reason: 'done in #2525', at: day(3), state: 'closed' as const, sessionId: 'live' };
+    // One write drops the TODO from the live session's rollup…
+    const dropped = settlePayload(payload([session('live', 3)], [], { closedTodos: [closure] }));
+    expect(dropped.closedTodos?.map((c) => c.key)).toEqual([closure.key]);
+    // …the next puts it back. The closure is still there to keep it closed.
+    const back = settlePayload({ ...dropped, sessions: [session('live', 3, { openTodos: [text] })] });
+    expect(back.closedTodos?.map((c) => c.key)).toEqual([closure.key]);
+    expect(back.closedTodos?.[0].state).toBe('closed');
+  });
+
+  it('drops that closure once its session ages out and nothing carries the TODO', () => {
+    const text = 'shipped long ago';
+    const out = evicting(session('old', 1, { openTodos: [text] }), {
+      closedTodos: [{ key: todoClosureKey(text), id: 'x', text, reason: 'r', at: day(2), state: 'closed', sessionId: 'old' }],
+    });
+    expect(out.archivedTodos).toEqual([]);
+    expect(out.closedTodos).toEqual([]);
+  });
+
   it('keeps a pending closure alive while the archived TODO it annotates is there', () => {
     const text = 'claimed on a branch';
     const out = evicting(session('old', 1, { openTodos: [text] }), {

@@ -1,6 +1,7 @@
 import { estimateTurnUsage, type ModelUsage } from './transcript.js';
 import { commandWritesFiles } from './shell-write-capture.js';
 import path from 'path';
+import { partsField, replyTextPart, replyToolPart, type DisplayPart } from './display-parts.js';
 
 // Parser for Antigravity (`agy`) transcripts.
 //
@@ -15,6 +16,9 @@ import path from 'path';
 export interface AntigravityTranscript {
   prompts: string[];
   responses: string[];    // assembled assistant output per prompt (aligned with prompts[])
+  // The share-safe parts of each response (aligned with prompts[]): the
+  // model's prose and the tools it called — no args, no results, no thinking.
+  responseParts: DisplayPart[][];
   // Epoch-ms of each prompt's `created_at` from the transcript, aligned with
   // prompts[]. null when the step carried no parseable timestamp. agy has no
   // UserPromptSubmit hook, so this transcript time is the ONLY real prompt time
@@ -338,7 +342,7 @@ function plannerStepText(step: any): string {
 // One user turn plus the assistant output assembled under it. Kept together so
 // that when we sort by prompt time, text + response + timestamp move as a unit
 // (see the sort at the end of parseAntigravityTranscript).
-interface AgyTurn { text: string; createdAt: number | null; inChars: number; outChars: number; buf: string[]; editedFiles: string[]; editRecords: AgyEditRecord[]; ranCommit: boolean; wroteViaShell: boolean; shellWriteCommands: string[]; commitShas: string[] }
+interface AgyTurn { text: string; createdAt: number | null; inChars: number; outChars: number; buf: string[]; shown: Array<DisplayPart | null>; editedFiles: string[]; editRecords: AgyEditRecord[]; ranCommit: boolean; wroteViaShell: boolean; shellWriteCommands: string[]; commitShas: string[] }
 
 export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript {
   const turns: AgyTurn[] = [];
@@ -392,7 +396,7 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
         const isReinjection = sawCompaction && turns.length > 0 && turns[turns.length - 1].text === req;
         if (!isReinjection) {
           const ms = typeof step?.created_at === 'string' ? Date.parse(step.created_at) : NaN;
-          turns.push({ text: req, createdAt: Number.isFinite(ms) ? ms : null, inChars: turns.length === 0 ? unclaimedIn : 0, outChars: turns.length === 0 ? unclaimedOut : 0, buf: [], editedFiles: [], editRecords: [], ranCommit: false, wroteViaShell: false, shellWriteCommands: [], commitShas: [] });
+          turns.push({ text: req, createdAt: Number.isFinite(ms) ? ms : null, inChars: turns.length === 0 ? unclaimedIn : 0, outChars: turns.length === 0 ? unclaimedOut : 0, buf: [], shown: [], editedFiles: [], editRecords: [], ranCommit: false, wroteViaShell: false, shellWriteCommands: [], commitShas: [] });
           addIn(req.length);
         }
       }
@@ -417,6 +421,12 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
       if (step?.type === 'PLANNER_RESPONSE') {
         const text = plannerStepText(step);
         if (text && turns.length > 0) turns[turns.length - 1].buf.push(text);
+        // Same order plannerStepText writes them: tool calls, then prose.
+        if (turns.length > 0) {
+          const shown = turns[turns.length - 1].shown;
+          for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) shown.push(replyToolPart(agyToolLabel(tc?.name)));
+          shown.push(replyTextPart(typeof step?.content === 'string' ? step.content.trim() : ''));
+        }
       }
       for (const p of stepFilePaths(step)) filePathSet.add(p);
       if (turns.length > 0) {
@@ -461,6 +471,7 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
   const prompts = turns.map((t) => t.text);
   const promptTimes = turns.map((t) => t.createdAt);
   const responses = turns.map((t) => t.buf.join('\n\n').trim().slice(0, MAX_RESPONSE_LEN));
+  const responseParts = turns.map((t) => partsField(t.shown).parts || []);
   // Per-prompt EDITED files (dedup), aligned with prompts[]; and the session union.
   const promptFilesEdited = turns.map((t) => [...new Set(t.editedFiles)]);
   const promptEditRecords = turns.map((t) => t.editRecords);
@@ -474,7 +485,7 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
     .map(([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 
-  return { prompts, responses, promptTimes, model, inputChars, outputChars,
+  return { prompts, responses, responseParts, promptTimes, model, inputChars, outputChars,
     promptInputChars: turns.map((t) => t.inChars), promptOutputChars: turns.map((t) => t.outChars), filePaths: [...filePathSet], filesEdited, promptFilesEdited, promptEditRecords, promptRanCommit,
     promptWroteViaShell, promptShellWriteCommands, promptCommitShas, toolCalls, toolBreakdown };
 }

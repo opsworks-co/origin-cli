@@ -23,9 +23,11 @@
  *
  * `task` is Claude Code's historical name and is kept: an older client, a
  * replayed offline queue, and other agents' transcripts still use it. `agent`
- * is the current one.
+ * is the current one. `spawn_agent` is Codex's (multi-agent mode): its rollout
+ * records it as `name: "spawn_agent", namespace: "collaboration"`, and its tool
+ * hooks send the two run together, `collaborationspawn_agent`.
  */
-export const SUBAGENT_SPAWN_TOOLS = new Set(['task', 'agent']);
+export const SUBAGENT_SPAWN_TOOLS = new Set(['task', 'agent', 'spawn_agent']);
 
 /**
  * Tools that only make sense once a sub-agent EXISTS — reading its output,
@@ -35,16 +37,29 @@ export const SUBAGENT_SPAWN_TOOLS = new Set(['task', 'agent']);
  * spawner rename leaves them untouched, and their presence alongside zero
  * recorded spawns is a contradiction rather than a plausible session.
  */
-export const SUBAGENT_COMPANION_TOOLS = new Set(['taskoutput', 'taskstop', 'listagents']);
+export const SUBAGENT_COMPANION_TOOLS = new Set([
+  'taskoutput', 'taskstop', 'listagents',
+  // Codex: wait for, message, resume or close a spawned sub-agent.
+  'wait_agent', 'send_input', 'resume_agent', 'close_agent',
+]);
+
+/**
+ * A tool name, lowercased, without the namespace Codex puts on its
+ * multi-agent tools (`collaboration.spawn_agent`, or run together as
+ * `collaborationspawn_agent` in a hook payload).
+ */
+function bareToolName(toolName: string | null | undefined): string {
+  return String(toolName ?? '').trim().toLowerCase().replace(/^collaboration[.:/_]?(?=[a-z_]+_agent$|send_input$)/, '');
+}
 
 /** Does this tool call spawn a sub-agent? Case-insensitive; never throws. */
 export function isSubagentSpawnTool(toolName: string | null | undefined): boolean {
-  return SUBAGENT_SPAWN_TOOLS.has(String(toolName ?? '').trim().toLowerCase());
+  return SUBAGENT_SPAWN_TOOLS.has(bareToolName(toolName));
 }
 
 /** Does this tool call operate on an ALREADY-SPAWNED sub-agent? */
 export function isSubagentCompanionTool(toolName: string | null | undefined): boolean {
-  return SUBAGENT_COMPANION_TOOLS.has(String(toolName ?? '').trim().toLowerCase());
+  return SUBAGENT_COMPANION_TOOLS.has(bareToolName(toolName));
 }
 
 /**
@@ -67,7 +82,7 @@ export function detectRenamedSpawner(
   toolNames: readonly string[],
   spawnCount: number,
 ): { broken: boolean; companionsSeen: string[]; candidates: string[] } {
-  const seen = (toolNames || []).map((n) => String(n ?? '').trim().toLowerCase()).filter(Boolean);
+  const seen = (toolNames || []).map((n) => bareToolName(n)).filter(Boolean);
   const companionsSeen = [...new Set(seen.filter((n) => isSubagentCompanionTool(n)))];
   if (spawnCount > 0 || companionsSeen.length === 0) {
     return { broken: false, companionsSeen, candidates: [] };

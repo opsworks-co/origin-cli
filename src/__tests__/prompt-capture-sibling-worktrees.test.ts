@@ -68,6 +68,9 @@ it('resolves relative gitdir pointers and commondir from either linked checkout'
   for (const root of [first, second]) {
     const pointer = path.join(root, '.git');
     const gitDir = fs.readFileSync(pointer, 'utf8').trim().slice('gitdir: '.length);
+    // Git for Windows marks a worktree's `.git` file HIDDEN, and opening a
+    // hidden file for overwrite fails with EPERM there: replace it instead.
+    fs.rmSync(pointer);
     fs.writeFileSync(pointer, `gitdir: ${path.relative(root, gitDir)}\n`);
   }
   expect(edit(path.join(second, 'src/file.ts'), first)).toBe('src/file.ts');

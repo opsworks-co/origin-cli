@@ -36,6 +36,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { api } from './api.js';
+import { stampObservedAt } from './observed-at.js';
+import { CLIENT_CAPABILITIES } from './client-capabilities.js';
 import { DEFAULT_FETCH_TIMEOUT_MS, timeoutForPayload, wireBytes } from './fetch-timeout.js';
 import { fitSessionUpdateForServer } from './session-update-size.js';
 
@@ -55,6 +57,15 @@ export interface QueueEntry {
    * replaying it could only put back what the newer one corrected.
    */
   snapshot?: boolean;
+  /**
+   * The protocol capabilities of the CLI that BUILT this payload
+   * (client-capabilities.ts), recorded when it was queued and sent with its
+   * replay. An entry without it was queued by an older CLI: it replays as
+   * built with none, whatever binary replays it — the binary's version says
+   * nothing about the payload. (Kept in `v: 1`: an older binary still reads
+   * and replays these entries instead of dropping them as corrupt.)
+   */
+  capabilities?: string[];
 }
 
 type Log = (event: string, message: string, data?: any) => void;
@@ -120,6 +131,7 @@ function writeQueueEntry(
       enqueuedAt: new Date().toISOString(),
       lastError: err?.message || String(err),
       ...(opts.snapshot ? { snapshot: true } : {}),
+      capabilities: [...CLIENT_CAPABILITIES],
     };
     const body = JSON.stringify(entry);
     if (body.length > MAX_ENTRY_BYTES) {
@@ -192,15 +204,22 @@ function readEntry(file: string): QueueEntry | null {
 }
 
 async function replayEntry(entry: QueueEntry, updateTimeoutMs: number): Promise<void> {
+  // An entry an older CLI queued carries no build time; the moment it was
+  // queued is the nearest one, and far closer than this replay.
+  if ((entry.kind === 'updateSession' || entry.kind === 'endSession')
+    && entry.payload && typeof entry.payload === 'object' && entry.payload.observedAt === undefined) {
+    entry.payload.observedAt = entry.enqueuedAt;
+  }
+  const payloadCapabilities = Array.isArray(entry.capabilities) ? entry.capabilities.filter((c) => typeof c === 'string') : [];
   if (entry.kind === 'updateSession') {
-    await api.updateSession(entry.sessionId, entry.payload, { timeoutMs: updateTimeoutMs });
+    await api.updateSession(entry.sessionId, entry.payload, { timeoutMs: updateTimeoutMs, payloadCapabilities });
   } else if (entry.kind === 'ingestCommits') {
     // Replayed with the backfill timeout, not the hook default: this payload
     // carries a per-commit patch, and the 8s default is what dropped it in the
     // first place. See the shadow-ingest call in handlePostCommit.
-    await api.ingestCommits(entry.payload, { timeoutMs: INGEST_REPLAY_TIMEOUT_MS });
+    await api.ingestCommits(entry.payload, { timeoutMs: INGEST_REPLAY_TIMEOUT_MS, payloadCapabilities });
   } else {
-    await api.endSession(entry.payload);
+    await api.endSession(entry.payload, { payloadCapabilities });
   }
 }
 
@@ -395,6 +414,7 @@ export function persistUpdateBeforeWork(
   data: any,
   log: Log = noop,
 ): string | null {
+  stampObservedAt(data);
   const payload = data && typeof data === 'object' ? { ...data } : data;
   if (payload && typeof payload === 'object') delete payload.status;
   return writeQueueEntry(
@@ -419,6 +439,8 @@ export async function durableUpdateSession(
   log: Log = noop,
   opts: { supersedes?: string | null; logEvent?: string; snapshot?: boolean; deferLarge?: boolean } = {},
 ): Promise<any | null> {
+  // Dated now, before any queueing, so a copy sent later says when it was built.
+  stampObservedAt(data);
   // The write-ahead copy this payload replaces (persistUpdateBeforeWork).
   // Removed BEFORE the drain so it is neither replayed ahead of this send
   // nor left behind for a later one; a retriable failure below re-enqueues
@@ -497,6 +519,7 @@ export async function durableEndSession(
   data: any,
   log: Log = noop,
 ): Promise<any | null> {
+  stampObservedAt(data);
   let deferred = 0;
   try {
     deferred = (await drainUpdateQueue(log, { forSessionId: sessionId })).deferred;

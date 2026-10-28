@@ -21,6 +21,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { querySqlite } from './utils/sqlite.js';
+import { partsField, replyTextPart, replyToolPart, type DisplayPart } from './display-parts.js';
 
 export interface DevinLiveSessionData {
   model?: string;
@@ -85,7 +86,7 @@ export function parseDevinLiveMessages(
   const seen = new Set<string>();
   const prompts: string[] = [];
   const promptTimes: (string | undefined)[] = [];
-  const turns: Array<{ role: string; content: string }> = [];
+  const turns: Array<{ role: string; content: string; parts?: DisplayPart[] }> = [];
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheReadTokens = 0;
@@ -106,7 +107,10 @@ export function parseDevinLiveMessages(
 
     if (role === 'tool') {
       toolCalls++;
-      if (content) turns.push({ role: 'assistant', content: `[Tool] ${truncate(content, 500)}` });
+      // A tool row is its description ("Read ./popcorn"): only the leading
+      // tool name is share-safe, never the rest of the line.
+      const name = content.match(/^[A-Za-z_][\w.-]{0,39}(?=\s|$)/)?.[0];
+      if (content) turns.push({ role: 'assistant', content: `[Tool] ${truncate(content, 500)}`, ...partsField([replyToolPart(name)]) });
       continue;
     }
     if (role === 'user') {
@@ -119,7 +123,7 @@ export function parseDevinLiveMessages(
       continue;
     }
     // assistant
-    if (content) turns.push({ role: 'assistant', content: truncate(content) });
+    if (content) turns.push({ role: 'assistant', content: truncate(content), ...partsField([replyTextPart(truncate(content))]) });
     const metrics = m?.metadata?.metrics;
     if (metrics && typeof metrics === 'object') {
       inputTokens += num(metrics.input_tokens);

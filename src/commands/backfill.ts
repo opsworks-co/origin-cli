@@ -1,11 +1,15 @@
 import chalk from 'chalk';
 import { listSessionIds, readSessionFile } from '../session-store.js';
 import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
+import { homedir } from 'os';
 import { join, resolve } from 'path';
 import { isAiCommit } from '../attribution.js';
 import { getGitRoot } from '../session-state.js';
 import * as readline from 'readline';
 import { git, gitDetailed, gitIdentityEnv } from '../utils/exec.js';
+import { buildInferredAttributionRecord, ATTRIBUTION_RECORD_NOTE_KEY } from '../attribution-note.js';
+import { publishAttributionNotes, resolvePushRemote, describePublishResult } from '../git-notes.js';
+import { cliVersion } from '../cli-version.js';
 
 const HEX = /^[a-fA-F0-9]{4,64}$/;
 const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
@@ -82,156 +86,85 @@ function getCommitMessage(repoPath: string, sha: string): string {
   }
 }
 
-function getCommitDiff(repoPath: string, sha: string): string {
-  if (!HEX.test(sha)) return '';
-  try {
-    return git(
-      ['diff-tree', '-p', sha, '--'],
-      { ...gitOpts(repoPath), maxBuffer: 2 * 1024 * 1024 },
-    ).trim();
-  } catch {
-    return '';
+// ─── Strategy 1: the agent's own transcript shows it making the commit ─────
+//
+// `git commit` prints `[<branch> <short-sha>] <subject>`, and an agent that ran
+// it has that line in its transcript as the tool result. Finding THIS repo's
+// commit sha there is the agent saying, in its own record, that it made it.
+//
+// This used to read `<repo>/.claude/projects`, `<repo>/.cursor` and
+// `<repo>/.codex` — config folders, not transcripts (Claude Code keeps them in
+// ~/.claude/projects/<slug>, Codex in ~/.codex/sessions) — and matched commits
+// to any file's timestamp within five minutes, labelled "high".
+
+const COMMIT_OUTPUT_RE = /\[[^\]\s]+(?: \(root-commit\))? ([0-9a-f]{7,40})\]/g;
+
+interface TranscriptCommit { short: string; agent: string; file: string }
+
+/** Claude Code's project folder name for a path: every non-alphanumeric → '-'. */
+export function claudeProjectSlug(repoPath: string): string {
+  return resolve(repoPath).replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+function commitShasInFile(file: string, agent: string, out: TranscriptCommit[]): void {
+  let text: string;
+  try { text = readFileSync(file, 'utf-8'); } catch { return; }
+  if (!text.includes('git commit') && !text.includes('root-commit')) return;
+  for (const m of text.matchAll(COMMIT_OUTPUT_RE)) out.push({ short: m[1].toLowerCase(), agent, file });
+}
+
+/** Claude Code transcripts of this repo and its worktrees (~/.claude/projects/<slug>*). */
+function scanClaudeTranscripts(repoPath: string, home: string, sinceMs: number): TranscriptCommit[] {
+  const out: TranscriptCommit[] = [];
+  const root = join(home, '.claude', 'projects');
+  const slug = claudeProjectSlug(repoPath);
+  let dirs: string[] = [];
+  try { dirs = readdirSync(root).filter((d) => d === slug || d.startsWith(`${slug}-`)); } catch { return out; }
+  for (const d of dirs) {
+    let files: string[] = [];
+    try { files = readdirSync(join(root, d)).filter((f) => f.endsWith('.jsonl')); } catch { continue; }
+    for (const f of files) {
+      const file = join(root, d, f);
+      try { if (statSync(file).mtimeMs < sinceMs) continue; } catch { continue; }
+      commitShasInFile(file, 'claude', out);
+    }
   }
+  return out;
 }
 
-// ─── Strategy 1: Local Agent History Matching ─────────────────────────────
-
-interface SessionTimestamp {
-  timestamp: number;
-  agent: string;
-  file: string;
-}
-
-function scanClaudeSessions(repoPath: string): SessionTimestamp[] {
-  const timestamps: SessionTimestamp[] = [];
-  const claudeDir = join(repoPath, '.claude', 'projects');
-  if (!existsSync(claudeDir)) return timestamps;
-
-  try {
-    const walkDir = (dir: string) => {
-      const entries = readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          walkDir(fullPath);
-        } else if (entry.name.endsWith('.jsonl') || entry.name.endsWith('.json')) {
-          try {
-            const content = readFileSync(fullPath, 'utf-8');
-            const lines = content.split('\n').filter(Boolean);
-            for (const line of lines) {
-              try {
-                const obj = JSON.parse(line);
-                const ts = obj.timestamp || obj.createdAt || obj.ts;
-                if (ts) {
-                  const msTs = typeof ts === 'number' && ts < 1e12 ? ts * 1000 : ts;
-                  timestamps.push({
-                    timestamp: typeof msTs === 'string' ? new Date(msTs).getTime() : msTs,
-                    agent: 'claude',
-                    file: fullPath,
-                  });
-                }
-              } catch { /* skip malformed lines */ }
-            }
-          } catch { /* skip unreadable files */ }
-        }
-      }
-    };
-    walkDir(claudeDir);
-  } catch { /* directory read error */ }
-
-  return timestamps;
-}
-
-function scanCursorSessions(repoPath: string): SessionTimestamp[] {
-  const timestamps: SessionTimestamp[] = [];
-  const cursorDir = join(repoPath, '.cursor');
-  if (!existsSync(cursorDir)) return timestamps;
-
-  try {
-    const entries = readdirSync(cursorDir, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = join(cursorDir, entry.name);
+/** Codex rollouts whose session ran in this repo (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl). */
+function scanCodexTranscripts(repoPath: string, home: string, sinceMs: number): TranscriptCommit[] {
+  const out: TranscriptCommit[] = [];
+  const root = join(home, '.codex', 'sessions');
+  const repo = resolve(repoPath);
+  const walk = (dir: string, depth: number) => {
+    let entries: import('fs').Dirent[] = [];
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const full = join(dir, e.name);
+      if (e.isDirectory() && depth < 4) { walk(full, depth + 1); continue; }
+      if (!e.isFile() || !e.name.endsWith('.jsonl')) continue;
+      try { if (statSync(full).mtimeMs < sinceMs) continue; } catch { continue; }
+      // The first line is the session's metadata, with the directory it ran in.
+      let cwd = '';
       try {
-        const stat = statSync(fullPath);
-        timestamps.push({
-          timestamp: stat.mtimeMs,
-          agent: 'cursor',
-          file: fullPath,
-        });
-      } catch { /* skip */ }
+        const first = readFileSync(full, 'utf-8').split('\n', 1)[0];
+        const meta = JSON.parse(first);
+        cwd = meta?.payload?.cwd || meta?.cwd || '';
+      } catch { continue; }
+      if (!cwd || !(resolve(cwd) === repo || resolve(cwd).startsWith(`${repo}/`))) continue;
+      commitShasInFile(full, 'codex', out);
     }
-  } catch { /* directory read error */ }
-
-  return timestamps;
+  };
+  walk(root, 0);
+  return out;
 }
 
-function scanCodexSessions(repoPath: string): SessionTimestamp[] {
-  const timestamps: SessionTimestamp[] = [];
-  const codexDir = join(repoPath, '.codex');
-  if (!existsSync(codexDir)) return timestamps;
-
-  try {
-    const walkDir = (dir: string) => {
-      const entries = readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          walkDir(fullPath);
-        } else {
-          try {
-            const stat = statSync(fullPath);
-            timestamps.push({
-              timestamp: stat.mtimeMs,
-              agent: 'codex',
-              file: fullPath,
-            });
-            // Also try to parse JSON content for timestamps
-            if (entry.name.endsWith('.json') || entry.name.endsWith('.jsonl')) {
-              const content = readFileSync(fullPath, 'utf-8');
-              const lines = content.split('\n').filter(Boolean);
-              for (const line of lines) {
-                try {
-                  const obj = JSON.parse(line);
-                  const ts = obj.timestamp || obj.createdAt || obj.ts;
-                  if (ts) {
-                    const msTs = typeof ts === 'number' && ts < 1e12 ? ts * 1000 : ts;
-                    timestamps.push({
-                      timestamp: typeof msTs === 'string' ? new Date(msTs).getTime() : msTs,
-                      agent: 'codex',
-                      file: fullPath,
-                    });
-                  }
-                } catch { /* skip */ }
-              }
-            }
-          } catch { /* skip */ }
-        }
-      }
-    };
-    walkDir(codexDir);
-  } catch { /* directory read error */ }
-
-  return timestamps;
-}
-
-function matchSessionToCommit(
-  commit: CommitInfo,
-  sessions: SessionTimestamp[],
-  windowMs: number = 5 * 60 * 1000,
-): SessionTimestamp | null {
-  const commitMs = commit.timestamp * 1000;
-  let bestMatch: SessionTimestamp | null = null;
-  let bestDelta = Infinity;
-
-  for (const session of sessions) {
-    const delta = Math.abs(session.timestamp - commitMs);
-    if (delta <= windowMs && delta < bestDelta) {
-      bestDelta = delta;
-      bestMatch = session;
-    }
-  }
-
-  return bestMatch;
+function matchTranscriptCommit(commit: CommitInfo, found: TranscriptCommit[]): TranscriptCommit | null {
+  const sha = commit.sha.toLowerCase();
+  const hits = found.filter((t) => sha.startsWith(t.short));
+  // Two agents claiming one commit is no answer.
+  return hits.length > 0 && hits.every((h) => h.agent === hits[0].agent) ? hits[0] : null;
 }
 
 // ─── Strategy 0: Origin Session State Files ────────────────────────────────
@@ -267,9 +200,10 @@ function scanOriginSessions(repoPath: string): OriginSessionInfo[] {
             const state = JSON.parse(content);
             if (!state || typeof state !== 'object') continue;
 
-            // Check if this session is for the current repo
+            // Only a session of THIS repo. One with no repoPath used to match
+            // every repo on the machine.
             const sessionRepo = state.repoPath || '';
-            if (sessionRepo && resolve(sessionRepo) !== resolve(repoPath)) continue;
+            if (!sessionRepo || resolve(sessionRepo) !== resolve(repoPath)) continue;
 
             const m = (state.model || '').toLowerCase();
             const agent = m.includes('codex') ? 'codex'
@@ -281,13 +215,14 @@ function scanOriginSessions(repoPath: string): OriginSessionInfo[] {
               : m || 'ai';
 
             const startMs = state.startedAt ? new Date(state.startedAt).getTime() : 0;
-            // Session end = last prompt time or startedAt + typical session length
-            const stateFile = statSync(fullPath);
-            const endMs = stateFile.mtimeMs;
+            // The session's own end when it recorded one; the file's mtime
+            // only says when anything last touched the file.
+            const recordedEnd = Date.parse(state.endedAt || state.lastActivityAt || '');
+            const endMs = Number.isFinite(recordedEnd) ? recordedEnd : statSync(fullPath).mtimeMs;
 
-            // Collect any commit SHAs stored in the state
+            // The commits the session captured. NOT headShaAtStart: that is the
+            // commit the session STARTED on — someone else's, made before it.
             const commits: string[] = [];
-            if (state.headShaAtStart) commits.push(state.headShaAtStart);
             if (state.gitCapture?.commitDetails) {
               for (const c of state.gitCapture.commitDetails) {
                 if (c.sha) commits.push(c.sha);
@@ -378,286 +313,106 @@ function scanOriginSessionsBranch(repoPath: string): OriginSessionInfo[] {
 function matchOriginSession(
   commit: CommitInfo,
   sessions: OriginSessionInfo[],
-): OriginSessionInfo | null {
-  const commitMs = commit.timestamp * 1000;
-
+  localEmail: string,
+): { session: OriginSessionInfo; bySha: boolean } | null {
+  // The session recorded this commit — whoever's machine it was.
   for (const session of sessions) {
-    // Direct SHA match — highest confidence
-    if (session.commits.includes(commit.sha)) {
-      return session;
-    }
-    // Timestamp match — commit happened during a known session
-    if (session.startedAt > 0 && session.endedAt > 0) {
-      // Allow 2 min buffer before start, 5 min after end
-      if (commitMs >= session.startedAt - 120000 && commitMs <= session.endedAt + 300000) {
-        return session;
-      }
-    }
+    if (session.commits.includes(commit.sha)) return { session, bySha: true };
   }
+  // A commit made while one of THIS machine's sessions ran, by THIS machine's
+  // git user: a teammate's commit pulled in during the window is not ours.
+  // Exactly one session must cover it.
+  if (!localEmail || commit.authorEmail.toLowerCase() !== localEmail) return null;
+  const commitMs = commit.timestamp * 1000;
+  const covering = sessions.filter((s) => s.startedAt > 0 && s.endedAt > 0
+    && commitMs >= s.startedAt - 120_000 && commitMs <= s.endedAt + 300_000);
+  return covering.length === 1 ? { session: covering[0], bySha: false } : null;
+}
+
+// ─── Strategy 2: the commit names its agent ────────────────────────────────
+//
+// Only what the commit itself SAYS: an Origin-Session trailer, a co-author or
+// author that is an agent by name or address, a message an agent writes
+// verbatim. The style guesses that lived here (a conventional prefix, an em
+// dash, a short lowercase subject, an emoji, "update the") labelled ordinary
+// human commits as Claude, Codex or Gemini — and `users.noreply.github.com`,
+// every GitHub web user's address, read as Copilot.
+
+/** An agent named by a person-ish identity string (name and/or email). */
+export function agentNamedBy(identity: string): string | null {
+  const s = identity.toLowerCase();
+  if (/\bclaude\b|@anthropic\.com/.test(s)) return 'claude';
+  if (/\bcodex\b|@openai\.com/.test(s)) return 'codex';
+  if (/\bcopilot\b|copilot@/.test(s)) return 'copilot';
+  if (/\bcursor ?agent\b|cursoragent@|@cursor\.(com|sh)/.test(s)) return 'cursor';
+  if (/\bgemini\b/.test(s)) return 'gemini';
+  if (/\bdevin\b|devin-ai-integration/.test(s)) return 'devin';
+  if (/\baider\b/.test(s)) return 'aider';
   return null;
 }
 
-// ─── Strategy 2: Commit Message Pattern Detection ─────────────────────────
+const TRAILER_AGENT_RE = /^Origin-Session:\s*[^|\n]*\|\s*([^|\n]+)/im;
 
-const CONVENTIONAL_PREFIXES = [
-  'feat:', 'fix:', 'refactor:', 'chore:', 'docs:', 'test:',
-  'style:', 'perf:', 'ci:', 'build:',
-];
-
-const AI_PHRASES = [
-  'as requested', 'based on', 'implement ', 'add support for',
-  'update to', 'per the', 'as discussed', 'as per',
-  'according to', 'implement the', 'add the', 'update the',
-  'handle the', 'ensure that', 'make sure',
-];
-
-const AI_AUTHOR_NAMES = [
-  'cursor', 'codex', 'claude', 'copilot', 'github-actions',
-  'devin', 'aider', 'composer', 'windsurf', 'gemini',
-];
-
-const AI_EMAIL_PATTERNS = [
-  'noreply', 'bot@', 'cursor@', 'users.noreply.github.com',
-  'codex@', 'claude@', 'copilot@', 'devin@', 'aider@',
-];
-
-function detectFromCommitMessage(
+export function detectFromCommitMessage(
   commit: CommitInfo,
   message: string,
 ): { agent: string; confidence: Confidence; source: string } | null {
-  const lowerMsg = message.toLowerCase();
-  const lowerSubject = commit.subject.toLowerCase();
-  const lowerAuthorName = commit.authorName.toLowerCase();
-  const lowerCommitterName = commit.committerName.toLowerCase();
-  const lowerAuthorEmail = commit.authorEmail.toLowerCase();
-  const lowerCommitterEmail = commit.committerEmail.toLowerCase();
-
-  // Check author/committer names for known AI agents
-  for (const name of AI_AUTHOR_NAMES) {
-    if (lowerAuthorName.includes(name) || lowerCommitterName.includes(name)) {
-      const agent = name === 'github-actions' ? 'ai' : name;
-      return { agent, confidence: 'high', source: 'backfill-author-match' };
-    }
+  // Origin's own trailer (a commit Origin captured but has no note for).
+  const trailer = message.match(TRAILER_AGENT_RE);
+  if (trailer) {
+    return { agent: agentNamedBy(trailer[1]) || 'ai', confidence: 'high', source: 'backfill-trailer' };
   }
-
-  // Check email patterns
-  for (const pattern of AI_EMAIL_PATTERNS) {
-    if (lowerAuthorEmail.includes(pattern) || lowerCommitterEmail.includes(pattern)) {
-      // noreply alone is medium confidence; specific agent emails are high
-      const isSpecific = pattern !== 'noreply' && pattern !== 'users.noreply.github.com';
-      const agent = detectAgentFromEmail(lowerAuthorEmail + ' ' + lowerCommitterEmail);
-      return {
-        agent,
-        confidence: isSpecific ? 'high' : 'medium',
-        source: 'backfill-email-match',
-      };
-    }
+  // A co-author that is an agent.
+  for (const m of message.matchAll(/^co-authored-by:\s*(.+)$/gim)) {
+    const agent = agentNamedBy(m[1]);
+    if (agent) return { agent, confidence: 'high', source: 'backfill-coauthor' };
   }
-
-  // Co-Authored-By patterns
-  if (lowerMsg.includes('co-authored-by:')) {
-    const coAuthorMatch = message.match(/[Cc]o-[Aa]uthored-[Bb]y:\s*(.+)/);
-    const coAuthor = coAuthorMatch?.[1]?.toLowerCase() || '';
-    if (coAuthor.includes('claude') || coAuthor.includes('anthropic')) {
-      return { agent: 'claude', confidence: 'high', source: 'backfill-coauthor' };
-    }
-    if (coAuthor.includes('codex') || coAuthor.includes('openai')) {
-      return { agent: 'codex', confidence: 'high', source: 'backfill-coauthor' };
-    }
-    if (coAuthor.includes('copilot') || coAuthor.includes('github')) {
-      return { agent: 'copilot', confidence: 'high', source: 'backfill-coauthor' };
-    }
-    if (coAuthor.includes('gemini') || coAuthor.includes('google')) {
-      return { agent: 'gemini', confidence: 'high', source: 'backfill-coauthor' };
-    }
-    if (coAuthor.includes('cursor')) {
-      return { agent: 'cursor', confidence: 'high', source: 'backfill-coauthor' };
-    }
-    if (coAuthor.includes('noreply') || coAuthor.includes('bot') || coAuthor.includes('ai')) {
-      return { agent: 'ai', confidence: 'medium', source: 'backfill-coauthor' };
-    }
-  }
-
-  // Codex default commit message
-  if (message.trim() === '-') {
-    return { agent: 'codex', confidence: 'high', source: 'backfill-pattern' };
-  }
-
-  // Explicit agent mentions
-  if (lowerMsg.includes('generated by gemini') || lowerMsg.includes('gemini:')) {
-    return { agent: 'gemini', confidence: 'high', source: 'backfill-pattern' };
-  }
-  if (lowerMsg.includes('generated by cursor') || lowerMsg.includes('cursor:')) {
-    return { agent: 'cursor', confidence: 'high', source: 'backfill-pattern' };
-  }
-
-  // Origin-Session trailer (already tagged but maybe not in notes)
-  if (lowerMsg.includes('origin-session:')) {
-    return { agent: 'ai', confidence: 'high', source: 'backfill-trailer' };
-  }
-
-  // ── Agent-specific commit message style detection ──
-
-  // Claude: very structured, verbose, em-dashes, detailed explanations
-  const hasConventionalPrefix = CONVENTIONAL_PREFIXES.some(p => lowerSubject.startsWith(p));
-  const hasEmDash = message.includes('—') || message.includes('--');
-  const isVerboseSubject = commit.subject.length > 60;
-  const hasDetailedBody = message.split('\n').filter(l => l.trim()).length > 3;
-  const claudeSignals = [hasConventionalPrefix, hasEmDash, isVerboseSubject, hasDetailedBody]
-    .filter(Boolean).length;
-  if (claudeSignals >= 3) {
-    return { agent: 'claude', confidence: 'medium', source: 'backfill-style-claude' };
-  }
-
-  // Codex: short messages, often lowercase, generic "Update/Add file" patterns,
-  // maintenance-style commits, "small" in subject, marker/note patterns
-  const isShort = commit.subject.length < 45;
-  const isGenericUpdate = /^(update|add|fix|remove|delete|change|modify|edit|expand|refine|mention)\s+/i.test(commit.subject);
-  const startsLowercase = /^[a-z]/.test(commit.subject);
-  const hasMarkerOrNote = /\b(marker|note|maintenance|guidance|follow-?up)\b/i.test(commit.subject);
-  const hasSmallWord = /\bsmall\b/i.test(commit.subject);
-  const codexSignals = [isShort, isGenericUpdate, startsLowercase, hasMarkerOrNote, hasSmallWord].filter(Boolean).length;
-  if (codexSignals >= 2) {
-    return { agent: 'codex', confidence: 'medium', source: 'backfill-style-codex' };
-  }
-
-  // Gemini: often adds emoji, uses "✨", "🔧" etc in commit messages
-  if (/[\u{1F300}-\u{1F9FF}]/u.test(message)) {
-    return { agent: 'gemini', confidence: 'medium', source: 'backfill-style-gemini' };
-  }
-
-  // Generic AI: conventional prefix + AI phrases
-  const hasAiPhrase = AI_PHRASES.some(p => lowerMsg.includes(p));
-  if (hasConventionalPrefix && hasAiPhrase) {
-    return { agent: 'ai', confidence: 'medium', source: 'backfill-pattern' };
-  }
-
-  return null;
-}
-
-function detectAgentFromEmail(emails: string): string {
-  const lower = emails.toLowerCase();
-  if (lower.includes('cursor')) return 'cursor';
-  if (lower.includes('codex')) return 'codex';
-  if (lower.includes('claude') || lower.includes('anthropic')) return 'claude';
-  if (lower.includes('copilot')) return 'copilot';
-  if (lower.includes('devin')) return 'devin';
-  if (lower.includes('aider')) return 'aider';
-  return 'ai';
-}
-
-// ─── Strategy 3: Code Style Heuristics ────────────────────────────────────
-
-function detectFromCodeStyle(
-  diff: string,
-): { agent: string; confidence: Confidence; source: string } | null {
-  if (!diff) return null;
-
-  const addedLines: string[] = [];
-  for (const line of diff.split('\n')) {
-    if (line.startsWith('+') && !line.startsWith('+++')) {
-      addedLines.push(line.slice(1));
-    }
-  }
-
-  if (addedLines.length < 5) return null;
-
-  let commentLines = 0;
-  let docstringCount = 0;
-  let todoImplement = 0;
-  let thoroughErrorHandling = 0;
-
-  for (const line of addedLines) {
-    const trimmed = line.trim();
-    // Count comments
-    if (trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('*') || trimmed.startsWith('/*')) {
-      commentLines++;
-    }
-    // Docstrings
-    if (trimmed.startsWith('/**') || trimmed.startsWith('"""') || trimmed.startsWith("'''")) {
-      docstringCount++;
-    }
-    // TODO/FIXME referencing implement/add
-    if (/\b(TODO|FIXME)\b/i.test(trimmed) && /\b(implement|add)\b/i.test(trimmed)) {
-      todoImplement++;
-    }
-    // Thorough error handling
-    if (/\b(try|catch|finally|except|rescue|throw|raise)\b/.test(trimmed)) {
-      thoroughErrorHandling++;
-    }
-  }
-
-  const commentRatio = commentLines / addedLines.length;
-
-  // Excessive comments (>30%) is a signal
-  let signals = 0;
-  if (commentRatio > 0.3) signals++;
-  if (docstringCount >= 3) signals++;
-  if (todoImplement >= 2) signals++;
-  if (thoroughErrorHandling >= 3 && thoroughErrorHandling / addedLines.length > 0.1) signals++;
-
-  if (signals >= 2) {
-    return { agent: 'ai', confidence: 'low', source: 'backfill-heuristic' };
-  }
-
-  return null;
-}
-
-// ─── Strategy 4: File Change Patterns ──────────────────────────────────────
-
-function detectFromFileChanges(
-  repoPath: string,
-  sha: string,
-): { agent: string; confidence: Confidence; source: string } | null {
-  if (!HEX.test(sha)) return null;
-  try {
-    const files = git(
-      ['diff-tree', '--no-commit-id', '--name-only', '-r', sha],
-      gitOpts(repoPath),
-    ).trim().split('\n').filter(Boolean);
-
-    if (files.length === 0) return null;
-
-    // If commit only touches .cursor/ files → Cursor
-    if (files.every(f => f.startsWith('.cursor/'))) {
-      return { agent: 'cursor', confidence: 'high', source: 'backfill-file-pattern' };
-    }
-    // If commit only touches .claude/ files → Claude
-    if (files.every(f => f.startsWith('.claude/'))) {
-      return { agent: 'claude', confidence: 'high', source: 'backfill-file-pattern' };
-    }
-    // If commit touches .cursor/ alongside other files → likely Cursor session
-    if (files.some(f => f.startsWith('.cursor/'))) {
-      return { agent: 'cursor', confidence: 'medium', source: 'backfill-file-pattern' };
-    }
-    // If commit touches .claude/ alongside other files → likely Claude session
-    if (files.some(f => f.startsWith('.claude/'))) {
-      return { agent: 'claude', confidence: 'medium', source: 'backfill-file-pattern' };
-    }
-    // If commit touches .codex/ files → Codex
-    if (files.some(f => f.startsWith('.codex/'))) {
-      return { agent: 'codex', confidence: 'medium', source: 'backfill-file-pattern' };
-    }
-  } catch { /* git command failed */ }
-
+  // The author or committer IS an agent (a bot account, an agent's identity).
+  const author = agentNamedBy(`${commit.authorName} <${commit.authorEmail}>`)
+    || agentNamedBy(`${commit.committerName} <${commit.committerEmail}>`);
+  if (author) return { agent: author, confidence: 'high', source: 'backfill-author-match' };
+  // Codex Cloud's default message.
+  if (message.trim() === '-') return { agent: 'codex', confidence: 'medium', source: 'backfill-pattern' };
+  const said = message.match(/\bgenerated (?:by|with) (claude|codex|copilot|cursor|gemini)\b/i);
+  if (said) return { agent: said[1].toLowerCase(), confidence: 'medium', source: 'backfill-pattern' };
   return null;
 }
 
 // ─── Apply Tags ───────────────────────────────────────────────────────────
 
+/** The record slug for a backfill agent label. */
+const RECORD_AGENT: Record<string, string> = { claude: 'claude-code' };
+
+function hasNote(repoPath: string, sha: string): boolean {
+  return gitDetailed(['notes', '--ref=origin', 'show', sha], gitOpts(repoPath)).status === 0;
+}
+
 function applyBackfillNote(repoPath: string, result: BackfillResult): boolean {
   if (!HEX.test(result.sha)) return false;
+  // Never over a note that is already there — it was written by a session,
+  // which knows more than any of this.
+  if (hasNote(repoPath, result.sha)) return false;
   try {
-    const noteData = JSON.stringify({
-      sessionId: `backfill-${result.sha.slice(0, 8)}`,
-      agent: result.agent,
-      agentName: result.agent,
-      model: 'unknown',
-      confidence: result.confidence,
-      source: result.source,
+    const envelope: Record<string, unknown> = {
+      // Read by this CLI (isAiNote: an agent and no session).
+      origin: {
+        agent: result.agent,
+        agentName: result.agent,
+        model: 'unknown',
+        confidence: result.confidence,
+        source: result.source,
+        backfill: true,
+      },
+    };
+    // Read by the server: a validated v1 record with `inferred` evidence sets
+    // the commit's agent and, carrying no session, never makes one up.
+    const built = buildInferredAttributionRecord(result.sha, RECORD_AGENT[result.agent] || result.agent, {
+      recordedAt: new Date(),
+      producerVersion: cliVersion(),
     });
+    if (built.record) envelope[ATTRIBUTION_RECORD_NOTE_KEY] = built.record;
     git(
-      ['notes', '--ref=origin', 'add', '-f', '-m', noteData, result.sha],
+      ['notes', '--ref=origin', 'add', '-m', JSON.stringify(envelope), result.sha],
       // `notes add` builds an object, so it needs a git identity exactly like
       // `commit-tree` — and this caller swallows its error, so a box without
       // one fails every write silently. Defers to real config (see
@@ -696,6 +451,7 @@ export async function backfillCommand(opts: {
   days?: string;
   dryRun?: boolean;
   apply?: boolean;
+  push?: boolean;
   minConfidence?: string;
 }) {
   const repoPath = getGitRoot(process.cwd());
@@ -713,7 +469,6 @@ export async function backfillCommand(opts: {
     process.exit(1);
   }
 
-  // Get commits
   const commits = getCommitsInRange(repoPath, days);
   if (commits.length === 0) {
     console.log(chalk.gray(`No commits found in the last ${days} days.`));
@@ -722,17 +477,20 @@ export async function backfillCommand(opts: {
 
   console.log(`Scanning ${chalk.bold(String(commits.length))} commits...\n`);
 
-  // Scan Origin session state files + origin-sessions branch (Strategy 0)
+  const home = process.env.HOME || process.env.USERPROFILE || homedir();
+  const sinceMs = Date.now() - (days + 1) * 86_400_000;
+  let localEmail = '';
+  try { localEmail = git(['config', 'user.email'], gitOpts(repoPath)).trim().toLowerCase(); } catch { /* none set */ }
+
+  // Strategy 0: Origin's own session records (state files + the session store).
   const originSessions = [
     ...scanOriginSessions(repoPath),
     ...scanOriginSessionsBranch(repoPath),
   ];
-
-  // Scan local agent history (Strategy 1)
-  const sessions = [
-    ...scanClaudeSessions(repoPath),
-    ...scanCursorSessions(repoPath),
-    ...scanCodexSessions(repoPath),
+  // Strategy 1: the agents' own transcripts on this machine.
+  const transcriptCommits = [
+    ...scanClaudeTranscripts(repoPath, home, sinceMs),
+    ...scanCodexTranscripts(repoPath, home, sinceMs),
   ];
 
   const aiResults: BackfillResult[] = [];
@@ -742,107 +500,37 @@ export async function backfillCommand(opts: {
     // Skip already-tagged commits
     if (isAiCommit(repoPath, commit.sha)) continue;
 
+    const base = {
+      sha: commit.sha,
+      date: commit.date.split('T')[0],
+      subject: commit.subject,
+      authorName: commit.authorName,
+      authorEmail: commit.authorEmail,
+    };
     let result: BackfillResult | null = null;
 
-    // Strategy 0: Origin session state match (absolute highest confidence)
-    const originMatch = matchOriginSession(commit, originSessions);
+    const originMatch = matchOriginSession(commit, originSessions, localEmail);
     if (originMatch) {
       result = {
-        sha: commit.sha,
-        date: commit.date.split('T')[0],
-        subject: commit.subject,
-        agent: originMatch.agent,
-        confidence: 'high',
-        source: 'backfill-origin-session',
-        authorName: commit.authorName,
-        authorEmail: commit.authorEmail,
+        ...base,
+        agent: originMatch.session.agent,
+        confidence: originMatch.bySha ? 'high' : 'medium',
+        source: originMatch.bySha ? 'backfill-origin-session' : 'backfill-origin-session-window',
       };
     }
 
-    // Strategy 1: Local agent history session match
     if (!result) {
-      const sessionMatch = matchSessionToCommit(commit, sessions);
-      if (sessionMatch) {
-        result = {
-          sha: commit.sha,
-          date: commit.date.split('T')[0],
-          subject: commit.subject,
-          agent: sessionMatch.agent,
-          confidence: 'high',
-          source: 'backfill-session-match',
-          authorName: commit.authorName,
-          authorEmail: commit.authorEmail,
-        };
-      }
+      const t = matchTranscriptCommit(commit, transcriptCommits);
+      if (t) result = { ...base, agent: t.agent, confidence: 'high', source: 'backfill-transcript' };
     }
 
-    // Strategy 2: Commit message patterns
     if (!result) {
-      const message = getCommitMessage(repoPath, commit.sha);
-      const msgResult = detectFromCommitMessage(commit, message);
-      if (msgResult) {
-        result = {
-          sha: commit.sha,
-          date: commit.date.split('T')[0],
-          subject: commit.subject,
-          agent: msgResult.agent,
-          confidence: msgResult.confidence,
-          source: msgResult.source,
-          authorName: commit.authorName,
-          authorEmail: commit.authorEmail,
-        };
-      }
+      const msgResult = detectFromCommitMessage(commit, getCommitMessage(repoPath, commit.sha));
+      if (msgResult) result = { ...base, ...msgResult };
     }
 
-    // Strategy 4: File change patterns
-    if (!result) {
-      const fileResult = detectFromFileChanges(repoPath, commit.sha);
-      if (fileResult) {
-        result = {
-          sha: commit.sha,
-          date: commit.date.split('T')[0],
-          subject: commit.subject,
-          agent: fileResult.agent,
-          confidence: fileResult.confidence,
-          source: fileResult.source,
-          authorName: commit.authorName,
-          authorEmail: commit.authorEmail,
-        };
-      }
-    }
-
-    // Strategy 3: Code style heuristics (lowest confidence)
-    if (!result) {
-      const diff = getCommitDiff(repoPath, commit.sha);
-      const styleResult = detectFromCodeStyle(diff);
-      if (styleResult) {
-        result = {
-          sha: commit.sha,
-          date: commit.date.split('T')[0],
-          subject: commit.subject,
-          agent: styleResult.agent,
-          confidence: styleResult.confidence,
-          source: styleResult.source,
-          authorName: commit.authorName,
-          authorEmail: commit.authorEmail,
-        };
-      }
-    }
-
-    if (result) {
-      aiResults.push(result);
-    } else {
-      humanResults.push({
-        sha: commit.sha,
-        date: commit.date.split('T')[0],
-        subject: commit.subject,
-        agent: 'Human',
-        confidence: 'low',
-        source: '',
-        authorName: commit.authorName,
-        authorEmail: commit.authorEmail,
-      });
-    }
+    if (result) aiResults.push(result);
+    else humanResults.push({ ...base, agent: 'Human', confidence: 'low', source: '' });
   }
 
   // Display results
@@ -863,15 +551,13 @@ export async function backfillCommand(opts: {
     }
   }
 
-  // Summary
   const highCount = aiResults.filter(r => r.confidence === 'high').length;
   const mediumCount = aiResults.filter(r => r.confidence === 'medium').length;
   const lowCount = aiResults.filter(r => r.confidence === 'low').length;
 
   console.log(`\nFound: ${chalk.cyan(String(aiResults.length))} AI commits (${highCount} high confidence, ${mediumCount} medium, ${lowCount} low)`);
-  console.log(`       ${chalk.gray(String(humanResults.length))} human commits`);
+  console.log(`       ${chalk.gray(String(humanResults.length))} with no agent evidence`);
 
-  // Filter by confidence for tagging
   const taggable = aiResults.filter(r => meetsMinConfidence(r.confidence, minConfidence));
 
   if (taggable.length === 0) {
@@ -880,11 +566,10 @@ export async function backfillCommand(opts: {
   }
 
   if (!apply) {
-    console.log(chalk.gray(`\nDry run — ${taggable.length} commits would be tagged. Use --apply to write git notes.`));
+    console.log(chalk.gray(`\nDry run — ${taggable.length} commits would be tagged. Use --apply to write git notes${opts.push ? '' : ', and --push to send them to the remote'}.`));
     return;
   }
 
-  // Apply mode: prompt for confirmation
   const answer = await promptUser(`\nApply tags to ${taggable.length} commits? [y/N] `);
   if (answer !== 'y' && answer !== 'yes') {
     console.log(chalk.gray('Aborted.'));
@@ -892,18 +577,29 @@ export async function backfillCommand(opts: {
   }
 
   let tagged = 0;
-  let failed = 0;
+  let skipped = 0;
   for (const r of taggable) {
-    if (applyBackfillNote(repoPath, r)) {
-      tagged++;
-    } else {
-      failed++;
-    }
+    if (applyBackfillNote(repoPath, r)) tagged++;
+    else skipped++;
   }
 
   console.log(chalk.green(`\nTagged ${tagged} commits with AI attribution notes.`));
-  if (failed > 0) {
-    console.log(chalk.yellow(`${failed} commits failed to tag.`));
+  if (skipped > 0) {
+    console.log(chalk.yellow(`${skipped} commits were not tagged (a note was already there, or the write failed).`));
+  }
+
+  // Notes live in this clone until they reach the remote; Origin reads them
+  // from there on the next sync of the repo.
+  if (opts.push && tagged > 0) {
+    const remote = resolvePushRemote(repoPath);
+    const pushed = publishAttributionNotes(repoPath, remote, { budgetMs: 60_000 });
+    if (pushed.status === 'pushed') {
+      console.log(chalk.green(`Pushed refs/notes/origin to ${remote}. Origin reads them on the repo's next sync.`));
+    } else {
+      console.log(chalk.yellow(`Could not push the notes: ${JSON.stringify(describePublishResult(pushed))}`));
+    }
+  } else if (tagged > 0) {
+    console.log(chalk.gray('The notes are local. Run again with --push, or `origin push-metadata`, to send them to the remote.'));
   }
 }
 
@@ -932,4 +628,4 @@ function formatConfidence(confidence: Confidence): string {
 }
 
 // Internals exercised by session-file-shape-readers.test.ts. Not a public API.
-export const __testing = { scanOriginSessionsBranch };
+export const __testing = { scanOriginSessionsBranch, scanOriginSessions, matchOriginSession, scanClaudeTranscripts, scanCodexTranscripts, matchTranscriptCommit, applyBackfillNote };

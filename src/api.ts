@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { CAPABILITY_HEADERS, payloadCapabilityHeaders } from './client-capabilities.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -9,6 +10,7 @@ import { debugLog } from './debug-log.js';
 import { isBenchmarkClonePath } from './benchmark-clone.js';
 import { fitSessionUpdateForServer } from './session-update-size.js';
 import { redactSessionPayloadContent } from './captured-diff-redaction.js';
+import { stampObservedAt } from './observed-at.js';
 
 function getConfig() {
   const config = loadConfig();
@@ -128,6 +130,11 @@ function assertFields(res: unknown, label: string, fields: string[]): asserts re
 // warnings, timeouts, and the 401 → auth-status/relogin handling. The duplicate
 // had none of that, which is how it sat at 0.1.0 while the CLI shipped ~40
 // releases.
+/** The payload-capability header of a queue replay; none for a fresh send. */
+function replayHeaders(reqOpts?: { payloadCapabilities?: readonly string[] }): Record<string, string> {
+  return reqOpts?.payloadCapabilities ? payloadCapabilityHeaders(reqOpts.payloadCapabilities) : {};
+}
+
 export async function request(path: string, opts: RequestInit = {}, timeoutMs?: number) {
   const config = getConfig();
   let res: Response;
@@ -140,6 +147,7 @@ export async function request(path: string, opts: RequestInit = {}, timeoutMs?: 
         // Lets the server record this install's CLI version so the web can
         // warn when it's out of date (bake-off runners no-op on a stale CLI).
         'X-Origin-CLI-Version': cliVersion(),
+        ...CAPABILITY_HEADERS,
         ...opts.headers as Record<string, string>,
       },
     }, timeoutMs);
@@ -200,6 +208,8 @@ export const api = {
   getPolicies: () => request('/api/mcp/policies'),
   registerMachine: (data: any) => request('/api/machines', { method: 'POST', body: JSON.stringify(data) }),
   getMachines: () => request('/api/machines'),
+  // Settings → Agents: which agents are installed here and who they are signed in as (agent-setup.ts).
+  reportAgentStatus: (data: unknown) => request('/api/machines/agent-status', { method: 'PUT', body: JSON.stringify(data) }),
   syncRepo: (id: string) => request(`/api/repos/${id}/sync`, { method: 'POST' }),
   getRepos: () => request('/api/repos'),
   // Agent bake-off
@@ -252,6 +262,69 @@ export const api = {
     repoId: string,
     body: { prNumber: number; frames: Array<{ file?: string; line?: number; sha?: string; content?: string }> },
   ) => request(`/api/repos/${repoId}/why/pr-comment`, { method: 'POST', body: JSON.stringify(body) }),
+  // Origin issues (`origin issue start`). The repo id comes from previewRoute,
+  // so these reach the org the repo lives in even when the key was minted in
+  // another (routes/issues.ts re-points a linked key there).
+  // Closed issues whose PR merged, with its merge commit (`origin benchmark replay-tasks`).
+  getIssueReplayCandidates: (repoId: string, ids?: string[] | null) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/issues/replay-candidates${ids && ids.length ? `?ids=${encodeURIComponent(ids.join(','))}` : ''}`),
+  getIssue: (repoId: string, shortId: string) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}`),
+  updateIssue: (repoId: string, shortId: string, data: Record<string, unknown>) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  // An agent run on the issue, for the Start dialog's live status: reported
+  // when the agent launches, and again when it exits.
+  startIssueRun: (repoId: string, shortId: string, data: { agent: string; branch: string | null; background: boolean; hostname: string }, timeoutMs = 5000) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}/runs`, { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
+  endIssueRun: (repoId: string, shortId: string, runId: string, data: { status: 'done' | 'failed' | 'timed_out'; exitCode: number; detail: string | null }, timeoutMs = 5000) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}/runs/${encodeURIComponent(runId)}`, { method: 'PATCH', body: JSON.stringify(data) }, timeoutMs),
+  // Reviewer agents (`origin review run`, review-run.ts): the run's packet —
+  // the PR, the reviewer and the whole prompt — then its start here and its
+  // findings. Same auth as everything else: the person's own key.
+  getReviewRunPacket: (runId: string) =>
+    request(`/api/reviewers/runs/${encodeURIComponent(runId)}/packet`),
+  // The team's Anthropic / OpenAI key for this run (Agents page), as the
+  // environment variables the agent reads; `env` is empty when there is none.
+  getReviewRunCredentials: (runId: string, timeoutMs = 10000) =>
+    request(`/api/reviewers/runs/${encodeURIComponent(runId)}/credentials`, {}, timeoutMs),
+  startReviewRun: (runId: string, data: { hostname: string; branch: string; headSha: string | null }, timeoutMs = 10000) =>
+    request(`/api/reviewers/runs/${encodeURIComponent(runId)}/start`, { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
+  reportReviewRun: (runId: string, data: Record<string, unknown>, timeoutMs = 30000) =>
+    request(`/api/reviewers/runs/${encodeURIComponent(runId)}/result`, { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
+  // `origin review runner`: claim the oldest queued run for one of this
+  // machine's checkouts (owner/name full names); null when nothing is queued.
+  claimReviewRun: (data: { machineId: string; repos: string[] }, timeoutMs = 10000) =>
+    request('/api/reviewers/runner/claim', { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
+  // Local CI (commands/local-ci.ts): claim a repo's queued test command for
+  // one of these checkouts, and report how it went.
+  claimLocalCheck: (data: { machineId: string; repos: string[] }, timeoutMs = 10000) =>
+    request('/api/ci/local/claim', { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
+  reportLocalCheck: (checkId: string, data: Record<string, unknown>, timeoutMs = 30000) =>
+    request(`/api/ci/local/${encodeURIComponent(checkId)}/result`, { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
+  // A run still going, with what it is waiting on (a cloud task's id): `origin issue cloud`.
+  noteIssueRun: (repoId: string, shortId: string, runId: string, detail: string, timeoutMs = 5000) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}/runs/${encodeURIComponent(runId)}`, { method: 'PATCH', body: JSON.stringify({ status: 'started', detail }) }, timeoutMs),
+  // What `origin issue start`'s pre-start pass asked (and any answers typed in the terminal),
+  // and a person's answer to an agent's question (`origin issue answer`).
+  postIssueQuestions: (repoId: string, shortId: string, data: { questions: Array<{ question: string; answer: string | null }>; agent: string }, timeoutMs = 10000) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}/questions`, { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
+  answerIssueQuestion: (repoId: string, shortId: string, data: { answer: string; id?: string | null }) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}/answer`, { method: 'POST', body: JSON.stringify(data) }),
+  // The live task queue (docs/LIVE_TASK_QUEUE.md) for `origin issue run-epic`:
+  // the next open story under an epic, by priority — `{ task: null }` when
+  // none is left — and the claim's renewal, release and finish by its token.
+  claimNextIssue: (repoId: string, data: { parentId?: string; type?: string; agent: string; host: string; leaseSeconds?: number }, timeoutMs = 10000) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/issues/claim-next`, { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
+  renewIssueClaim: (repoId: string, shortId: string, claimToken: string, leaseSeconds?: number, timeoutMs = 10000) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}/renew`, { method: 'POST', body: JSON.stringify({ claimToken, ...(leaseSeconds ? { leaseSeconds } : {}) }) }, timeoutMs),
+  releaseIssueClaim: (repoId: string, shortId: string, claimToken: string, timeoutMs = 10000) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}/release`, { method: 'POST', body: JSON.stringify({ claimToken }) }, timeoutMs),
+  finishIssueClaim: (repoId: string, shortId: string, data: { claimToken: string; resolution: string; commitSha?: string | null; prUrl?: string | null }, timeoutMs = 10000) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}/finish`, { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
+  // runId: the run to put the session on; null = the launch reported none; omitted = unknown.
+  // claim: the session also takes the task in the live queue (an older server ignores it).
+  linkIssueSession: (repoId: string, shortId: string, sessionId: string, timeoutMs?: number, runId?: string | null) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}/link`, { method: 'POST', body: JSON.stringify({ sessionId, ...(runId === undefined ? {} : { runId }), claim: true, host: os.hostname() }) }, timeoutMs),
   getWhoami: () => request('/api/mcp/whoami'),
   // Where a session started in this repo would land. Captures are routed by
   // repo, not by the org the key was minted in, so `origin status` asks
@@ -305,6 +378,8 @@ export const api = {
     branch?: string;
     hostname?: string;
     additionalRepoPaths?: string[];
+    /** Each extra git root with its remote, so the server can tell a RhodeCode repo (OR-17). Servers that predate it read additionalRepoPaths. */
+    additionalRepos?: Array<{ repoPath: string; repoUrl?: string }>;
     agentSessionId?: string;
     /**
      * The `local-<uuid>` id this session ran under before it reached the server.
@@ -312,6 +387,8 @@ export const api = {
      * so they resolve to this session.
      */
     localSessionId?: string;
+    /** agentSessionId of the session that started this one (Claude desktop subsession). */
+    spawnedFromAgentSessionId?: string;
     importedFromPreviousAccount?: boolean;
     // The WORKING root (a linked worktree's own dir), as opposed to repoPath,
     // which is canonical. The server keeps it so the session page can tell a
@@ -346,7 +423,11 @@ export const api = {
   // payload each poll it then fails at exactly 8s forever (see
   // timeoutForPayload). Hooks deliberately keep the default fast-fail: they are
   // killed at ~10s, and a kill skips the durable-retry enqueue entirely.
-  updateSession: async (id: string, data: any, reqOpts?: { timeoutMs?: number }) => {
+  // `reqOpts.payloadCapabilities` — set only by a queue replay: what the
+  // queued payload was built with, which may be less than this binary can do
+  // (client-capabilities.ts).
+  updateSession: async (id: string, data: any, reqOpts?: { timeoutMs?: number; payloadCapabilities?: readonly string[] }) => {
+    stampObservedAt(data);
     // Every producer's PATCH passes here, so this is where a turn's editsJson
     // is held to the server's size limit (see session-update-size.ts).
     // It is also where a turn's diffs and editsJson lose their secrets — the
@@ -354,7 +435,7 @@ export const api = {
     const fitted = fitSessionUpdateForServer(redactSessionPayloadContent(data), (fit) => debugLog('api', 'editsJson fitted to the server limit', { sessionId: id, ...fit }));
     const res = await request(
       `/api/mcp/session/${id}`,
-      { method: 'PATCH', body: JSON.stringify(fitted) },
+      { method: 'PATCH', body: JSON.stringify(fitted), headers: replayHeaders(reqOpts) },
       reqOpts?.timeoutMs,
     );
     assertObj(res, 'updateSession');
@@ -373,8 +454,9 @@ export const api = {
     assertObj(res, 'importDevinDesktopSessions');
     return res as { imported?: number; skipped?: number; healed?: number; noRepo?: number; disabled?: boolean };
   },
-  endSession: async (data: any) => {
-    const res = await request('/api/mcp/session/end', { method: 'POST', body: JSON.stringify(redactSessionPayloadContent(data)) });
+  endSession: async (data: any, reqOpts?: { payloadCapabilities?: readonly string[] }) => {
+    stampObservedAt(data);
+    const res = await request('/api/mcp/session/end', { method: 'POST', body: JSON.stringify(redactSessionPayloadContent(data)), headers: replayHeaders(reqOpts) });
     assertObj(res, 'endSession');
     return res;
   },
@@ -385,10 +467,10 @@ export const api = {
   // can stop waiting and show the result. Mirrors the heartbeat's reportResult;
   // exposed here because the transcript watcher also executes these commands
   // (watcher-captured sessions run no heartbeat).
-  reportCommandResult: (id: string, type: string, status: 'success' | 'failed', message: string) =>
+  reportCommandResult: (id: string, type: string, status: 'success' | 'failed', message: string, extra?: Record<string, unknown>) =>
     request(`/api/mcp/session/${id}/command-result`, {
       method: 'POST',
-      body: JSON.stringify({ type, status, message }),
+      body: JSON.stringify({ type, status, message, ...extra }),
     }),
   // Live, scope-filtered policy set for a running session — lets pre-tool-use
   // pick up a policy created AFTER the session started (the heartbeat refreshes
@@ -425,6 +507,8 @@ export const api = {
       sha: string;
       message?: string;
       author?: string;
+      /** The git author's email — the server matches people by it. */
+      authorEmail?: string;
       branch?: string | null;
       filesChanged?: string[];
       additions?: number;
@@ -443,7 +527,7 @@ export const api = {
       // — git's totals — instead of counting a text that is known short.
       diffTruncated?: boolean;
     }>;
-  }, reqOpts?: { timeoutMs?: number }) => {
+  }, reqOpts?: { timeoutMs?: number; payloadCapabilities?: readonly string[] }) => {
     // Every producer (post-commit, history sync, backfill, queue replay) goes
     // through here: a benchmark clone's commits are a copy of another repo's
     // and are never sent. Answered as "nothing unknown" so the history sync
@@ -452,14 +536,15 @@ export const api = {
       debugLog('api', 'commit ingest skipped — benchmark clone', { repoPath: data.repoPath, commits: data.commits.length });
       return { ingested: 0, skipped: 'benchmark-clone', unknownShas: [] as string[] };
     }
-    const res = await request('/api/mcp/commits/ingest', { method: 'POST', body: JSON.stringify(data) }, reqOpts?.timeoutMs);
+    const res = await request('/api/mcp/commits/ingest', { method: 'POST', body: JSON.stringify(data), headers: replayHeaders(reqOpts) }, reqOpts?.timeoutMs);
     assertObj(res, 'ingestCommits');
     return res;
   },
-  attachRepo: async (id: string, repoPath: string) => {
+  attachRepo: async (id: string, repoPath: string, repoUrl?: string) => {
     const res = await request(`/api/mcp/session/${id}/attach-repo`, {
       method: 'POST',
-      body: JSON.stringify({ repoPath }),
+      // repoUrl lets the server recognise a RhodeCode repo (OR-17); older servers ignore it.
+      body: JSON.stringify(repoUrl ? { repoPath, repoUrl } : { repoPath }),
     });
     assertObj(res, 'attachRepo');
     return res;

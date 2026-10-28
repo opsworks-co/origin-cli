@@ -61,6 +61,17 @@ export function defaultBranchRef(repoPath: string): string | null {
  * anything", which is not the question.
  */
 function closingWorkHasLanded(repoPath: string, branchRef: string, closure: TodoClosure): boolean {
+  // A pull request named as having done it: its merge is on the branch when a
+  // commit there says so — a squash's "(#24)" subject, or a merge commit's
+  // "Merge pull request #24 ".
+  for (const pr of (closure.prs || []).slice(0, 10)) {
+    if (!Number.isInteger(pr) || pr <= 0) continue;
+    for (const needle of [`(#${pr})`, `Merge pull request #${pr} `]) {
+      const hit = gitOrNull(['log', branchRef, '--fixed-strings', '--grep', needle, '--format=%H', '-1'],
+        { cwd: repoPath, timeoutMs: 10_000 });
+      if (hit && hit.trim()) return true;
+    }
+  }
   for (const sha of (closure.shas || []).slice(0, 20)) {
     if (!/^[0-9a-f]{7,40}$/i.test(sha)) continue;
     // `--is-ancestor` answers in the EXIT CODE and prints nothing — 0 yes, 1 no,
@@ -120,6 +131,29 @@ export function matchTodoForClosure(
 }
 
 /**
+ * The evidence a closing marker names for work that was ALREADY done — the
+ * session itself changed nothing, so it has no commit of its own to land:
+ *   [Origin: Closes] e2069d70 — already done in #24
+ *   [Origin: Closes] e2069d70 already fixed by 1a2b3c4d
+ * Shas are hex tokens of 7–40 characters after the TODO's own id (which is
+ * hex too, and leads); pull requests are `#N`, `PR N` or `pull/N`. The
+ * default branch still decides: these only count once they are on it.
+ */
+export function closureEvidence(marker: string, todoId?: string): { shas: string[]; prs: number[] } {
+  const text = (marker || '').trim();
+  // Drop the leading id token (the TODO named), so it is not read as a sha.
+  const lead = text.match(/^[`'"]?([0-9a-f]{4,16})[`'"]?\b/i)?.[1]?.toLowerCase();
+  const rest = lead && (!todoId || todoId.toLowerCase().startsWith(lead)) ? text.slice(text.toLowerCase().indexOf(lead) + lead.length) : text;
+  const shas = [...new Set([...rest.matchAll(/\b([0-9a-f]{7,40})\b/gi)]
+    .map((m) => m[1].toLowerCase())
+    // A sha has a letter and a digit; a bare number or word is not one.
+    .filter((s) => /[a-f]/.test(s) && /\d/.test(s)))].slice(0, 10);
+  const prs = [...new Set([...rest.matchAll(/(?:#|\bPR\s*#?|\bpull\/)(\d{1,7})\b/gi)].map((m) => Number(m[1])))]
+    .filter((n) => n > 0).slice(0, 10);
+  return { shas, prs };
+}
+
+/**
  * Record a session's `[Origin: Closes]` claims as PENDING closures.
  *
  * Pending on purpose: at session end the work is in a working tree or on a
@@ -151,11 +185,16 @@ export function recordPendingClosures(opts: {
     const key = todoClosureKey(hit.text);
     if (claimed.has(key)) continue;
     claimed.add(key);
+    // The session's own commits, plus any the marker names as having
+    // already done the work.
+    const evidence = closureEvidence(marker, hit.id);
+    const shas = [...new Set([...(opts.shas || []), ...evidence.shas])].slice(0, 20);
     closures.push({
       key, id: hit.id, text: hit.text,
       reason: (opts.reason?.trim() || marker).slice(0, 300),
       at, state: 'pending', sessionId,
-      ...(opts.shas?.length ? { shas: opts.shas.slice(0, 20) } : {}),
+      ...(shas.length ? { shas } : {}),
+      ...(evidence.prs.length ? { prs: evidence.prs } : {}),
     });
   }
   if (closures.length === 0) return 0;

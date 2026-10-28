@@ -92,13 +92,15 @@ export function run(file: string, args: string[], opts: RunOptions = {}): string
 
 /**
  * Like `run`, but returns { stdout, stderr, status } and never throws on
- * non-zero exit. Use when you need the exit code or stderr.
+ * non-zero exit. Use when you need the exit code or stderr. `timedOut` is set
+ * only when the child was killed because `timeoutMs` ran out — not for a
+ * missing executable, an overflowing `maxBuffer` or a non-zero exit.
  */
 export function runDetailed(
   file: string,
   args: string[],
   opts: RunOptions = {},
-): { stdout: string; stderr: string; status: number } {
+): { stdout: string; stderr: string; status: number; timedOut?: true } {
   const spawnOpts: SpawnSyncOptions = {
     cwd: opts.cwd,
     timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -109,11 +111,12 @@ export function runDetailed(
     windowsHide: true, // see buildOptions — no console window per child on Windows
   };
   const r = spawnSync(file, args, spawnOpts);
-  return {
+  const out = {
     stdout: typeof r.stdout === 'string' ? r.stdout : (r.stdout?.toString?.() ?? ''),
     stderr: typeof r.stderr === 'string' ? r.stderr : (r.stderr?.toString?.() ?? ''),
     status: r.status ?? -1,
   };
+  return (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ? { ...out, timedOut: true } : out;
 }
 
 // ─── Executable lookup (cross-platform) ─────────────────────────────────────
@@ -261,7 +264,7 @@ export function git(args: string[], opts: RunOptions = {}): string {
 export function gitDetailed(
   args: string[],
   opts: RunOptions = {},
-): { stdout: string; stderr: string; status: number } {
+): { stdout: string; stderr: string; status: number; timedOut?: true } {
   return runDetailed('git', withSubmoduleVisibility(args), opts);
 }
 

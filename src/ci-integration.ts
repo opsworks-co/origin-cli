@@ -297,10 +297,10 @@ jobs:
           node-version: '20'
 
       - name: Install Origin CLI
-        run: npm install -g @origin/cli
+        run: npm install -g https://getorigin.io/cli/origin-cli-latest.tgz
 
       - name: Login to Origin
-        run: origin login --token \${{ secrets.ORIGIN_API_KEY }}
+        run: origin login --key \${{ secrets.ORIGIN_API_KEY }}
 
       - name: Attribution Check
         run: |
@@ -332,7 +332,7 @@ jobs:
           node-version: '20'
 
       - name: Install Origin CLI
-        run: npm install -g @origin/cli
+        run: npm install -g https://getorigin.io/cli/origin-cli-latest.tgz
 
       - name: Fetch the pull request's original commits and the attribution notes
         run: |

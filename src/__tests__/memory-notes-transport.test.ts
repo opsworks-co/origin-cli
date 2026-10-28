@@ -29,6 +29,7 @@ import {
   MEMORY_NOTES_FETCH_REFSPECS,
   NOTES_FETCH_REFSPEC,
   ORIGIN_NOTES_GLOB_REFSPEC,
+  type MemoryPushReport,
 } from '../git-notes.js';
 
 let tmpRoot: string;
@@ -243,11 +244,44 @@ describe('memory notes transport', () => {
     expect(readMemory(bob).sessions.map((s) => s.sessionId)).toEqual(['a1']);
   });
 
-  it('does not push memory by default — no repo or machine config is metadata only', () => {
+  // Memory has its own switch now, on by default; prompt text keeps its
+  // opt-in, so what goes out without it carries none.
+  it('pushes memory by default, with prompt text stripped from entries written before', () => {
     fs.rmSync(path.join(alice, '.origin.json'));
+    writeMemory(alice, [
+      session('a1', '2026-08-01T01:00:00.000Z', { intent: ['rewrite the billing engine before the acquisition call'], summary: 'rewrite the billing engine before the acquisition call', decisions: ['kept the old table'] }),
+      session('a2', '2026-08-01T02:00:00.000Z', { intent: ['ship the export'], summary: 'Added CSV export' }),
+    ]);
+    expect(pushMemoryNotes(alice, 'origin')).toBe(true);
+    expect(git(alice, 'ls-remote', 'origin', 'refs/notes/*')).toContain('origin-memory');
+
+    git(bob, 'fetch', 'origin', 'refs/notes/origin-memory:refs/notes/origin-memory');
+    const pushed = readMemory(bob);
+    expect(JSON.stringify(pushed)).not.toMatch(/acquisition call|ship the export/);
+    const [a1, a2] = pushed.sessions;
+    expect(a1.summary).toBe('No summary');        // it was the prompt fallback
+    expect(a2.summary).toBe('Added CSV export');   // the agent's own summary stays
+    expect(a1.decisions).toEqual(['kept the old table']);
+    expect(pushed.sessions.every((e: any) => e.promptTextWithheld === true && !('intent' in e))).toBe(true);
+  });
+
+  it('notesPushMemory: false keeps memory on the machine, in the repo or machine-wide', () => {
+    fs.writeFileSync(path.join(alice, '.origin.json'), JSON.stringify({ notesPushMemory: false }));
     writeMemory(alice, [session('a1')]);
-    pushMemoryNotes(alice, 'origin');
+    expect(pushMemoryNotes(alice, 'origin')).toBe(false);
+    fs.rmSync(path.join(alice, '.origin.json'));
+    fs.mkdirSync(path.dirname(machineConfig), { recursive: true });
+    fs.writeFileSync(machineConfig, JSON.stringify({ notesPushMemory: false }));
+    clearConfigCache();
+    expect(pushMemoryNotes(alice, 'origin')).toBe(false);
     expect(git(alice, 'ls-remote', 'origin', 'refs/notes/*')).not.toContain('origin-memory');
+  });
+
+  it('with prompt text on, memory goes out as written', () => {
+    writeMemory(alice, [session('a1', '2026-08-01T01:00:00.000Z', { intent: ['rewrite the billing engine'] })]);
+    pushMemoryNotes(alice, 'origin');
+    git(bob, 'fetch', 'origin', 'refs/notes/origin-memory:refs/notes/origin-memory');
+    expect(readMemory(bob).sessions[0].intent).toEqual(['rewrite the billing engine']);
   });
 
   it('only a literal boolean true opts in', () => {
@@ -288,5 +322,29 @@ describe('memory notes transport', () => {
   it('is a quiet no-op when there is no memory to push', () => {
     expect(() => pushMemoryNotes(alice, 'origin')).not.toThrow();
     expect(git(alice, 'ls-remote', 'origin', 'refs/notes/*')).not.toContain('origin-memory');
+  });
+
+  // `origin sync` has to tell "nothing to send" and "the remote said no" apart
+  // from a push that landed — both used to print a gray line that read as fine.
+  it('reports a clone with no memory as zero local refs, not as a push', () => {
+    const report: MemoryPushReport = {};
+    expect(pushMemoryNotes(alice, 'origin', report)).toBe(true);
+    expect(report).toEqual({ localRefs: 0 });
+  });
+
+  it('reports the remote\'s reason when it refuses the push', () => {
+    const hook = path.join(upstream, 'hooks', 'pre-receive');
+    fs.writeFileSync(hook, '#!/bin/sh\necho "notes refs are not allowed here" >&2\nexit 1\n', { mode: 0o755 });
+    // A global core.hooksPath (Origin's own, on a dev box) would hide this dir.
+    git(upstream, 'config', 'core.hooksPath', path.join(upstream, 'hooks'));
+    writeMemory(alice, [session('a1')]);
+
+    const report: MemoryPushReport = {};
+    expect(pushMemoryNotes(alice, 'origin', report)).toBe(false);
+    expect(report.localRefs).toBe(1);
+    // The host's own words, not the retry's "couldn't find remote ref".
+    expect(report.error).toMatch(/notes refs are not allowed here/);
+    expect(report.error).toMatch(/remote rejected/);
+    expect(report.error).not.toMatch(/couldn't find remote ref|failed to push some refs/);
   });
 });

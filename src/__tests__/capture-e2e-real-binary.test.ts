@@ -426,8 +426,19 @@ describe.skipIf(!haveDist)('capture end to end through the built binary', () => 
     await run('user-prompt-submit', { prompt: 'thanks, what did we do?' });
     lines.push(JSON.stringify({ type: 'assistant', timestamp: new Date().toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: 'We changed the greeting, left a note and tidied the readme.' }] } }));
     fs.writeFileSync(transcript, lines.join('\n') + '\n');
+    const stopFiredAt = Date.now();
+    const sentBefore = stopPayloads().length;
     const stop = await run('stop', { stop_hook_active: false });
     expect(stop.code, stop.stderr).toBe(0);
+    // The Stop's session update says when the turn ended by the CLI's clock,
+    // so a late or replayed delivery still stamps the real activity time
+    // (d403e181: a `claude -p` arm whose Stop landed after its end read 26 s).
+    const stamped = stopPayloads().slice(sentBefore).map((b) => b.lastActivityAt).filter(Boolean);
+    expect(stamped.length, 'no Stop update carried lastActivityAt').toBeGreaterThan(0);
+    for (const at of stamped) {
+      expect(Date.parse(at)).toBeGreaterThanOrEqual(stopFiredAt);
+      expect(Date.parse(at)).toBeLessThanOrEqual(Date.now());
+    }
 
     const rows = lastRows();
     const t3 = rows.find((r: any) => r.promptIndex === 2);

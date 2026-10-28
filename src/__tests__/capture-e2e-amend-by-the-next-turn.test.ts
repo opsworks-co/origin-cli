@@ -7,16 +7,22 @@
 //
 // The review of #1724 reported this shape as a defect: with the fold keeping
 // the EARLIEST attestation per survivor, turn 1 would own the amended commit,
-// be measured against it and be billed infuse.py, and turn 2 would have made no
-// commit. That reproduces only on a hand-built state. Through the hooks it does
-// not: post-commit attests the amended sha to the running turn and corrects an
-// attestation that names another one ("attested turn disagreed with the
-// attributed one"), so the amended commit ends up on turn 2, turn 1 is declined
-// by the commit-patch pass and keeps the row its own Stop sent.
+// be measured against it and be billed infuse.py. On 2026-09-18 this pinned
+// the opposite — post-commit "corrected" the fold and the amended commit ended
+// up on turn 2 — because turn 1 kept its ledger row either way.
 //
-// Nothing pinned that, and the fold's "keep the earliest" rule is one reorder
-// away from undoing it. This asserts what reaches the server, at the amending
-// Stop AND the one after it.
+// Session 597b3d88 (2026-10-21) showed where that breaks: a turn whose row is
+// the COMMIT PATCHES of its branches is re-derived from `commitTurns` at every
+// Stop, so re-tagging the amended commit took the whole branch (2,755 lines)
+// away from turn 1 and credited it to the turn that amended five lines of it.
+// See capture-e2e-amend-of-another-turns-branch.test.ts for that shape.
+//
+// The contract now, through git's own hook order (post-commit, then
+// post-rewrite): the amended commit stays attested to turn 1; turn 1 is
+// measured on the commit it made (shelf.py, never infuse.py); turn 2 is sent
+// its delta on the commit it amended (infuse.py) and no commit stamp of its
+// own — the server reads its work as committed by the commit that holds it.
+// Asserted at the amending Stop AND the one after it.
 //
 // Requires `dist/`. POSIX-only, like the harness it is modelled on
 // (capture-e2e-amend-real-binary.test.ts).
@@ -263,28 +269,46 @@ describe.skipIf(!haveDist)('a commit amended by the NEXT turn, end to end throug
       .flatMap((b) => (Array.isArray(b?.gitCapture?.rewrittenCommits) ? b.gitCapture.rewrittenCommits : []));
     expect(pairs, 'no rewrittenCommits pair reached the API').toContainEqual({ from: original, to: amended });
 
-    // Turn 1, as last sent: its own commit's work, never the amendment.
-    const first = lastRow(0);
-    expect([...first.filesChanged].sort(), 'the first turn was billed the amendment').toEqual(['shelf.py']);
-    expect(first.diff).not.toContain('infuse.py');
-    expect([first.linesAdded, first.linesRemoved]).toEqual([1, 0]);
-
-    // Turn 2: the amendment, and a commit to its name.
-    const second = lastRow(1);
-    expect(second, 'no row for the amending turn').toBeTruthy();
-    expect([...second.filesChanged].sort()).toEqual(['infuse.py']);
-    expect([second.linesAdded, second.linesRemoved]).toEqual([1, 0]);
-    expect(second.commitSha, 'the amending turn made no commit').toBe(amended);
-    // Turn 1's stamp, when it carries one, is never the superseded original.
-    if (first.commitSha) expect(first.commitSha, 'a row stamped with a superseded sha').toBe(amended);
-
-    // The amended commit is attested to the turn that made it.
     const stateDir = path.join(repo, '.git');
     const stateFile = fs.readdirSync(stateDir).find((f) => /^origin-session.*\.json$/.test(f));
     expect(stateFile, 'no session state file in .git').toBeTruthy();
     const state = JSON.parse(fs.readFileSync(path.join(stateDir, stateFile!), 'utf-8'));
+    const first = lastRow(0);
+    const second = lastRow(1);
+    const log = fs.readFileSync(path.join(os.homedir(), '.origin', 'hooks.log'), 'utf-8');
+    // What the hooks decided, for a failure to explain itself: the scratch
+    // home is gone by the time anyone reads the report.
+    const why = JSON.stringify({
+      rows: { first: { files: first?.filesChanged, lines: [first?.linesAdded, first?.linesRemoved], commitSha: first?.commitSha },
+        second: { files: second?.filesChanged, lines: [second?.linesAdded, second?.linesRemoved], commitSha: second?.commitSha } },
+      commits: { original: original.slice(0, 8), amended: amended.slice(0, 8) },
+      commitTurns: state.commitTurns, preSquash: state.preSquashCommitTurns, folded: state.foldedCommitTurns,
+      log: log.split('\n').filter((l) => /\[(stop|post-commit|post-rewrite)\]/.test(l) && /amend|delta|declined|replaced by|attested|recorded|pairs|window|payload/.test(l)).slice(-80),
+    }, null, 2);
+
+    // Turn 1, as last sent: its own commit's work, never the amendment.
+    expect([...first.filesChanged].sort(), why).toEqual(['shelf.py']);
+    expect(first.diff, why).not.toContain('infuse.py');
+    expect([first.linesAdded, first.linesRemoved], why).toEqual([1, 0]);
+    // …stamped with the commit as it stands, never the superseded original.
+    expect(first.commitSha, why).toBe(amended);
+
+    // Turn 2: its delta on the commit it amended, and no commit of its own.
+    expect(second, 'no row for the amending turn').toBeTruthy();
+    expect([...second.filesChanged].sort(), why).toEqual(['infuse.py']);
+    expect([second.linesAdded, second.linesRemoved], why).toEqual([1, 0]);
+    expect(second.diff, why).toContain('+from shelf import JARS');
+    expect(second.commitSha ?? null, why).toBeNull();
+
+    // The amended commit is attested to the turn that made the commit it
+    // replaced; that commit is recorded beside the fold as turn 1's own, with
+    // the turn that amended it.
+    const turnOne = state.promptTurnIds?.[0];
     const turnTwo = state.promptTurnIds?.[1];
-    expect(turnTwo, 'the amending turn has no id').toBeTruthy();
-    expect((state.commitTurns || []).map((c: any) => [c.sha, c.turnId])).toEqual([[amended, turnTwo]]);
-  }, 180_000 * WINDOWS_SLOWDOWN);
+    expect(turnOne && turnTwo, 'a turn has no id').toBeTruthy();
+    expect((state.commitTurns || []).map((c: any) => [c.sha, c.turnId]), why).toEqual([[amended, turnOne]]);
+    expect((state.preSquashCommitTurns || []).map((c: any) => [c.sha, c.turnId, c.squash, c.amendedBy]), why)
+      .toContainEqual([original, turnOne, amended, turnTwo]);
+    expect(log, why).not.toContain('attested turn disagreed with the attributed one — correcting');
+  }, 360_000 * WINDOWS_SLOWDOWN);
 });

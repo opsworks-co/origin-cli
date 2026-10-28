@@ -23,7 +23,7 @@ import fs from 'fs';
 import { changedFilesBetween, readFileAtRev, gitIgnoredFiles } from './git-capture.js';
 import { debugLog } from './debug-log.js';
 import { listActiveSessions, type SessionState } from './session-state.js';
-import { detectLiveContention, contentionCoversTurn, readContentionTaint } from './checkout-contention.js';
+import { detectLiveContention, contentionCoversTurn, noteContendersBack, readContentionTaint } from './checkout-contention.js';
 import type { TurnObservation } from './resolve-turn.js';
 
 /**
@@ -200,10 +200,13 @@ export function stateLedgerIsContended(
       fs.writeFileSync(`${journalPath}.contended`, JSON.stringify({ at: Date.now(), peers: report.peers.map((p) => p.sessionId) }));
     } catch { /* current collision still declines this capture */ }
     // Record them as rivals too, so the next prompt can see them go and later
-    // turns are released — the taint alone has no one to clear it.
+    // turns are released — the taint alone has no one to clear it. A rival
+    // stamped gone that is back covers turns again (noteContendersBack): the
+    // turn window reads only these marks.
     const ids = new Set(state.contendingSessionIds || []);
     for (const p of report.peers) ids.add(p.sessionId);
     state.contendingSessionIds = [...ids];
+    noteContendersBack(state, report.peers.map((p) => p.sessionId));
     return true;
   } catch { return false; }
 }

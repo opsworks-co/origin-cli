@@ -118,6 +118,42 @@ describe('rewrite and session writer on one commit, in either order', () => {
     expect(mergeSessionNoteOverRewrite(null, payload, 'e'.repeat(40), opts)).toBe(payload);
     expect(mergeSessionNoteOverRewrite(foreign, payload, 'e'.repeat(40), opts)).toBe(payload);
   });
+
+  // OR-45 checkpoint 6.3: the session's own line decision never costs the
+  // carried sessions their contributions.
+  it('a fresh degraded line result downgrades only the writing session; a carried session stays', () => {
+    const a = commit('a.txt');
+    annotate(a, 'sess-b', 'codex', 'gpt-5');
+    const t = commit('t.txt');
+    preserveAttributionOnRewrite(repo, a, t);
+    const withLines = (decision: unknown) => {
+      const d = sessionData('sess-s') as any;
+      d.attribution = { ...d.attribution, lineClaims: { [t]: decision } };
+      return d;
+    };
+    const files = [{ path: 't.txt', ranges: [{ start_line: 1, end_line: 1 }] }];
+    const own = () => readNote(t).attribution_record.contributions.find((c: any) => c.session.id === 'sess-s');
+
+    writeGitNotes(repo, [t], withLines({ status: 'proven', files }));
+    expect(sessionsOn(t)).toEqual(['sess-b', 'sess-s']);
+    expect(own().files).toEqual(files);
+    expect(readNote(t).attribution_record.attribution_level).toBe('line');
+
+    // Not re-checked: the lines stay, and so does sess-b.
+    writeGitNotes(repo, [t], withLines({ status: 'not_evaluated' }));
+    expect(sessionsOn(t)).toEqual(['sess-b', 'sess-s']);
+    expect(own().files).toEqual(files);
+
+    // Re-checked and failed: sess-s is commit-level now, sess-b is untouched.
+    const carried = readNote(t).attribution_record.contributions.find((c: any) => c.session.id === 'sess-b');
+    writeGitNotes(repo, [t], withLines({ status: 'degraded', reason: 'replay_mismatch' }));
+    const n = readNote(t);
+    expect(sessionsOn(t)).toEqual(['sess-b', 'sess-s']);
+    expect(own()).not.toHaveProperty('files');
+    expect(n.attribution_record.attribution_level).toBe('commit');
+    expect(n.attribution_record.contributions.find((c: any) => c.session.id === 'sess-b')).toEqual(carried);
+    expect(readRecord(n.attribution_record).status).toBe('exact');
+  });
 });
 
 // ─── The lock: owned, never bypassed, never stolen (review №2 P1-1, №3 P2) ───
@@ -276,7 +312,10 @@ describe('note-write lock liveness: pid reuse, leases, bounded waits', () => {
     const r = preserveAttributionBatch(repo, [{ oldSha: a, newSha: t }], { lock: { waitMs: 200, attempts: 1, processStart: () => 'an-unrelated-process' } });
     expect(r).toMatchObject({ written: 1, failed: 0 });
     expect(sessionsOn(t)).toEqual(['sess-b']);
-    expect(observeNoteLock(lockDir())).toMatchObject({ epoch: 2, state: 'free' });
+    // Recovered by a newer epoch, then released; how many short lock phases the rewrite took is not the point.
+    const view = observeNoteLock(lockDir());
+    expect(view.state).toBe('free');
+    expect(view.epoch).toBeGreaterThan(1);
   });
 
   it.skipIf(isWindows)('the reviewer\'s case: a stale e1 of pid 1, read with the real process probe, does not block writers', () => {
@@ -500,10 +539,12 @@ describe('legacy readers of a squash aggregate', () => {
     }), t);
     expect(isAiCommit(repo, t)).toBe(true);
     expect(getSessionContextForCommit(repo, t)).toBeNull();
+    // A legacy aggregate is commit-level evidence: [AI~], never a proven line
+    // (OR-46 CR1), and with several sessions no owner is picked.
     const lines = getLineBlame(repo, 'squashed.txt');
     expect(lines.length).toBeGreaterThan(0);
     for (const l of lines) {
-      expect(l.authorship).toBe('ai');
+      expect(l).toMatchObject({ authorship: 'ai', confidence: 'commit' });
       expect(l.sessionId).toBeUndefined();
       expect(l.agent).toBeUndefined();
       expect(l.model).toBeUndefined();
@@ -517,7 +558,10 @@ describe('legacy readers of a squash aggregate', () => {
     }), t);
     expect(isAiCommit(repo, t)).toBe(true);
     expect(getSessionContextForCommit(repo, t)).toMatchObject({ sessionId: 'sess-a', agent: 'codex', model: 'gpt-5' });
-    expect(getLineBlame(repo, 'squashed.txt')[0]).toMatchObject({ authorship: 'ai', sessionId: 'sess-a', agent: 'codex' });
+    // A single-session aggregate names its session at commit level only:
+    // [AI~], not a line claim (OR-46 CR1).
+    const line = getLineBlame(repo, 'squashed.txt')[0];
+    expect(line).toMatchObject({ authorship: 'ai', confidence: 'commit', sessionId: 'sess-a', agent: 'codex', model: 'gpt-5' });
   });
 
   it('an aggregate that names no session is not an AI claim', () => {
@@ -590,6 +634,10 @@ describe.skipIf(isWindows || !fs.existsSync(BIN))('active session: amend and reb
     };
     execFileSync('git', ['init', '-q', '-b', 'main', repo], { env });
     hgit('config', 'core.hooksPath', hooks);
+    // annotate() runs through the suite's git env, not `env`, so the repo needs
+    // an identity of its own (a CI runner has none to guess).
+    hgit('config', 'user.email', 'e2e@example.com');
+    hgit('config', 'user.name', 'E2E');
     transcript = path.join(tmp, 'transcript.jsonl');
     fs.writeFileSync(transcript, '');
     const earlier = new Date(Date.now() - 60 * 60_000).toISOString();

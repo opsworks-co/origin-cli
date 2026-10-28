@@ -147,6 +147,109 @@ describe.skipIf(!haveDist)('both commit paths embed the v1 record', () => {
     expectRecordFor(sha, 'claude-code');
   }, 120_000 * WINDOWS_SLOWDOWN);
 
+  // OR-45: the same hooks carry proven commit-coordinate lines.
+  describe('line claims (Claude Code)', () => {
+    const appPy = () => path.join(repo, 'app.py');
+    const edit = { old_string: 'print("old")', new_string: 'print("new")' };
+
+    function transcriptToolUse(id: string, name: string, input: Record<string, unknown>) {
+      lines.push(JSON.stringify({ type: 'assistant', timestamp: new Date().toISOString(), message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] } }));
+      lines.push(JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } }));
+      fs.writeFileSync(transcript, lines.join('\n') + '\n');
+    }
+    /** The agent's Edit; PostToolUse fires only when `live` (the ledger), as it does unless the hook is lost. */
+    async function agentEdits(id: string, live: boolean) {
+      const input = { file_path: appPy(), ...edit };
+      expect((await run('pre-tool-use', { tool_name: 'Edit', tool_input: input, tool_use_id: id })).code).toBe(0);
+      fs.writeFileSync(appPy(), 'print("new")\n');
+      transcriptToolUse(id, 'Edit', input);
+      if (live) {
+        const post = await run('post-tool-use', { tool_name: 'Edit', tool_input: input, tool_use_id: id, tool_response: { filePath: appPy(), success: true } });
+        expect(post.code, post.stderr).toBe(0);
+      }
+    }
+    /** The agent commits through its shell; the generated hook runs post-commit. */
+    async function agentCommits(id: string): Promise<string> {
+      const command = 'git commit -qam "fix greeting"';
+      expect((await run('pre-tool-use', { tool_name: 'Bash', tool_input: { command }, tool_use_id: id })).code).toBe(0);
+      git(['commit', '-qam', 'fix greeting']);
+      const sha = git(['rev-parse', 'HEAD']);
+      const pc = await spawnBin(['hooks', 'git-post-commit'], '', { ORIGIN_COMMIT_SHA: sha });
+      expect(pc.code, pc.stderr).toBe(0);
+      transcriptToolUse(id, 'Bash', { command });
+      await run('post-tool-use', { tool_name: 'Bash', tool_input: { command }, tool_use_id: id, tool_response: { stdout: '', stderr: '' } });
+      return sha;
+    }
+    const files = (sha: string) => note(sha)?.attribution_record?.contributions?.[0]?.files;
+
+    it('post-commit writes the line record, and SessionEnd rewriting the note keeps it', async () => {
+      sessionId = 'e2e-v1-lines-claude-1234';
+      agent = 'claude-code';
+      await setupRepo();
+      await startTurn('change the greeting and commit');
+      await agentEdits('toolu_edit_1', true);
+      const sha = await agentCommits('toolu_commit_1');
+
+      const afterCommit = expectRecordFor(sha, 'claude-code');
+      expect(afterCommit.attribution_level).toBe('line');
+      expect(files(sha)).toEqual([{ path: 'app.py', ranges: [expect.objectContaining({ start_line: 1, end_line: 1 })] }]);
+
+      await stop();
+      const end = await run('session-end', { reason: 'exit' });
+      expect(end.code, end.stderr).toBe(0);
+      const afterEnd = expectRecordFor(sha, 'claude-code');
+      expect(afterEnd.attribution_level).toBe('line');
+      expect(files(sha)).toEqual(afterCommit.contributions[0].files);
+    }, 180_000 * WINDOWS_SLOWDOWN);
+
+    it('a live ledger post-commit cannot prepare still gets a valid commit-level note (checkpoint 6.6)', async () => {
+      sessionId = 'e2e-v1-lines-bad-ledger-1234';
+      agent = 'claude-code';
+      await setupRepo();
+      await startTurn('change the greeting and commit');
+      await agentEdits('toolu_edit_1', true);
+      // Corrupt the ledger in every copy of the session state: preparing the
+      // line-claim captures now throws inside post-commit.
+      const stateFiles = [
+        ...fs.readdirSync(path.join(repo, '.git')).filter((f) => /^origin-session.*\.json$/.test(f)).map((f) => path.join(repo, '.git', f)),
+        ...(() => {
+          const dir = path.join(os.homedir(), '.origin', 'sessions');
+          try { return fs.readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => path.join(dir, f)); } catch { return []; }
+        })(),
+      ];
+      let corrupted = 0;
+      for (const file of stateFiles) {
+        const state = JSON.parse(fs.readFileSync(file, 'utf-8'));
+        if (state?.sessionId === undefined || !Array.isArray(state.liveEdits) || state.liveEdits.length === 0) continue;
+        state.liveEdits = 'corrupt';
+        fs.writeFileSync(file, JSON.stringify(state));
+        corrupted++;
+      }
+      expect(corrupted).toBeGreaterThan(0);
+      const sha = await agentCommits('toolu_commit_1');
+      const record = expectRecordFor(sha, 'claude-code');
+      expect(record.attribution_level).toBe('commit');
+      expect(record.contributions[0]).not.toHaveProperty('files');
+    }, 180_000 * WINDOWS_SLOWDOWN);
+
+    it('a commit-level note from post-commit is upgraded to lines by Stop once the capture exists', async () => {
+      sessionId = 'e2e-v1-lines-upgrade-1234';
+      agent = 'claude-code';
+      await setupRepo();
+      await startTurn('change the greeting and commit');
+      // PostToolUse never fired: post-commit has no capture to project.
+      await agentEdits('toolu_edit_1', false);
+      const sha = await agentCommits('toolu_commit_1');
+      expect(expectRecordFor(sha, 'claude-code').attribution_level).toBe('commit');
+
+      // Stop reads the transcript capture and rewrites the note with the lines.
+      await stop();
+      const record = expectRecordFor(sha, 'claude-code');
+      expect(record.attribution_level).toBe('line');
+      expect(files(sha)).toEqual([{ path: 'app.py', ranges: [expect.objectContaining({ start_line: 1, end_line: 1 })] }]);
+    }, 180_000 * WINDOWS_SLOWDOWN);
+  });
+
   for (const recoveringAgent of ['claude-code', 'gemini']) {
     it(`recovery path (${recoveringAgent}): Stop notes a commit that ran no git hook`, async () => {
       sessionId = `e2e-v1-stop-${recoveringAgent}-1234`;

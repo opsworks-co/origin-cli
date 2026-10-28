@@ -28,7 +28,12 @@ describe('the local CI lock', () => {
     // Stands in for ci-local.sh: alive for ~1.5 s, its pid in the lock. NOT
     // this process's child, as the real one is not: a child that exits stays
     // a zombie (still "alive" to kill -0) until this blocked thread reaps it.
-    const pid = Number(execFileSync('sh', ['-c', 'sleep 1.5 >/dev/null 2>&1 & echo $!'], { encoding: 'utf-8' }).trim());
+    // A node grandchild, not `sh -c 'sleep & echo $!'`: on Windows that $! is
+    // Git Bash's own pid, which no Windows call knows.
+    const pid = Number(execFileSync(process.execPath, ['-e', [
+      "const c = require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1500)'], { detached: true, stdio: 'ignore' });",
+      'console.log(c.pid); c.unref();',
+    ].join('\n')], { encoding: 'utf-8' }).trim());
     fs.writeFileSync(localCiLockPath(home), `${pid}\n`);
     expect(localCiHolder(home)).toBe(pid);
 

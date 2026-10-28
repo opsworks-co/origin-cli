@@ -179,31 +179,46 @@ export function windowsNotifyScript(title: string, body: string): string {
 }
 
 /**
- * Best-effort desktop notification. macOS: osascript; Linux: notify-send;
- * Windows: a PowerShell tray balloon. Fire-and-forget — never throws, never
- * blocks the caller (the heartbeat tick must stay fast).
+ * The command that shows a desktop notification on `platform`, as execFile
+ * argv — never a shell string. macOS: osascript, title/body as AppleScript
+ * string literals (backslash and double quote escaped, so text can't end the
+ * literal); Linux: notify-send, title/body as plain arguments; Windows: a
+ * PowerShell tray balloon (windowsNotifyScript). Null on anything else.
+ */
+export function desktopNotificationCommand(
+  title: string,
+  body: string,
+  platform: NodeJS.Platform = process.platform,
+): { file: string; args: string[]; opts: { timeout: number; windowsHide?: boolean } } | null {
+  const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  if (platform === 'darwin') {
+    return { file: 'osascript', args: ['-e', `display notification "${esc(body)}" with title "${esc(title)}"`], opts: { timeout: 5000 } };
+  }
+  if (platform === 'linux') {
+    // `--` so a title that starts with "-" is never read as an option.
+    return { file: 'notify-send', args: ['--', title, body], opts: { timeout: 5000 } };
+  }
+  if (platform === 'win32') {
+    // -NoProfile so a slow or broken user profile can't stall the heartbeat.
+    // windowsHide so no console window flashes on top of the user's work.
+    return {
+      file: 'powershell',
+      args: ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', windowsNotifyScript(title, body)],
+      opts: { timeout: 8000, windowsHide: true },
+    };
+  }
+  return null;
+}
+
+/**
+ * Best-effort desktop notification (desktopNotificationCommand). Fire-and-
+ * forget — never throws, never blocks the caller (the heartbeat tick must stay
+ * fast).
  */
 export function sendDesktopNotification(title: string, body: string): void {
   try {
-    const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    if (process.platform === 'darwin') {
-      execFile(
-        'osascript',
-        ['-e', `display notification "${esc(body)}" with title "${esc(title)}"`],
-        { timeout: 5000 },
-        () => { /* best effort */ },
-      );
-    } else if (process.platform === 'linux') {
-      execFile('notify-send', [title, body], { timeout: 5000 }, () => { /* best effort */ });
-    } else if (process.platform === 'win32') {
-      // -NoProfile so a slow or broken user profile can't stall the heartbeat.
-      // windowsHide so no console window flashes on top of the user's work.
-      execFile(
-        'powershell',
-        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', windowsNotifyScript(title, body)],
-        { timeout: 8000, windowsHide: true },
-        () => { /* best effort */ },
-      );
-    }
+    const cmd = desktopNotificationCommand(title, body);
+    if (!cmd) return;
+    execFile(cmd.file, cmd.args, cmd.opts, () => { /* best effort */ });
   } catch { /* never let a notification failure surface */ }
 }

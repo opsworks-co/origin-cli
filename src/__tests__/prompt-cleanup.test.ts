@@ -253,6 +253,31 @@ describe('cleanPrompt — system-injected envelope filtering', () => {
     expect(parseTranscript(file).prompts).toEqual(['fix the last prompt capture']);
   });
 
+  it('drops a Cursor <dynamic_tool_catalog> dump, closed or clipped, and keeps a user_query beside it', () => {
+    // Cursor baton 31b35b6d: after a summary Cursor injected a 10 KB
+    // `<dynamic_tool_catalog>` (prose preamble + <dynamic_tool_namespaces>)
+    // followed by <hooks_context> as one user-role entry; it became turn 9.
+    const catalog = [
+      '<dynamic_tool_catalog>',
+      'These dynamic tool namespaces were available when this conversation started. Availability may have changed, so use `GetDynamicTools` to check current state before calling `CallDynamicTool`.',
+      '',
+      '<dynamic_tool_namespaces>',
+      '<namespace name="cursor-app-control" tools="move_agent_to_root, rename_chat" namespaceUseInstructions="Controls the Cursor application itself." />',
+      '</dynamic_tool_namespaces>',
+      '</dynamic_tool_catalog>',
+    ].join('\n');
+    const hooks = '<hooks_context description="Additional context provided by session hooks.">Origin: Session tracking active</hooks_context>';
+    const file = writeJsonl([
+      { role: 'user', message: { content: [{ type: 'text', text: '<timestamp>Wed</timestamp>\n<user_query>\nhow many rows did you generate\n</user_query>' }] } },
+      { role: 'assistant', message: { content: [{ type: 'text', text: 'about 40' }] } },
+      { role: 'user', message: { content: [{ type: 'text', text: `${catalog}\n${hooks}` }] } },
+      // The hook stores promptText clipped at 1000 chars: no closing tag.
+      { role: 'user', message: { content: [{ type: 'text', text: catalog.slice(0, 200) }] } },
+      { role: 'user', message: { content: [{ type: 'text', text: `${catalog}\n<user_query>edit and commit</user_query>` }] } },
+    ]);
+    expect(parseTranscript(file).prompts).toEqual(['how many rows did you generate', 'edit and commit']);
+  });
+
   it('drops a Cursor compact hooks_context dump, and does not replay the last prompt untagged', () => {
     // Session 593241fe: after compact, Cursor injected Origin's hooks_context
     // as a user-role message and then re-appended the previous sentence

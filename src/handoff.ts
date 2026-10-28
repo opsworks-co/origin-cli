@@ -182,7 +182,12 @@ export function extractTodosFromPrompts(prompts: string[]): string[] {
     // colon-optional, "give me todo list short" became the TODO "list short"
     // and "note that …" became one too — talk ABOUT the list, not an item.
     /\b(?:TODO|FIXME|NOTE):\s*(.+?)(?:\n|$)/gi,
-    /\b(?:TODO|FIXME|NOTE)\s+(.+?)(?:\n|$)/g,
+    // Without a colon the word is a label only where a line starts with it
+    // (after a bullet, number or comment mark). Mid-sentence it is the noun:
+    // "fix closing a TODO when there's nothing to commit" became the TODO
+    // "when there's nothing to commit", and "the new TODO in `list_tasks` …"
+    // became "in `list_tasks` …".
+    /^[ \t]*(?:[-*•][ \t]+|\d+[.)][ \t]+|\/\/[ \t]*|#[ \t]*)?(?:TODO|FIXME|NOTE)[ \t]+(.+?)[ \t]*$/gm,
     // Intent phrasing, but ONLY when anchored to a dev verb, so plain
     // conversational instructions don't leak in.
     new RegExp(String.raw`\b(?:we )?(?:should|need(?:s)? to|have to|still need to) ((?:${TODO_VERB})\s+.+?)(?:\.|,|\n|$)`, 'gi'),

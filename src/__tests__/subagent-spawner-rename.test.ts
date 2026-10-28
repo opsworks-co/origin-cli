@@ -101,8 +101,9 @@ describe('detectRenamedSpawner', () => {
 });
 
 describe('the spawn-tool set is the single source of truth', () => {
-  it('holds both known names', () => {
-    expect([...SUBAGENT_SPAWN_TOOLS].sort()).toEqual(['agent', 'task']);
+  it('holds every known name', () => {
+    // Claude Code's old and current names, and Codex's.
+    expect([...SUBAGENT_SPAWN_TOOLS].sort()).toEqual(['agent', 'spawn_agent', 'task']);
   });
 
   it('hooks.ts matches through the helper, not a hard-coded string', () => {

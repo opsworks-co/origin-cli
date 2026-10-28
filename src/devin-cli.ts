@@ -2,6 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { hasAncestorProcess } from './utils/process-detect.js';
+import { partsField, replyTextPart, replyToolPart, type DisplayPart } from './display-parts.js';
 
 // ── Devin CLI (terminal) transcript capture ──────────────────────────────
 // The Devin CLI — unlike Devin Desktop — writes a PLAINTEXT transcript per
@@ -90,7 +91,7 @@ export function parseDevinCliTranscript(raw: string, sinceIso?: string): DevinCl
   };
 
   const prompts: string[] = [];
-  const turns: Array<{ role: string; content: string }> = [];
+  const turns: Array<{ role: string; content: string; parts?: DisplayPart[] }> = [];
   let toolCalls = 0;
 
   for (const s of d.steps) {
@@ -104,14 +105,14 @@ export function parseDevinCliTranscript(raw: string, sinceIso?: string): DevinCl
       continue;
     }
     // Any non-system, non-user step is the agent (Devin uses source "agent").
-    if (message) turns.push({ role: 'assistant', content: truncate(message) });
+    if (message) turns.push({ role: 'assistant', content: truncate(message), ...partsField([replyTextPart(truncate(message))]) });
     const tcs = Array.isArray(s?.tool_calls) ? s.tool_calls : [];
     for (const tc of tcs) {
       toolCalls++;
       const fn = tc?.function_name || tc?.name || 'tool';
       let args = '';
       try { args = typeof tc?.arguments === 'string' ? tc.arguments : JSON.stringify(tc?.arguments ?? {}); } catch { args = ''; }
-      turns.push({ role: 'assistant', content: `[Tool: ${fn}] ${truncate(args, 500)}` });
+      turns.push({ role: 'assistant', content: `[Tool: ${fn}] ${truncate(args, 500)}`, ...partsField([replyToolPart(fn)]) });
     }
   }
 

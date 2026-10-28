@@ -54,6 +54,11 @@ export interface OriginConfig {
   // (`origin pre-review`, `origin chat`, `origin ask`). Env var
   // ANTHROPIC_API_KEY takes precedence when both are set.
   anthropicApiKey?: string;
+  // Which account the reviewer runs on this machine bill. 'team' (default):
+  // the workspace's API key from the Agents page, when it set one. 'machine':
+  // never that key — the agent runs on this machine's own sign-in (a Claude
+  // or ChatGPT subscription), so reviews stop drawing on API credits.
+  reviewerKey?: 'team' | 'machine';
   agentSlugs?: Record<string, string>; // Per-tool agent slug overrides (e.g. { cursor: 'cursor-frontend' })
   // Publish prompt text through Git: prompt text, summary and markers in
   // refs/notes/origin, the automatic push of memory notes, and the automatic
@@ -65,6 +70,10 @@ export interface OriginConfig {
   // `pushStrategy` decide the origin-sessions destination separately (see
   // sessionBranchPushTarget in prompt-privacy.ts).
   notesIncludePrompts?: boolean;
+  // Push the repo memory notes (refs/notes/origin-memory). Default ON; with
+  // prompt text off they are written without it. `false` keeps memory on this
+  // machine. A boolean in .origin.json wins (memoryPushDecision).
+  notesPushMemory?: boolean;
   keyType?: 'solo' | 'team';       // solo = personal dev key, team = org-managed key
   accountType?: 'developer' | 'org'; // Account type of the key owner
   orgName?: string;                 // Organization name for display
@@ -96,6 +105,11 @@ export interface OriginConfig {
   // even remote-less ones — keep tracking. Managed via `origin ignore repo`.
   // Entries are stored as the user typed them; matching normalizes (~, abs).
   ignoredRepos?: string[];
+  // Opt-in native desktop notifications from the agent hooks: when Claude Code
+  // waits for permission or input (its Notification hook), and when a turn
+  // leaves new commits on a non-default branch (agent-notify.ts). Local only —
+  // no network. `origin config set desktopNotifications true`.
+  desktopNotifications?: boolean;
 }
 
 export interface AgentConfig {
@@ -268,6 +282,7 @@ export interface RepoConfig {
   trackTabCompletions?: boolean;
   secretScan?: boolean;  // Pre-commit secret scanning (default: true)
   notesIncludePrompts?: boolean;  // Publish prompt text through Git; only literal true opts in (default: metadata only)
+  notesPushMemory?: boolean;  // Push the memory notes (default: true; written without prompt text unless notesIncludePrompts)
 }
 
 export function loadRepoConfig(repoPath: string): RepoConfig | null {

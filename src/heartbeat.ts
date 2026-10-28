@@ -12,12 +12,14 @@
 // ---------------------------------------------------------------------------
 
 import fs from 'fs';
+import { CAPABILITY_HEADERS } from './client-capabilities.js';
 import { commitMadeByOpenTurn } from './heartbeat-turn-commit.js';
 import { newCaptureStamp } from './capture-stamp.js';
 import { serverRowForLocalTurn } from './turn-index.js';
 import { promptChangesForSessionEnd } from './session-end-payload.js';
-import { commitLandedInTurn, stopAbandonedTurn, turnIsClosed } from './turn-commit-scope.js';
+import { closedTurnLeftUnsent, commitLandedInTurn, stopAbandonedTurn, turnIsClosed } from './turn-commit-scope.js';
 import { assessRestoreSafety } from './restore-safety.js';
+import { runRestoreTurn, type RestoreTurnCommand } from './restore-turn.js';
 import os from 'os';
 import path from 'path';
 import { execFileSync, spawn } from 'child_process';
@@ -29,9 +31,10 @@ import { changedFilesBetween, createShadowCommit, filesChangedSinceShadow, files
 import { combineApplyableTurnDiff, hasDuplicateFileSections } from './applyable-turn-diff.js';
 import { capDiff } from './diff-budget.js';
 import { applyLedgerToMappings } from './capture-from-ledger.js';
+import { readWorkingFile } from './write-journal-store.js';
 import { preferCommitPatchForCommittedTurns } from './commit-patch-for-committed-turn.js';
 import { preferShadowRangeForTurns } from './prefer-shadow-range.js';
-import { filesClaimedByOtherLiveSessions, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn } from './commands/hooks.js';
+import { diffMeasuredFromGitLeft, filesClaimedByOtherLiveSessions, gitLeftBeforeStatesForTurn, inheritedBaselineForTurn, inheritedBeforeStatesForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn } from './commands/hooks.js';
 import { openTurnNarrowingBase, scopeUncommittedToOpenTurn } from './open-turn-uncommitted-scope.js';
 import { readJournalEntries, journalPathsForTag } from './write-journal-watch.js';
 import { ensureInProcessJournal, stateLedgerIsContended } from './ledger-producer.js';
@@ -839,12 +842,20 @@ async function pushInflightDiff(): Promise<void> {
       ignoredFiles: state.repoPath
         ? (files: string[]) => gitIgnoredFiles(state.repoPath as string, files)
         : undefined,
+      readWorkingFile: state.repoPath
+        ? (file: string) => readWorkingFile(state.repoPath as string, file)
+        : undefined,
       changedFilesBetween: state.repoPath
         ? (from: string, to: string) => changedFilesBetween(state.repoPath as string, from, to)
         : undefined,
       inheritedBefore: state.repoPath
         ? (baselineSha: string, localTurn: number) =>
           inheritedBeforeStatesForTurn(state.repoPath as string, state as any, baselineSha, localTurn)
+        : undefined,
+      // …and what a stopped merge or pick left in the files it moved.
+      leftByGit: state.repoPath
+        ? (baselineSha: string | null, localTurn: number) =>
+          gitLeftBeforeStatesForTurn(state.repoPath as string, state as any, baselineSha, localTurn)
         : undefined,
       startDirt: state.repoPath ? startDirtReader(state.repoPath as string) : undefined,
       observe: observer.observe,
@@ -855,6 +866,9 @@ async function pushInflightDiff(): Promise<void> {
       observe: observer.observe,
       windowInheritsCommits: (fromShadow, toShadow, localTurn) => windowInheritsCommitsForTurn(
         repoPath, state as any, fromShadow, toShadow, localTurn,
+      ),
+      remeasureWindow: (localTurn, fromShadow, toShadow, diff) => diffMeasuredFromGitLeft(
+        repoPath, state as any, fromShadow, localTurn, diff, toShadow,
       ),
     });
     // Same pass Stop runs: a committed turn's diff is the commit patch, not
@@ -888,7 +902,7 @@ async function pushInflightDiff(): Promise<void> {
 
     await fetchWithTimeout(`${apiUrl}/api/mcp/session/${sessionId}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey, ...CAPABILITY_HEADERS },
       // Direct fetch, not api.updateSession — so redact the turn's content here.
       body: JSON.stringify(redactSessionPayloadContent({
         promptChanges: [
@@ -1138,7 +1152,7 @@ async function pushInflightCodexState(): Promise<void> {
     if (!stillOwnsSession()) return;
     await fetchWithTimeout(`${apiUrl}/api/mcp/session/${sessionId}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey, ...CAPABILITY_HEADERS },
       body: JSON.stringify({
         prompt: joinedPrompt || undefined,
         transcript: parsed.transcript || undefined,
@@ -1200,18 +1214,92 @@ function runStopForCodexTurnThatHadNone(
   } catch { /* the next tick will not retry: once per turn */ }
 }
 
+/** Local turns this daemon already re-ran a Claude Code Stop for — once each. */
+const claudeStopsRerun = new Set<number>();
+
+/**
+ * Claude Code's Stop closed the last turn on disk and died before sending its
+ * row (closedTurnLeftUnsent). Run the Stop hook again, as Claude Code would
+ * have, so the row, its usage and the session's token totals are sent.
+ */
+function runStopForClaudeTurnLeftUnsent(): void {
+  if (!stateFile) return;
+  let state: {
+    agentSlug?: string; repoPath?: string; lastCwd?: string; transcriptPath?: string;
+    claudeSessionId?: string; agentSessionId?: string; prompts?: string[];
+    stopClosing?: { turn?: number; at?: number } | null; stopSentTurnIndex?: number | null;
+    activeTurn?: { index?: number } | null;
+  };
+  try {
+    state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+  } catch { return; }
+  if ((state.agentSlug || '').toLowerCase() !== 'claude-code') return;
+  if (!state.repoPath || !state.transcriptPath) return;
+  const turn = closedTurnLeftUnsent(state, claudeStopsRerun);
+  if (turn === null) return;
+  claudeStopsRerun.add(turn);
+  const cli = path.join(path.dirname(process.argv[1] || ''), 'index.js');
+  if (!fs.existsSync(cli)) return;
+  debugLog('heartbeat', 'claude-code turn closed but never sent — running Stop for it again', {
+    sessionId, promptIndex: turn, closedAt: new Date(state.stopClosing!.at as number).toISOString(),
+    stopSentTurnIndex: state.stopSentTurnIndex ?? null,
+  });
+  const cwd = state.lastCwd && fs.existsSync(state.lastCwd) ? state.lastCwd : state.repoPath;
+  try {
+    const child = spawn(process.execPath, [cli, 'hooks', 'claude-code', 'stop'], {
+      cwd, detached: true, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true, env: process.env,
+    });
+    child.on('error', () => { /* logged by the hook itself when it runs */ });
+    child.stdin?.end(JSON.stringify({
+      session_id: state.claudeSessionId || state.agentSessionId || undefined,
+      cwd,
+      transcript_path: state.transcriptPath,
+      hook_event_name: 'Stop',
+      stop_hook_active: false,
+    }));
+    child.unref();
+  } catch { /* the next tick will not retry: once per turn */ }
+}
+
 /**
  * Report command execution result back to the dashboard.
  */
-async function reportResult(type: string, status: 'success' | 'failed', message: string) {
+async function reportResult(type: string, status: 'success' | 'failed', message: string, extra?: Record<string, unknown>) {
   if (!isConnected) return;
   try {
     await fetchWithTimeout(`${apiUrl}/api/mcp/session/${sessionId}/command-result`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-      body: JSON.stringify({ type, status, message }),
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey, ...CAPABILITY_HEADERS },
+      body: JSON.stringify({ type, status, message, ...extra }),
     });
   } catch { /* ignore */ }
+}
+
+/**
+ * Handle a turn restore from the dashboard ("Restore to this turn"). Soft makes
+ * a new branch and touches nothing else; Hard resets this branch only on a
+ * clean tree. Never stashes — see restore-turn.ts.
+ */
+async function handleRestoreTurn(command: RestoreTurnCommand) {
+  let repoPath = '';
+  if (stateFile) {
+    try {
+      const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+      repoPath = state.repoPath || '';
+    } catch { /* ignore */ }
+  }
+  const mode = command?.mode === 'hard' ? 'hard' : 'soft';
+  if (!repoPath) {
+    await reportResult('restore-turn', 'failed', 'Could not resolve repo path from session state. Nothing was changed.', { mode });
+    return;
+  }
+  let result;
+  try {
+    result = runRestoreTurn(repoPath, { ...command, sessionId });
+  } catch (err: any) {
+    result = { status: 'failed' as const, mode, message: err?.message || 'Unknown error during restore' };
+  }
+  await reportResult('restore-turn', result.status, result.message, { mode, targetPromptIndex: command?.targetPromptIndex ?? null });
 }
 
 /**
@@ -1484,7 +1572,7 @@ async function endOrphanedSession(takenOverBy: string): Promise<void> {
   try {
     await fetchWithTimeout(`${apiUrl}/api/mcp/session/end`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey, ...CAPABILITY_HEADERS },
       body: JSON.stringify({ sessionId }),
     });
   } catch { /* best effort */ }
@@ -1545,6 +1633,7 @@ async function endSession() {
         headers: {
           'Content-Type': 'application/json',
           'X-API-Key': apiKey,
+          ...CAPABILITY_HEADERS,
         },
         body: JSON.stringify(redactSessionPayloadContent(endPayload)),
       });
@@ -1848,6 +1937,7 @@ async function ping() {
         headers: {
           'Content-Type': 'application/json',
           'X-API-Key': apiKey,
+          ...CAPABILITY_HEADERS,
         },
         body: JSON.stringify({ branch: getCurrentBranch() }),
       });
@@ -2008,6 +2098,10 @@ async function ping() {
       // current. No-op for non-Codex agents (guarded inside).
       await pushInflightCodexState().catch(() => { /* non-fatal */ });
 
+      // A Claude Code turn whose Stop died after closing it gets its Stop run
+      // again, so its row and the session's totals carry its usage.
+      runStopForClaudeTurnLeftUnsent();
+
       // Push live diff for the in-flight prompt so the dashboard shows the
       // change as it happens, instead of staying empty until the next prompt
       // or session end. Fire-and-forget so a slow git diff doesn't delay the
@@ -2020,6 +2114,9 @@ async function ping() {
       }
       if (data.command && data.command.type === 'branch') {
         handleBranch(data.command);
+      }
+      if (data.command && data.command.type === 'restore-turn') {
+        handleRestoreTurn(data.command);
       }
 
       // Self-terminate when the server reports this session terminal. Two tiers:

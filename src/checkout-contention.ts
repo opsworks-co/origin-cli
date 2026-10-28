@@ -45,6 +45,8 @@ export interface PeerSession {
   lastSeenMs?: number;
   /** See `neverRanATurn`. */
   neverRanATurn?: boolean;
+  /** See `peerIdleSinceMs`. */
+  idleSinceMs?: number;
 }
 
 /**
@@ -77,6 +79,58 @@ export function neverRanATurn(state: {
 }
 
 /**
+ * When the peer's last turn closed — only when it provably has none open now.
+ *
+ * Session 9c1b8c40 sat in its worktree RUNNING and idle: last Stop 01:25:32Z,
+ * last own timestamp 01:26:10Z, `activeTurn: null`, never ended. Session
+ * 3cadaee2 took its first prompt in the same tree at 01:32:27Z, six minutes
+ * later — inside PEER_ACTIVE_WINDOW_MS — and recorded it as a rival. A peer
+ * that is never ENDED is never stamped gone, so the mark covered every turn:
+ * the ledger and the turn window declined, and turn 1 shipped only its one
+ * Write-tool file while three shell-written ones (Repos.tsx −360) reached the
+ * session header and no turn (`header_file_unclaimed_by_turns`).
+ *
+ * A peer whose Stop closed its last turn, with nothing opened since, writes
+ * nothing until its next prompt — and that prompt stamps `currentTurnStartedAt`
+ * and `activeTurn`, which bring it straight back. So "closed, and last seen
+ * before our turn began" says it could not have written during our turn.
+ * Anything not provably that shape — an open `activeTurn`, a prompt newer than
+ * the close, a session whose hooks record no close — returns undefined and the
+ * peer still counts.
+ */
+export function peerIdleSinceMs(state: Record<string, unknown>): number | undefined {
+  if (state.activeTurn) return undefined;
+  const ms = (v: unknown) => {
+    const n = typeof v === 'number' ? v : typeof v === 'string' ? Date.parse(v) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  };
+  const closed = ms(state.lastTurnClosedAt) ?? ms(state.lastStopAt);
+  if (closed === undefined) return undefined;
+  const opened = ms(state.currentTurnStartedAt);
+  if (opened !== undefined && opened > closed) return undefined;
+  if (Array.isArray(state.promptSubmittedAt)) {
+    for (const p of state.promptSubmittedAt) {
+      const t = ms(p);
+      if (t !== undefined && t > closed) return undefined;
+    }
+  }
+  return closed;
+}
+
+/**
+ * Was this peer idle for the whole of a turn that began at `turnStartMs`?
+ *
+ * True only when its last turn was closed (peerIdleSinceMs) AND nothing it
+ * recorded is as new as the turn's start. A turn with no known start, or a
+ * peer with no recorded activity, is never idle — unprovable stays a rival.
+ */
+export function peerIdleThroughTurn(p: Pick<PeerSession, 'idleSinceMs' | 'lastSeenMs'>, turnStartMs: number | null | undefined): boolean {
+  if (typeof turnStartMs !== 'number' || !Number.isFinite(turnStartMs)) return false;
+  if (typeof p.idleSinceMs !== 'number' || typeof p.lastSeenMs !== 'number') return false;
+  return p.lastSeenMs < turnStartMs && p.idleSinceMs < turnStartMs;
+}
+
+/**
  * How recently a peer must have been seen to count as sharing the tree.
  *
  * A session that ended, or that has been idle for a long while, is not writing
@@ -97,6 +151,8 @@ export function detectContention(
   workTree: string,
   peers: readonly PeerSession[],
   now: number = Date.now(),
+  /** The turn being captured: a peer idle through all of it is no rival for it. */
+  turnStartMs?: number | null,
 ): ContentionReport {
   const found: ContentionPeer[] = [];
   if (!workTree) return { contested: false, peers: found };
@@ -106,6 +162,7 @@ export function detectContention(
     if (String(p.status || '').toUpperCase() === 'ENDED') continue;
     if (typeof p.lastSeenMs === 'number' && now - p.lastSeenMs > PEER_ACTIVE_WINDOW_MS) continue;
     if (p.neverRanATurn) continue;
+    if (peerIdleThroughTurn(p, turnStartMs)) continue;
 
     // A peer contends only if it writes in the SAME tree. A sibling working in
     // its own worktree of the same repo is not a rival — that separation is
@@ -129,12 +186,17 @@ export function detectContention(
  * permanently ineligible for journal capture.
  */
 export function detectLiveContention(
-  self: Pick<SessionState, 'sessionId'>,
+  self: Pick<SessionState, 'sessionId'> & { currentTurnStartedAt?: number },
   workTree: string,
   sessions: readonly SessionState[] = listActiveSessions(workTree),
   now: number = Date.now(),
 ): ContentionReport {
-  const peers: PeerSession[] = sessions.map((p) => ({
+  return detectContention(self, workTree, peerSessionsFrom(sessions), now, self.currentTurnStartedAt);
+}
+
+/** The contention view of each listed session's state. */
+export function peerSessionsFrom(sessions: readonly SessionState[]): PeerSession[] {
+  return sessions.map((p) => ({
     sessionId: p.sessionId,
     agentSlug: p.agentSlug,
     repoPath: p.repoPath,
@@ -144,8 +206,8 @@ export function detectLiveContention(
       try { return fs.statSync((p as SessionState & { __statePath?: string }).__statePath || '').mtimeMs; } catch { return undefined; }
     })()),
     neverRanATurn: neverRanATurn(p),
+    idleSinceMs: peerIdleSinceMs(p as unknown as Record<string, unknown>),
   }));
-  return detectContention(self, workTree, peers, now);
 }
 
 /**
@@ -266,6 +328,26 @@ export function noteContendersGone(
     if (liveIds.has(id)) continue;
     if (typeof marks.contenderGoneAt?.[id] === 'number') continue;
     (marks.contenderGoneAt ||= {})[id] = observedAt;
+    changed = true;
+  }
+  return changed;
+}
+
+/**
+ * A recorded rival seen contending again: forget that it was gone.
+ *
+ * `contenderGoneAt` is first-observation-wins, so without this a rival that
+ * went idle (or was stamped gone) and later started working again would never
+ * cover a turn again — the turn window reads only these marks. Dropping the
+ * stamp re-covers every turn from the rival's first sighting, which declines
+ * more than strictly needed and never less; the next turn that begins with the
+ * rival idle stamps it gone again. Returns whether anything changed.
+ */
+export function noteContendersBack(marks: ContentionMarks, ids: Iterable<string>): boolean {
+  let changed = false;
+  for (const id of ids) {
+    if (typeof marks.contenderGoneAt?.[id] !== 'number') continue;
+    delete marks.contenderGoneAt[id];
     changed = true;
   }
   return changed;

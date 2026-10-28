@@ -13,18 +13,21 @@ import {
   foldRemoteMemory,
   foldRemoteMemoryBrief,
   reconcileMemoryWithRemote,
+  scrubPromptTextFromMemory,
   reconcileMemoryBriefWithRemote,
 } from './memory.js';
 import {
   ATTRIBUTION_RECORD_NOTE_KEY,
   buildAttributionRecordForCommit,
+  lineClaimDecisionFor,
+  preserveProvenLineClaims,
   type AttributionRecordSource,
 } from './attribution-note.js';
 import { cliVersion } from './cli-version.js';
 import { mergeSessionNoteOverRewrite } from './history-rewrite.js';
 import { withNoteWriteLock, type NoteLease } from './note-write-lock.js';
 import { isPromptHash, provablePromptHash } from './prompt-hash.js';
-import { shouldIncludePromptText } from './prompt-privacy.js';
+import { shouldIncludePromptText, shouldPushMemory } from './prompt-privacy.js';
 import { EDITS_TRUNCATED_MARKER, scrubNoteObject } from './note-scrub.js';
 
 function redact(text: string): string {
@@ -337,7 +340,7 @@ export { scrubNoteObject };
 
 // The prompt-publication policy lives in prompt-privacy.ts; re-exported here,
 // where every caller has always imported it from.
-export { shouldIncludePromptText };
+export { shouldIncludePromptText, shouldPushMemory };
 
 // ─── Notes auto-sync ─────────────────────────────────────────────────────
 //
@@ -661,11 +664,11 @@ export function foldStagedNotes(repoPath: string): boolean {
 }
 
 /**
- * Push Origin's memory notes to `remote`. Gated by the SAME privacy switch
- * that governs attribution notes and the origin-sessions branch
- * (notesIncludePrompts): memory holds session summaries, per-file notes and
- * decision text, so it leaves the machine only for someone who opted in to
- * sharing prompt-derived content. Off by default; local memory is unaffected.
+ * Push Origin's memory notes to `remote`. On by default, under its own switch
+ * (notesPushMemory, memoryPushDecision): memory holds the agents' summaries,
+ * per-file notes, decisions and TODOs. Prompt text keeps its own opt-in —
+ * without it the note is scrubbed of prompt text before it goes
+ * (memoryReadyToLeave).
  *
  * Best-effort and silent — a memory push must never fail a commit or a
  * session end. On a non-fast-forward (another machine pushed since we last
@@ -750,8 +753,47 @@ export function pushAcceptanceNotes(repoPath: string, remote: string): void {
   }
 }
 
-export function pushMemoryNotes(repoPath: string, remote: string): void {
-  if (!shouldIncludePromptText(repoPath)) return;
+/** What a memory push found, for a caller that has to tell the user. */
+export interface MemoryPushReport {
+  /** Memory refs written locally. 0: this clone has none, so nothing went out. */
+  localRefs?: number;
+  /** git's reason the last failed ref did not land (credentials redacted). */
+  error?: string;
+}
+
+/** Why a git push failed, in a line: the host's own `remote:` words and the
+ *  `! [rejected]` line, not git's generic "failed to push some refs". */
+function gitFailureReason(err: any): string {
+  const raw = String(err?.stderr || err?.message || err || '').trim();
+  const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+  const telling = lines.filter((l) => /^remote:\s*\S/.test(l) || l.startsWith('!') || /^fatal:/.test(l));
+  return redactRemoteCredentials((telling.length ? telling : lines.slice(-2)).join(' ')) || 'git push failed';
+}
+
+/**
+ * Push the memory refs. True when every ref written locally is now on the
+ * remote — pushed, or pushed after reconciling with a remote that moved.
+ * `report`, when given, is filled with how many refs there were and why one
+ * failed — True with zero local refs is "nothing to send", not "sent".
+ */
+/**
+ * May the memory notes leave this machine now: the memory switch is on, and —
+ * with prompt text off — no entry still carries any. A scrub that fails stops
+ * the push; memory that was local-only must not go out with prompts in it.
+ */
+export function memoryReadyToLeave(repoPath: string): boolean {
+  if (!shouldPushMemory(repoPath)) return false;
+  if (shouldIncludePromptText(repoPath)) return true;
+  return scrubPromptTextFromMemory(repoPath).ok;
+}
+
+export function pushMemoryNotes(repoPath: string, remote: string, report?: MemoryPushReport): boolean {
+  if (!memoryReadyToLeave(repoPath)) {
+    if (report && shouldPushMemory(repoPath)) report.error = 'could not remove prompt text from the memory note, so it was not pushed';
+    return false;
+  }
+  let ok = true;
+  let localRefs = 0;
   const execOpts = {
     windowsHide: true,
     cwd: repoPath,
@@ -765,10 +807,15 @@ export function pushMemoryNotes(repoPath: string, remote: string): void {
     } catch {
       continue; // nothing written locally for this ref yet
     }
+    localRefs++;
     const push = () => execFileSync('git', ['push', remote, `${local}:${local}`, '--no-verify', '--quiet'], execOpts);
     try {
       push();
-    } catch {
+    } catch (firstErr) {
+      // The push's own refusal is the reason to report: when the remote has
+      // never had the ref, the retry's fetch fails with "couldn't find remote
+      // ref", which says nothing about why the push was turned away.
+      let pushErr: unknown = firstErr;
       // Non-fast-forward: another machine advanced the ref. Re-fetch and
       // RECONCILE — union the payloads, then re-parent our ref onto the remote
       // tip so the retry actually fast-forwards. Folding alone isn't enough:
@@ -778,10 +825,17 @@ export function pushMemoryNotes(repoPath: string, remote: string): void {
         execFileSync('git', ['fetch', '--no-tags', remote, `+${local}:${staging}`], execOpts);
         if (local.endsWith('origin-memory')) reconcileMemoryWithRemote(repoPath, staging);
         else reconcileMemoryBriefWithRemote(repoPath, staging);
-        push();
-      } catch { /* give up quietly — memory stays local until next time */ }
+        try { push(); } catch (retryErr) { pushErr = retryErr; throw retryErr; }
+      } catch {
+        // Still not on the remote. The unpublished marker stays, so the next
+        // write or session start tries again (memory-publish-queue.ts).
+        ok = false;
+        if (report) report.error = gitFailureReason(pushErr);
+      }
     }
   }
+  if (report) report.localRefs = localRefs;
+  return ok;
 }
 
 // ─── SessionStart notes fetch (throttled) ────────────────────────────────
@@ -1249,7 +1303,7 @@ export interface PrePushPublishResult {
 }
 
 export interface PrePushPublishOptions {
-  /** Offer the memory refs. Default: shouldIncludePromptText (the same gate as pushMemoryNotes). */
+  /** Offer the memory refs. Default: memoryReadyToLeave (the same gate as pushMemoryNotes). */
   includeMemory?: boolean;
   /** Non-notes refs to carry in the same push (the origin-sessions branch). */
   extraRefs?: PrePushRef[];
@@ -1379,7 +1433,7 @@ export function publishPrePushRefs(
         { ...process.env, ...identityEnvFor(hasIdentity) });
       return merge.kind === 'ok';
     };
-    const includeMemory = opts.includeMemory ?? shouldIncludePromptText(repoPath);
+    const includeMemory = opts.includeMemory ?? memoryReadyToLeave(repoPath);
     const candidates: PrePushRef[] = [
       { ref: 'refs/notes/origin', staging: STAGED_NOTES.attribution.staging,
         reconcile: () => notesMerge('refs/notes/origin', STAGED_NOTES.attribution.staging) },
@@ -1562,7 +1616,13 @@ export function writeGitNotes(
         const readSourceNote = (source: string): string | null => {
           try { return execFileSync('git', ['notes', '--ref=origin', 'show', source], execOpts); } catch { return null; }
         };
-        const merged = mergeSessionNoteOverRewrite(existing, notePayload, sha, { recordedAt: new Date(), producerVersion }, readSourceNote);
+        // A later write of the same session that did not re-check the lines
+        // must not turn its proven lines back into a commit claim. One that
+        // re-checked and failed (`degraded`) is the commit's answer now.
+        const rewritten = mergeSessionNoteOverRewrite(existing, notePayload, sha, { recordedAt: new Date(), producerVersion }, readSourceNote);
+        const merged = lineClaimDecisionFor(data.attribution?.lineClaims, sha).status === 'not_evaluated'
+          ? preserveProvenLineClaims(existing, rewritten, sha)
+          : rewritten;
         // Our lease may have run out while we read: then a newer holder may
         // be merging, and our -f would drop its write. Write nothing.
         if (!lease.holds(NOTE_WRITE_TIMEOUT_MS)) return false;

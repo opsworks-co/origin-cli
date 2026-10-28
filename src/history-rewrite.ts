@@ -4,15 +4,23 @@
  * A history rewrite — amend, rebase, a rebase squash/fixup, cherry-pick, a
  * forge squash merge — makes a NEW commit out of one or more old ones. The
  * old commits' notes stay where they are; the new commit needs a note of its
- * own. Line ranges do not survive a rewrite (nothing proves the new commit's
- * lines are the old commit's lines), so the rule is conservative:
+ * own. The rule is conservative:
  *
- *   every rebuilt canonical record is COMMIT-level, names the NEW commit, and
- *   carries only the identity of contributions the old notes proved.
+ *   every rebuilt canonical record names the NEW commit and carries only the
+ *   identity of contributions the old notes proved. It is COMMIT-level unless
+ *   the caller hands in line claims PROVEN on the new commit
+ *   (`lineProjection`, rewrite-line-projection.ts, OR-46): then a contribution
+ *   whose projected lines no other claimant touches carries them as `files`,
+ *   in the new commit's coordinates and without `iteration_index` (the old
+ *   commit's prompts are not proven to be this commit's). A line two claimants
+ *   reach — two sessions of a squash, a session the sources disagree about, a
+ *   line the target's own record already claims — is carried by none. With no
+ *   proven line the note is exactly what OR-11 always wrote.
  *
  * What travels into a rebuilt contribution: `evidence`, `agent`, `model`,
  * `actor`, `session.id` and `session.reference_uri`/`started_at` when every
- * merged copy agrees. What never does: `files` and ranges, `iterations`
+ * merged copy agrees, and the projected `files` above. What never does: the
+ * old `files` and ranges themselves, `iterations`
  * (the old commit's turns are not proven to be this commit's), `prompt_count`,
  * `usage`, `duration_ms`, `session.diff_stats` (session-cumulative up to the
  * OLD record's `recorded_at`, and summing them across squashed commits double
@@ -72,7 +80,10 @@ import {
   ATTRIBUTION_RECORD_NOTE_KEY,
   ATTRIBUTION_RECORD_PRODUCER,
   buildAttributionRecordForCommit,
+  publishableLineFiles,
 } from './attribution-note.js';
+import { MAX_FILE_LINES, isCanonicalRepoPath } from './attribution-line-ranges.js';
+import { MAX_REWRITE_CLAIM_LINES, type ProjectedRewriteLine } from './rewrite-line-projection.js';
 
 /**
  * Envelope key, next to `origin` and `attribution_record`, of the rewrite
@@ -115,6 +126,14 @@ export type RewriteWarningCode =
   | 'target-session-differs'
   /** No valid record could be built from what the sources prove. */
   | 'record-not-built'
+  /**
+   * Proven lines were not carried: a contribution's lines could not be published
+   * whole (schema or note-size limits), or the line projection handed in was
+   * malformed or beyond its bounds and was ignored as a whole.
+   */
+  | 'rewrite-lines-not-carried'
+  /** The target record states more line ranges or lines than a rewrite checks against; the target is left unchanged. */
+  | 'target-lines-unbounded'
   /** A rebuild from the sources in hand would drop what the target already carries (a source note is gone). */
   | 'target-rebuild-lossy'
   /** The note-write lock could not be held through the write, after every attempt: nothing written. */
@@ -148,6 +167,12 @@ export interface RebuildRewriteInput {
   sources: ReadonlyArray<RewriteSourceNote>;
   /** The target's note as it exists now, or null. */
   existingTarget?: string | null;
+  /**
+   * Target lines proven to carry a source contribution's claim, computed by
+   * the caller from THESE `sources` (projectRewriteLineClaims). Absent or
+   * empty: every rebuilt contribution is commit-level, as before OR-46.
+   */
+  lineProjection?: ReadonlyArray<ProjectedRewriteLine>;
   recordedAt: Date;
   producerVersion: string;
 }
@@ -172,7 +197,7 @@ export interface RebuildRewriteResult {
 
 const FULL_SHA = /^([0-9a-f]{40}|[0-9a-f]{64})$/;
 
-type Opts = { recordedAt: Date; producerVersion: string };
+type Opts = { recordedAt: Date; producerVersion: string; lineProjection?: ReadonlyArray<ProjectedRewriteLine> };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -230,6 +255,8 @@ function marker(targetSha: string, sources: Iterable<string>, base: 'none' | 'no
 interface Claim {
   sha: string;
   contribution: Record<string, any>;
+  /** Index of the contribution in the source's own v1 record; absent for a legacy claim. */
+  index?: number;
 }
 
 /**
@@ -271,7 +298,7 @@ function claimsFromNote(sha: string, obj: Record<string, any>, warnings: Rewrite
       warnings.push({ code: 'source-record-wrong-revision', sha, detail: `record names ${revision?.vcs}:${revision?.id}` });
       return [];
     }
-    return (read.record.contributions as Record<string, any>[]).map((c) => ({ sha, contribution: commitLevelIdentity(c) }));
+    return (read.record.contributions as Record<string, any>[]).map((c, index) => ({ sha, contribution: commitLevelIdentity(c), index }));
   }
   return claimsFromLegacy(sha, obj, warnings, opts);
 }
@@ -410,11 +437,181 @@ function mergeClaims(claims: Claim[], warnings: RewriteWarning[]): MergedClaims 
   return out;
 }
 
+// ─── Carried line claims ────────────────────────────────────────────────────
+
+/** A claimant of a target line that no rebuilt contribution can be: the target's own record. */
+const TARGET_OWNER = 'target:';
+/** Line ranges of the target's own record a rewrite checks projected lines against. */
+const MAX_TARGET_OWNER_RANGES = 100_000;
+/**
+ * Lines the target's own record may state, measured arithmetically: the most a
+ * record of OR-45-bounded files can hold (1000 files × MAX_FILE_LINES + 1).
+ * A record claiming more cannot describe real files; it is not reasoned about.
+ */
+const MAX_TARGET_OWNER_LINES = 1000 * (MAX_FILE_LINES + 1);
+
+/**
+ * The line projection as handed in, or undefined when it cannot be trusted
+ * WHOLE: more entries than one projection may produce, a source that is not
+ * an old commit of this rewrite, a non-integer index, a non-canonical path, a
+ * line outside the OR-45 file bounds. A rejected projection carries no line
+ * at all — the note is OR-11's commit-level one — and says so in a warning.
+ * The builder never trusts the caller's bounds.
+ */
+function acceptedProjection(
+  projection: ReadonlyArray<ProjectedRewriteLine> | undefined,
+  commits: ReadonlySet<string>,
+  targetSha: string,
+  warnings: RewriteWarning[],
+): ReadonlyArray<ProjectedRewriteLine> | undefined {
+  if (projection === undefined || projection === null) return undefined;
+  const reject = (why: string) => {
+    warnings.push({ code: 'rewrite-lines-not-carried', sha: targetSha, detail: `line projection ignored: ${why}` });
+    return undefined;
+  };
+  if (!Array.isArray(projection)) return reject('not a list');
+  if (projection.length > MAX_REWRITE_CLAIM_LINES) return reject('too many lines');
+  for (const p of projection) {
+    if (!isPlainObject(p)) return reject('malformed entry');
+    if (typeof p.sourceSha !== 'string' || !commits.has(p.sourceSha)) return reject('a source that is not an old commit of this rewrite');
+    if (!Number.isSafeInteger(p.contributionIndex) || p.contributionIndex < 0) return reject('malformed contribution index');
+    if (typeof p.path !== 'string' || !isCanonicalRepoPath(p.path)) return reject('unsafe path');
+    if (!Number.isSafeInteger(p.line) || p.line < 1 || p.line > MAX_FILE_LINES + 1) return reject('line outside the file bounds');
+  }
+  return projection;
+}
+
+/**
+ * The target's own claimed lines as sorted, merged intervals per path; null
+ * past MAX_TARGET_OWNER_RANGES ranges or MAX_TARGET_OWNER_LINES stated lines,
+ * both counted before anything is sorted.
+ */
+function targetIntervals(targetFiles: ReadonlyArray<Record<string, any>>): Map<string, Array<[number, number]>> | null {
+  let count = 0;
+  let stated = 0;
+  const byPath = new Map<string, Array<[number, number]>>();
+  for (const f of targetFiles) {
+    const ranges = Array.isArray(f?.ranges) ? f.ranges : [];
+    count += ranges.length;
+    if (count > MAX_TARGET_OWNER_RANGES) return null;
+    const list = byPath.get(f.path) ?? [];
+    for (const r of ranges) {
+      stated += r.end_line - r.start_line + 1;
+      if (stated > MAX_TARGET_OWNER_LINES) return null;
+      list.push([r.start_line, r.end_line]);
+    }
+    byPath.set(f.path, list);
+  }
+  for (const [p, list] of byPath) {
+    list.sort((a, b) => a[0] - b[0]);
+    const merged: Array<[number, number]> = [];
+    for (const [s, e] of list) {
+      const last = merged[merged.length - 1];
+      if (last && s <= last[1] + 1) last[1] = Math.max(last[1], e);
+      else merged.push([s, e]);
+    }
+    byPath.set(p, merged);
+  }
+  return byPath;
+}
+
+/** Does a sorted, merged interval list hold `line`? Binary search: never walks a range. */
+function holds(intervals: ReadonlyArray<[number, number]> | undefined, line: number): boolean {
+  if (!intervals) return false;
+  let lo = 0;
+  let hi = intervals.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (line < intervals[mid][0]) hi = mid - 1;
+    else if (line > intervals[mid][1]) lo = mid + 1;
+    else return true;
+  }
+  return false;
+}
+
+/**
+ * The `files` each claim group may carry: of the projected target lines, the
+ * ones exactly ONE claimant reaches. A claimant is a claim group (by
+ * `claimKey`, whether or not it ends up with a contribution), a projected line
+ * whose source contribution no claim here names, or the target's own record
+ * (`targetFiles`). Only groups in `carriers` get files; the rest still block.
+ * A group whose lines cannot be published whole stays commit-level.
+ *
+ * The target's ranges are never walked line by line (a valid record may claim
+ * up to line 2^53 − 1): projected lines are looked up in them. Null when the
+ * target states more ranges or lines than are checked — the caller then
+ * leaves the target exactly as it is.
+ */
+function carriedLineFiles(
+  claims: ReadonlyArray<Claim>,
+  carriers: ReadonlySet<string>,
+  projection: ReadonlyArray<ProjectedRewriteLine> | undefined,
+  targetFiles: ReadonlyArray<Record<string, any>>,
+  targetSha: string,
+  warnings: RewriteWarning[],
+): Map<string, Record<string, any>[]> | null {
+  const out = new Map<string, Record<string, any>[]>();
+  if (!projection || projection.length === 0) return out;
+  const ownedByTarget = targetIntervals(targetFiles);
+  if (!ownedByTarget) return null;
+  const groupOf = new Map<string, string>();
+  for (const c of claims) if (c.index !== undefined) groupOf.set(`${c.sha}:${c.index}`, claimKey(c.contribution));
+
+  const owners = new Map<string, Set<string>>();
+  const own = (path: string, line: number, owner: string) => {
+    const k = `${path}\u0000${line}`;
+    if (!owners.has(k)) owners.set(k, new Set());
+    owners.get(k)!.add(owner);
+  };
+  for (const p of projection) {
+    if (holds(ownedByTarget.get(p.path), p.line)) own(p.path, p.line, TARGET_OWNER);
+    own(p.path, p.line, groupOf.get(`${p.sourceSha}:${p.contributionIndex}`) ?? `unclaimed:${p.sourceSha}:${p.contributionIndex}`);
+  }
+
+  const linesByGroup = new Map<string, Map<string, number[]>>();
+  for (const [k, set] of owners) {
+    if (set.size !== 1) continue;
+    const [group] = set;
+    if (!carriers.has(group)) continue;
+    const sep = k.lastIndexOf('\u0000');
+    const path = k.slice(0, sep);
+    const line = Number(k.slice(sep + 1));
+    if (!linesByGroup.has(group)) linesByGroup.set(group, new Map());
+    const byPath = linesByGroup.get(group)!;
+    byPath.set(path, [...(byPath.get(path) ?? []), line]);
+  }
+
+  for (const [group, byPath] of [...linesByGroup].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    const files = [...byPath].sort(([a], [b]) => (a < b ? -1 : 1)).map(([path, lines]) => {
+      const ranges: Array<{ start_line: number; end_line: number }> = [];
+      for (const l of [...lines].sort((a, b) => a - b)) {
+        const last = ranges[ranges.length - 1];
+        if (last && last.end_line === l - 1) last.end_line = l;
+        else ranges.push({ start_line: l, end_line: l });
+      }
+      return { path, ranges };
+    });
+    // No iteration is carried: `undefined` strips any.
+    const published = publishableLineFiles(files, undefined);
+    if (published && published.length > 0) {
+      out.set(group, published as Record<string, any>[]);
+    } else {
+      warnings.push({ code: 'rewrite-lines-not-carried', sha: targetSha, detail: 'proven lines exceed the record or note limits; the contribution stays commit-level' });
+    }
+  }
+  return out;
+}
+
+/** `line` when any contribution carries `files`, else `commit`. */
+function levelOf(contributions: ReadonlyArray<Record<string, any>>): 'line' | 'commit' {
+  return contributions.some((c) => Array.isArray(c.files)) ? 'line' : 'commit';
+}
+
 function newRecord(targetSha: string, contributions: Record<string, any>[], opts: Opts) {
   return {
     schema_version: ATTRIBUTION_RECORD_SCHEMA_VERSION,
     revision: { vcs: 'git', id: targetSha },
-    attribution_level: 'commit',
+    attribution_level: levelOf(contributions),
     recorded_at: opts.recordedAt.toISOString(),
     producer: { name: ATTRIBUTION_RECORD_PRODUCER, version: opts.producerVersion },
     contributions,
@@ -521,7 +718,7 @@ export function rebuildRewrittenNote(input: RebuildRewriteInput): RebuildRewrite
   if (!FULL_SHA.test(targetSha)) {
     return { payload: null, warnings: [{ code: 'record-not-built', detail: 'target is not a full git sha' }] };
   }
-  const opts = { recordedAt: input.recordedAt, producerVersion: input.producerVersion };
+  const opts: Opts = { recordedAt: input.recordedAt, producerVersion: input.producerVersion };
 
   // One old commit counts once, and never the target itself.
   const notes = new Map<string, string>();
@@ -535,6 +732,7 @@ export function rebuildRewrittenNote(input: RebuildRewriteInput): RebuildRewrite
     const sha = (raw || '').toLowerCase();
     if (FULL_SHA.test(sha) && sha !== targetSha) commits.add(sha);
   }
+  opts.lineProjection = acceptedProjection(input.lineProjection, new Set(notes.keys()), targetSha, warnings);
 
   if (typeof input.existingTarget === 'string' && input.existingTarget.trim()) {
     const existing = parseNote(input.existingTarget);
@@ -604,9 +802,12 @@ function rebuildFromSources(
   const claims = [...parsed].flatMap(([sha, obj]) => claimsFromNote(sha, obj, warnings, opts));
   const { merged, conflicts: conflicted } = mergeClaims(claims, warnings);
   for (const key of conflicted) conflicts.add(key);
+  // No target record here: the ownership check cannot be unbounded.
+  const files = carriedLineFiles(claims, new Set(merged.keys()), opts.lineProjection, [], targetSha, warnings) ?? new Map();
   let record: Record<string, any> | undefined;
   if (merged.size > 0) {
-    record = validated(newRecord(targetSha, [...merged.values()], opts), targetSha, warnings);
+    const contributions = [...merged].map(([key, c]) => (files.has(key) ? { ...c, files: files.get(key) } : c));
+    record = validated(newRecord(targetSha, contributions, opts), targetSha, warnings);
   } else {
     warnings.push({ code: 'record-not-built', sha: targetSha, detail: 'no source proves a contribution' });
   }
@@ -664,13 +865,22 @@ function mergeIntoTargetNote(
   const { merged, models } = mergeClaims(claims, warnings);
 
   const baseByKey = new Map(baseContributions.map((c) => [claimKey(c), c] as const));
+  // Only a session the target does not carry may bring lines; every other
+  // claimant, and the target's own line claims, still block the lines they reach.
+  const carriers = new Set([...merged.keys()].filter((key) => !baseByKey.has(key)));
+  const targetFiles = baseContributions.flatMap((c) => (Array.isArray(c.files) ? c.files : []));
+  const files = carriedLineFiles(claims, carriers, opts.lineProjection, targetFiles, targetSha, warnings);
+  if (!files) {
+    warnings.push({ code: 'target-lines-unbounded', sha: targetSha, detail: 'the target record states more line ranges or lines than a rewrite checks; left unchanged' });
+    return { payload: null, record: base || undefined, warnings };
+  }
   const additions: Record<string, any>[] = [];
   // Sessions the target carries under a model the sources contradict: the
   // target keeps its contribution, minus the model.
   const degrade = new Set<string>();
   for (const [key, c] of merged) {
     const onTarget = baseByKey.get(key);
-    if (!onTarget) { additions.push(c); continue; }
+    if (!onTarget) { additions.push(files.has(key) ? { ...c, files: files.get(key) } : c); continue; }
     if (!hardIdentityAgrees([onTarget, c])) {
       warnings.push({ code: 'target-session-differs', sha: targetSha, sessionId: c.session?.id, detail: 'the target record already names this session with another identity; the target wins' });
       continue;
@@ -689,7 +899,13 @@ function mergeIntoTargetNote(
   if (additions.length > 0 || degrade.size > 0) {
     const kept = baseContributions.map((c) => (degrade.has(claimKey(c)) ? withoutModel(c) : c));
     const candidate = base
-      ? { ...base, recorded_at: opts.recordedAt.toISOString(), producer: { name: ATTRIBUTION_RECORD_PRODUCER, version: opts.producerVersion }, contributions: [...kept, ...additions] }
+      ? {
+        ...base,
+        attribution_level: levelOf([...kept, ...additions]),
+        recorded_at: opts.recordedAt.toISOString(),
+        producer: { name: ATTRIBUTION_RECORD_PRODUCER, version: opts.producerVersion },
+        contributions: [...kept, ...additions],
+      }
       : newRecord(targetSha, [...kept, ...additions], opts);
     record = validated(candidate, targetSha, warnings);
     if (!record) return { payload: null, warnings };

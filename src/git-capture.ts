@@ -1183,6 +1183,42 @@ export function createShadowCommit(repoPath: string, tag: string): string | null
   }
 }
 
+export const TURN_TREES_REF = 'refs/origin/turn-trees';
+
+/**
+ * Keep a turn's end-of-turn tree reachable so "Restore this turn" still finds
+ * it months later. The tree comes from `git stash create`, a dangling commit,
+ * and the only other holder is the session's snapshot branch, which
+ * session-end condenses (metadata only) and deletes, so git gc prunes the
+ * code. Each pin appends one commit to a single chain ref; a tree equal to the
+ * tip's is skipped. Compare-and-swap on the ref, so concurrent sessions in
+ * the same repo don't drop each other's pins. Best effort: returns false on
+ * any failure and never throws.
+ */
+export function pinTurnTree(repoPath: string, treeSha: string | null | undefined): boolean {
+  if (!treeSha || !/^[0-9a-f]{40}([0-9a-f]{24})?$/i.test(treeSha)) return false;
+  const gitOpts = { cwd: repoPath, timeoutMs: 10_000 };
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'Origin', GIT_AUTHOR_EMAIL: SHADOW_IDENTITY_EMAIL,
+    GIT_COMMITTER_NAME: 'Origin', GIT_COMMITTER_EMAIL: SHADOW_IDENTITY_EMAIL,
+  };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const tip = gitOrNull(['rev-parse', '--verify', '--quiet', `${TURN_TREES_REF}^{commit}`], gitOpts);
+    if (tip && gitOrNull(['rev-parse', `${tip}^{tree}`], gitOpts) === treeSha) return true;
+    const made = gitDetailed(
+      ['commit-tree', '--no-gpg-sign', treeSha, ...(tip ? ['-p', tip] : []), '-m', 'origin turn tree'],
+      { ...gitOpts, env },
+    );
+    const sha = made.status === 0 ? made.stdout.trim() : '';
+    if (!HEX.test(sha)) return false;
+    // Old value '' = the ref must not exist yet.
+    const moved = gitDetailed(['update-ref', TURN_TREES_REF, sha, tip ?? ''], gitOpts);
+    if (moved.status === 0) return true;
+  }
+  return false;
+}
+
 /**
  * A commit whose tree is every one of `tips` merged — the tree a turn started
  * from when it inherited more than one line (checked a branch out, then merged
@@ -1555,11 +1591,11 @@ export function isUnsafeGitShowPath(relPath: string): boolean {
  * `relPath` must be relative to the repo ROOT and use forward slashes, which is
  * what `git show <sha>:<path>` expects.
  */
-export function readFileAtRev(repoPath: string, sha: string, relPath: string): string | null {
+export function readFileAtRev(repoPath: string, sha: string, relPath: string, opts: { timeoutMs?: number } = {}): string | null {
   if (!sha || !HEX.test(sha) || isUnsafeGitShowPath(relPath)) return null;
   try {
     return git(['show', `${sha}:${relPath}`], {
-      cwd: repoPath, timeoutMs: 10_000, maxBuffer: 10 * 1024 * 1024,
+      cwd: repoPath, timeoutMs: opts.timeoutMs ?? 10_000, maxBuffer: 10 * 1024 * 1024,
     });
   } catch {
     return null;

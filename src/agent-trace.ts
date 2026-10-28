@@ -1,6 +1,6 @@
 import { execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
-import { getLineBlame, type LineAttribution } from './attribution.js';
+import { getLineBlame, isLineProvenAttribution, type LineAttribution } from './attribution.js';
 import { getGitRoot, getHeadSha } from './session-state.js';
 import { gitIdentityEnv } from './utils/exec.js';
 
@@ -166,8 +166,16 @@ function groupLinesIntoConversations(lines: LineAttribution[]): ConversationGrou
     endLine: number;
   } | null = null;
 
-  for (const line of lines) {
-    const sid = line.sessionId || (line.authorship === 'human' ? '__human__' : '__unknown__');
+  for (const raw of lines) {
+    // A trace range is a line claim. Commit-level AI evidence ([AI~]) proves
+    // no line: it is exported as unknown, and an import of the trace can never
+    // turn it into a line claim.
+    const line: LineAttribution = raw.authorship === 'ai' && !isLineProvenAttribution(raw)
+      ? { lineNumber: raw.lineNumber, authorship: 'unknown' }
+      : raw;
+    const sid = line.authorship === 'ai' && line.sessionId
+      ? line.sessionId
+      : line.authorship === 'human' ? '__human__' : '__unknown__';
     const key = `${sid}|${line.authorship}`;
 
     if (current && `${current.sessionId}|${current.authorship}` === key && line.lineNumber === current.endLine + 1) {
@@ -255,12 +263,15 @@ export function exportAgentTrace(repoPath: string, sessionId?: string): AgentTra
       continue; // file deleted
     }
 
-    const lines = getLineBlame(repoPath, filePath);
+    // The record names HEAD as its revision, so its ranges are HEAD's lines —
+    // never the coordinates of an uncommitted edit on disk.
+    const lines = getLineBlame(repoPath, filePath, { view: 'head' });
     if (lines.length === 0) continue;
 
-    // If sessionId filter is set, only include lines from that session
+    // If sessionId filter is set, only include lines from that session.
+    // Unknown lines are exported as `unknown`, never as human or AI.
     const filteredLines = sessionId
-      ? lines.filter(l => l.sessionId === sessionId || l.authorship === 'human')
+      ? lines.filter(l => (isLineProvenAttribution(l) && l.sessionId === sessionId) || l.authorship === 'human')
       : lines;
 
     const conversationGroups = groupLinesIntoConversations(filteredLines);
@@ -339,9 +350,10 @@ export function importAgentTrace(repoPath: string, traceData: AgentTraceRecord):
           fileAttr.model = conv.contributor.model_id;
           fileAttr.agent = modelIdToOriginAgent(conv.contributor.model_id);
         }
-      } else {
+      } else if (conv.contributor.type === 'human') {
         fileAttr.humanLines.push(...lineNumbers);
       }
+      // `unknown` (or anything else) proves nothing: neither list.
     }
 
     attribution[file.path] = fileAttr;

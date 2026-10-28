@@ -39,6 +39,21 @@ describe('extractTodosFromPrompts precision', () => {
     expect(extractTodosFromPrompts(['take TODO 8865b51a next'])).toEqual([]);
   });
 
+  it('does not read the noun TODO mid-sentence as a marker', () => {
+    // 2026-10-13/15: both became open TODOs on the Issues tab.
+    expect(extractTodosFromPrompts(["fix closing a TODO when there's nothing to commit"])).toEqual([]);
+    expect(extractTodosFromPrompts([
+      'Make the MCP `add_todo` tool also create the issue on the Origin server right away, so other agents see the new TODO in `list_tasks` without waiting for push + memory import.',
+    ])).toEqual([]);
+    expect(extractTodosFromPrompts(['why is this FIXME still here'])).toEqual([]);
+  });
+
+  it('reads a bare capital marker that starts a line, a bullet or a comment', () => {
+    expect(extractTodosFromPrompts(['Plan:\nTODO add retries to the uploader\nthanks'])).toEqual(['add retries to the uploader']);
+    expect(extractTodosFromPrompts(['- TODO rename the flag\n- FIXME handle the null case'])).toEqual(['rename the flag', 'handle the null case']);
+    expect(extractTodosFromPrompts(['  // TODO drop the legacy branch'])).toEqual(['drop the legacy branch']);
+  });
+
   it('still reads a marker: a colon in any case, or the word in capitals', () => {
     expect(extractTodosFromPrompts(['todo: rename the flag to --strict'])).toEqual(['rename the flag to --strict']);
     expect(extractTodosFromPrompts(['TODO add retries to the uploader'])).toEqual(['add retries to the uploader']);

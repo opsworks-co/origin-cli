@@ -22,6 +22,7 @@ import {
   filesPutBackAcrossTheGap,
   filesRestoredFromHistory,
 } from '../restored-from-history.js';
+import { WINDOWS_SLOWDOWN } from './helpers/windows-e2e.js';
 
 let repo: string;
 let trace: string;
@@ -154,5 +155,9 @@ describe('filesPutBackAcrossTheGap (Stop and session-end)', () => {
     // a file in any gap, so no working-tree read follows.
     expect(spent.all).toBeLessThanOrEqual(rows.length);
     expect(rows.every((r) => (r.filesChanged as string[]).includes('pkg.json'))).toBe(true);
-  });
+    // The setup is ~435 git processes (61 shadow boundaries, 30 checkouts) —
+    // 18-22 s on a macOS laptop, several times that on the Windows runner,
+    // where Defender inspects every spawn. The part under test is bounded
+    // above by `spent.all`, not by this timeout.
+  }, 90_000 * WINDOWS_SLOWDOWN);
 });

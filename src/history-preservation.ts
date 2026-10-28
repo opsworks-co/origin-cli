@@ -1,6 +1,7 @@
 import { execFileSync, execSync } from 'child_process';
 import { CAPTURE_REWRITES, backgroundedWithRewrites, repairLocalPostRewriteScript } from './post-rewrite-hook-stdin.js';
 import { REWRITE_NOTE_KEY, rebuildRewrittenNote, type RewriteWarning } from './history-rewrite.js';
+import { projectRewriteLineClaims, type ProjectedRewriteLine } from './rewrite-line-projection.js';
 import { noteLockWaitOverride, withNoteWriteLock, type NoteLease, type NoteLockOptions } from './note-write-lock.js';
 import { cliVersion } from './cli-version.js';
 import { gitIdentityEnv, runDetailed } from './utils/exec.js';
@@ -79,6 +80,13 @@ export interface RewriteOptions {
  * the same identity fallback as every other note writer, under the lock every
  * writer of a note shares (note-write-lock.ts).
  *
+ * The line projection is git work on immutable commits and can take its whole
+ * budget, so it runs outside the lock (OR-46 CR4): the relevant notes are read
+ * under a short lock, the note is built from that snapshot, and a second short
+ * lock writes it only if every note it was built from is still byte for byte
+ * the same. A changed note means the attempt is stale: nothing is written and
+ * the target is tried again. A note no rebuild reads never forces a retry.
+ *
  * `sourceShas` is every old commit of the mapping or range, noted or not: the
  * mapping, not the number of notes, says whether this was a squash.
  */
@@ -91,91 +99,152 @@ export function rewriteAttributionForTarget(
   const target = resolveCommit(repoPath, targetSha);
   if (!target) return { outcome: 'skipped', warnings: [{ code: 'record-not-built', sha: targetSha, detail: 'target is not a commit' }] };
   const { attempts = REWRITE_LOCK_ATTEMPTS, ...lock } = opts.lock ?? {};
-  // A held or lost lock is retried — the rebuild is a function of the old
-  // commits' notes, so a repeat writes the same note, once. Never unlocked.
-  let detail = 'another writer held the note lock too long';
+  const lockOpts: NoteLockOptions = { waitMs: noteLockWaitOverride() ?? REWRITE_LOCK_WAIT_MS, ...lock };
+  // A full sha names the same commit forever: resolved once, outside the lock.
+  const resolved = new Map<string, string | null>();
+  const resolve = (raw: string): string | null => {
+    if (!resolved.has(raw)) resolved.set(raw, resolveCommit(repoPath, raw));
+    return resolved.get(raw)!;
+  };
+  const initial: string[] = [];
+  for (const raw of sourceShas) {
+    const sha = resolve(raw);
+    if (!sha || sha === target || initial.includes(sha)) continue;
+    initial.push(sha);
+  }
+  // A held or lost lock, or a note that changed under the build, is retried —
+  // the rebuild is a function of the notes it read, so a repeat writes the
+  // same note, once. Never unlocked, never from a stale snapshot.
+  let detail = LOCK_BUSY;
   for (let attempt = 1; attempt <= Math.max(1, attempts); attempt++) {
-    const done = withNoteWriteLock(repoPath, (lease) => rewriteLocked(repoPath, target, sourceShas, opts, lease), { waitMs: noteLockWaitOverride() ?? REWRITE_LOCK_WAIT_MS, ...lock });
-    if (done && done !== LEASE_LOST) return done;
-    detail = done === LEASE_LOST ? 'the note lock\'s lease ran out before the write' : 'another writer held the note lock too long';
+    const done = rewriteAttempt(repoPath, target, initial, resolve, opts, lockOpts);
+    if (!('retry' in done)) return done;
+    detail = done.retry;
   }
   return { outcome: 'failed', warnings: [{ code: 'note-lock-unavailable', sha: target, detail: `${detail}; ${Math.max(1, attempts)} attempt(s), nothing written` }] };
 }
 
-/** The lock was lost before the write: nothing was written, try again. */
-const LEASE_LOST = Symbol('lease-lost');
+/** Why an attempt wrote nothing and the target is tried again. */
+const LOCK_BUSY = 'another writer held the note lock too long';
+const LEASE_RAN_OUT = 'the note lock\'s lease ran out before the write';
+const NOTES_CHANGED = 'the old commits\' or the target\'s notes kept changing';
 
-function rewriteLocked(
+type RewriteAttempt = { outcome: RewriteTargetOutcome; warnings: RewriteWarning[] } | { retry: string };
+
+/** A note read failed: never "no note". */
+const READ_FAILED = Symbol('read-failed');
+
+/** Each commit's note exactly as stored (null: none), or READ_FAILED. */
+function readNotes(repoPath: string, shas: ReadonlyArray<string>): Map<string, string | null> | typeof READ_FAILED {
+  const out = new Map<string, string | null>();
+  for (const sha of shas) {
+    const read = readNote(repoPath, sha);
+    if ('error' in read) return READ_FAILED;
+    out.set(sha, read.note);
+  }
+  return out;
+}
+
+function rewriteAttempt(
   repoPath: string,
   target: string,
-  sourceShas: ReadonlyArray<string>,
+  initial: ReadonlyArray<string>,
+  resolve: (sha: string) => string | null,
   opts: RewriteOptions,
-  lease: NoteLease,
-): { outcome: RewriteTargetOutcome; warnings: RewriteWarning[] } | typeof LEASE_LOST {
-  const warnings: RewriteWarning[] = [];
-  const commits = new Set<string>();
-  const notes = new Map<string, string>();
-  const addCommit = (sha: string): boolean => {
-    commits.add(sha);
-    const read = readNote(repoPath, sha);
-    if ('error' in read) return false;
-    if (read.note !== null) notes.set(sha, read.note);
-    return true;
+  lock: NoteLockOptions,
+): RewriteAttempt {
+  const commits = new Set<string>(initial);
+  // Every note this attempt builds from, exactly as read; a commit without one is null.
+  const snapshot = new Map<string, string | null>();
+  const take = (shas: ReadonlyArray<string>): RewriteAttempt | null => {
+    const read = withNoteWriteLock(repoPath, () => readNotes(repoPath, shas), lock);
+    if (read === null) return { retry: LOCK_BUSY };
+    if (read === READ_FAILED) return { outcome: 'failed', warnings: [] };
+    for (const [sha, note] of read) snapshot.set(sha, note);
+    return null;
   };
-  for (const raw of sourceShas) {
-    const sha = resolveCommit(repoPath, raw);
-    if (!sha || sha === target || commits.has(sha)) continue;
-    if (!addCommit(sha)) return { outcome: 'failed', warnings };
-  }
-  const existing = readNote(repoPath, target);
-  if ('error' in existing) return { outcome: 'failed', warnings };
+  const stop = take([target, ...initial]);
+  if (stop) return stop;
+  const existing = snapshot.get(target) ?? null;
+  const sources = () => [...commits].flatMap((sha) => {
+    const note = snapshot.get(sha);
+    return typeof note === 'string' ? [{ sha, note }] : [];
+  });
   // Nothing to carry and no rewrite bookkeeping to extend: the target is not written.
-  if (notes.size === 0 && !(existing.note && existing.note.includes(REWRITE_NOTE_KEY))) {
-    return { outcome: 'skipped', warnings };
+  if (sources().length === 0 && !(existing && existing.includes(REWRITE_NOTE_KEY))) {
+    return { outcome: 'skipped', warnings: [] };
   }
-
-  const build = () => rebuildRewrittenNote({
+  const build = (lineProjection?: ReadonlyArray<ProjectedRewriteLine>) => rebuildRewrittenNote({
     targetSha: target,
     sourceCommits: [...commits],
-    sources: [...notes].map(([sha, note]) => ({ sha, note })),
-    existingTarget: existing.note,
+    sources: sources(),
+    existingTarget: existing,
+    lineProjection,
     recordedAt: opts.now ?? new Date(),
     producerVersion: opts.producerVersion ?? cliVersion(),
   });
-  let result = build();
-  if (result.recordedSources) {
-    // The target note is an earlier rewrite's: rebuild from the union of the
-    // old commits it recorded and these, so the order the hooks ran in and a
-    // repeat of the same pairs change nothing. A recorded commit git no longer
-    // has still counts; it just has no note to read.
-    for (const sha of result.recordedSources) {
-      if (commits.has(sha)) continue;
-      if (resolveCommit(repoPath, sha)) {
-        if (!addCommit(sha)) return { outcome: 'failed', warnings };
-      } else {
-        commits.add(sha);
-      }
-    }
-    result = build();
-  }
-  warnings.push(...result.warnings);
-  if (result.payload === null) return { outcome: notes.size === 0 ? 'skipped' : 'unchanged', warnings };
 
-  // A newer holder may be merging once our lease is over: then write nothing.
-  if (!lease.holds(GIT_TIMEOUT_MS)) return LEASE_LOST;
-  try {
-    execFileSync('git', ['notes', '--ref=origin', 'add', '-f', '-m', result.payload, target], {
-      cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS, encoding: 'utf-8', windowsHide: true,
-      env: { ...process.env, ...gitIdentityEnv(repoPath) },
-    });
-  } catch {
-    return { outcome: 'failed', warnings };
+  // The target note is an earlier rewrite's: rebuild from the union of the old
+  // commits it recorded and these, so the order the hooks ran in and a repeat
+  // of the same pairs change nothing. A build without a projection only finds
+  // them; a recorded commit git no longer has still counts, it just has no
+  // note to read. The target note is fixed for the attempt, so one round adds
+  // them all.
+  for (let round = 0; ; round++) {
+    const missing = (build().recordedSources ?? []).filter((sha) => !commits.has(sha));
+    if (missing.length === 0) break;
+    if (round > 0) return { retry: NOTES_CHANGED };
+    const readable: string[] = [];
+    for (const sha of missing) {
+      commits.add(sha);
+      if (resolve(sha) && !snapshot.has(sha)) readable.push(sha);
+    }
+    const more = readable.length ? take(readable) : null;
+    if (more) return more;
   }
-  const back = readNote(repoPath, target);
-  if ('error' in back || back.note === null || back.note.trim() !== result.payload.trim()) {
-    return { outcome: 'failed', warnings };
+
+  // Line claims proven on the new commit from these very notes (OR-46), once
+  // per attempt; none proven, and the note is OR-11's commit-level one.
+  const projection = projectRewriteLineClaims({ repoPath, targetSha: target, sources: sources() });
+  const result = build(projection.lines);
+  if (result.recordedSources) return { retry: NOTES_CHANGED };
+  const warnings: RewriteWarning[] = [...result.warnings];
+  // A projection that gave up (a limit, the budget, git) leaves the rewrite
+  // commit-level, as OR-11 wrote it; say why, once. No line claims to carry
+  // is not a reason.
+  if (projection.reason) {
+    const detail = `line projection: ${projection.reason}; the rewrite stays commit-level`;
+    if (!warnings.some((w) => w.code === 'rewrite-lines-not-carried' && w.detail === detail)) {
+      warnings.push({ code: 'rewrite-lines-not-carried', sha: target, detail });
+    }
   }
-  return { outcome: 'written', warnings };
+  if (result.payload === null) return { outcome: sources().length === 0 ? 'skipped' : 'unchanged', warnings };
+  const payload = result.payload;
+
+  const done = withNoteWriteLock(repoPath, (lease: NoteLease): RewriteAttempt => {
+    // Exactly the notes the build read, and only those.
+    const now = readNotes(repoPath, [...snapshot.keys()]);
+    if (now === READ_FAILED) return { outcome: 'failed', warnings };
+    for (const [sha, note] of snapshot) {
+      if (now.get(sha) !== note) return { retry: NOTES_CHANGED };
+    }
+    // A newer holder may be merging once our lease is over: then write nothing.
+    if (!lease.holds(GIT_TIMEOUT_MS)) return { retry: LEASE_RAN_OUT };
+    try {
+      execFileSync('git', ['notes', '--ref=origin', 'add', '-f', '-m', payload, target], {
+        cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS, encoding: 'utf-8', windowsHide: true,
+        env: { ...process.env, ...gitIdentityEnv(repoPath) },
+      });
+    } catch {
+      return { outcome: 'failed', warnings };
+    }
+    const back = readNote(repoPath, target);
+    if ('error' in back || back.note === null || back.note.trim() !== payload.trim()) {
+      return { outcome: 'failed', warnings };
+    }
+    return { outcome: 'written', warnings };
+  }, lock);
+  return done ?? { retry: LOCK_BUSY };
 }
 
 /**

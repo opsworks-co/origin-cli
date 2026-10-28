@@ -68,6 +68,8 @@ export async function verifyCommand(opts?: { json?: boolean }) {
         aiLinesPct: aiLinesPct,
         tools: Object.fromEntries(stats.byTool),
         models: Object.fromEntries(stats.byModel),
+        // The whole object, `unavailable` included: see AcceptanceMetrics.
+        acceptance: { ...stats.acceptance },
       };
     } catch {
       result.attribution = null;

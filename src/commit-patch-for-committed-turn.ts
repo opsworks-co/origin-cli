@@ -80,7 +80,7 @@ export interface CommittedTurnState {
   rewrittenCommits?: Array<{ from: string; to: string }>;
   /** Each turn's own commit, one hop short of a squash that folded several
    *  turns' commits together — see foldCommitRecordsToSurvivors. */
-  preSquashCommitTurns?: Array<{ sha: string; turnId: string; squash: string }>;
+  preSquashCommitTurns?: Array<{ sha: string; turnId: string; squash: string; amendedBy?: string }>;
   /** A turn's commit a later rewrite replaced, kept with the turn that made it. */
   foldedCommitTurns?: Array<{ sha: string; turnId: string }>;
 }
@@ -723,6 +723,112 @@ function patchAcrossBranches(
 }
 
 /**
+ * For an original and its replacement on DIFFERENT parents: the files whose
+ * own change differs between the two commits — the turn's delta. Null when
+ * they share a parent (the tree diff is the delta). 'unprovable' when such a
+ * file also changed under them in the base, so the two cannot be told apart.
+ */
+function ownPatchDelta(repoPath: string, sha: string, squash: string): Set<string> | null | 'unprovable' {
+  const parentOf = (c: string) => git(repoPath, ['rev-parse', '--verify', '-q', `${c}^1`]).out.trim();
+  const p1 = parentOf(sha);
+  const p2 = parentOf(squash);
+  if (!HEX.test(p1) || !HEX.test(p2) || p1 === p2) return null;
+  const touched = (from: string, to: string) => git(repoPath, ['diff', '--no-renames', '--name-only', from, to, '--']).out
+    .split('\n').map((l) => l.trim()).filter(Boolean);
+  const paths = [...new Set([...touched(p1, sha), ...touched(p2, squash)])];
+  const blobs = (rev: string): Map<string, string> => {
+    const out = new Map<string, string>();
+    if (paths.length === 0) return out;
+    const r = git(repoPath, ['ls-tree', '-r', '--full-tree', rev, '--', ...paths]);
+    for (const line of r.out.split('\n')) {
+      const tab = line.indexOf('\t');
+      if (tab > 0) out.set(line.slice(tab + 1), line.slice(0, tab).split(' ')[2] || '');
+    }
+    return out;
+  };
+  const [b1, a1, b2, a2] = [blobs(p1), blobs(sha), blobs(p2), blobs(squash)];
+  const delta = new Set<string>();
+  for (const f of paths) {
+    if (b1.get(f) === b2.get(f) && a1.get(f) === a2.get(f)) continue; // the same change, re-made
+    if (b1.get(f) !== b2.get(f)) return 'unprovable';
+    delta.add(f);
+  }
+  return delta;
+}
+
+/**
+ * The row of a turn that AMENDED commits other turns made: the delta between
+ * each original and the commit that replaced it. Measured commit to commit —
+ * the turn's shadow says nothing about a branch it checked out, amended and
+ * left. No stamp: the amended commit is its author's, and this turn's work is
+ * in it by the server's own reading (committed by work).
+ */
+function amendDeltaForTurn(
+  repoPath: string,
+  pm: CommittedTurnMapping,
+  turnId: string,
+  amends: Array<{ sha: string; squash: string }>,
+  deps: PreferCommitPatchDeps,
+): boolean {
+  const budget = Math.floor(MAX_PROMPT_DIFF_LEN / amends.length);
+  const parts: Array<NonNullable<ReturnType<typeof commitDiffScopedToPrompt>>> = [];
+  for (const { sha, squash } of amends) {
+    const names = git(repoPath, ['diff', '--no-renames', '--name-only', sha, squash, '--']);
+    if (!names.ok) {
+      declined(deps, pm, 'the amended commit could not be diffed');
+      deps.log?.('commit patch declined: the amended commit could not be diffed', { promptIndex: pm.promptIndex, original: sha.slice(0, 8), amended: squash.slice(0, 8) });
+      return false;
+    }
+    let files = names.out.split('\n').map((l) => l.trim()).filter(Boolean);
+    // Commit to commit is an amend's delta only when both sit on one parent.
+    // On two parents the tree diff also carries everything the base moved by:
+    // session 817f02b4 turn 12 re-made a deploy commit on a main that had moved
+    // (f66e4c1f -> 696602e3, the same patch on #2650 and on #2654) and was billed
+    // 18 files, +154/-48 — turn 11's work and another PR's. There the delta is
+    // only what the two commits' OWN patches do differently.
+    const own = ownPatchDelta(repoPath, sha, squash);
+    if (own === 'unprovable') {
+      declined(deps, pm, 'the replaced commit sits on another base');
+      deps.log?.('commit patch declined: the replaced commit sits on another base and its change cannot be told from the base\'s', { promptIndex: pm.promptIndex, original: sha.slice(0, 8), amended: squash.slice(0, 8) });
+      return false;
+    }
+    if (own) files = files.filter((f) => own.has(f));
+    if (files.length === 0) continue;
+    const scoped = commitDiffScopedToPrompt(repoPath, sha, squash, files, budget);
+    if (!scoped) {
+      declined(deps, pm, 'the amended commit could not be diffed');
+      deps.log?.('commit patch declined: the amended commit could not be diffed', { promptIndex: pm.promptIndex, original: sha.slice(0, 8), amended: squash.slice(0, 8) });
+      return false;
+    }
+    if (scoped.diff.trim()) parts.push(scoped);
+  }
+  const before = { linesAdded: pm.linesAdded, linesRemoved: pm.linesRemoved };
+  const diff = parts.map((p) => (p.diff.endsWith('\n') ? p.diff : `${p.diff}\n`)).join('');
+  const named = [...new Set(parts.flatMap((p) => (p.files.length > 0 ? p.files : pathsInDiff(p.diff))))];
+  const diffTruncated = parts.some((p) => p.diffTruncated);
+  pm.diff = diff;
+  pm.filesChanged = named;
+  pm.linesAdded = parts.reduce((n, p) => n + p.linesAdded, 0);
+  pm.linesRemoved = parts.reduce((n, p) => n + p.linesRemoved, 0);
+  const inText = new Set(pathsInDiff(diff));
+  pm.contentUnavailableFiles = diffTruncated ? named.filter((f) => !inText.has(f)) : [];
+  pm.uncommittedDiff = '';
+  if (named.length > 0) delete pm.chatOnly; else pm.chatOnly = true;
+  // Measured between two commits: a commit patch, which every later pass (the
+  // legacy write re-render, the heartbeat re-send) leaves alone. No stamp, and
+  // no `patchCommits`: the commit it stands for is its author's.
+  pm.commitPatch = true;
+  pm.commitSha = null;
+  applied(deps, pm);
+  deps.log?.('ledger diff replaced by the turn\'s delta on the commits it amended', {
+    promptIndex: pm.promptIndex, turnId, amended: amends.map((a) => `${a.sha.slice(0, 8)}->${a.squash.slice(0, 8)}`),
+    files: named.length, diffTruncated, ledgerLines: `+${before.linesAdded ?? '?'}/-${before.linesRemoved ?? '?'}`,
+    deltaLines: `+${pm.linesAdded}/-${pm.linesRemoved}`,
+  });
+  return true;
+}
+
+/**
  * Replace each committed, clean turn's diff with its commit patch. Mutates the
  * mappings in place, like applyLedgerCaptures, and returns how many it changed.
  * Never throws: a git failure leaves the mapping as it was.
@@ -776,7 +882,29 @@ export function preferCommitPatchForCommittedTurns(
         && !isSharedSquash(c.sha) && !intoSharedSquash(c.sha)),
       ...preSquash.filter((c) => c.turnId === turnId),
     ];
-    if (own.length === 0) { declined(deps, pm, 'the turn made no commit'); continue; }
+    if (own.length === 0) {
+      // A turn that AMENDED another turn's commit made no commit of its own:
+      // the amended commit is shared with the turn that made the original,
+      // and this turn's part of it is the delta between the two. Its ledger
+      // cannot say so — the branch was checked out, amended and left, so the
+      // tree ends as it began — and the stamp post-commit put on the row as
+      // the commit landed must not stand, or the server records the whole
+      // amended commit as this turn's own original (session 597b3d88 turn 2:
+      // "own +2749/-2625" over a row of +20/-7).
+      const amends = preSquash.filter((c) => c.amendedBy === turnId);
+      if (amends.length > 0) {
+        if (amendDeltaForTurn(repoPath, pm, turnId, amends, deps)) replaced++;
+        continue;
+      }
+      if (pm.commitSha && (isSharedSquash(pm.commitSha) || rewritesOf(pm.commitSha, allRewrites).some(isSharedSquash))) {
+        deps.log?.('amending turn keeps its own delta, not the amended commit', {
+          promptIndex: pm.promptIndex, turnId, stamp: pm.commitSha.slice(0, 8),
+        });
+        pm.commitSha = null;
+      }
+      declined(deps, pm, 'the turn made no commit');
+      continue;
+    }
     covered.set(pm, [...new Set(own.flatMap((c) => [c.sha, ...rewritesOf(c.sha, allRewrites)]))]
       .filter((sha) => !isSharedSquash(sha)));
     // Every commit of the turn that still exists as an object names the

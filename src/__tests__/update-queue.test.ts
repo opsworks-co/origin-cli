@@ -80,7 +80,7 @@ describe('durableUpdateSession', () => {
     expect(await durableUpdateSession('s1', { diff: 'valuable' })).toBeNull();
     expect(updateSession).toHaveBeenCalledTimes(2);
     expect(entryFiles()).toHaveLength(1);
-    expect(JSON.parse(fs.readFileSync(path.join(QUEUE_DIR, entryFiles()[0]), 'utf8')).payload).toEqual({ diff: 'valuable' });
+    expect(JSON.parse(fs.readFileSync(path.join(QUEUE_DIR, entryFiles()[0]), 'utf8')).payload).toEqual({ diff: 'valuable', observedAt: expect.any(String) });
   });
 
   it.each([408, 429, 500, 503])('queues HTTP %s without an immediate retry', async status => {
@@ -146,6 +146,33 @@ describe('durableUpdateSession', () => {
 });
 
 describe('drainUpdateQueue', () => {
+  // Race arm f5556b20: an update queued at 12:37 replayed at 12:49 and the
+  // server dated its activity by the arrival. A replay must say when the
+  // update was built — the entry's own stamp, or the moment it was queued.
+  it('a replayed entry carries when it was built, never the replay time', async () => {
+    const seen: any[] = [];
+    updateSession.mockImplementation(async (_id: string, data: any) => { seen.push({ ...data }); return {}; });
+    enqueueFailedUpdate('updateSession', 's1', { tag: 'legacy' }, netErr()); // older CLI: no observedAt
+    await new Promise((r) => setTimeout(r, 5)); // distinct timestamp prefix
+    enqueueFailedUpdate('updateSession', 's1', { tag: 'stamped', observedAt: '2026-10-14T12:37:47.402Z' }, netErr());
+    const [legacyFile] = entryFiles().sort();
+    const legacyQueuedAt = JSON.parse(fs.readFileSync(path.join(QUEUE_DIR, legacyFile), 'utf-8')).enqueuedAt;
+    await new Promise((r) => setTimeout(r, 20));
+    await drainUpdateQueue();
+    expect(seen.map((d) => [d.tag, d.observedAt])).toEqual([
+      ['legacy', legacyQueuedAt],
+      ['stamped', '2026-10-14T12:37:47.402Z'],
+    ]);
+  });
+
+  it('a pre-persisted update records its build time in the queue entry', () => {
+    const data: any = { tag: 'p' };
+    persistUpdateBeforeWork('s1', data);
+    const entry = JSON.parse(fs.readFileSync(path.join(QUEUE_DIR, entryFiles()[0]), 'utf-8'));
+    expect(typeof entry.payload.observedAt).toBe('string');
+    expect(data.observedAt).toBe(entry.payload.observedAt); // the direct send carries the same stamp
+  });
+
   it('replays oldest-first and clears the queue', async () => {
     const seen: string[] = [];
     updateSession.mockImplementation(async (_id: string, data: any) => { seen.push(data.tag); return {}; });
@@ -187,7 +214,7 @@ describe('drainUpdateQueue', () => {
     enqueueFailedUpdate('endSession', 's1', { sessionId: 's1', summary: 'done' }, netErr());
     const res = await drainUpdateQueue();
     expect(res.replayed).toBe(1);
-    expect(endSession).toHaveBeenCalledWith({ sessionId: 's1', summary: 'done' });
+    expect(endSession).toHaveBeenCalledWith({ sessionId: 's1', summary: 'done', observedAt: expect.any(String) }, { payloadCapabilities: ['rhodecode-remote-identity-1'] });
   });
 
   it('durableEndSession queues on retriable failure', async () => {
@@ -208,7 +235,7 @@ describe('drainUpdateQueue', () => {
     enqueueFailedUpdate('ingestCommits', 'commit:abc123', payload, netErr());
     const res = await drainUpdateQueue();
     expect(res.replayed).toBe(1);
-    expect(ingestCommits).toHaveBeenCalledWith(payload, { timeoutMs: 60_000 });
+    expect(ingestCommits).toHaveBeenCalledWith(payload, { timeoutMs: 60_000, payloadCapabilities: ['rhodecode-remote-identity-1'] });
     expect(entryFiles()).toHaveLength(0);
   });
 
@@ -240,7 +267,7 @@ describe('persistUpdateBeforeWork', () => {
     expect(persistUpdateBeforeWork('sess-killed-stop', payload)).toBeTruthy();
     updateSession.mockResolvedValue({ ok: true });
     await drainUpdateQueue();
-    expect(updateSession).toHaveBeenCalledWith('sess-killed-stop', payload, { timeoutMs: 8000 });
+    expect(updateSession).toHaveBeenCalledWith('sess-killed-stop', payload, { timeoutMs: 8000, payloadCapabilities: ['rhodecode-remote-identity-1'] });
     expect(entryFiles()).toHaveLength(0);
     expect(payload.promptChanges.map(row => row.promptIndex)).toEqual(Array.from({ length: 21 }, (_, i) => i));
   });
@@ -254,7 +281,7 @@ describe('persistUpdateBeforeWork', () => {
   it('never carries status — a late replay of RUNNING would reopen an ended session', () => {
     persistUpdateBeforeWork('sess-kill', { prompt: 'p', status: 'RUNNING' });
     const entry = JSON.parse(fs.readFileSync(path.join(QUEUE_DIR, entryFiles()[0]), 'utf-8'));
-    expect(entry.payload).toEqual({ prompt: 'p' });
+    expect(entry.payload).toEqual({ prompt: 'p', observedAt: expect.any(String) });
   });
 
   it('a later drain delivers the pre-persisted PATCH when the hook died', async () => {
@@ -262,7 +289,7 @@ describe('persistUpdateBeforeWork', () => {
     updateSession.mockResolvedValueOnce({});
     const res = await drainUpdateQueue();
     expect(res.replayed).toBe(1);
-    expect(updateSession).toHaveBeenCalledWith('sess-kill', { prompt: 'prompt 3' }, { timeoutMs: 8000 });
+    expect(updateSession).toHaveBeenCalledWith('sess-kill', { prompt: 'prompt 3', observedAt: expect.any(String) }, { timeoutMs: 8000, payloadCapabilities: ['rhodecode-remote-identity-1'] });
     expect(entryFiles()).toHaveLength(0);
   });
 
@@ -275,7 +302,7 @@ describe('persistUpdateBeforeWork', () => {
     updateSession.mockResolvedValueOnce({ ok: true });
     await durableUpdateSession('sess-ok', { prompt: 'p1\n\n---\n\np2', tokensUsed: 5 }, undefined, { supersedes: name });
     expect(updateSession).toHaveBeenCalledTimes(1);
-    expect(updateSession).toHaveBeenCalledWith('sess-ok', { prompt: 'p1\n\n---\n\np2', tokensUsed: 5 });
+    expect(updateSession).toHaveBeenCalledWith('sess-ok', { prompt: 'p1\n\n---\n\np2', tokensUsed: 5, observedAt: expect.any(String) });
     expect(entryFiles()).toHaveLength(0);
   });
 
@@ -285,7 +312,7 @@ describe('persistUpdateBeforeWork', () => {
     await durableUpdateSession('sess-down', { prompt: 'p1', tokensUsed: 5 }, undefined, { supersedes: name });
     expect(entryFiles()).toHaveLength(1);
     const entry = JSON.parse(fs.readFileSync(path.join(QUEUE_DIR, entryFiles()[0]), 'utf-8'));
-    expect(entry.payload).toEqual({ prompt: 'p1', tokensUsed: 5 });
+    expect(entry.payload).toEqual({ prompt: 'p1', tokensUsed: 5, observedAt: expect.any(String) });
   });
 
   it('removeQueuedUpdate drops exactly the named entry', () => {
@@ -296,5 +323,79 @@ describe('persistUpdateBeforeWork', () => {
     removeQueuedUpdate('does-not-exist.json');
     removeQueuedUpdate(null);
     expect(entryFiles()).toEqual([b]);
+  });
+});
+
+// OR-17: a server that governs prompts with RhodeCode refuses writes from a
+// CLI that cannot report remotes (426). The transport header says what the
+// REPLAYING binary can do; the payload was built by whatever binary queued it.
+describe('capability provenance of queued payloads', () => {
+  const LEGACY_PAYLOAD = { additionalRepoPaths: ['/work/rc-checkout'], promptChanges: [{ captureId: 'c1', diff: 'legacy' }] };
+  const writeLegacyEntry = (name: string, entry: Record<string, unknown>) => {
+    fs.mkdirSync(QUEUE_DIR, { recursive: true });
+    fs.writeFileSync(path.join(QUEUE_DIR, name), JSON.stringify({ v: 1, attempts: 0, enqueuedAt: new Date().toISOString(), ...entry }));
+  };
+
+  it('a v1 entry an older CLI queued replays as built with no capability, payload unchanged but for its build time', async () => {
+    updateSession.mockResolvedValue({});
+    endSession.mockResolvedValue({});
+    ingestCommits.mockResolvedValue({});
+    writeLegacyEntry('1000-1-a.json', { kind: 'updateSession', sessionId: 's1', payload: LEGACY_PAYLOAD });
+    writeLegacyEntry('1001-1-b.json', { kind: 'ingestCommits', sessionId: 'commit:abc', payload: { repoPath: '/r', commits: [{ sha: 'abc' }] } });
+    writeLegacyEntry('1002-1-c.json', { kind: 'endSession', sessionId: 's1', payload: { sessionId: 's1' } });
+    const res = await drainUpdateQueue();
+    expect(res.replayed).toBe(3);
+    expect(updateSession).toHaveBeenCalledWith('s1', { ...LEGACY_PAYLOAD, observedAt: expect.any(String) }, expect.objectContaining({ payloadCapabilities: [] }));
+    expect(ingestCommits).toHaveBeenCalledWith({ repoPath: '/r', commits: [{ sha: 'abc' }] }, expect.objectContaining({ payloadCapabilities: [] }));
+    expect(endSession).toHaveBeenCalledWith({ sessionId: 's1', observedAt: expect.any(String) }, { payloadCapabilities: [] });
+  });
+
+  it('an entry this CLI queues records its capabilities and replays with them', async () => {
+    enqueueFailedUpdate('updateSession', 's1', { tag: 'new' }, netErr());
+    const stored = JSON.parse(fs.readFileSync(path.join(QUEUE_DIR, entryFiles()[0]), 'utf8'));
+    expect(stored.v).toBe(1);
+    expect(stored.capabilities).toEqual(['rhodecode-remote-identity-1']);
+    updateSession.mockResolvedValue({});
+    await drainUpdateQueue();
+    expect(updateSession).toHaveBeenCalledWith('s1', { tag: 'new', observedAt: expect.any(String) }, expect.objectContaining({ payloadCapabilities: ['rhodecode-remote-identity-1'] }));
+  });
+
+  it('legacy and new entries keep oldest-first order; the 426 of a legacy one drops only it', async () => {
+    const seen: Array<[string, readonly string[] | undefined]> = [];
+    updateSession.mockImplementation(async (_id: string, data: any, o: any) => {
+      seen.push([data.tag, o?.payloadCapabilities]);
+      if (o?.payloadCapabilities?.length === 0) throw httpErr(426);
+      return {};
+    });
+    writeLegacyEntry('1000-1-a.json', { kind: 'updateSession', sessionId: 's1', payload: { tag: 'old' } });
+    enqueueFailedUpdate('updateSession', 's1', { tag: 'new' }, netErr());
+    const res = await drainUpdateQueue();
+    expect(seen).toEqual([['old', []], ['new', ['rhodecode-remote-identity-1']]]);
+    expect(res.dropped).toBe(1);
+    expect(res.replayed).toBe(1);
+    expect(entryFiles()).toHaveLength(0);
+  });
+
+  it('a 503 from the server\'s capability check keeps a legacy entry queued for retry; a decided 426 drops it', async () => {
+    const unavailable = Object.assign(httpErr(503), { code: 'REMOTE_IDENTITY_CHECK_UNAVAILABLE' });
+    updateSession.mockRejectedValueOnce(unavailable);
+    writeLegacyEntry('1000-1-a.json', { kind: 'updateSession', sessionId: 's1', payload: { tag: 'old' } });
+    let res = await drainUpdateQueue();
+    expect([res.remaining, res.dropped]).toEqual([1, 0]);
+    expect(JSON.parse(fs.readFileSync(path.join(QUEUE_DIR, '1000-1-a.json'), 'utf8')).attempts).toBe(1);
+
+    updateSession.mockRejectedValueOnce(Object.assign(httpErr(426), { code: 'CLIENT_UPGRADE_REQUIRED' }));
+    res = await drainUpdateQueue();
+    expect([res.remaining, res.dropped]).toEqual([0, 1]);
+    expect(entryFiles()).toHaveLength(0);
+  });
+
+  it('a retried legacy entry stays legacy: its rewrite on a retriable failure adds no capability', async () => {
+    updateSession.mockRejectedValueOnce(httpErr(503));
+    writeLegacyEntry('1000-1-a.json', { kind: 'updateSession', sessionId: 's1', payload: { tag: 'old' } });
+    await drainUpdateQueue();
+    const stored = JSON.parse(fs.readFileSync(path.join(QUEUE_DIR, '1000-1-a.json'), 'utf8'));
+    expect(stored.attempts).toBe(1);
+    expect(stored.capabilities).toBeUndefined();
   });
 });

@@ -16,6 +16,15 @@ import { makeSyncBlock } from '../sync-block.js';
 import { durableUpdateSession } from '../update-queue.js';
 import { debugLog } from '../debug-log.js';
 import { recordManualSessionEnd } from '../manual-session-end.js';
+import { withClaudeHookLock } from '../claude-hook-lock.js';
+
+/**
+ * How long `sessions end` waits for a running hook before closing the turn.
+ * It runs inside the turn, so the holder is a tool hook or a queued prompt's
+ * submit (seconds), not this conversation's Stop. Kept well inside the agent's
+ * own command timeout: a killed end command never puts its barrier up.
+ */
+const END_STOP_LOCK_WAIT_MS = 30_000;
 
 const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
@@ -548,12 +557,17 @@ export async function sessionEndCommand(id: string) {
     if (!open || !Number.isInteger(open.index) || state.agentSlug !== 'claude-code' || !state.claudeSessionId) continue;
     try {
       const { handleStop } = await import('./hooks/stop.js');
-      await handleStop({
+      // Under the conversation's hook lock, like the Stop hook itself. Unlocked,
+      // this Stop ran beside the NEXT prompt's submit and saved its stale
+      // prompt list over the one submit had just saved: session a325d2ee
+      // prompt 12 (2026-10-15) lost its record, a later Stop minted it a
+      // second turn id, and its commits stayed on the first one.
+      await withClaudeHookLock('claude-code', 'stop', state.claudeSessionId, () => handleStop({
         session_id: state.claudeSessionId,
         transcript_path: state.transcriptPath || undefined,
         cwd: state.lastCwd || state.repoPath,
         hook_event_name: 'Stop',
-      }, 'claude-code');
+      }, 'claude-code'), { timeoutMs: END_STOP_LOCK_WAIT_MS });
       console.log(chalk.gray(`  Closed turn ${open.index + 1}, which was still open.`));
     } catch (err: any) {
       console.log(chalk.yellow(`  Could not close the open turn ${open.index + 1}: ${err?.message || err}`));
@@ -1136,6 +1150,7 @@ export async function sessionsSyncCommand(opts: { quiet?: boolean; markImported?
           importedFromPreviousAccount: opts.markImported === true,
           // This queued session's commits carry its local id in their trailers.
           localSessionId: state.sessionId.startsWith('local-') ? state.sessionId : undefined,
+          spawnedFromAgentSessionId: state.spawnedFromAgentSessionId,
         });
         realSessionId = startRes.sessionId as string;
         // Persist the real id BEFORE attempting end, so an end failure (or a

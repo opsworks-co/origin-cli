@@ -11,6 +11,7 @@ import { execFileSync, spawn } from 'child_process';
 import { throughLiveInstall } from './live-install-path.js';
 import { fileURLToPath } from 'url';
 import { processInfo } from './utils/process-detect.js';
+import type { ProcessIdentity } from './process-owner.js';
 import { isHeartbeatFor, isOwnDaemonAlive, signalOwnDaemon } from './utils/signal-own-daemon.js';
 import { samePath } from './paths.js';
 import { keepWriteTreesSavedMeanwhile } from './session-write-trees.js';
@@ -87,6 +88,10 @@ export interface SessionState {
   // "basename LIKE %x%" anymore — if the ID can't be matched, the hook
   // captures nothing and logs the miss instead of guessing.
   agentSessionId?: string;
+  // agentSessionId of the session that started this one — a Claude desktop
+  // subsession (claude-desktop-spawn.ts). Sent with session/start, including
+  // the late one `origin sessions sync` makes for a queued session.
+  spawnedFromAgentSessionId?: string;
   // Backward-compat field name — older state files predate `agentSessionId`
   // and key off this one. New code prefers `agentSessionId`; old readers
   // (findSessionByClaudeId, etc.) continue to work because session-start
@@ -95,6 +100,13 @@ export interface SessionState {
   transcriptPath: string;     // Path to JSONL transcript file
   model: string;
   startedAt: string;          // ISO timestamp
+  // The server row's own start, when session-start reused or resumed a row
+  // that began before this launch. `startedAt` stays this launch's start: the
+  // prompt counter (`parsed.promptIndexBase + prompts.length`) is built on it,
+  // and `prompts` holds only this launch's turns. Token totals are not —
+  // they are the whole row's, so they are parsed since this instead.
+  // See parseSessionTranscript.
+  sessionStartedAt?: string;
   prompts: string[];          // Accumulated user prompts
   // `<nativePromptIndex>:<imageIndex>` → the server's one-line caption of that
   // image. Kept OUT of `prompts` on purpose: `prompts` goes on the wire, where
@@ -238,6 +250,13 @@ export interface SessionState {
   // A rival covers a turn only while it was not gone before that turn began —
   // see contentionCoversTurn in checkout-contention.ts.
   contenderGoneAt?: Record<string, number>;
+  /**
+   * The agent process this session runs in — pid, start time, boot, host —
+   * recorded by its own hooks on session start and every prompt. prepare-
+   * commit-msg finds it among its ancestors to know which session ran
+   * `git commit` (process-owner.ts). Absent on Windows and for IDE agents.
+   */
+  ownerProcess?: ProcessIdentity;
   writeJournalPath?: string;
   /**
    * Content snapshots for this session's journal — see write-journal-store.ts.
@@ -293,7 +312,11 @@ export interface SessionState {
   // Per LOCAL turn and tree: files a tree-moving git command put in place.
   // They are git's, not the turn's, and the write-journal channel drops them
   // (TODO e87a35d5). Written by endShellProbe, read by journalFilesForTurn.
-  gitMovedFilesByTurn?: Array<{ promptIndex: number; tree: string; files: string[] }>;
+  // `left`: file → blob of what a STOPPED merge/rebase pick left in it, so a
+  // later write to the file is measured from there, not from the turn's start
+  // (TODO 1de72a6e). Written by endShellProbe, read by recordProbedShellEdits,
+  // the shell window and the ledger's before-states.
+  gitMovedFilesByTurn?: Array<{ promptIndex: number; tree: string; files: string[]; left?: Record<string, string> }>;
 
 
   promptShadows?: Array<{
@@ -382,14 +405,19 @@ export interface SessionState {
   // the hook executable. Its commits do not invoke git hooks at all, so
   // commit-time attestation can never exist for it; discovery is the only
   // evidence available.
-  commitTurns?: Array<{ sha: string; turnId: string; at: string; via: 'post-commit' | 'transcript' }>;
+  //   trailer      the session was ended by hand when its sub-agent committed,
+  //                so post-commit recorded nothing; on resume, a commit with
+  //                this session's trailer whose files a turn's own recorded
+  //                edits wrote in that tree (commits-while-ended.ts).
+  commitTurns?: Array<{ sha: string; turnId: string; at: string; via: 'post-commit' | 'transcript' | 'trailer' }>;
   /**
-   * What each turn committed before a squash ACROSS turns folded it away —
-   * `commitTurns` then names the squash under the earliest turn only. Read by
-   * the commit-patch pass, which measures a turn from its own commit. Local;
+   * What each turn committed before a squash ACROSS turns — or an amend by
+   * another turn (recordAmendByAnotherTurn) — folded it away: `commitTurns`
+   * then names the survivor under the earliest turn only. Read by the
+   * commit-patch pass, which measures a turn from its own commit. Local;
    * never sent.
    */
-  preSquashCommitTurns?: Array<{ sha: string; turnId: string; at?: string; squash: string }>;
+  preSquashCommitTurns?: Array<{ sha: string; turnId: string; at?: string; squash: string; /** The turn that AMENDED `sha` into `squash` — measured as the delta between the two. */ amendedBy?: string }>;
   /**
    * Who made each commit a rewrite (rebase, amend, forge squash) folded out of
    * `commitTurns`, which names survivors only. Written at fold time; read by
@@ -551,6 +579,16 @@ export interface SessionState {
   // call's post-tool-use; the commit hooks read it to name the committing
   // session before they weigh any file. See commit-command-in-flight.ts.
   commitCommandInFlight?: { at: string; toolCallId?: string; cwd?: string; turn?: number; endedAt?: string } | null;
+  // Working trees of OTHER repositories this session's tool calls reached
+  // (`cd /other/repo && …`, an absolute path in a file tool), with the common
+  // git dir that identifies the repository. A commit there finds no session
+  // state in its own .git; the commit hooks read this from the mirror to find
+  // the session that made it. See foreign-trees.ts.
+  foreignTrees?: Array<{ path: string; commonDir: string; at: string; turn: number }>;
+  // Commits this session made in another repository (foreignTrees). Kept out
+  // of sessionCommitShas, whose every reader runs git in the session's own
+  // repo and cannot see them.
+  crossRepoCommits?: Array<{ sha: string; repoPath: string; at: string; turnId?: string }>;
   // Prompt indexes whose turn ran a WRITE-SHAPED shell command (a heredoc,
   // `sed -i`, `cp`, an interpreter invocation…). The post-tool-use hook sets
   // this; Stop reads it to decide whether to derive that turn's shell writes
@@ -1405,7 +1443,11 @@ export function getCanonicalRepoPath(workRoot: string): string {
       // non-empty directory that actually exists. Anything weird → keep
       // the working root so we don't accidentally hide the worktree session.
       if (mainRepo && mainRepo !== workRoot && fs.existsSync(mainRepo)) {
-        return mainRepo;
+        // path.resolve: a linked worktree's common dir comes back from git
+        // absolute with FORWARD slashes on Windows (`C:/…/repo/.git`), while
+        // the main checkout's relative `.git` resolves to backslashes above —
+        // one repository, two spellings. A no-op on POSIX.
+        return path.resolve(mainRepo);
       }
     }
   } catch { /* fall through */ }
@@ -2365,9 +2407,11 @@ export function finalRewriteOf(sha: string, pairs: ReadonlyArray<RewritePair> | 
  * insights-scope.ts, GitHub squashed it as 9afdf670, and every later Stop
  * measured turn 1 from main — billing turn 0's +41/-7 as turn 1's.
  *
- * Exact shas only, never "whoever owns the survivor": an amend by the NEXT
- * turn attests the survivor to that turn, and the commit it replaced is still
- * the first turn's. Undefined when the sha was never attested.
+ * Exact shas only, never "whoever owns the survivor". An amend by the NEXT
+ * turn lands as that turn's attestation for a moment, until the pair folds it:
+ * the amended commit then stays the first turn's (recordAmendByAnotherTurn),
+ * and the commit it replaced is recorded as that turn's own beside the fold.
+ * Undefined when the sha was never attested.
  */
 export function commitTurnOf(
   state: Pick<SessionState, 'commitTurns' | 'foldedCommitTurns' | 'preSquashCommitTurns'>,
@@ -2468,15 +2512,23 @@ function foldCommitRecordsToSurvivors(
         // GitHub's): the attestation standing on it is the fold's, not a commit
         // that turn made — the turns behind it are already on record.
         if (pre.some((x) => sameRecordedSha(x.squash, own) || sameRecordedSha(finalRewriteOf(x.squash, kept), own))) continue;
-        pre.push({ sha: own, turnId: ct.turnId, at: ct.at, squash });
+        // An AMEND by another turn: the target is that turn's own attestation
+        // and exactly one commit folded into it. The amending turn's part is
+        // the delta between the two (the commit-patch pass), not the target.
+        // recordAmendByAnotherTurn writes the same record from post-commit;
+        // this is the fold's own reading, for when that hook could not tell.
+        const amender = state.commitTurns.find((c) => c?.sha && c.turnId && c.turnId !== ct.turnId && sameRecordedSha(c.sha, squash))?.turnId;
+        const foldedIn = pairs.filter((p) => sameRecordedSha(p.to, squash)).length;
+        pre.push({ sha: own, turnId: ct.turnId, at: ct.at, squash, ...(amender && foldedIn === 1 ? { amendedBy: amender } : {}) });
       }
       state.preSquashCommitTurns = pre;
     }
     // Who made each commit the fold is about to replace, and each hop between
     // it and its survivor (a rebased copy, before a forge squash of it). The
     // survivor's attestation says nothing about them: an amend by the next
-    // turn attests the survivor to that turn (commitTurnOf). The first word on
-    // a sha stands.
+    // turn lands as that turn's attestation until the fold hands the survivor
+    // back to its author (commitTurnOf, recordAmendByAnotherTurn). The first
+    // word on a sha stands.
     const folded = Array.isArray(state.foldedCommitTurns) ? [...state.foldedCommitTurns] : [];
     const attested = (sha: string) => state.commitTurns!.some((c) => c?.sha && sameRecordedSha(c.sha, sha))
       || folded.some((c) => sameRecordedSha(c.sha, sha));
@@ -3487,4 +3539,58 @@ export function firstUnanchoredPrompt(
     if (!anchored.includes(i)) return i;
   }
   return null;
+}
+
+/**
+ * A commit the running turn AMENDED that another turn made stays that turn's.
+ *
+ * `git commit --amend` lands as a new sha and post-commit attests it to the
+ * running turn — the right observation for an amend of the turn's own commit,
+ * the wrong one for an amend of an earlier turn's. Session 597b3d88
+ * (2026-10-21): turn 1 wrote the Dashboard split (2,755 lines) as 1bb435a4;
+ * turn 2 amended three unused imports out of it as de4031c5; post-commit
+ * attested de4031c5 to turn 2, then CORRECTED the fold's attestation to turn 2
+ * as well. Every Stop after that rebuilt turn 1's row without that branch, and
+ * the server credited turn 2 with the whole commit.
+ *
+ * The shape is a squash across turns with one hop — turn A's commit folded into
+ * a commit turn B made — and it is recorded the same way: the amended commit
+ * stays attested to A, and the commit it replaced is kept beside the fold as
+ * A's own, for the pass that measures a turn's work. B has no commit of its
+ * own; its part is its ledger row.
+ *
+ * Order-independent. post-commit calls this with the amended-away sha from
+ * HEAD's reflog, whether or not post-rewrite's pair has arrived: with the pair
+ * already folded the amended sha stands under A and only the record beside the
+ * fold is missing; without it the pair is applied here and the fold
+ * (crossTurnSquashTargets, counting B's attestation on the target) does the
+ * rest. Returns who made the original, or null when the commit was not an
+ * amend of another turn's. Does not save.
+ */
+export function recordAmendByAnotherTurn(
+  state: Pick<SessionState, 'sessionCommitShas' | 'rewrittenCommits' | 'commitTurns' | 'foldedCommitTurns' | 'preSquashCommitTurns'>,
+  commitSha: string,
+  amendingTurnId: string,
+  amendedAway: string | null | undefined,
+): { authorTurnId: string; amendedAway: string } | null {
+  if (!commitSha || !amendingTurnId) return null;
+  const pairs = Array.isArray(state.rewrittenCommits) ? state.rewrittenCommits : [];
+  const from = amendedAway || pairs.find((p) => p?.to && sameRecordedSha(p.to, commitSha))?.from;
+  if (!from || sameRecordedSha(from, commitSha)) return null;
+  const author = commitTurnOf(state, from) as { sha: string; turnId: string; at?: string } | undefined;
+  if (!author || author.turnId === amendingTurnId) return null;
+  applyRewritePairsToState(state, [{ from, to: commitSha }]);
+  const survivor = (state.commitTurns || []).find((c) => c?.sha && sameRecordedSha(c.sha, commitSha));
+  if (survivor && survivor.turnId !== author.turnId) survivor.turnId = author.turnId;
+  const pre = Array.isArray(state.preSquashCommitTurns) ? [...state.preSquashCommitTurns] : [];
+  if (!pre.some((x) => x?.sha && sameRecordedSha(x.sha, from))) {
+    pre.push({ sha: from, turnId: author.turnId, ...(author.at ? { at: author.at } : {}), squash: commitSha, amendedBy: amendingTurnId });
+    state.preSquashCommitTurns = pre;
+  } else {
+    // The fold recorded the original first (post-rewrite's pair arrived before
+    // this hook); who amended it is known only here.
+    const mine = pre.find((x) => x?.sha && sameRecordedSha(x.sha, from));
+    if (mine && !mine.amendedBy) { mine.amendedBy = amendingTurnId; state.preSquashCommitTurns = pre; }
+  }
+  return { authorTurnId: author.turnId, amendedAway: from };
 }

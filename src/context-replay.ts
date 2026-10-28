@@ -368,6 +368,27 @@ export function gradeabilityProblems(
     if (/from ['"]typescript['"]|readFileSync\(\s*new URL\(\s*['"]\.\.?\/[^'"]+\.[cm]?[jt]sx?['"]/.test(text)) {
       problems.push(`${testPath} reads source code, so it grades one implementation, not the behaviour`);
     }
+  }
+  for (const { testPath, name, module } of missingImports(testSources, parentFile)) {
+    if (!task.prompt.includes(name)) {
+      problems.push(`${testPath} imports ${name} from ${module}, which the parent does not export and the prompt does not name`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * Names the tests import from the repo's own modules that the parent does not
+ * export yet: the interface an agent can only meet if the prompt names it.
+ * Pure + exported: gradeabilityProblems flags them, and replay-tasks names
+ * them in the prompts it writes.
+ */
+export function missingImports(
+  testSources: Record<string, string>,
+  parentFile: (repoRelative: string) => string | null,
+): Array<{ testPath: string; name: string; module: string }> {
+  const out: Array<{ testPath: string; name: string; module: string }> = [];
+  for (const [testPath, text] of Object.entries(testSources)) {
     for (const m of text.matchAll(/import\s*\{([^}]+)\}\s*from\s*['"](\.{1,2}\/[^'"]+)['"]/g)) {
       const modRel = path.posix.normalize(path.posix.join(path.posix.dirname(testPath), m[2])).replace(/\.js$/, '.ts');
       const source = parentFile(modRel) ?? parentFile(modRel.replace(/\.ts$/, '/index.ts'));
@@ -377,13 +398,11 @@ export function gradeabilityProblems(
         const exported = source !== null && new RegExp(
           `export\\s+(declare\\s+)?(async\\s+)?(function\\*?|const|let|var|class|interface|type|enum)\\s+${name}\\b|export\\s*\\{[^}]*\\b${name}\\b`,
         ).test(source);
-        if (!exported && !task.prompt.includes(name)) {
-          problems.push(`${testPath} imports ${name} from ${modRel}, which the parent does not export and the prompt does not name`);
-        }
+        if (!exported) out.push({ testPath, name, module: modRel });
       }
     }
   }
-  return problems;
+  return out;
 }
 
 /**

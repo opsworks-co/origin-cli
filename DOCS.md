@@ -1,6 +1,6 @@
 # Origin CLI Documentation
 
-Origin is an AI coding governance platform that tracks, attributes, and governs AI-assisted code across your team. The CLI hooks into AI coding agents (Claude Code, Cursor, Gemini, Windsurf, Aider) to capture session data, enforce policies, and provide attribution analytics.
+Origin is an AI coding governance platform that tracks, attributes, and governs AI-assisted code across your team. The CLI hooks into AI coding agents (Claude Code, Cursor, Codex, Gemini CLI, GitHub Copilot, Devin, Antigravity, Aider) to capture session data, enforce policies, and provide attribution analytics.
 
 ## Table of Contents
 
@@ -12,6 +12,7 @@ Origin is an AI coding governance platform that tracks, attributes, and governs 
 - [Attribution & Blame](#attribution--blame)
 - [Search & Analysis](#search--analysis)
 - [Time Travel & Resume](#time-travel--resume)
+- [More Commands](#more-commands)
 - [Trail System](#trail-system)
 - [Cross-Agent Handoff](#cross-agent-handoff)
 - [Session Memory](#session-memory)
@@ -32,9 +33,11 @@ Origin is an AI coding governance platform that tracks, attributes, and governs 
 ## Installation
 
 ```bash
-# Install from Origin platform
+# Install from Origin platform (the CLI is not published to the public npm registry)
 npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
 ```
+
+Later updates: `origin upgrade` (see [Upgrade](#upgrade)).
 
 Verify:
 
@@ -45,8 +48,8 @@ origin --version
 ## Quick Start (Standalone — no server required)
 
 ```bash
-# 1. Enable global hooks (tracks all repos automatically)
-origin enable --global
+# 1. Enable hooks (machine-wide by default, so every repo is tracked)
+origin enable
 
 # 2. Code with any AI agent (Claude Code, Gemini CLI, Cursor, etc.)
 
@@ -66,15 +69,12 @@ No login, no API keys. All data stored locally in git notes and `origin-sessions
 # 1. Login to your Origin instance
 origin login
 
-# 2. Register this machine
+# 2. Register this machine and install hooks (auto-detects installed agents)
 origin enable
 
-# 3. Enable hooks (auto-detects installed agents)
-origin enable
+# 3. Start coding with your AI agent — Origin tracks everything automatically
 
-# 4. Start coding with your AI agent — Origin tracks everything automatically
-
-# 5. View your session
+# 4. View your session
 origin sessions
 ```
 
@@ -87,22 +87,24 @@ origin sessions
 Authenticate with your Origin server.
 
 ```bash
-origin login
-# Prompts for:
-#   API URL (default: https://getorigin.io)
-#   API Key (from your Origin dashboard)
+origin login                       # Browser sign-in (device code)
+origin login --key <apiKey>        # Non-interactive, with an API key
+origin login --url <apiUrl>        # Another Origin instance (default: https://getorigin.io)
+origin login --profile <name>      # Save as a named profile
 ```
+
+If the browser sign-in does not complete, it falls back to prompting for the API URL and key. `--token` takes a one-time install token from the dashboard.
 
 Config saved to `~/.origin/config.json`.
 
 ### `origin enable`
 
-Register this machine as an agent host. Auto-detects installed AI tools.
+Register this machine as an agent host and install hooks. Auto-detects installed AI tools.
 
 ```bash
 origin enable
-# Detects: claude, cursor, aider, gemini, windsurf
-# Registers machine with Origin API
+# Detects installed agents (Claude Code, Cursor, Codex, Gemini CLI, Copilot, Devin, Antigravity)
+# Registers machine with Origin API (when logged in)
 # Saves to ~/.origin/agent.json
 ```
 
@@ -132,11 +134,18 @@ origin enable --agent claude-code
 origin enable --agent cursor
 origin enable --agent gemini
 origin enable --agent codex
-origin enable --agent windsurf
-origin enable --agent aider
+origin enable --agent devin
+origin enable --agent copilot
+origin enable --agent antigravity
 
-# Install globally (all repos tracked automatically)
-origin enable --global
+# Aider's config is per repo, so it needs --local
+origin enable --local --agent aider
+
+# Install for the current repo only (default is machine-wide)
+origin enable --local
+
+# Local-only mode: skip the API even when logged in
+origin enable --standalone
 
 # Install and link to a specific Origin agent
 origin enable --link my-agent-slug
@@ -144,26 +153,31 @@ origin enable --link my-agent-slug
 # Override the agent slug used for session attribution
 origin enable --agent-slug my-custom-slug
 
-# Replace existing hooks instead of chaining
-origin enable --no-chain
+# Skip registering Origin's MCP server with the detected agents
+origin enable --no-mcp
 ```
+
+`--global` is still accepted but does nothing: machine-wide is the default.
 
 **What gets installed:**
 
+Machine-wide paths are shown; with `--local` the same files go under the repo root (e.g. `.claude/settings.json`).
+
 | Agent | Config File | Events |
 |-------|-------------|--------|
-| Claude Code | `~/.claude/settings.json` | SessionStart, Stop, UserPromptSubmit, SessionEnd, PreToolUse, PostToolUse |
-| Cursor | `~/.cursor/hooks.json` | sessionStart, stop, beforeSubmitPrompt, sessionEnd |
-| Codex CLI | `~/.codex/config.json` | SessionStart, Stop, UserPromptSubmit |
-| Gemini | `~/.gemini/settings.json` | SessionStart, SessionEnd, BeforeAgent, AfterAgent |
-| Windsurf | `~/.windsurf/hooks.json` | sessionStart, stop, beforeSubmitPrompt, sessionEnd |
-| Aider | `~/.aider.conf.yml` | git-commit-verify, notifications-command |
-| Git | `.git/hooks/post-commit` | post-commit (for commit attribution) |
-| Git | `.git/hooks/pre-push` | pre-push (auto-push session data) |
+| Claude Code | `~/.claude/settings.json` | SessionStart, Stop, UserPromptSubmit, SessionEnd, PreToolUse, PostToolUse, PostToolUseFailure, Notification |
+| Cursor | `~/.cursor/hooks.json` | sessionStart, stop, beforeSubmitPrompt, sessionEnd, afterFileEdit |
+| Codex CLI | `~/.codex/hooks.json` | SessionStart, UserPromptSubmit, Stop (not installed on Windows) |
+| Gemini CLI | `~/.gemini/settings.json` | SessionStart, SessionEnd, BeforeAgent, AfterAgent, BeforeTool, AfterTool |
+| Devin | `~/.devin/hooks.v1.json` (plus legacy `~/.windsurf/hooks.json`) | SessionStart, Stop, UserPromptSubmit, SessionEnd |
+| Antigravity | `~/.gemini/config/hooks.json` (repo: `.agents/hooks.json`) | PreToolUse, PostToolUse, Stop |
+| GitHub Copilot | `~/.copilot/hooks/origin.json` (repo: `.github/hooks/origin.json`) | sessionStart, userPromptSubmitted, agentStop, sessionEnd |
+| Aider | `.aider.conf.yml` (repo only) | git-commit-verify, notifications-command |
+| Git | `~/.origin/git-hooks/` (global `core.hooksPath`) | pre-commit, commit-msg, prepare-commit-msg, post-commit, pre-push, post-rewrite, post-merge, post-checkout |
 
-**Hook chaining:** By default, Origin preserves existing hooks and chains them. Use `--no-chain` to replace instead.
+**Hook chaining:** Origin preserves existing hooks and chains them.
 
-**Permission deny rules:** Origin installs deny rules so AI agents can't read their own session metadata (`.git/origin-session*.json`, `.origin.json`).
+**Permission deny rules:** For Claude Code, Origin adds deny rules so the agent can't read its own session metadata (`.git/origin-session*.json`, `.origin.json`).
 
 ### `origin disable`
 
@@ -171,7 +185,7 @@ Remove all Origin hooks.
 
 ```bash
 origin disable           # Remove from current repo
-origin disable --global  # Remove global hooks
+origin disable --global  # Remove machine-wide hooks (and restore your previous core.hooksPath)
 ```
 
 ### `origin link`
@@ -234,11 +248,13 @@ origin sessions end abc1        # Partial ID match works
 
 ### `origin sessions clean`
 
-End all stale RUNNING sessions in bulk.
+End RUNNING sessions that have been silent for 12 hours or more. A session that is still live is never ended.
 
 ```bash
-origin sessions clean           # Clean sessions for current repo
-origin sessions clean --all     # Clean all repos
+origin sessions clean                   # Clean sessions for current repo
+origin sessions clean --all             # Clean all repos
+origin sessions clean --dry-run         # Show what would be ended
+origin sessions clean --older-than 24   # Only sessions silent for 24h+
 ```
 
 ### `origin explain [sessionId]`
@@ -354,14 +370,11 @@ origin diff --json             # JSON output
 
 ### `origin stats`
 
-View dashboard statistics with attribution breakdown.
+View attribution statistics for the current repo.
 
 ```bash
-# API stats (sessions, costs, agents)
+# Local git-based stats (default inside a repo)
 origin stats
-
-# Local git-based stats with attribution
-origin stats --local
 # Shows:
 #   Total commits (AI vs human)
 #   Lines added by AI vs human
@@ -371,7 +384,13 @@ origin stats --local
 #   Acceptance rate (AI lines humans kept vs edited)
 
 # Custom commit range
-origin stats --local --range HEAD~100..HEAD
+origin stats --range HEAD~100..HEAD
+
+# All repos
+origin stats --global
+
+# Org-wide dashboard stats from the Origin API
+origin stats --dashboard
 ```
 
 ---
@@ -463,7 +482,7 @@ With `--expand`, each entry includes the full colored diff showing exactly what 
 
 Interactive AI assistant for your repo's AI context. Ask natural language questions about your AI-authored code, sessions, costs, and attribution.
 
-Requires `ANTHROPIC_API_KEY` environment variable.
+Requires an Anthropic key: `ANTHROPIC_API_KEY` or `origin config set anthropicApiKey <key>`.
 
 ```bash
 # Interactive mode — ongoing conversation
@@ -563,16 +582,17 @@ origin audit --output audit.md                  # Write to file
 
 ### `origin backfill`
 
-Retroactively tag old commits as AI or human-authored.
+Retroactively tag old commits with AI attribution.
 
 ```bash
 origin backfill                       # Dry-run — show what would be tagged
 origin backfill --apply               # Actually write the tags
 origin backfill --days 180            # Go back 6 months
 origin backfill --min-confidence high # Only tag high-confidence matches
+origin backfill --apply --push        # Also push refs/notes/origin to the remote
 ```
 
-Scans `.claude/`, `.cursor/`, `.codex/` session history, commit message patterns, and code style heuristics to identify AI-generated commits.
+Matches commits against Origin session records (`~/.origin/sessions/` and the `origin-sessions` branch), Claude Code transcripts (`~/.claude/projects/`), Codex rollouts (`~/.codex/sessions/`) and commit trailers/messages.
 
 ### `origin verify`
 
@@ -585,11 +605,10 @@ origin verify --json    # JSON output
 
 ### `origin review-pr`
 
-Review a pull request with AI governance analysis.
+Analyze the AI sessions behind a GitHub pull request. Needs a connection to Origin (`origin login`).
 
 ```bash
-origin review-pr 123              # Review PR #123
-origin review-pr <pr-url>         # Review by URL
+origin review-pr <pr-url>         # e.g. https://github.com/org/repo/pull/123
 ```
 
 ---
@@ -602,7 +621,9 @@ List and manage registered AI agents (connected mode).
 
 ```bash
 origin agents                     # List all agents
-origin agents create --name "My Agent" --slug my-agent --model claude-opus-4-6
+origin agent:create --name "My Agent" --slug my-agent --model claude-opus-4-6
+origin agents check               # Installed agents, versions, signed-in accounts
+origin agents login claude        # Sign an agent in with its own login
 ```
 
 ### `origin policies`
@@ -621,7 +642,7 @@ List and manage repositories tracked by Origin.
 
 ```bash
 origin repos                      # List all repos
-origin repos add --name my-repo --path /path/to/repo
+origin repo:add --name my-repo --path /path/to/repo
 ```
 
 ---
@@ -647,9 +668,26 @@ origin rewind --to a1b2c3d
 
 # List checkpoints without rewinding
 origin rewind --list
+
+# Also move HEAD (git reset --hard), discarding later commits
+origin rewind --to a1b2c3d --hard
 ```
 
+By default (`--soft`) files are restored into the working tree and HEAD is left alone.
+
 **Safety:** Always stashes current changes before rewinding. Requires confirmation.
+
+### `origin snapshot`
+
+Mid-session shadow snapshots, stored as refs under `refs/origin/shadow/` (no commits on your branch).
+
+```bash
+origin snapshot                          # Save a snapshot of uncommitted changes now
+origin snapshot list                     # List snapshots in this repo
+origin snapshot restore <id>             # Restore the working tree to a snapshot
+origin snapshot restore <id> --branch x  # Create branch x at the snapshot instead
+origin snapshot clean                    # Remove all shadow snapshots
+```
 
 ### `origin resume [branch]`
 
@@ -662,17 +700,11 @@ origin resume
 # Resume from specific branch
 origin resume feature/auth
 
-# Auto-launch the AI agent with context
-origin resume --launch
-
 # Get context as JSON (for piping)
 origin resume --json
 ```
 
-With `--launch`, Origin detects the installed agent and launches it with the session context:
-- Claude Code: pipes context to `claude --resume`
-- Cursor: writes context to `.cursor/context.md`
-- Gemini: writes context to `.gemini/context.md`
+It prints a markdown context block you can pipe into an agent. The `--launch` flag is accepted but does not launch anything today.
 
 ### `origin share <sessionId>`
 
@@ -693,68 +725,54 @@ Generates a self-contained markdown bundle with context, prompts, files changed,
 
 ---
 
+## More Commands
+
+Commands not covered in detail above. Run `origin <command> --help` for options.
+
+| Command | What it does |
+|---------|--------------|
+| `origin why <file>:<line>` | Which session and prompt wrote a line; `--trace` resolves a whole stack trace |
+| `origin commit [sha]` | Prompt + Origin metadata stored in a commit's git note (offline) |
+| `origin show <commit>` | The Origin session linked to a commit |
+| `origin log` | `git log` with agent, cost and prompts inline |
+| `origin xray` | How much of the repo AI wrote, and how much of it is still alive |
+| `origin compare <a> [b]` | Compare AI attribution between branches or commit ranges |
+| `origin rework` | AI code that was reverted or heavily modified |
+| `origin recap` | End-of-day summary (`--days <n>`) |
+| `origin search-history <query>` | Ranked search over sessions, commits, decisions, TODOs and prompts |
+| `origin pre-review` | AI review of the working diff before you open a PR (needs an Anthropic key) |
+| `origin intent-review [branch]` | Review that shows why code was written (prompts, reasoning, risk) |
+| `origin revert-prompt <session> <turn>` | Undo the lines one prompt wrote, on a new branch |
+| `origin isolate` | Create a git worktree for this session so file attribution is exact |
+| `origin issue …` | Git-tracked issue tracker; `origin issue start <id>` hands an issue to an agent |
+| `origin mcp install` / `status` | Register Origin's MCP server with your agents |
+| `origin export [range]` | Export sessions as JSON, CSV or Agent Trace |
+| `origin push-metadata [remote]` | Push `refs/notes/origin` to a remote |
+| `origin ignore …` | File ignore patterns; `origin ignore repo add` stops tracking a whole repo |
+| `origin url-handler install` | Let the dashboard's Start button launch agents via `getorigin://` links |
+| `origin verify-install` | Check the installed CLI against the published manifest |
+| `origin version` | CLI version and build provenance |
+
+---
+
 ## Trail System
 
-Branch-centric work tracking. Trails describe the "why" and "what" of work while sessions capture the "how" and "when."
+Feature Trails group sessions by repo and branch. They are created and edited in the Origin dashboard (Sessions → Trails); the CLI only lists them. Needs a connection to Origin.
 
-### `origin trail`
+### `origin trail` / `origin trail list`
 
-Show the trail for the current branch.
-
-```bash
-origin trail
-# Shows: Trail ID, name, branch, status, priority, labels,
-#        reviewers, associated sessions
-```
-
-### `origin trail list`
-
-List all trails.
+List your org's trails.
 
 ```bash
 origin trail list                    # All trails
 origin trail list --status active    # Filter by status
+origin trail list --label backend    # Filter by label
+origin trail list --verbose          # Show repo, branches, labels, and totals
 ```
 
 Statuses: `active`, `review`, `done`, `paused`
 
-### `origin trail create <name>`
-
-Create a trail for the current branch.
-
-```bash
-origin trail create "Add user authentication"
-origin trail create "Bug fix: login loop" --priority high
-origin trail create "Refactor API" --priority critical --label backend --label api
-```
-
-### `origin trail update`
-
-Update the current trail.
-
-```bash
-origin trail update --status review
-origin trail update --priority high
-origin trail update --title "Updated: Add OAuth2 authentication"
-```
-
-### `origin trail assign <user>`
-
-Assign a reviewer.
-
-```bash
-origin trail assign john@example.com
-```
-
-### `origin trail label <labels...>`
-
-Add labels.
-
-```bash
-origin trail label frontend security
-```
-
-Trails are stored on the `origin-sessions` branch under `trails/` and synced with remote.
+`origin trail create`, `update`, `assign` and `label` still exist, but only point you to the dashboard.
 
 ---
 
@@ -1058,7 +1076,7 @@ On session-end, Origin scans all prompts for patterns like:
 - "need to fix X", "we should add Y", "handle Z later"
 - "still need to implement X"
 
-Extracted TODOs are stored in `~/.origin/origin-todos.json` across all repos.
+Extracted TODOs are stored in `~/.origin/origin-todos.json` across all repos. `origin todo list` also shows the open TODOs recorded in the repo's memory notes (`refs/notes/origin-memory`). Manual TODOs and closures are written to those notes too, so they travel with the repo.
 
 ### `origin todo`
 
@@ -1161,11 +1179,19 @@ origin config set telemetry true
 | `commitLinking` | `always` \| `prompt` \| `never` | `always` | Add Origin-Session trailers to commits |
 | `pushStrategy` | `auto` \| `prompt` \| `false` | `auto` | When to push origin-sessions branch |
 | `telemetry` | `true` \| `false` | `false` | Enable anonymous telemetry (opt-in) |
-| `autoUpdate` | `true` \| `false` | `true` | Check for CLI updates |
+| `autoUpdate` | `true` \| `false` | — | Listed by `config list`, but the CLI does not read it today |
 | `secretRedaction` | `true` \| `false` | `true` | Redact secrets before sending to API |
-| `hookChaining` | `true` \| `false` | `true` | Chain existing hooks when installing |
-| `anthropicApiKey` | string | — | Anthropic API key for AI features (`explain --summarize`, `chat`, `session-compare`) |
+| `hookChaining` | `true` \| `false` | — | Listed by `config list`, but the CLI does not read it today |
+| `anthropicApiKey` | string | — | Anthropic API key for AI features (`explain --summarize`, `chat`, `ask`, `pre-review`, `session-compare`); `ANTHROPIC_API_KEY` wins |
 | `agentSlugs` | object | `{}` | Per-tool agent slug overrides (e.g., `{"claude-code": "claude-front"}`) |
+| `mode` | `auto` \| `standalone` | `auto` | `standalone` skips the API even when logged in |
+| `sessionBackend` | `refs` \| `branch` | `refs` | Local session storage: one ref per session (`refs/origin/sessions/<id>`) or the shared `origin-sessions` branch |
+| `snapshotRepo` | URL | — | External git remote for the `origin-sessions` branch |
+| `memoryUpdate` | `session-end` \| `commit` \| `both` | `session-end` | When to refresh session memory |
+| `memorySummary` | `heuristic` \| `llm` | `heuristic` | How memory summaries are written |
+| `autoSnapshot` | `true` \| `false` | `false` | Snapshot the working tree before agent file edits |
+| `signSnapshots` | `true` \| `false` | — | Sign Origin's own commits (snapshots, session branch) |
+| `desktopNotifications` | `true` \| `false` | `false` | Desktop notification when an agent waits for you or finishes a turn with new commits |
 
 ### Agent Slug Overrides
 
@@ -1190,9 +1216,13 @@ This is useful when you have multiple Origin agents (e.g., `claude-frontend`, `c
 {
   "agent": "my-agent-slug",
   "ignorePatterns": ["*.generated.ts", "dist/**"],
-  "trackTabCompletions": true
+  "trackTabCompletions": true,
+  "secretScan": true,
+  "notesIncludePrompts": false
 }
 ```
+
+`secretScan` (default `true`) controls the pre-commit secret scan. `notesIncludePrompts` and `notesEncryptPrompts` are described under [Git Notes Format](#git-notes-format).
 
 ---
 
@@ -1231,12 +1261,24 @@ origin ci check --range origin/main..HEAD
 
 Output includes: total commits, AI vs human split, AI percentage, top AI models used.
 
-### `origin ci squash-merge <baseBranch>`
+### `origin ci squash-merge`
 
-Preserve AI attribution data through squash merges. Collects attribution from all commits being squashed and writes a combined note to the new squash commit.
+Preserve AI attribution data through squash merges. Collects attribution from all commits being squashed and writes a combined note to the new squash commit. The range and target must be given explicitly; a base branch alone is refused.
 
 ```bash
-origin ci squash-merge main
+origin ci squash-merge --range <base-before-merge>..<source-tip> --target <squash-sha>
+origin ci squash-merge --range A..B --target C --skip-unless-squash   # no-op unless C is a squash commit
+origin ci squash-merge --range A..B --target C --warn-only            # warn and exit 0 if it can't carry
+```
+
+### `origin ci session-check`
+
+Verify that every commit has a linked Origin session (tamper detection).
+
+```bash
+origin ci session-check              # From the branch point
+origin ci session-check --since abc1 # From a specific commit
+origin ci session-check --warn-only  # Exit 0, print warnings only
 ```
 
 ### `origin ci generate-workflow`
@@ -1247,6 +1289,8 @@ Generate a GitHub Actions workflow file for automated attribution checking.
 origin ci generate-workflow
 # Outputs a complete .github/workflows/origin-attribution.yml
 ```
+
+The generated file includes an opt-in `squash-attribution` job, enabled by setting the repository variable `ORIGIN_SQUASH_MERGE_ONLY` to `true`.
 
 ### Example GitHub Actions Workflow
 
@@ -1265,7 +1309,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Origin CLI
-        run: npm install -g @origin/cli
+        run: npm install -g https://getorigin.io/cli/origin-cli-latest.tgz
 
       - name: Attribution Check
         run: |
@@ -1273,7 +1317,9 @@ jobs:
           origin ci check --range "${{ github.event.pull_request.base.sha }}..${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
 ```
 
-**Required secrets:** `ORIGIN_API_KEY`
+**Required secrets:** `ORIGIN_API_KEY` (used by the `origin login` step in the generated workflow).
+
+Note: the CLI is not on the public npm registry. Install it from the tarball URL above, not as `@origin/cli`.
 
 ---
 
@@ -1344,7 +1390,7 @@ origin proxy install
 # Adds ~/.origin/bin to PATH (add to shell profile)
 ```
 
-**What it intercepts:** `git commit`, `git push`, `git rebase`, `git cherry-pick`, `git stash`
+**What it intercepts:** `git commit` (including `--amend`), `git push`, `git rebase`, `git cherry-pick`, `git stash`, `git merge`
 
 For each intercepted command, the proxy fires pre/post hooks for attribution preservation.
 
@@ -1395,16 +1441,21 @@ Checks for:
 Remove orphaned data and temp files.
 
 ```bash
-origin clean             # Preview what would be cleaned
-origin clean --dry-run   # Same as above
-origin clean --force     # Clean without confirmation
+origin clean                       # Preview what would be cleaned
+origin clean --dry-run             # Same as above
+origin clean --force               # Clean without confirmation
+origin clean --shadow-refs         # Preview unreferenced shadow refs older than 30 days
+origin clean --shadow-refs --force # Remove them
 ```
 
 Removes:
-- Orphaned `origin-sessions` branch entries
-- Stale `.git/origin-session*.json` files
+- Stale `.git/origin-session*.json` files (>24h)
 - Temp index files (`.git/origin-tmp-index*`)
-- Old hooks log entries (>7 days)
+- Orphaned session files in `~/.origin/sessions/` (never work that exists only there)
+- Old hooks log (>7 days)
+- Old telemetry queue
+
+`--shadow-refs` only touches `refs/origin/shadow/`. See [SHADOW-RETENTION.md](./SHADOW-RETENTION.md).
 
 ### `origin reset`
 
@@ -1424,13 +1475,15 @@ origin reset --force     # Force clear
 Upgrade Origin CLI to the latest version.
 
 ```bash
-origin upgrade                    # Upgrade to latest stable
-origin upgrade --channel beta     # Upgrade to beta channel
-origin upgrade --channel canary   # Upgrade to canary channel
-origin upgrade --check            # Only check, don't install
+origin upgrade             # Download and install the latest version
+origin upgrade --check     # Only check, don't install
+origin upgrade --dry-run   # Show what would be downloaded and installed
+origin upgrade --force     # Install the server version even if it is older (rollback)
 ```
 
-Origin also checks for updates automatically after commands run (configurable via `origin config set autoUpdate false`).
+It installs `https://getorigin.io/cli/origin-cli-latest.tgz` and then repairs agent hook configs that no longer match the new CLI (`origin hooks repair`). There is no backup of the previous install, so `--rollback` exits without changes.
+
+Origin also checks for a newer version after commands run (cached for 24h in `~/.origin/last-update-check.json`) and prints a notice on stderr.
 
 ---
 
@@ -1438,7 +1491,7 @@ Origin also checks for updates automatically after commands run (configurable vi
 
 Origin uses a multi-layer hook system:
 
-### Agent Hooks (7 events)
+### Hook Events
 
 | Event | Trigger | Data Captured |
 |-------|---------|---------------|
@@ -1478,14 +1531,17 @@ Each agent handles session start/end differently:
 
 | Agent | Session Start | Session End | Fallback |
 |-------|--------------|-------------|----------|
-| Claude Code | `SessionStart` hook | `SessionEnd` hook | Heartbeat stale check (15 min) |
-| Cursor | `sessionStart` hook | No explicit end | Heartbeat stale check (15 min) |
-| Codex CLI | `user-prompt-submit` hook | No explicit end | Heartbeat stale check (15 min) |
-| Gemini CLI | `SessionStart` hook | `SessionEnd` hook | Heartbeat stale check (15 min) |
+| Claude Code | `SessionStart` hook | `SessionEnd` hook | Heartbeat stale check |
+| Cursor | `sessionStart` hook | `sessionEnd` hook | Heartbeat stale check |
+| Codex CLI | `SessionStart` hook | No explicit end | Heartbeat stale check |
+| Gemini CLI | `SessionStart` hook | `SessionEnd` hook | Heartbeat stale check |
+| GitHub Copilot | `sessionStart` hook | `sessionEnd` hook | Heartbeat stale check |
+| Devin | `SessionStart` hook | `SessionEnd` hook | Heartbeat stale check |
+| Antigravity | `PostToolUse` hook (no session-start event) | No explicit end (`Stop` ends each turn) | Heartbeat stale check |
 
-**Heartbeat:** A background process (`~/.origin/heartbeats/<id>.pid`) pings the Origin API every 30 seconds. If the state file hasn't been updated in 15 minutes (agent closed/crashed), the heartbeat auto-ends the session.
+**Heartbeat:** A background process (`~/.origin/heartbeats/<id>.pid`) pings the Origin API every 30 seconds. For hook-driven agents, if the session state file hasn't been updated in 90 minutes (agent closed/crashed), the heartbeat ends the session.
 
-**Server-side cleanup:** The Origin platform also checks every 5 minutes and auto-completes any RUNNING sessions with no heartbeat ping in 15 minutes.
+**Server side:** The Origin platform does not auto-complete sessions. A RUNNING session with no recent activity is shown as IDLE.
 
 ### Per-Prompt Diff Tracking
 
@@ -1533,6 +1589,8 @@ When `secretRedaction` is enabled (default: true), Origin automatically redacts:
 | `~/.origin/sessions/<id>.json` | Global session archive (backup state) |
 | `~/.origin/heartbeats/<id>.pid` | Active heartbeat PID files |
 | `~/.origin/origin-todos.json` | AI-extracted TODO tracker (cross-repo) |
+| `~/.origin/git-hooks/` | Machine-wide git hooks (global `core.hooksPath`) |
+| `~/.origin/note-keys.json` | Cached keys for sealed prompts (owner-only) |
 | `.git/origin-session-<tag>.json` | Active session state (tagged per concurrent session) |
 | `.git/origin-handoff.json` | Cross-agent handoff context (last session summary for next agent) |
 | `.origin.json` | Per-repo config (agent slug, ignore patterns) |
@@ -1541,10 +1599,15 @@ When `secretRedaction` is enabled (default: true), Origin automatically redacts:
 
 | Ref | Purpose |
 |-----|---------|
-| `origin-sessions` | Orphan branch storing session data (metadata.json, prompts.md, changes.json per session) |
+| `refs/origin/sessions/<id>` | One ref per session (default local store, `sessionBackend: refs`) |
+| `origin-sessions` | Orphan branch storing session data (metadata.json, prompts.md, changes.json per session); still produced at publish time |
+| `refs/origin/shadow/<tag>` | Mid-session shadow snapshots |
 | `refs/notes/origin` | Git notes with AI attribution metadata per commit |
 | `refs/notes/origin-memory` | Session memory — accumulated session summaries for context injection |
-| `trails/` | Trail metadata (on origin-sessions branch) |
+| `refs/notes/origin-memory-brief` | Continuation brief for the next session (`memorySummary: llm`) |
+| `refs/notes/origin-acceptance` | How much of a past agent's output survived |
+| `refs/notes/origin-repo-brief` | Cached repo brief (opt-in) |
+| `refs/notes/origin-remote*` | Staging refs that `git fetch` fills before notes are merged |
 
 ### Origin-Sessions Branch Structure
 
@@ -1554,8 +1617,6 @@ sessions/
     metadata.json    # Session metrics, tokens, cost, git state
     prompts.md       # Human-readable markdown with all prompts
     changes.json     # Prompt-to-file mappings with diffs
-trails/
-  <trailId>.json     # Trail metadata
 ```
 
 ### Git Notes Format
@@ -1662,9 +1723,10 @@ Disclosure for customers and pilots: *Earlier Origin versions could include prom
 | Cursor | Session hooks + Cursor DB | Cursor hooks API | Yes (reuses across prompts) | Stable |
 | Codex CLI | Session hooks + SQLite state | Codex hooks API | No (new session per conversation) | Stable |
 | Gemini CLI | Session hooks + process detection | Gemini settings hooks | No | Stable |
-| Aider | Process detection | Config hooks | No | Stable |
-| Windsurf | Session hooks + process detection | Windsurf hooks API | No | Preview |
-| GitHub Copilot | Process detection | Global post-commit hook | N/A | Preview |
+| Aider | Process detection | Config hooks (`.aider.conf.yml`, repo only) | No | Stable |
+| Devin (formerly Windsurf) | Session hooks + process detection | Devin hooks (`~/.devin/hooks.v1.json`) | No | Preview |
+| GitHub Copilot | Session hooks + process detection | Copilot CLI hooks (`~/.copilot/hooks/`) | — | Preview |
+| Antigravity | Session hooks (`agy`) | Antigravity hooks (`~/.gemini/config/hooks.json`) | — | Preview |
 | Continue | Process detection | Global post-commit hook | N/A | Preview |
 | Amp | Process detection | Global post-commit hook | N/A | Preview |
 | Junie | Process detection | Global post-commit hook | N/A | Preview |
@@ -1704,10 +1766,11 @@ Override in `.origin.json`:
 
 | Variable | Purpose |
 |----------|---------|
-| `ORIGIN_API_URL` | Override API URL |
-| `ORIGIN_API_KEY` | Override API key |
-| `ORIGIN_DEBUG` | Enable debug logging |
-| `ANTHROPIC_API_KEY` | Anthropic API key for AI features (`explain --summarize`, `chat`, `session-compare`) |
+| `ANTHROPIC_API_KEY` | Anthropic API key for AI features (`explain --summarize`, `chat`, `ask`, `pre-review`, `session-compare`); wins over `anthropicApiKey` |
+| `ORIGIN_PR_NUMBER` | PR number for `origin why --trace --pr-comment` (otherwise read from `GITHUB_REF`) |
+| `ORIGIN_FORCE_DEVICE_CODE` | `1` forces the browser device-code flow in `origin login` |
+
+The API URL and key come from `~/.origin/config.json` (`origin login`), not from environment variables. Hook debug output always goes to `~/.origin/hooks.log`.
 
 ---
 
@@ -1733,7 +1796,7 @@ origin reset --force       # Clear current session state
 
 ### Session still shows RUNNING after closing agent
 
-The heartbeat process auto-ends sessions after 15 minutes of inactivity. If it persists:
+The heartbeat process ends a hook-driven session after 90 minutes without hook activity. If it persists:
 
 ```bash
 # Check for orphaned heartbeats

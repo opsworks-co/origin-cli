@@ -98,6 +98,24 @@ export interface LedgerCapture {
   netZero: string[];
   /** True when every file resolved on both sides. */
   complete: boolean;
+  /**
+   * Files whose last journaled copy was not their content at the turn's end:
+   * the watcher missed a later write, and the after-state was taken from the
+   * turn's end instead. See LedgerCaptureDeps.endState.
+   */
+  missedWrites?: string[];
+}
+
+/** A file's content where the turn ended — see LedgerCaptureDeps.endState. */
+export interface TurnEndState {
+  /** The file's bytes there; null when it was absent or could not be read. */
+  read: (file: string) => string | null;
+  /**
+   * When that state was taken (ms). A record the journal made after it is
+   * newer than it — a turn re-opened after its Stop — and the journal stands.
+   * Omitted for the working tree, which is always now.
+   */
+  at?: number;
 }
 
 export interface LedgerCaptureDeps {
@@ -160,6 +178,44 @@ export interface LedgerCaptureDeps {
    * (690e594c turn 1).
    */
   startDirt?: (file: string, started: string, inherited: string) => string | null;
+  /**
+   * The `beforeOverrides` entries that are EXACT: the bytes a stopped merge
+   * or pick left in the file, recorded as git wrote them (TODO 1de72a6e).
+   * `startDirt` is not laid over these — git refuses to move a file the turn
+   * started with dirty, and a conflicted text is not a base to merge into.
+   */
+  exactBefore?: ReadonlySet<string>;
+  /**
+   * The tree where the turn ended: its turn-end shadow, or the working tree
+   * while it is still open. A file whose last journaled copy differs from it
+   * lost a write to the watcher — FSEvents drops events under load — and the
+   * ledger would bill the turn for a state the file only passed through.
+   * Session 588bb84a: two python writes to codex.ts 25 s apart, the second
+   * never journaled, and the turn read +51/-8 against a commit of +53/-8. A
+   * turn that does not commit has no commit patch to put that right, so the
+   * after-state is taken from here instead. Omit to trust the journal.
+   */
+  endState?: TurnEndState;
+}
+
+/**
+ * The file's content at the turn's end, when the journal's last copy of it is
+ * not that content — or null when the journal's copy stands.
+ */
+function contentTheJournalMissed(c: { file: string; lastAt?: number }, journaled: string, end: TurnEndState): string | null {
+  // The journal saw a write after the end state was taken: it is the newer.
+  if (typeof end.at === 'number' && typeof c.lastAt === 'number' && c.lastAt > end.at) return null;
+  let atEnd: string | null = null;
+  try { atEnd = end.read(c.file); } catch { return null; }
+  // Absent at the end is not evidence of a missed write: the shadow leaves
+  // out what git ignores, and a missed delete is another question.
+  if (typeof atEnd !== 'string' || atEnd === journaled) return null;
+  // A shadow is a commit, so git's own filters stand between it and the
+  // bytes on disk: line endings normalised on the way in, an LFS pointer in
+  // place of the content. Neither is a write.
+  if (atEnd.replace(/\r\n/g, '\n') === journaled.replace(/\r\n/g, '\n')) return null;
+  if (atEnd.startsWith('version https://git-lfs.github.com/spec/')) return null;
+  return atEnd;
 }
 
 /**
@@ -222,6 +278,7 @@ export function captureTurnFromLedger(deps: LedgerCaptureDeps): LedgerCapture | 
   const resolved: LedgerFile[] = [];
   const contentUnavailable: string[] = [];
   const netZero: string[] = [];
+  const missedWrites: string[] = [];
   let complete = true;
   // Checkouts inside the turn, by time — see the round-trip rule below.
   const checkoutsAt = fencesInTurn(entries, turnId)
@@ -240,6 +297,10 @@ export function captureTurnFromLedger(deps: LedgerCaptureDeps): LedgerCapture | 
         complete = false;
         continue;
       }
+      if (deps.endState) {
+        const missed = contentTheJournalMissed(c, after, deps.endState);
+        if (missed !== null) { after = missed; missedWrites.push(c.file); }
+      }
     }
 
     // BEFORE. The ledger's own previous snapshot first — that is the whole
@@ -254,7 +315,7 @@ export function captureTurnFromLedger(deps: LedgerCaptureDeps): LedgerCapture | 
       // describes work that is not this turn's to claim.
       before = inherited.get(c.file) ?? null;
       if (before !== null) beforeSource = 'baseline';
-      if (before !== null && deps.startDirt) {
+      if (before !== null && deps.startDirt && !deps.exactBefore?.has(c.file)) {
         let atStart: string | null = null;
         if (c.beforeHash) atStart = getSnapshot(snapshotDir, c.beforeHash);
         else if (!c.reclaimed && deps.baselineSha && deps.readAtRev) atStart = deps.readAtRev(deps.baselineSha, c.file);
@@ -342,6 +403,7 @@ export function captureTurnFromLedger(deps: LedgerCaptureDeps): LedgerCapture | 
     contentUnavailable: [...new Set(contentUnavailable)],
     netZero,
     complete,
+    ...(missedWrites.length > 0 ? { missedWrites } : {}),
   };
 }
 
@@ -375,7 +437,7 @@ export interface LedgerSessionState {
   /** LOCAL-numbered, like the ids. */
   promptShadows?: Array<{ promptIndex: number; shadowSha: string; promptStartedAt?: number; cutAfterTurnStart?: boolean }>;
   /** LOCAL-numbered: the tree Stop saw when it closed turn L. */
-  turnEndShadows?: Array<{ promptIndex: number; shadowSha: string }>;
+  turnEndShadows?: Array<{ promptIndex: number; shadowSha: string; capturedAt?: string }>;
   sessionStartShadowSha?: string | null;
   prePromptSha?: string | null;
   headShaAtStart?: string | null;
@@ -421,6 +483,11 @@ export interface ApplyLedgerDeps {
   /** Batched "does git ignore this?" — see LedgerCaptureDeps.ignoredFiles. */
   ignoredFiles?: (files: string[]) => Set<string>;
   /**
+   * A file's bytes in the working tree, null when absent. The end state of
+   * the newest turn while it has no turn-end shadow (LedgerCaptureDeps.endState).
+   */
+  readWorkingFile?: (file: string) => string | null;
+  /**
    * Per-turn before-states for files the turn inherited from a checkout, pull,
    * rebase or merge that landed inside its window. Injected because answering
    * it needs the repo, and this module does no IO of its own.
@@ -428,6 +495,13 @@ export interface ApplyLedgerDeps {
   inheritedBefore?: (baselineSha: string, localTurn: number) => Map<string, string | null>;
   /** LedgerCaptureDeps.startDirt, for the turn whose baseline is `baselineSha`. */
   startDirt?: (baselineSha: string, file: string, started: string, inherited: string) => string | null;
+  /**
+   * Per-turn before-states for the files a STOPPED merge, rebase pick,
+   * cherry-pick or revert left in the tree (file → the bytes git left), see
+   * gitLeftBeforeStatesForTurn. They win over `inheritedBefore` file by file:
+   * the operation left the file after any commit it checked out.
+   */
+  leftByGit?: (baselineSha: string | null, localTurn: number) => Map<string, string>;
   /** `git diff --name-only <from> <to>` — what a checkout between them rewrote. */
   changedFilesBetween?: (from: string, to: string) => string[];
   /** Optional trace hook; never throws. */
@@ -515,6 +589,27 @@ function heldInTurnStashes(
   }
   if (written.size === 0) return new Set();
   return stashedFiles(mark.at, written);
+}
+
+/**
+ * Where turn `local` ended: the shadow Stop cut when it closed the turn, else —
+ * for the newest turn, which no Stop has closed yet — the working tree.
+ * Undefined when neither can be read.
+ */
+function turnEndState(
+  state: LedgerSessionState,
+  local: number,
+  newest: boolean,
+  deps: Pick<ApplyLedgerDeps, 'readAtRev' | 'readWorkingFile'>,
+): TurnEndState | undefined {
+  const end = state.turnEndShadows?.find((ps) => ps.promptIndex === local);
+  if (end?.shadowSha) {
+    if (!deps.readAtRev) return undefined;
+    const at = end.capturedAt ? Date.parse(end.capturedAt) : NaN;
+    const readAtRev = deps.readAtRev;
+    return { read: (file) => readAtRev(end.shadowSha, file), ...(Number.isFinite(at) ? { at } : {}) };
+  }
+  return newest && deps.readWorkingFile ? { read: deps.readWorkingFile } : undefined;
 }
 
 /**
@@ -630,9 +725,23 @@ export function applyLedgerToMappings(
         }
         if (fenced.before.size > 0) beforeOverrides = new Map([...fenced.before, ...(beforeOverrides || [])]);
       }
+      // What a STOPPED merge or pick left in a file is the state the turn's
+      // write to it changed — after any commit the operation checked out, so
+      // over the inherited answer for that file (TODO 1de72a6e).
+      let exactBefore: Set<string> | undefined;
+      if (deps.leftByGit) {
+        try {
+          const left = deps.leftByGit(baselineSha, local);
+          if (left && left.size > 0) {
+            beforeOverrides = new Map([...(beforeOverrides || []), ...left]);
+            exactBefore = new Set(left.keys());
+          }
+        } catch { /* unanswerable: the turn keeps the before-states above */ }
+      }
       const cap = captureTurnFromLedger({
         entries, turnId, snapshotDir, baselineSha, priorBaselineSha,
-        readAtRev: deps.readAtRev, ignoredFiles: deps.ignoredFiles, beforeOverrides,
+        readAtRev: deps.readAtRev, ignoredFiles: deps.ignoredFiles, beforeOverrides, exactBefore,
+        endState: turnEndState(state, local, local === turnIds.length - 1, deps),
         startDirt: deps.startDirt && baselineSha
           ? (file, started, inherited) => deps.startDirt!(baselineSha, file, started, inherited)
           : undefined,
@@ -678,12 +787,20 @@ export function applyLedgerToMappings(
       delete pm.chatOnly;
       delete pm.turnWindowCaptured;
       if (cap.contentUnavailable.length > 0) pm.contentUnavailableFiles = cap.contentUnavailable;
+      if (cap.missedWrites) {
+        deps.log?.('journal missed a write: after-state taken from the turn end', {
+          promptIndex: pm.promptIndex, turnId, files: cap.missedWrites,
+        });
+      }
       // What the turn wrote and put back. Decided only by a producer that can
       // say what the turn authored (Stop); left as it stands otherwise, so a
       // later re-send cannot clear a verdict an earlier Stop reached.
       if (deps.authoredFiles) {
         const discarded = discardedWorkForTurn(
-          cap.netZero,
+          // Not a file whose after-state came from the turn's end: the bytes
+          // the turn last wrote are the ones the journal missed, so no stash
+          // or commit can be checked for them, and "put back" is unproven.
+          cap.missedWrites ? cap.netZero.filter((f) => !cap.missedWrites!.includes(f)) : cap.netZero,
           deps.authoredFiles(pm.promptIndex, local),
           // Held elsewhere: in a commit of the turn, or in a stash it made.
           () => {

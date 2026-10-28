@@ -22,7 +22,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { preferCommitPatchForCommittedTurns, pathsInDiff } from '../commit-patch-for-committed-turn.js';
-import { applyRewritePairsToState, type SessionState } from '../session-state.js';
+import { applyRewritePairsToState, recordAmendByAnotherTurn, type SessionState } from '../session-state.js';
 import { createShadowCommit } from '../git-capture.js';
 
 let repo: string;
@@ -297,5 +297,107 @@ describe('a squash of ONE turn\'s commits is unchanged', () => {
     preferCommitPatchForCommittedTurns(state, rows, repo);
     expect(rows[0].linesAdded).toBe(2);
     expect(pathsInDiff(rows[0].diff).sort()).toEqual(['hook.ts', 'other.ts']);
+  });
+});
+
+// ── An amend by the next turn is the same shape with one hop ─────────────────
+//
+// Session 597b3d88 (2026-10-21): turn 1 wrote the Dashboard split (2,755
+// lines) as 1bb435a4; turn 2 amended three unused imports out of it as
+// de4031c5. post-commit attested de4031c5 to turn 2 and then "corrected" the
+// fold's attestation to turn 2 as well, so every later Stop rebuilt turn 1's
+// commit-patch row without that branch, and the server credited turn 2 with
+// the whole commit over a row of +20/-7.
+
+/**
+ * Turn 0 commits the fix; turn 1 rewrites one of its lines, adds a line to a
+ * second file and runs `git commit --amend`. Leaves HEAD at the amended commit.
+ */
+function twoTurnsOneAmend() {
+  git('checkout', '-qb', 'fix/pr');
+  const shadow0 = createShadowCommit(repo, 'turn0') || git('rev-parse', 'HEAD');
+  write('hook.ts', 'one\ntwo\nthree\nturn zero A\nturn zero B\n');
+  const fix = commitAll('fix: the hook reads stdin');
+  const shadow1 = createShadowCommit(repo, 'turn1') || fix;
+  write('hook.ts', 'one\ntwo\nthree\nturn zero A\nreview rewrote B\n');
+  write('handler.ts', 'h1\nreview added\n');
+  git('add', '-A'); git('commit', '-q', '--amend', '--no-edit');
+  const amended = git('rev-parse', 'HEAD');
+  const state = {
+    promptTurnIds: ['t_0', 't_1'],
+    sessionCommitShas: [fix],
+    commitTurns: [{ sha: fix, turnId: 't_0', at: '2026-10-21T22:45:23.000Z', via: 'post-commit' as const }],
+    promptShadows: [{ promptIndex: 0, shadowSha: shadow0 }, { promptIndex: 1, shadowSha: shadow1 }],
+    prePromptSha: null as string | null,
+    rewrittenCommits: [] as Array<{ from: string; to: string }>,
+    preSquashCommitTurns: undefined as SessionState['preSquashCommitTurns'],
+    foldedCommitTurns: undefined as SessionState['foldedCommitTurns'],
+  };
+  return { fix, amended, state };
+}
+
+describe('an amend by the next turn', () => {
+  it('git\'s order — post-commit attests, then the pair folds: the amended commit is the first turn\'s, its original kept beside', () => {
+    const { fix, amended, state } = twoTurnsOneAmend();
+    state.sessionCommitShas.push(amended);
+    state.commitTurns.push({ sha: amended, turnId: 't_1', at: '2026-10-21T23:29:53.000Z', via: 'post-commit' });
+    applyRewritePairsToState(state, [{ from: fix, to: amended }]);
+    expect(state.commitTurns.map((c) => [c.sha, c.turnId])).toEqual([[amended, 't_0']]);
+    expect(state.preSquashCommitTurns?.map((c) => [c.sha, c.turnId, c.squash, c.amendedBy])).toEqual([[fix, 't_0', amended, 't_1']]);
+  });
+
+  it('the live order — the pair folds first, then post-commit records who amended: the same state', () => {
+    const { fix, amended, state } = twoTurnsOneAmend();
+    applyRewritePairsToState(state, [{ from: fix, to: amended }]);
+    expect(state.commitTurns.map((c) => [c.sha, c.turnId])).toEqual([[amended, 't_0']]);
+    expect(state.preSquashCommitTurns).toBeUndefined();
+    const author = recordAmendByAnotherTurn(state, amended, 't_1', fix);
+    expect(author).toEqual({ authorTurnId: 't_0', amendedAway: fix });
+    expect(state.commitTurns.map((c) => [c.sha, c.turnId])).toEqual([[amended, 't_0']]);
+    expect(state.preSquashCommitTurns?.map((c) => [c.sha, c.turnId, c.squash, c.amendedBy])).toEqual([[fix, 't_0', amended, 't_1']]);
+  });
+
+  it('post-commit without the pair or the reflog: the record needs the amended-away sha from one of them', () => {
+    const { amended, state } = twoTurnsOneAmend();
+    expect(recordAmendByAnotherTurn(state, amended, 't_1', null)).toBeNull();
+    expect(state.preSquashCommitTurns).toBeUndefined();
+  });
+
+  it('a turn amending its OWN commit records nothing — the fold alone is right', () => {
+    const { fix, amended, state } = twoTurnsOneAmend();
+    expect(recordAmendByAnotherTurn(state, amended, 't_0', fix)).toBeNull();
+    state.commitTurns.push({ sha: amended, turnId: 't_0', at: '2026-10-21T22:47:03.000Z', via: 'post-commit' });
+    applyRewritePairsToState(state, [{ from: fix, to: amended }]);
+    expect(state.commitTurns.map((c) => [c.sha, c.turnId])).toEqual([[amended, 't_0']]);
+    expect(state.preSquashCommitTurns).toBeUndefined();
+  });
+
+  it('THE BUG: the first turn is sent the commit it made, not the amended one', () => {
+    const { fix, amended, state } = twoTurnsOneAmend();
+    state.commitTurns.push({ sha: amended, turnId: 't_1', at: '2026-10-21T23:29:53.000Z', via: 'post-commit' });
+    applyRewritePairsToState(state, [{ from: fix, to: amended }]);
+    const rows = [row(0), row(1)];
+    preferCommitPatchForCommittedTurns(state, rows, repo);
+    expect(pathsInDiff(rows[0].diff)).toEqual(['hook.ts']);
+    expect(rows[0].diff).toContain('+turn zero B');
+    expect(rows[0].diff).not.toContain('review');
+    expect([rows[0].linesAdded, rows[0].linesRemoved]).toEqual([2, 0]);
+    expect(rows[0].commitSha).toBe(amended);
+  });
+
+  it('…and the amending turn is sent its delta on that commit, with no stamp of its own', () => {
+    const { fix, amended, state } = twoTurnsOneAmend();
+    state.commitTurns.push({ sha: amended, turnId: 't_1', at: '2026-10-21T23:29:53.000Z', via: 'post-commit' });
+    applyRewritePairsToState(state, [{ from: fix, to: amended }]);
+    const rows = [row(0), { ...row(1), commitSha: amended }];
+    preferCommitPatchForCommittedTurns(state, rows, repo);
+    expect(pathsInDiff(rows[1].diff).sort()).toEqual(['handler.ts', 'hook.ts']);
+    expect(rows[1].diff).toContain('+review rewrote B');
+    expect(rows[1].diff).toContain('-turn zero B');
+    expect(rows[1].diff).toContain('+review added');
+    expect([rows[1].linesAdded, rows[1].linesRemoved]).toEqual([2, 1]);
+    expect(rows[1].commitSha).toBeNull();
+    // Together they are the amended commit, counted once.
+    expect(rows[0].linesAdded + rows[1].linesAdded - rows[1].linesRemoved).toBe(3);
   });
 });

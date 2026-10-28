@@ -239,7 +239,7 @@ describe('helpers', () => {
   });
 
   it('handles empty/garbage transcripts without throwing', () => {
-    expect(parseAntigravityTranscript('')).toEqual({ prompts: [], responses: [], promptTimes: [], model: null, inputChars: 0, outputChars: 0, promptInputChars: [], promptOutputChars: [], filePaths: [], filesEdited: [], promptFilesEdited: [], promptEditRecords: [], promptRanCommit: [], promptWroteViaShell: [], promptShellWriteCommands: [], promptCommitShas: [], toolCalls: 0, toolBreakdown: [] });
+    expect(parseAntigravityTranscript('')).toEqual({ prompts: [], responses: [], responseParts: [], promptTimes: [], model: null, inputChars: 0, outputChars: 0, promptInputChars: [], promptOutputChars: [], filePaths: [], filesEdited: [], promptFilesEdited: [], promptEditRecords: [], promptRanCommit: [], promptWroteViaShell: [], promptShellWriteCommands: [], promptCommitShas: [], toolCalls: 0, toolBreakdown: [] });
     expect(parseAntigravityTranscript('not json\n{bad').prompts).toEqual([]);
   });
 });

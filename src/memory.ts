@@ -6,6 +6,7 @@ import { getGitRoot } from './session-state.js';
 import { isRepoIgnored } from './ignore-repos.js';
 import { contextVariant } from './context-variant.js';
 import { loadConfig } from './config.js';
+import { markMemoryWritten } from './memory-publish-queue.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -49,6 +50,10 @@ export interface SessionMemoryEntry {
   // where a tool call's arguments never appear. writeSessionMemory carries
   // these across each rewrite and folds them back into `decisions`.
   recordedDecisions?: RecordedDecision[];
+  // Built with prompt text off: `intent` holds only [Origin: Intent] markers
+  // and `summary` never falls back to the prompt. scrubPromptTextFromMemory
+  // leaves these entries alone and strips the older ones before a push.
+  promptTextWithheld?: boolean;
 }
 
 /** A decision recorded through the MCP record_decision tool — see SessionMemoryEntry. */
@@ -296,6 +301,12 @@ export interface TodoClosure {
   sessionId?: string;
   /** Commits carrying the closing work. The promotion check reads these. */
   shas?: string[];
+  /**
+   * Pull requests named as having done it ("already done in #24"): confirmed
+   * when one's merge is on the default branch, like `shas`. How a session that
+   * changed nothing — the work was already done — closes its TODO.
+   */
+  prs?: number[];
   /** When `pending` became `closed`. */
   confirmedAt?: string;
 }
@@ -524,7 +535,13 @@ export function settlePayload(p: MemoryPayload, budget: number = memoryBudgetByt
   for (const e of keptSessions) for (const t of e.openTodos || []) liveTodoKeys.add(todoClosureKey(t));
   for (const m of manualTodos) if (m?.key) liveTodoKeys.add(m.key);
   for (const a of todosOut) liveTodoKeys.add(a.key);
-  closedTodos = closedTodos.filter((c) => liveTodoKeys.has(c.key));
+  // Nor while the session that closed it is still kept. A session's rollup is
+  // rewritten on every turn, commit and end, by writers that disagree about
+  // which TODOs a later [Origin: Closes] already settled — so a TODO can leave
+  // the rollup on one write and come back on the next. Pruning its closure in
+  // between reopened shipped work (df39aecf's two cloud-run TODOs, 2026-10-20).
+  const keptIds = new Set(keptSessions.map((s) => s.sessionId));
+  closedTodos = closedTodos.filter((c) => liveTodoKeys.has(c.key) || (!!c.sessionId && keptIds.has(c.sessionId)));
   // Closed means gone — the item leaves, and its closure leaves with it on the
   // next write, once nothing references the key any more.
   const closedKeys = new Set(closedTodos.filter((c) => c.state === 'closed').map((c) => c.key));
@@ -583,6 +600,8 @@ function writeMemoryPayload(
     cwd: repoPath, timeoutMs: 10_000, env: gitIdentityEnv(repoPath), input: JSON.stringify(settled, null, 2),
   });
   if (r.status !== 0) throw new Error(`git notes add failed: ${r.stderr.trim()}`);
+  // Written here, not yet on the remote: get it published (memory-publish-queue.ts).
+  markMemoryWritten(repoPath);
 }
 
 /** Write a payload whole — every record, none preserved from the note. For merge results. */
@@ -918,6 +937,53 @@ export function writeSessionMemory(repoPath: string, entry: SessionMemoryEntry):
   }
 }
 
+/**
+ * Strip a session entry of the prompt text older entries carry: `intent` fell
+ * back to the first prompt verbatim, and `summary` to the same 200 characters
+ * when there was no summary. Pure — exported for testing. Which intent came
+ * from a marker is not recorded, so all of it goes; a summary that repeats an
+ * intent line is the prompt fallback.
+ */
+export function withoutPromptText(e: SessionMemoryEntry): SessionMemoryEntry {
+  if (e.promptTextWithheld) return e;
+  const { intent, ...rest } = e;
+  const fromPrompt = (intent || []).some((i) => i.trim() && i.trim() === (e.summary || '').trim());
+  return { ...rest, summary: fromPrompt ? 'No summary' : e.summary, promptTextWithheld: true };
+}
+
+/**
+ * Before memory leaves a machine that keeps prompt text off: rewrite the note
+ * so no entry still carries it. Memory is pushed by default now
+ * (memoryPushDecision), and entries written before that kept the user's first
+ * prompt verbatim — local-only then, published by the next push otherwise.
+ * Returns true when the note changed. Never throws: a failed scrub must stop
+ * the push, so the caller treats false-with-error as "do not push".
+ */
+export function scrubPromptTextFromMemory(repoPath: string): { changed: boolean; ok: boolean } {
+  try {
+    let changed = false;
+    const { sessions, commits } = loadMemoryPayloadForWrite(repoPath);
+    if (sessions.some((e) => !e.promptTextWithheld)) {
+      writeMemoryPayload(repoPath, sessions.map(withoutPromptText), commits);
+      changed = true;
+    }
+    // The brief is an LLM paraphrase of those entries, intent included. One
+    // not marked prompt-free is dropped; the next session end writes a new one.
+    const brief = readMemoryBrief(repoPath);
+    if (brief && !brief.promptFree) {
+      const root = briefRootCommit(repoPath);
+      if (root) {
+        git(['notes', `--ref=${MEMORY_BRIEF_REF_NAME}`, 'remove', root], { cwd: repoPath, timeoutMs: 10_000, env: gitIdentityEnv(repoPath) });
+        markMemoryWritten(repoPath);
+        changed = true;
+      }
+    }
+    return { changed, ok: true };
+  } catch {
+    return { changed: false, ok: false };
+  }
+}
+
 // Record an IMMUTABLE per-commit memory entry. Add-once by SHA: if a record for
 // this commit already exists, it is left untouched (frozen). Pruned to commits
 // whose session is still in the retained session window.
@@ -982,6 +1048,17 @@ export function recordTodoClosures(repoPath: string, closures: TodoClosure[]): n
     for (const c of closures) {
       if (!c?.key || !c.text) continue;
       const mine = byKey.get(c.key);
+      // A later pending claim adds its evidence to an earlier one: a session
+      // that names the commit or PR that already did the work must not be
+      // shadowed by an earlier claim that named nothing.
+      if (mine && mine.state === 'pending' && c.state === 'pending') {
+        const shas = [...new Set([...(mine.shas || []), ...(c.shas || [])])].slice(0, 20);
+        const prs = [...new Set([...(mine.prs || []), ...(c.prs || [])])].slice(0, 10);
+        if (shas.length === (mine.shas || []).length && prs.length === (mine.prs || []).length) continue;
+        byKey.set(c.key, { ...mine, ...(shas.length ? { shas } : {}), ...(prs.length ? { prs } : {}) });
+        changed++;
+        continue;
+      }
       if (mine && (mine.state === 'closed' || c.state !== 'closed')) continue;
       byKey.set(c.key, mine && c.state === 'closed'
         // Promotion keeps the original claim and stamps it, so the record still
@@ -1520,6 +1597,9 @@ export interface MemoryBrief {
   brief: string;
   signature: string; // over the substantive entries it was generated from
   generatedAt: string;
+  // Generated from entries with the prompt text stripped (prompt text off).
+  // A brief without it may paraphrase a prompt, so it is dropped before a push.
+  promptFree?: boolean;
 }
 
 // Fingerprint of the substantive memory, so the brief is only regenerated when
@@ -1544,6 +1624,7 @@ export function writeMemoryBrief(repoPath: string, brief: MemoryBrief): void {
     if (!root) return;
     git(['notes', `--ref=${MEMORY_BRIEF_REF_NAME}`, 'add', '-f', '-m', JSON.stringify(brief, null, 2), root],
       { cwd: repoPath, timeoutMs: 10_000, env: gitIdentityEnv(repoPath) });
+    markMemoryWritten(repoPath);
   } catch { /* non-fatal */ }
 }
 
@@ -1628,7 +1709,27 @@ export function buildMemoryBriefContext(repoPath: string): string | null {
   const cached = readMemoryBrief(repoPath);
   const brief = cached?.brief?.trim();
   if (!brief) return null;
+  // A brief that sessions have moved past is worse than none: when the LLM
+  // that rewrites it fails (the org key ran out of credit), the origin repo
+  // kept injecting a 32-day-old "in flight" list as current work. The
+  // deterministic buildMemoryContext reads the sessions themselves.
+  if (isMemoryBriefStale(cached!, readAllSessionMemory(repoPath))) return null;
   return `Prior work in this repo (recent sessions):\n${brief}`;
+}
+
+/** Grace for the refresh to land: it runs in a detached child after a
+ *  session or commit, so the newest session briefly postdates the brief. */
+const MEMORY_BRIEF_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/** True when a substantive session ended more than a day after the brief was
+ *  written — the brief no longer describes the repo's recent work. */
+export function isMemoryBriefStale(brief: MemoryBrief, entries: SessionMemoryEntry[]): boolean {
+  const generated = Date.parse(brief.generatedAt || '');
+  if (!Number.isFinite(generated)) return false;
+  return (entries || []).filter(isSubstantiveMemory).some((e) => {
+    const ended = Date.parse(e.endedAt || '');
+    return Number.isFinite(ended) && ended - generated > MEMORY_BRIEF_STALE_AFTER_MS;
+  });
 }
 
 // ─── Clear Memory ──────────────────────────────────────────────────────────

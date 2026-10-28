@@ -58,7 +58,7 @@ A consumer can implement a reader from this document and the schema alone.
 | `examples/valid/long-session-subset.json` | A 40-prompt session of which only iterations 17 and 18 went into this revision. |
 | `examples/valid/line-level.json` | A line-level record; ranges point at the contributing iteration that produced them. |
 | `examples/valid/mixed-line-and-commit.json` | A line-level record in which one contribution has line claims and the other stays commit-level. |
-| `examples/invalid/*.json` | One record per rule that must be rejected; the file name names the rule. Most fail the JSON Schema. Seven pass it and fail a semantic rule: `duplicate-iteration-index.json` and `duplicate-session-iteration-index.json` (S1), `duplicate-session-id.json` (S2), `prompt-uri-index-mismatch.json` (S3), `line-range-inverted.json` (S4), `line-range-unknown-iteration.json` (S5), `iteration-index-beyond-prompt-count.json` (S6). |
+| `examples/invalid/*.json` | One record per rule that must be rejected; the file name names the rule. Most fail the JSON Schema. Seven pass it and fail a semantic rule: `duplicate-iteration-index.json` and `duplicate-session-iteration-index.json` (S1; the second also breaks S2), `duplicate-session-id.json` (S2), `prompt-uri-index-mismatch.json` (S3), `line-range-inverted.json` (S4), `line-range-unknown-iteration.json` (S5), `iteration-index-beyond-prompt-count.json` (S6). |
 
 The reference implementation is `packages/cli/src/attribution-record.ts`
 (see [Validating a record](#validating-a-record)). Its tests live in
@@ -492,18 +492,20 @@ meaning of the fields defined here.
   across contributions to compute a share.
 - No per-range confidence, no line content hashes, no range for deleted lines
   (line numbers refer to the file at this revision).
-- Producing line ranges from agent events is not part of this contract; no
-  Origin writer emits `files` yet.
+- Producing line ranges from agent events is not part of this contract. The
+  Origin CLI's session writer emits `files` only for lines it can prove (see
+  [Runtime status](#runtime-status-the-origin-cli-writer)).
 
 **Other known limits of v1:**
 
 - No history-rewrite lineage (amend, rebase, squash, cherry-pick). A rewritten
-  revision gets its own commit-level record (see
-  [Runtime status](#runtime-status-the-origin-cli-writer)); OR-11/A5 needed no
-  lineage field. One can still be added as an optional field in a minor release
-  if a consumer needs it.
-- No line-range remapping across a rewrite: a rewritten revision's record is
-  commit-level even when the old revision's was line-level.
+  revision gets its own record, which describes only the new revision and
+  names no old one; OR-11/A5 needed no lineage field. One can still be added as
+  an optional field in a minor release if a consumer needs it.
+- No lineage does not mean no line claims after a rewrite: a writer may
+  re-project the ranges it can prove survive into the new revision, as
+  ordinary `files` of the new record, with no new schema field (see
+  [Runtime status](#runtime-status-the-origin-cli-writer)).
 - No per-file diff statistics and no list of files read or changed; files
   appear only as line claims.
 - No sub-agent breakdown. Sub-agent work is part of its parent session.
@@ -698,6 +700,19 @@ SessionEnd hooks) embeds one v1 record per annotated commit in the note on
   commit land in, as a cumulative index, with its `?prompt=N` link when the
   session has a reference); that iteration's `prompt_hash` (see below);
   `session.usage.cost` (a positive estimate, `basis: "estimated"`).
+- **Line claims (OR-45).** The record is `attribution_level: "line"` with
+  `files` only when the writer proves the lines: it replays the session's own
+  captured edits over the commit's parent and keeps a line only when git's
+  diff of the commit also shows it as added
+  (`packages/cli/src/attribution-line-ranges.ts`; which captured edits count
+  is in `attribution-line-claims.ts`). Only `claude-code`, `codex`, `cursor`,
+  `gemini` and `copilot` can open line claims today. Only lines of the attested
+  iteration carry `iteration_index`. Anything not proven — a truncated capture,
+  a replay mismatch, the time budget, claims over 64 KiB in the note — gives
+  the commit-level record. A later write of the same session that did not
+  evaluate lines keeps the ranges an earlier write proved
+  (`preserveProvenLineClaims`), and Stop can upgrade a commit-level note of its
+  own session to line-level.
 - **Prompt hash (OR-48/A8).** `prompt_hash` is written only when the writer can
   prove its input is exactly the text the iteration's `?prompt=N` link serves:
   the whole prompt this launch captured for that turn (cumulative index minus
@@ -714,17 +729,46 @@ SessionEnd hooks) embeds one v1 record per annotated commit in the note on
   a measured zero cannot be told from "not measured" until OR-23),
   `prompt_count` (the cumulative count across resumes is not established
   reliably), `actor`, `revision.diff_stats` and `session.diff_stats` (the note
-  writers do not compute them per revision), and `files` (no line ranges are
-  captured).
-- Notes written before this change are not rewritten, and the other shapes below
-  (Agent Trace import, backfill) still carry no record.
+  writers do not compute them per revision), and `files` when the lines are
+  not proven (above).
+- Notes written before this change are not rewritten. Agent Trace import notes
+  still carry no record.
+- **Backfill.** `origin backfill --apply` writes a record with
+  `evidence: "inferred"`, `agent` only, and no `session` or `model`
+  (`buildInferredAttributionRecord` in `attribution-note.ts`), next to its
+  legacy backfill payload. It writes no record when the agent is not one of
+  the well-known ids, and never over an existing note.
 - **History rewrites (OR-11/A5).** A commit made by `git commit --amend`,
   `git rebase` (including a `rebase -i` squash/fixup), `git cherry-pick`, or a
   squash merge carried by `origin ci squash-merge --range --target` gets a record
   rebuilt for **the new commit**, never a copy of the old one (which names the
   old revision):
-  - `attribution_level` is always `commit`: line ranges are not remapped across
-    a rewrite, and no `files` are carried. Line-level remapping is future work.
+  - Line claims are re-projected only where they are proven to survive, and
+    the projection fails closed (OR-46). A contribution gets `files` only from
+    the claims of an old commit's own canonical record — exact or a 1.x
+    projection that names that old commit — and only for lines of the new
+    commit that satisfy every condition:
+    - the file is the same path — its blob unchanged or edited; the line
+      conditions below decide which lines survive an edit — or, when the old
+      path is gone, the one path git pairs with it as an exact (100%) rename.
+      When the old path still exists but holds another blob and the new
+      commit adds exactly one path with the old blob, that path is taken
+      instead of the edited old path (a unique exact-blob relocation: git
+      shows the old path modified and the new one added, not a rename).
+      Several such added paths are not told apart: the file maps nowhere.
+      This is not copy tracking; no similarity is used;
+    - every optimal line alignment of the old blob onto the new one pairs the
+      claimed line with this line, and both lines have the same text;
+    - the new commit itself adds the line against its first parent: a line it
+      inherits from its parent is never claimed by the rewrite.
+  - A merge target, an ambiguous mapping, a line that two contributions or
+    sessions reach, a bound or a timeout, unreadable data, or no surviving line
+    produce no ranges — never guessed ones. Projected ranges carry no
+    `iteration_index`, and the contribution carries no session `iterations`:
+    a rewritten line claim says which session wrote the line, not which prompt.
+  - A record with at least one contribution holding proven `files` is
+    `attribution_level: "line"`; its other contributions stay commit-level.
+    With no proven line, the rebuild is the commit-level one described here.
   - From each old note's record (read with `readRecord`; exact or a 1.x
     projection that names that old commit — anything else gives no claim), or
     else from a legacy session note with an observed session id and an explicit
@@ -758,7 +802,9 @@ SessionEnd hooks) embeds one v1 record per annotated commit in the note on
     exactly as it is, by the rewrite and by the session writer alike. The
     session writer, writing the commit's own note after a rewrite, keeps the
     carried contributions of other sessions, and a rewrite never rebuilds a
-    note into one that carries less than it did.
+    note into one that carries less than it did. Such a protected record's
+    contributions and line claims are never replaced by projected ones, and a
+    line they claim is not given to another session.
 
 The sections below describe the legacy payloads, which every note still carries.
 
@@ -770,10 +816,10 @@ Five payload shapes live on `refs/notes/origin` (paths under
 | Shape | Writer | Distinguishing keys |
 | --- | --- | --- |
 | Session note | `git-notes.ts` `buildNotePayload`, called from `commands/hooks/post-commit.ts`, `commands/hooks/session-end.ts` and `commands/hooks/stop.ts` | `{origin: {version: 1, sessionId, …}}` |
-| Scrubbed session note | `commands/scrub-notes.ts` (`scrubNoteObject` in `git-notes.ts`) | Session note with prompt text removed and `promptTextWithheld: true` |
+| Scrubbed session note | `commands/scrub-notes.ts` (`scrubNoteObject` in `note-scrub.ts`, re-exported from `git-notes.ts`) | Session note with prompt text removed and `promptTextWithheld: true` |
 | Squash aggregate | `history-rewrite.ts` (`rebuildRewrittenNote`), for a `rebase -i` squash and for `origin ci squash-merge --range --target` (`ci-integration.ts` `squashMergeAttribution`) | `{origin: {version: 1, squashMerge: true, commitsSquashed, sessionIds[], models[]}}` (plus `sessionId`, `agent`, `model` only for a single-session squash), next to a rebuilt `attribution_record`. `commitsSquashed` counts every squashed commit. Notes written by the earlier CI command also carry summed `total*` fields. |
 | Agent Trace import note | `agent-trace.ts` `importAgentTrace` | `{origin: {source: "agent-trace", sourceVersion, sourceTool, sessionId: <trace id>, attribution: {files}}}`, no `version` |
-| Backfill note | `commands/backfill.ts` `applyBackfillNote` | Bare object without the `origin` wrapper: `{sessionId: "backfill-<sha8>", agent, agentName, model: "unknown", confidence, source}` |
+| Backfill note | `commands/backfill.ts` `applyBackfillNote` | `{origin: {agent, agentName, model: "unknown", confidence, source, backfill: true}}`, no `version` and no `sessionId`, next to an `inferred` `attribution_record` when the agent is a well-known id. Older backfill notes were a bare object without the `origin` wrapper and with `sessionId: "backfill-<sha8>"`. |
 
 Existing notes are also rewritten in place by `commands/notes-repair.ts` (drops
 junk `markers` entries) and `attribution.ts` `preserveAttributionOnMove` (renames
@@ -786,8 +832,18 @@ Readers: `attribution.ts` (`isAiCommit`, `getLineBlame`,
 `ci-integration.ts`, and in the API `apps/api/src/services/origin-sessions-import.ts`
 (`noteCarriesAiEvidence`, `ensureAiToolDetected`, `synthesizeSessionFromNote`,
 used by `POST /api/sessions/:id/import-note` and repository note import) and
-`apps/api/src/routes/repos.ts` (GitHub blame fallback). None of them checks
-`origin.version`. Several CLI readers (`attribution.ts`, `agent-trace.ts`,
+`apps/api/src/routes/repos/files-routes.ts` (GitHub blame fallback). None of them checks
+`origin.version`.
+
+Readers of the v1 record itself: `attribution-export.ts` (`origin export`,
+below) and `history-rewrite.ts` use `readRecord`; `attribution-note.ts` reads
+the stored record of a commit with `validateFull` before it keeps or upgrades
+its line claims. In the API, `canonicalRecordAgents`,
+`canonicalRecordAttribution` and `noteEnvelopeAiEvidence` in
+`origin-sessions-import.ts` (also used by `files-routes.ts`) read
+`attribution_record` with a structural check of the version, the revision and
+each contribution's identity, not the full validation path. They read any 1.x
+record like 1.0. Several CLI readers (`attribution.ts`, `agent-trace.ts`,
 `mcp/file-context.ts`, `commands/report.ts`, `commands/intent-review.ts`) also
 accept a bare note object without the `origin` wrapper.
 
@@ -810,9 +866,9 @@ such route exists in `apps/api`.
 | (annotated commit) | All note shapes | The note is attached to a commit; the payload never contains its own commit id. | Implicit | No | `revision.vcs: "git"`, `revision.id` = the annotated commit, taken from the transport. |
 | `sessionId` | Session note | Origin session id. `unknown` is a legacy sentinel for "no session". | Yes | No | `session.id`. Not mapped when empty or `unknown`. |
 | `sessionId` | Agent Trace import note | The trace record `id`, not a session. | Yes | No | Not mapped. |
-| `sessionId` | Backfill note | Synthetic `backfill-<sha8>`; no session was observed. | Yes | No | Not mapped (`evidence: "inferred"`, no `session`). |
+| `sessionId` | Older backfill note | Synthetic `backfill-<sha8>`; no session was observed. Current backfill notes have no `sessionId`. | Older notes: yes | No | Not mapped (`evidence: "inferred"`, no `session`). |
 | `agent` | Session note (from `agentSlug`) | Agent slug: `claude-code`, `cursor`, `codex`, `gemini`, `copilot`, `devin`, `antigravity`. Omitted when unknown. | No | No | `agent.id`. |
-| `agent`, `agentName` | Backfill note | Agent guessed from file patterns (`.claude/`, `.cursor/`, `.codex/`). | Yes | No | `agent.id`, with `evidence: "inferred"`. `agentName` is not mapped (duplicate). |
+| `agent`, `agentName` | Backfill note | Agent named by evidence outside a session: an Origin session or an agent transcript that shows the commit, Origin's commit trailer, an agent co-author, author or committer, or a commit-message pattern. `claude` stands for `claude-code`. | Yes | No | `agent.id`, with `evidence: "inferred"`. `agentName` is not mapped (duplicate). The backfill writer emits this record itself. |
 | `model` | Session note | Model id reported by the transcript or hook, or the literal `unknown` when not found. | Yes | No | `model.id`. `unknown` means absent. Only the model id is recorded today; no provider or separate version. |
 | `model` | Backfill note | Always `unknown`. | Yes | No | Absent. |
 | `attribution.files[].model` | Agent Trace import note | Source `model_id`, verbatim. | No | No | `model.id`, with `evidence: "imported"`. |
@@ -826,6 +882,7 @@ such route exists in `apps/api`.
 | `prompts[].text` | Session note | Per-prompt text, redacted, capped at 1 KB. | Yes in type; withheld when prompts are excluded | **Prompt text** | Dropped. |
 | `markers` | Session note | The agent's `[Origin: …]` commentary from the transcript. | No | **Prompt-derived** | Dropped. |
 | `prompts[].editsJson` | Session note | Serialized edit capture, including `promptText` (blanked when prompts are excluded) and code before/after, capped at 16 KB. | No | **Prompt text** (embedded) and code | Dropped. |
+| `sealed` | Session note (repo opt-in `notesEncryptPrompts: true`, `note-seal.ts`) | The prompt summary, full prompt, markers and per-prompt text, encrypted (AES-256-GCM) with the repo's key for the month. The clear fields stay as in a metadata-only note. | No | **Prompt text** (encrypted) | Dropped. |
 | `promptTextWithheld` | Session note, scrubbed note | `true` when prompt text was removed. | No | No | Not mapped. v1 never carries prompt text, so the flag has no meaning. |
 | `promptHash`, `prompts[].promptHash` | Session note (since OR-48/A8) | Canonical v1 hash of the prompt `fullPrompt` stands for, and of each listed prompt, written with or without the prompt text and only when provably the text of the permissioned record (see [Runtime status](#runtime-status-the-origin-cli-writer)). Absent otherwise. | No | No (an identifier; low-entropy prompts can be guessed) | Not mapped from legacy notes: the legacy list is the session prefix. The writer puts the contributing iteration's hash in `session.iterations[].prompt_hash` itself. Notes written before OR-48 cannot be hashed faithfully: their stored text is redacted and truncated. |
 | (prompt reference) | none | No current payload addresses a single prompt. | — | — | `session.iterations[].reference_uri`; no legacy source. |
@@ -855,7 +912,7 @@ such route exists in `apps/api`.
 | `origin_rewrite` | Note envelope of a rewritten commit (since OR-11) | `{schema: "origin-rewrite/1", target, sources, base}`: the commit, the full shas of every old commit the note was rebuilt from, and whether the commit's own note sits underneath. Transport bookkeeping for the note writers, next to `origin` and `attribution_record`. | No | No | Not in v1: the record describes the new revision only. |
 | `subagents[]` | Session note | Claude Code `Task` spawns: `type`, `promptIndex`, optional `files`. | No | Configuration names | Dropped. Part of the parent session. |
 | `source`, `sourceVersion`, `sourceTool` | Agent Trace import note | Origin of the imported data: `agent-trace`, the trace version, the trace's tool name. | Yes | No | `evidence: "imported"`. The converter is the `producer`. The source details are not carried in v1. |
-| `confidence`, `source` | Backfill note | Heuristic confidence (`high`/`medium`) and rule name. | Yes | No | `evidence: "inferred"`. Not carried further. |
+| `confidence`, `source`, `backfill` | Backfill note | Heuristic confidence (`high`/`medium`), rule name (`backfill-…`), and `backfill: true` on current notes. | Yes | No | `evidence: "inferred"`. Not carried further. |
 | (unknown keys) | All shapes | Readers ignore unknown keys; writers added fields without bumping `version`. | — | — | Replaced by the explicit minor-version rules. |
 
 ### Converting a legacy session note to v1
@@ -902,7 +959,8 @@ records of a range"); in terms of this contract:
   is; a newer 1.x record is emitted as its **1.0 projection**. An unsupported
   major, an invalid record, and a record whose `revision` is not `git` with the
   id of the commit it is stored for are not used, as the
-  [reader rules](#versioning-and-compatibility) require: each is reported as a
+  [reader rules](#versioning-and-compatibility) require. So is a note that is
+  not a JSON object. Each is reported as a
   skipped commit on stderr and does not make the valid records of other
   commits unavailable. `--strict` turns any of them into a failure of the whole
   export. A reader of the output therefore only ever sees
@@ -910,6 +968,10 @@ records of a range"); in terms of this contract:
 - Commits without a record (no note, or a legacy-only note) are left out. The
   export never builds a record from a legacy payload.
 - Records are ordered oldest first in Git topological order.
+- The range is one revision, `A..B` or `A...B`. With a range, `--format` must
+  be `json` (the default), `-o/--output <file>` writes the array to a file,
+  and `--limit`, `--model` and `--session` are refused. `--strict` without a
+  range is refused.
 - `origin export` without a range is the unrelated session-summary export.
 
 The command reads the local clone only; the notes must already be there (see
@@ -971,7 +1033,8 @@ validation, so S1–S6 also apply to the 1.0 projection of a newer minor.
 | `readRecord(input)` | The reader algorithm: `exact`, `projected` (with the transformed copy), `unsupported` or `invalid`. |
 | `canonicalPromptHash(text)` | The [prompt hash](#prompt-hash). |
 
-The CLI note writer (OR-9/A3) and the range export (OR-12/A6, below) use it.
+The CLI note writers (OR-9/A3, backfill), the history rewrite (OR-11/A5) and
+the range export (OR-12/A6, above) use it.
 
 With Ajv (JavaScript), layer 1:
 
@@ -1015,6 +1078,13 @@ safely:
 3. **`reference_uri` ACL.** The current `originUrl` points at
    `<apiUrl>/sessions/<id>`. Whether that route enforces the ACL this contract
    requires, and whether it should be the web or the API host, was not verified.
+   For RhodeCode repositories OR-17 does not dereference the URI at all: a
+   RhodeCode route checks RhodeCode's repository permission, takes the session
+   id and index from the stored record, and hands Origin a short-lived signed
+   grant (see `integrations/rhodecode/README.md`, "Prompt references"). The URI
+   stays an identifier with no query beyond `prompt=N` and no credential; this
+   contract does not change. Whether Origin's own session route enforces the
+   right ACL for other consumers remains open.
 4. **Where the canonical schema lives and who owns compatibility.** This
    repository path is the working answer. A public URL and `$id` can be added
    once a route actually serves the file.
@@ -1022,7 +1092,9 @@ safely:
    legacy payload under `attribution_record` (see
    [Runtime status](#runtime-status-the-origin-cli-writer)). Since OR-48/A8 the
    legacy payload carries prompt text only with the explicit
-   `notesIncludePrompts: true` opt-in.
+   `notesIncludePrompts: true` opt-in. A repo can instead set
+   `notesEncryptPrompts: true`, and the prompt text travels only encrypted
+   (`sealed`).
 6. **Token semantics per agent.** Whether each supported agent's `input` really
    excludes cache tokens and how it counts reasoning tokens is confirmed by
    OR-23.

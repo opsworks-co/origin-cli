@@ -63,8 +63,12 @@ afterEach(() => {
  * (`expected 5 to be 4`) — the recursive implementation there is backed by
  * something `unref` does not reach.
  *
- * So the guarantee below is asserted where the platform can honour it, and
- * skipped — loudly, not silently — where it cannot. Asserting it everywhere
+ * (Node 20's own source says why: its Linux recursive watcher's unref() walks
+ * a map of Stats objects, not the handles, so it releases nothing.) The
+ * journal no longer uses that watcher on Linux — it watches per directory
+ * (dir-tree-watch.ts), whose handles unref properly — so the guarantee below
+ * is asserted on Linux too, and on any other platform where unref works.
+ * Skipped — loudly, not silently — where it cannot be honoured. Asserting it everywhere
  * would put a known-false expectation in the suite; dropping it everywhere
  * would stop testing the two platforms where it is real.
  */
@@ -86,7 +90,7 @@ const unrefReleasesWatchers = (): boolean => {
 };
 
 describe('a write-journal watcher and the process that owns it', () => {
-  it.skipIf(!unrefReleasesWatchers())(
+  it.skipIf(process.platform !== 'linux' && !unrefReleasesWatchers())(
     'leaves no ref\'d fs watcher behind when the caller forgets to stop it', () => {
       // The leak this exists for: no `stop()` at all.
       const before = (process as any)._getActiveHandles?.().length ?? 0;

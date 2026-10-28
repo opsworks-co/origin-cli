@@ -17,7 +17,7 @@ import { getGitRoot } from '../session-state.js';
 import { mcpAgentsForEnable, installMcpForAgent, mcpServerCommand, mcpCapable } from '../mcp/install.js';
 import { recordEnabledRepo } from '../enabled-repos.js';
 import { hookToolIds, recognizedHookToolIds } from '../agents/registry.js';
-import { PREVIOUS_HOOKS_PATH_FILE, rememberPreviousHooksPath } from '../global-hooks-path.js';
+import { CHAINED_HOOKS_PATH_SETTING, PREVIOUS_HOOKS_PATH_FILE, rememberPreviousHooksPath } from '../global-hooks-path.js';
 
 // ─── PATH Resolution ─────────────────────────────────────────────────────
 // Hooks run in a minimal shell environment where `origin` may not be in PATH.
@@ -347,17 +347,28 @@ interface AgentConfig {
 // reported nothing. A validator written separately from the writer would just
 // be a second copy waiting to drift; deriving both from one payload can't.
 
-function claudeHookEvents(): Record<string, any[]> {
+export const CLAUDE_SESSION_END_HOOK_TIMEOUT_SEC = 60;
+
+export function claudeHookEvents(): Record<string, any[]> {
   return {
     SessionStart: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code session-start') }] }],
     Stop: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code stop') }] }],
     UserPromptSubmit: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code user-prompt-submit') }] }],
-    SessionEnd: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code session-end') }] }],
+    // Claude Code cancels SessionEnd hooks after max(1.5 s, their timeout):
+    // without one, a `claude -p` exit killed this hook before it read its
+    // payload, and the session stayed Running. 60 s is Claude's own cap.
+    SessionEnd: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code session-end'), timeout: CLAUDE_SESSION_END_HOOK_TIMEOUT_SEC }] }],
     PreToolUse: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code pre-tool-use') }] }],
     PostToolUse: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code post-tool-use') }] }],
     // A FAILED tool call fires this instead of PostToolUse. Without it a failed
     // `git commit` left its commit claim up for the rest of the turn.
     PostToolUseFailure: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code post-tool-use-failure') }] }],
+    // Claude is waiting on the human: a permission prompt, or idle at the
+    // input prompt. Forwarded to the dashboard / browser push and, opt-in, a
+    // desktop popup (agent-notify.ts). Adding it here is also what makes an
+    // existing install read as drifted, so `origin upgrade`'s hook-config
+    // repair writes it in without duplicating the other entries.
+    Notification: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code notification') }] }],
   };
 }
 
@@ -2035,8 +2046,65 @@ if [ -z "$ORIGIN_BIN" ]; then
     "/usr/local/bin/origin"; do
     if [ -x "$_origin_c" ]; then ORIGIN_BIN="$_origin_c"; break; fi
   done
+fi
+
+${KEYCHAIN_GUARD}`;
+}
+
+/** Marks a hook script that carries KEYCHAIN_GUARD — the upgrade test. */
+export const KEYCHAIN_GUARD_MARKER = '# origin-keychain-guard';
+
+/**
+ * NODE_USE_SYSTEM_CA=1 makes Node 22+ read the macOS Keychain the first time
+ * it builds a TLS context. Inside a seatbelt sandbox (Codex --full-auto) that
+ * read fails — "SecItemCopyMatching failed -50" — and Node SEGFAULTS. The PATH
+ * above puts Homebrew's node first, so this hits even when the CLI was
+ * installed under an older one. A crashed pre-commit aborts the commit and the
+ * agent retries with --no-verify, so no policy and no secret scan runs at all.
+ *
+ * When the Keychain can't even be listed, run Origin on Node's bundled CA
+ * store instead: the hook still does everything, it just can't trust a CA that
+ * lives only in the Keychain. Exported, so hooks chained after Origin's — which
+ * would crash the same way — run under it too. The probe costs one `security`
+ * spawn (~7 ms) and only when the variable is set on macOS.
+ */
+const KEYCHAIN_GUARD = `${KEYCHAIN_GUARD_MARKER}
+# NODE_USE_SYSTEM_CA=1 + no Keychain access (a sandboxed agent) segfaults Node
+# 22+ on its first TLS connection. Fall back to Node's bundled CA store.
+if [ "$NODE_USE_SYSTEM_CA" = "1" ] && [ "$(uname -s 2>/dev/null)" = "Darwin" ] && ! security list-keychains >/dev/null 2>&1; then
+  NODE_USE_SYSTEM_CA=0; export NODE_USE_SYSTEM_CA
+  ORIGIN_KEYCHAIN_SKIPPED=1
+fi`;
+
+/**
+ * Run a hook that can block the git command, then exit with its code if it
+ * failed. Second line of defence behind KEYCHAIN_GUARD: a CLI killed by a
+ * signal (exit > 128) while NODE_USE_SYSTEM_CA=1 is retried once without it,
+ * so a sandbox the probe didn't recognise still gets its policies checked
+ * instead of a crash. Only for hooks that don't read stdin — a retry would
+ * find it already drained.
+ */
+function runBlockingHook(hook: string, what: string): string {
+  return `if [ -n "$ORIGIN_BIN" ]; then
+  if [ -n "$ORIGIN_KEYCHAIN_SKIPPED" ]; then
+    echo "Origin: macOS Keychain unreachable (sandboxed?) — running ${what} on Node's bundled CA store instead of NODE_USE_SYSTEM_CA" >&2
+  fi
+  ${hook}
+  RESULT=$?
+  if [ $RESULT -gt 128 ] && [ "$NODE_USE_SYSTEM_CA" = "1" ]; then
+    echo "Origin: hook crashed (exit $RESULT) with NODE_USE_SYSTEM_CA=1 — retrying on Node's bundled CA store" >&2
+    NODE_USE_SYSTEM_CA=0; export NODE_USE_SYSTEM_CA
+    ${hook}
+    RESULT=$?
+  fi
+  if [ $RESULT -ne 0 ]; then
+    exit $RESULT
+  fi
 fi`;
 }
+
+/** Marks a hook script whose chain honours the repo's chained hooks dir — the upgrade test. */
+export const REPO_CHAIN_MARKER = '# origin-repo-chain';
 
 /**
  * The tail every global git hook shares: run the user's own hooks after
@@ -2044,7 +2112,10 @@ fi`;
  *   - the global hooks dir `core.hooksPath` named before `origin enable
  *     --global` took it over, saved beside these hooks (global-hooks-path.ts).
  *     Without it a user's `~/.githooks` silently stopped running.
- *   - the repo's own `$(git-dir)/hooks`.
+ *   - the repo's own hooks: the dir its own `core.hooksPath` named before
+ *     `origin doctor --fix` moved it to `origin.chainedHooksPath` (that is the
+ *     dir git ran instead of `$(git-dir)/hooks`, so it replaces it here too),
+ *     else `$(git-dir)/hooks`.
  * When both are the same dir the hook runs once.
  *
  * `gate`: the hook can block the git command (pre-commit, commit-msg, pre-push,
@@ -2058,6 +2129,13 @@ PREV_HOOK=""
 PREV_HOOKS_DIR="\$(cat "\$(dirname "\$0")/${PREVIOUS_HOOKS_PATH_FILE}" 2>/dev/null)"
 case "$PREV_HOOKS_DIR" in "~"|"~/"*) PREV_HOOKS_DIR="$HOME\$(printf '%s' "$PREV_HOOKS_DIR" | cut -c2-)" ;; esac
 LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/${hook}"
+${REPO_CHAIN_MARKER}
+CHAINED_HOOKS_DIR="\$(git config --get ${CHAINED_HOOKS_PATH_SETTING} 2>/dev/null)"
+if [ -n "$CHAINED_HOOKS_DIR" ]; then
+  case "$CHAINED_HOOKS_DIR" in "~"|"~/"*) CHAINED_HOOKS_DIR="$HOME\$(printf '%s' "$CHAINED_HOOKS_DIR" | cut -c2-)" ;; esac
+  case "$CHAINED_HOOKS_DIR" in /*|[A-Za-z]:*) ;; *) CHAINED_HOOKS_DIR="\$(git rev-parse --show-toplevel 2>/dev/null)/$CHAINED_HOOKS_DIR" ;; esac
+  LOCAL_HOOK="$CHAINED_HOOKS_DIR/${hook}"
+fi
 if [ -n "$PREV_HOOKS_DIR" ] && [ -f "$PREV_HOOKS_DIR/${hook}" ] && [ -x "$PREV_HOOKS_DIR/${hook}" ]; then
   _origin_prev_real="\$(cd "$PREV_HOOKS_DIR" 2>/dev/null && pwd -P)"
   if [ "$_origin_prev_real" != "\$(cd "\$(dirname "\$0")" 2>/dev/null && pwd -P)" ]; then
@@ -2127,13 +2205,7 @@ export function writeGlobalPreCommitHook(globalHooksDir: string): void {
 
 ${hookShimPreamble()}
 
-if [ -n "$ORIGIN_BIN" ]; then
-  "$ORIGIN_BIN" hooks git-pre-commit
-  RESULT=$?
-  if [ $RESULT -ne 0 ]; then
-    exit $RESULT
-  fi
-fi
+${runBlockingHook('"$ORIGIN_BIN" hooks git-pre-commit', 'secret scan and policies')}
 
 ${chainUserHooks('pre-commit', { gate: true })}
 `;
@@ -2156,13 +2228,7 @@ export function writeGlobalCommitMsgHook(globalHooksDir: string): void {
 
 ${hookShimPreamble()}
 
-if [ -n "$ORIGIN_BIN" ]; then
-  "$ORIGIN_BIN" hooks git-commit-msg "$1"
-  RESULT=$?
-  if [ $RESULT -ne 0 ]; then
-    exit $RESULT
-  fi
-fi
+${runBlockingHook('"$ORIGIN_BIN" hooks git-commit-msg "$1"', 'commit-message policies')}
 
 ${chainUserHooks('commit-msg', { gate: true })}
 `;
@@ -2331,6 +2397,59 @@ ${chainUserHooks('prepare-commit-msg', { gate: true })}
   fs.chmodSync(prepareCommitMsgPath, '755');
 }
 
+const GLOBAL_HOOK_WRITERS: Record<string, (dir: string) => void> = {
+  'pre-commit': writeGlobalPreCommitHook,
+  'commit-msg': writeGlobalCommitMsgHook,
+  'pre-push': writeGlobalPrePushHook,
+  'post-checkout': writeGlobalPostCheckoutHook,
+  'post-commit': writeGlobalPostCommitHook,
+  'post-rewrite': writeGlobalPostRewriteHook,
+  'post-merge': writeGlobalPostMergeHook,
+  'prepare-commit-msg': writeGlobalPrepareCommitMsgHook,
+};
+
+/** Every hook name Origin writes a full hook for. Others get a chain-only one. */
+export const ORIGIN_GLOBAL_HOOKS = Object.keys(GLOBAL_HOOK_WRITERS);
+
+/**
+ * A global hook for a name Origin has no work for (pre-rebase, pre-merge-commit,
+ * …): it only runs the user's hooks. Written when a repo's own hooks dir is
+ * chained (local-hooks-path.ts), because with `core.hooksPath` on Origin's dir
+ * git looks for every hook there and nowhere else. Gated and fed stdin, so it
+ * passes on whatever the chained hook would have done on its own.
+ */
+export function writeGlobalChainOnlyHook(globalHooksDir: string, hook: string): void {
+  const p = path.join(globalHooksDir, hook);
+  fs.writeFileSync(p, `#!/bin/sh
+# origin-global-chain-${hook}
+# Installed by: origin doctor --fix — runs only your own ${hook} hooks
+
+${CAPTURE_PRE_PUSH_STDIN}
+${chainUserHooks(hook, { gate: true, feed: withPrePushStdin })}
+`);
+  fs.chmodSync(p, '755');
+}
+
+/**
+ * Rewrite each Origin-written global hook that predates KEYCHAIN_GUARD or the
+ * repo chain (REPO_CHAIN_MARKER). Only files carrying their own
+ * `# origin-global-<hook>` header are touched — a user's script in the same dir
+ * is left alone. Returns the hooks rewritten.
+ */
+export function upgradeOutdatedGlobalHooks(globalHooksDir: string): string[] {
+  const upgraded: string[] = [];
+  for (const [hook, write] of Object.entries(GLOBAL_HOOK_WRITERS)) {
+    try {
+      const content = fs.readFileSync(path.join(globalHooksDir, hook), 'utf-8');
+      if (!content.includes(`# origin-global-${hook}\n`)) continue;
+      if (content.includes(KEYCHAIN_GUARD_MARKER) && content.includes(REPO_CHAIN_MARKER)) continue;
+      write(globalHooksDir);
+      upgraded.push(hook);
+    } catch { /* missing or unreadable — the install paths above own that */ }
+  }
+  return upgraded;
+}
+
 function installGlobalGitHooks(): void {
   const globalHooksDir = path.join(os.homedir(), '.origin', 'git-hooks');
 
@@ -2462,6 +2581,10 @@ export function ensurePolicyHookInstalled(gitRoot: string): { installed: boolean
         if (fs.existsSync(resolvedDir) && !fs.existsSync(globalCommitMsg)) {
           writeGlobalCommitMsgHook(resolvedDir);
         }
+        // And every hook written before the Keychain guard (under a sandboxed
+        // agent its node segfaults and the agent commits with --no-verify) or
+        // before the repo chain (a repo's own hooks dir would stop running).
+        upgradeOutdatedGlobalHooks(resolvedDir);
         const globalPreCommit = path.join(resolvedDir, 'pre-commit');
         if (fs.existsSync(resolvedDir) && !fs.existsSync(globalPreCommit)) {
           writeGlobalPreCommitHook(resolvedDir);

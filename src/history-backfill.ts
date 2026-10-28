@@ -22,7 +22,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
-import { combineApplyableTurnDiff } from './applyable-turn-diff.js';
+import { sessionNetDiff } from './session-net-diff.js';
 import { git, gitDetailed, gitOrNull } from './utils/exec.js';
 import { commitLineCounts, isUnsafeGitShowPath, mergeTreeOf, tmpIndexPath } from './git-capture.js';
 import { ingestPatchForCommit } from './commit-ingest-patch.js';
@@ -79,6 +79,7 @@ export interface BackfillCommitPayload {
   sha: string;
   message?: string;
   author?: string;
+  authorEmail?: string;
   // Deliberately no `branch`: these commits were made on branches we can
   // no longer name (ancestry reachable from today's HEAD includes merged
   // feature work). Stamping the CURRENT branch on all of history would be
@@ -595,7 +596,7 @@ export function extractCommitDiff(
  * folding it in would silently change what a merge's Commit row contains.
  */
 export interface CommitPrefetch {
-  meta: Map<string, { author: string; committedAt: string; message: string }>;
+  meta: Map<string, { author: string; authorEmail: string; committedAt: string; message: string }>;
   files: Map<string, string[]>;
   // Git's totals per commit, one batched numstat. A merge prints nothing
   // here (no single parent) and is asked one at a time by commitLineCounts.
@@ -603,7 +604,7 @@ export interface CommitPrefetch {
 }
 
 export function prefetchCommitPayloads(cwd: string, shas: string[]): CommitPrefetch {
-  const meta = new Map<string, { author: string; committedAt: string; message: string }>();
+  const meta = new Map<string, { author: string; authorEmail: string; committedAt: string; message: string }>();
   const files = new Map<string, string[]>();
   const numstat = new Map<string, { added: number; removed: number }>();
   const valid = shas.filter((x) => SHA_RE.test(x));
@@ -612,16 +613,16 @@ export function prefetchCommitPayloads(cwd: string, shas: string[]): CommitPrefe
   // Records are NUL-separated (-z); fields inside one record by \x1f, with the
   // raw body (%B) last because it is the only multi-line field.
   const metaOut = gitOrNull(
-    ['log', '--ignore-missing', '--no-walk=unsorted', '-z', '--format=%H%x1f%an%x1f%cI%x1f%B', ...valid],
+    ['log', '--ignore-missing', '--no-walk=unsorted', '-z', '--format=%H%x1f%an%x1f%ae%x1f%cI%x1f%B', ...valid],
     { cwd },
   );
   for (const rec of (metaOut || '').split('\0')) {
     if (!rec) continue;
     const parts = rec.split('\x1f');
-    if (parts.length < 3) continue;
+    if (parts.length < 4) continue;
     const sha = parts[0].trim();
     if (!SHA_RE.test(sha)) continue;
-    meta.set(sha, { author: parts[1], committedAt: parts[2], message: parts.slice(3).join('\x1f') });
+    meta.set(sha, { author: parts[1], authorEmail: parts[2], committedAt: parts[3], message: parts.slice(4).join('\x1f') });
   }
 
   // `diff-tree --stdin` prints each commit's sha on its own line, then that
@@ -696,21 +697,23 @@ export function buildCommitPayload(
   if (!SHA_RE.test(sha)) return null;
   const pre = prefetch?.meta.get(sha);
   let author: string;
+  let authorEmail: string;
   let committedAt: string;
   let message: string;
   if (pre) {
-    ({ author, committedAt } = pre);
+    ({ author, authorEmail, committedAt } = pre);
     message = pre.message.trim().slice(0, MAX_MESSAGE_LEN);
   } else {
     // No prefetch, or a sha the batch could not resolve (rebased away — the
     // batch drops it rather than failing, see prefetchCommitMeta).
-    const meta = gitOrNull(['log', '-1', '--format=%an%x1f%cI%x1f%B', sha], { cwd });
+    const meta = gitOrNull(['log', '-1', '--format=%an%x1f%ae%x1f%cI%x1f%B', sha], { cwd });
     if (meta === null) return null;
     const parts = meta.split('\x1f');
-    if (parts.length < 3) return null;
+    if (parts.length < 4) return null;
     author = parts[0];
-    committedAt = parts[1];
-    message = parts.slice(2).join('\x1f').trim().slice(0, MAX_MESSAGE_LEN);
+    authorEmail = parts[1];
+    committedAt = parts[2];
+    message = parts.slice(3).join('\x1f').trim().slice(0, MAX_MESSAGE_LEN);
   }
 
   const { diff, filesChanged } = extractCommitDiff(cwd, sha, prefetch?.files.get(sha));
@@ -720,6 +723,9 @@ export function buildCommitPayload(
     sha,
     message,
     author,
+    // The server matches people by it (Commit.authorEmail); a name is not
+    // an identity.
+    ...(authorEmail ? { authorEmail } : {}),
     filesChanged,
     committedAt: committedAt || undefined,
     ...(counts ? { additions: counts.added, deletions: counts.removed } : {}),
@@ -1011,10 +1017,10 @@ export function renderAuthoredCommits(
     } catch { /* a sha a rebase removed */ }
   }
   // The watcher has no session baseline, but it must still never publish two
-  // sections for one file. The shared combiner keeps ordinary per-commit
-  // sections intact and collapses an overlap rather than shipping a patch no
-  // consumer can apply or count correctly.
-  const diff = combineApplyableTurnDiff({ committedDiff: parts.join('\n'), uncommittedDiff: '' });
+  // sections for one file. A file two of these commits touched is one net
+  // section when git proves the span is all these commits — never last-wins,
+  // which counted only the newest commit's lines (session-net-diff.ts).
+  const diff = sessionNetDiff(cwd, shas, parts.join('\n'), '');
   return {
     diff,
     filesChanged: filesInDiff(diff),

@@ -361,6 +361,15 @@ describe('the generated GitHub Actions workflow', () => {
     expect(step).toContain('--warn-only');
     expect(job).toContain('origin push-metadata');
   });
+  it('installs the CLI from getorigin.io (it is not on npm) and logs in with the API key via --key', () => {
+    const installs = yaml.split('\n').filter((l) => l.includes('npm install -g'));
+    expect(installs).toHaveLength(2);
+    for (const l of installs) expect(l.trim()).toBe('run: npm install -g https://getorigin.io/cli/origin-cli-latest.tgz');
+    expect(yaml).not.toContain('@origin/cli');
+    // --token takes a one-time install token; the API key secret goes through --key.
+    expect(yaml).toContain('origin login --key ${{ secrets.ORIGIN_API_KEY }}');
+    expect(yaml).not.toContain('login --token');
+  });
   it('hands the command the SHAs the event states, after fetching the originals and the notes', () => {
     expect(yaml).toContain('+refs/pull/${{ github.event.pull_request.number }}/head:refs/origin-ci/pr-head');
     expect(yaml).toContain('+refs/notes/origin:refs/notes/origin');

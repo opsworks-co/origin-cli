@@ -137,9 +137,9 @@ describe('a queued update too large for a hook', () => {
     const bytes = fs.statSync(path.join(QUEUE_DIR, entries()[0].name)).size;
     const res = await drainUpdateQueue(undefined, { background: true });
     expect(res).toMatchObject({ replayed: 2, deferred: 0, remaining: 0 });
-    expect(updateSession.mock.calls[0][2]).toEqual({ timeoutMs: timeoutForPayload(bytes) });
+    expect(updateSession.mock.calls[0][2]).toEqual({ timeoutMs: timeoutForPayload(bytes), payloadCapabilities: ['rhodecode-remote-identity-1'] });
     expect(updateSession.mock.calls[0][2].timeoutMs).toBeGreaterThan(8000);
-    expect(updateSession.mock.calls[1][1]).toEqual({ tag: 'after' });
+    expect(updateSession.mock.calls[1][1]).toEqual({ tag: 'after', observedAt: expect.any(String) });
   });
 
   // Sent past a deferred older update, a fresh one landed FIRST and the older
@@ -243,7 +243,7 @@ describe('a hook update too large to send in 8s goes straight to the background 
     const bytes = fs.statSync(path.join(QUEUE_DIR, queued[0].name)).size;
     await drainUpdateQueue(undefined, { background: true });
     expect(updateSession.mock.calls[0][1]).toEqual(data);
-    expect(updateSession.mock.calls[0][2]).toEqual({ timeoutMs: timeoutForPayload(bytes) });
+    expect(updateSession.mock.calls[0][2]).toEqual({ timeoutMs: timeoutForPayload(bytes), payloadCapabilities: ['rhodecode-remote-identity-1'] });
     expect(entries()).toHaveLength(0);
   });
 

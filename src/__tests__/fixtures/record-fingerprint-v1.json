@@ -1,0 +1,208 @@
+{
+  "$comment": "Golden vectors of origin-record-fingerprint/1. Shared by the TypeScript CLI tests and the Python RhodeCode integration tests: plain JSON, no language-specific encoding. `input` is a JSON value exactly as written here (literals such as -0.0 and 1e3 are deliberate); `canonical` is the expected canonical text, hashed as UTF-8; `fingerprint` is the expected token, or `unavailable: true` when the value has no canonical form. `parse` lists tokens and the expected outcome of the strict token parser.",
+  "canonicalization": "origin-record-fingerprint/1",
+  "vectors": [
+    {
+      "name": "empty-object",
+      "input": {},
+      "canonical": "{}",
+      "fingerprint": "origin-record-fingerprint/1:sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "key-order-code-points",
+      "input": { "b": 1, "a": 2, "é": 5, "A": 3, "z": 6, "aa": 4 },
+      "canonical": "{\"A\":3,\"a\":2,\"aa\":4,\"b\":1,\"z\":6,\"é\":5}",
+      "fingerprint": "origin-record-fingerprint/1:sha256:d8588f9e35d3bb9533cb6975b4d7d825bdcb4efff30b1ed8898e9adf3ccb89a3"
+    },
+    {
+      "name": "astral-key-order",
+      "$comment": "U+1F600 sorts before U+FF61 by UTF-16 code units (0xD83D < 0xFF61) but after it by code point.",
+      "input": { "😀": 1, "｡": 2 },
+      "canonical": "{\"｡\":2,\"😀\":1}",
+      "fingerprint": "origin-record-fingerprint/1:sha256:d1d83ba6bff40585e1333a6ebe5e3eaf5edbc7ade11fc9578bb15a93583600f6"
+    },
+    {
+      "name": "control-escapes",
+      "$comment": "Only quote, backslash and U+0000..U+001F are escaped, as lowercase \\u00xx (no \\n or \\t); U+007F stays literal.",
+      "input": { "s": "a\u0000b\u0001\u001f\n\t\"\\\u007f" },
+      "canonical": "{\"s\":\"a\\u0000b\\u0001\\u001f\\u000a\\u0009\\\"\\\\\u007f\"}",
+      "fingerprint": "origin-record-fingerprint/1:sha256:480c6cf989d926252c658e9bc203b4b6b90022fc6847cc6fbe285fec4ea1aaff"
+    },
+    {
+      "name": "line-separators-literal",
+      "input": { "s": "  é" },
+      "canonical": "{\"s\":\"  é\"}",
+      "fingerprint": "origin-record-fingerprint/1:sha256:50359a8c676c183fcbec3fd55a67878556f43c0ef81f4aa0653a70c156ae4e89"
+    },
+    {
+      "name": "negative-zero",
+      "input": [-0, 0, -0.0],
+      "canonical": "[0,0,0]",
+      "fingerprint": "origin-record-fingerprint/1:sha256:2a08979e8002252124e861b2816490b04fe03b6b779f9287fb7c25652bbc4052"
+    },
+    {
+      "name": "safe-integer-boundary",
+      "$comment": "1e3 is the integer 1000 in both readers.",
+      "input": [9007199254740991, -9007199254740991, 1e3],
+      "canonical": "[9007199254740991,-9007199254740991,1000]",
+      "fingerprint": "origin-record-fingerprint/1:sha256:73e817d299247ee71ca24236d2727bbeacc62b492e70672de571a56879815e24"
+    },
+    {
+      "name": "unsafe-integer",
+      "input": [9007199254740992],
+      "unavailable": true
+    },
+    {
+      "name": "negative-unsafe-integer",
+      "input": [-9007199254740992],
+      "unavailable": true
+    },
+    {
+      "name": "non-integer",
+      "input": [1.5],
+      "unavailable": true
+    },
+    {
+      "name": "unpaired-surrogate-value",
+      "input": { "s": "x\ud800y" },
+      "unavailable": true
+    },
+    {
+      "name": "unpaired-surrogate-key",
+      "input": { "\udc00": 1 },
+      "unavailable": true
+    },
+    {
+      "name": "array-order-a",
+      "input": [3, 1, 2],
+      "canonical": "[3,1,2]",
+      "fingerprint": "origin-record-fingerprint/1:sha256:51bda7ab4e44726cde71fcb6e4b515357059bb6b6dd5146d1fc50f73f11678c6"
+    },
+    {
+      "name": "array-order-b",
+      "input": [1, 2, 3],
+      "canonical": "[1,2,3]",
+      "fingerprint": "origin-record-fingerprint/1:sha256:a615eeaee21de5179de080de8c3052c8da901138406ba71c38c032845f7d54f4"
+    },
+    {
+      "name": "nested-key-reorder-a",
+      "input": { "x": { "b": [true, false, null], "a": "v" } },
+      "canonical": "{\"x\":{\"a\":\"v\",\"b\":[true,false,null]}}",
+      "fingerprint": "origin-record-fingerprint/1:sha256:56ad978537048fa0825e2fbc05e1a2757e7c84f5aa07da83d561b0f5099e18c6"
+    },
+    {
+      "name": "nested-key-reorder-b",
+      "input": { "x": { "a": "v", "b": [true, false, null] } },
+      "canonical": "{\"x\":{\"a\":\"v\",\"b\":[true,false,null]}}",
+      "fingerprint": "origin-record-fingerprint/1:sha256:56ad978537048fa0825e2fbc05e1a2757e7c84f5aa07da83d561b0f5099e18c6"
+    },
+    {
+      "name": "record-base",
+      "record": true,
+      "input": {
+        "schema_version": "1.0",
+        "revision": { "vcs": "git", "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        "attribution_level": "line",
+        "recorded_at": "2026-10-20T00:00:00Z",
+        "producer": { "name": "origin-cli", "version": "0.20261020.1504" },
+        "contributions": [
+          {
+            "evidence": "session_capture",
+            "agent": { "id": "claude-code" },
+            "model": { "id": "claude-opus-4-6" },
+            "session": { "id": "session-agent", "iterations": [{ "index": 0 }] },
+            "files": [{ "path": "a.ts", "ranges": [{ "start_line": 3, "end_line": 5, "iteration_index": 0 }] }]
+          }
+        ]
+      },
+      "canonical": "{\"attribution_level\":\"line\",\"contributions\":[{\"agent\":{\"id\":\"claude-code\"},\"evidence\":\"session_capture\",\"files\":[{\"path\":\"a.ts\",\"ranges\":[{\"end_line\":5,\"iteration_index\":0,\"start_line\":3}]}],\"model\":{\"id\":\"claude-opus-4-6\"},\"session\":{\"id\":\"session-agent\",\"iterations\":[{\"index\":0}]}}],\"producer\":{\"name\":\"origin-cli\",\"version\":\"0.20261020.1504\"},\"recorded_at\":\"2026-10-20T00:00:00Z\",\"revision\":{\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"vcs\":\"git\"},\"schema_version\":\"1.0\"}",
+      "fingerprint": "origin-record-fingerprint/1:sha256:5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a57"
+    },
+    {
+      "name": "record-range-changed",
+      "record": true,
+      "input": {
+        "schema_version": "1.0",
+        "revision": { "vcs": "git", "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        "attribution_level": "line",
+        "recorded_at": "2026-10-20T00:00:00Z",
+        "producer": { "name": "origin-cli", "version": "0.20261020.1504" },
+        "contributions": [
+          {
+            "evidence": "session_capture",
+            "agent": { "id": "claude-code" },
+            "model": { "id": "claude-opus-4-6" },
+            "session": { "id": "session-agent", "iterations": [{ "index": 0 }] },
+            "files": [{ "path": "a.ts", "ranges": [{ "start_line": 3, "end_line": 6, "iteration_index": 0 }] }]
+          }
+        ]
+      },
+      "canonical": "{\"attribution_level\":\"line\",\"contributions\":[{\"agent\":{\"id\":\"claude-code\"},\"evidence\":\"session_capture\",\"files\":[{\"path\":\"a.ts\",\"ranges\":[{\"end_line\":6,\"iteration_index\":0,\"start_line\":3}]}],\"model\":{\"id\":\"claude-opus-4-6\"},\"session\":{\"id\":\"session-agent\",\"iterations\":[{\"index\":0}]}}],\"producer\":{\"name\":\"origin-cli\",\"version\":\"0.20261020.1504\"},\"recorded_at\":\"2026-10-20T00:00:00Z\",\"revision\":{\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"vcs\":\"git\"},\"schema_version\":\"1.0\"}",
+      "fingerprint": "origin-record-fingerprint/1:sha256:8a51ec0516411ab7b9756b709c478b5d03fd7ece068023e9e2dfd68a2a59a4c5"
+    },
+    {
+      "name": "record-agent-changed",
+      "record": true,
+      "input": {
+        "schema_version": "1.0",
+        "revision": { "vcs": "git", "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        "attribution_level": "line",
+        "recorded_at": "2026-10-20T00:00:00Z",
+        "producer": { "name": "origin-cli", "version": "0.20261020.1504" },
+        "contributions": [
+          {
+            "evidence": "session_capture",
+            "agent": { "id": "codex" },
+            "model": { "id": "claude-opus-4-6" },
+            "session": { "id": "session-agent", "iterations": [{ "index": 0 }] },
+            "files": [{ "path": "a.ts", "ranges": [{ "start_line": 3, "end_line": 5, "iteration_index": 0 }] }]
+          }
+        ]
+      },
+      "canonical": "{\"attribution_level\":\"line\",\"contributions\":[{\"agent\":{\"id\":\"codex\"},\"evidence\":\"session_capture\",\"files\":[{\"path\":\"a.ts\",\"ranges\":[{\"end_line\":5,\"iteration_index\":0,\"start_line\":3}]}],\"model\":{\"id\":\"claude-opus-4-6\"},\"session\":{\"id\":\"session-agent\",\"iterations\":[{\"index\":0}]}}],\"producer\":{\"name\":\"origin-cli\",\"version\":\"0.20261020.1504\"},\"recorded_at\":\"2026-10-20T00:00:00Z\",\"revision\":{\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"vcs\":\"git\"},\"schema_version\":\"1.0\"}",
+      "fingerprint": "origin-record-fingerprint/1:sha256:d5d65e058bf7dfb89cd7ce09d37daee461e738151aa61189a4eb5fda3ed7be1e"
+    },
+    {
+      "name": "record-string-changed",
+      "record": true,
+      "input": {
+        "schema_version": "1.0",
+        "revision": { "vcs": "git", "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        "attribution_level": "line",
+        "recorded_at": "2026-10-20T00:00:00Z",
+        "producer": { "name": "origin-cli", "version": "0.20261020.1504" },
+        "contributions": [
+          {
+            "evidence": "session_capture",
+            "agent": { "id": "claude-code" },
+            "model": { "id": "claude-opus-4-6" },
+            "session": { "id": "session-agenT", "iterations": [{ "index": 0 }] },
+            "files": [{ "path": "a.ts", "ranges": [{ "start_line": 3, "end_line": 5, "iteration_index": 0 }] }]
+          }
+        ]
+      },
+      "canonical": "{\"attribution_level\":\"line\",\"contributions\":[{\"agent\":{\"id\":\"claude-code\"},\"evidence\":\"session_capture\",\"files\":[{\"path\":\"a.ts\",\"ranges\":[{\"end_line\":5,\"iteration_index\":0,\"start_line\":3}]}],\"model\":{\"id\":\"claude-opus-4-6\"},\"session\":{\"id\":\"session-agenT\",\"iterations\":[{\"index\":0}]}}],\"producer\":{\"name\":\"origin-cli\",\"version\":\"0.20261020.1504\"},\"recorded_at\":\"2026-10-20T00:00:00Z\",\"revision\":{\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"vcs\":\"git\"},\"schema_version\":\"1.0\"}",
+      "fingerprint": "origin-record-fingerprint/1:sha256:1f7dc662f0117d0f835c228a394b69e823064de34e2d088a96af2c05a6bf5d18"
+    }
+  ],
+  "parse": [
+    { "name": "v1-sha256", "token": "origin-record-fingerprint/1:sha256:5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a57", "result": "ok" },
+    { "name": "v2-same-digest", "token": "origin-record-fingerprint/2:sha256:5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a57", "result": "unsupported_fingerprint_protocol" },
+    { "name": "v10-same-digest", "token": "origin-record-fingerprint/10:sha256:5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a57", "result": "unsupported_fingerprint_protocol" },
+    { "name": "sha512-same-digest", "token": "origin-record-fingerprint/1:sha512:5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a57", "result": "unsupported_fingerprint_protocol" },
+    { "name": "uppercase-hex", "token": "origin-record-fingerprint/1:sha256:5030D8AF5A5FD946DCAC571F1730451242E3EC689CF6D60887EFDC9D22934A57", "result": "protocol_error" },
+    { "name": "uppercase-algorithm", "token": "origin-record-fingerprint/1:SHA256:5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a57", "result": "protocol_error" },
+    { "name": "uppercase-prefix", "token": "Origin-record-fingerprint/1:sha256:5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a57", "result": "protocol_error" },
+    { "name": "hex-63", "token": "origin-record-fingerprint/1:sha256:5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a5", "result": "protocol_error" },
+    { "name": "hex-65", "token": "origin-record-fingerprint/1:sha256:5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a570", "result": "protocol_error" },
+    { "name": "leading-space", "token": " origin-record-fingerprint/1:sha256:5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a57", "result": "protocol_error" },
+    { "name": "trailing-space", "token": "origin-record-fingerprint/1:sha256:5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a57 ", "result": "protocol_error" },
+    { "name": "trailing-newline", "token": "origin-record-fingerprint/1:sha256:5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a57\n", "result": "protocol_error" },
+    { "name": "leading-zero-version", "token": "origin-record-fingerprint/01:sha256:5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a57", "result": "protocol_error" },
+    { "name": "bare-sha256", "token": "sha256:5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a57", "result": "protocol_error" },
+    { "name": "bare-digest", "token": "5030d8af5a5fd946dcac571f1730451242e3ec689cf6d60887efdc9d22934a57", "result": "protocol_error" },
+    { "name": "empty", "token": "", "result": "protocol_error" },
+    { "name": "number", "token": 99, "result": "protocol_error" },
+    { "name": "null", "token": null, "result": "protocol_error" }
+  ]
+}

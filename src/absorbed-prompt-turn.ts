@@ -38,6 +38,8 @@ export interface AbsorbedTurn {
   marked: boolean;
   /** Commits re-attested from `splitFrom` to it. */
   commits: string[];
+  /** The id was the journal mark its own submit left, not a new one. */
+  adopted?: true;
 }
 
 interface AbsorbState {
@@ -68,6 +70,8 @@ export function giveAbsorbedPromptsTheirTurns(
   opts: {
     /** Put `turnId`'s mark in the journal at `at`, after `afterTurnId`'s. */
     markAt: (turnId: string, at: number, afterTurnId: string) => boolean;
+    /** Ids of the journal's turn marks at exactly `at`. */
+    marksAt?: (at: number) => string[];
     newId?: () => string;
   },
 ): AbsorbedTurn[] {
@@ -115,10 +119,16 @@ export function giveAbsorbedPromptsTheirTurns(
     const prevBegan = Date.parse(state.promptSubmittedAt?.[prev] || '');
     if (Number.isFinite(prevBegan) && at < prevBegan) continue;
 
-    const turnId = newId();
+    // Its submit DID run and mark the journal at the prompt's own time, but
+    // its record in state was lost: `origin sessions end` ran a Stop beside
+    // that submit and saved over it (session a325d2ee prompt 12, 2026-10-15).
+    // Commits since were attested to that mark's id, so a new id would leave
+    // the prompt with two turns and its commits on neither served row.
+    const adopted = opts.marksAt?.(at).find((id) => !ids.includes(id));
+    const turnId = adopted || newId();
     ids[index] = turnId;
     recordPromptSubmittedAt(state, index, at);
-    const marked = opts.markAt(turnId, at, splitFrom);
+    const marked = adopted ? true : opts.markAt(turnId, at, splitFrom);
     const commits: string[] = [];
     for (const ct of state.commitTurns || []) {
       if (ct.turnId !== splitFrom) continue;
@@ -128,7 +138,7 @@ export function giveAbsorbedPromptsTheirTurns(
         commits.push(ct.sha);
       }
     }
-    out.push({ promptIndex: index, turnId, at, splitFrom, midTurn: midTurn.has(pos), marked, commits });
+    out.push({ promptIndex: index, turnId, at, splitFrom, midTurn: midTurn.has(pos), marked, commits, ...(adopted ? { adopted: true as const } : {}) });
   }
   return out;
 }

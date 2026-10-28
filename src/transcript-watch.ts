@@ -60,7 +60,7 @@ import { estimateSessionCost } from './transcript.js';
 import { uploadPromptImages, applyImageDescriptions } from './prompt-images.js';
 import { capturePromptEdits } from './prompt-capture/index.js';
 import { timeoutForPayload } from './fetch-timeout.js';
-import { ensureInProcessJournal, stopJournalWatcher, applyLedgerToProducerRows, hookStateTagFor } from './ledger-producer.js';
+import { ensureInProcessJournal, stopJournalWatcher, applyLedgerToProducerRows, hookStateTagFor, __stopAllJournalWatchers } from './ledger-producer.js';
 import { transcriptWriterTurns, filesRecordedForOtherTurns, reconcileWindowAttribution, type AttributedTurn } from './transcript-attribution.js';
 import { git } from './utils/exec.js';
 import { registerLogonAutoStart, type LogonAutoStartResult } from './utils/logon-autostart.js';
@@ -89,6 +89,7 @@ import { readMarkerTurns, type MarkerTurn } from './origin-markers.js';
 import { commitDecisionsFor, commitEvidence, commitTurnDecisions, committedSessionMarkers, withTurnDiffs } from './committed-markers.js';
 import { anchorEditPositions, backfillWriteBaselines, chainWholeFileWrites, type PromptCapture } from './prompt-capture/index.js';
 import { compareResolverWithPasses, createTurnObserver, observeReconstruction, onlyDifferences } from './resolve-turn.js';
+import { runRestoreTurn, type RestoreTurnCommand } from './restore-turn.js';
 
 export type { TranscriptAdapter, ScannedTranscript, ParsedSession };
 
@@ -375,7 +376,7 @@ export interface WatchDeps {
   // (restore/branch). Optional so tests can omit it.
   pingSession?: (originSessionId: string) => Promise<any>;
   // Report a command's outcome back to the dashboard.
-  reportCommandResult?: (originSessionId: string, type: string, status: 'success' | 'failed', message: string) => Promise<any>;
+  reportCommandResult?: (originSessionId: string, type: string, status: 'success' | 'failed', message: string, extra?: Record<string, unknown>) => Promise<any>;
   loadState: (agentSlug: string, sessionId: string) => SessionWatchState | null;
   saveState: (s: SessionWatchState) => void;
   // Write the `.git/origin-session-<tag>.json` state file (session-state.ts
@@ -441,7 +442,7 @@ export interface WatchDeps {
     // Which turn each commit belongs to, and how firmly — see
     // SessionState.commitTurns. Lets the extractor use an observation instead of
     // guessing "the highest-index turn that claims the sha".
-    commitTurns?: Array<{ sha: string; turnId: string; via?: 'post-commit' | 'transcript' }>;
+    commitTurns?: Array<{ sha: string; turnId: string; via?: 'post-commit' | 'transcript' | 'trailer' }>;
     promptTurnIds?: string[];
     headShaAtStart?: string;
   }) => Array<{
@@ -3101,11 +3102,26 @@ export async function handleCloudCommands(
   deps: WatchDeps,
 ): Promise<void> {
   if (!state.originSessionId || state.status !== 'RUNNING') return;
-  let command: { type?: string; commitSha?: string; treeSha?: string; mode?: 'soft' | 'hard' } | undefined;
+  let command: { type?: string; commitSha?: string; treeSha?: string; mode?: 'soft' | 'hard' } & RestoreTurnCommand | undefined;
   try {
     const res: any = await deps.pingSession?.(state.originSessionId);
     command = res?.command;
   } catch { return; /* offline — retry next poll */ }
+  // "Restore to this turn" (the web's turn restore): never stashes, never
+  // discards — the same runner the heartbeat uses (restore-turn.ts).
+  if (command && command.type === 'restore-turn') {
+    const turnMode: 'soft' | 'hard' = command.mode === 'hard' ? 'hard' : 'soft';
+    let result;
+    try {
+      result = runRestoreTurn(state.workRoot, { ...command, sessionId: state.originSessionId });
+    } catch (err: any) {
+      result = { status: 'failed' as const, message: String(err?.message || err) };
+    }
+    await deps.reportCommandResult?.(state.originSessionId, 'restore-turn', result.status, result.message, {
+      mode: turnMode, targetPromptIndex: command.targetPromptIndex ?? null,
+    }).catch(() => {});
+    return;
+  }
   if (!command || command.type !== 'restore') return;
 
   const mode: 'soft' | 'hard' = command.mode === 'hard' ? 'hard' : 'soft';
@@ -3461,7 +3477,7 @@ export function buildRealDeps(machineId: string, hostname?: string): WatchDeps {
     syncNotes: (workRoot: string) => { syncNotesForSessionStart(workRoot); },
     captureCommitScoped: commitDiffScopedToPrompt,
     pingSession: (id) => api.pingSession(id),
-    reportCommandResult: (id, type, status, message) => api.reportCommandResult(id, type, status, message),
+    reportCommandResult: (id, type, status, message, extra) => api.reportCommandResult(id, type, status, message, extra),
     capturePromptEdits: (opts) => capturePromptEdits(opts as any) as any,
     saveGitState: (state, workRoot, tag) => writeGitSessionFile(state as any, workRoot, tag),
     loadGitState: (workRoot, tag) => readGitSessionFile(workRoot, tag) as any,
@@ -3527,6 +3543,10 @@ export async function transcriptWatchCommand(opts: TranscriptWatchOptions = {}):
 
   if (opts.once) {
     await runWatchCycle(adapters, deps);
+    // The cycle's in-process journal watchers are of no use once it is over,
+    // and an open one can keep the process alive (Linux, Node 20: its unref()
+    // did nothing, and `--once` never exited).
+    __stopAllJournalWatchers();
     return;
   }
 

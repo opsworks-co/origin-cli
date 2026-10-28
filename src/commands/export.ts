@@ -5,6 +5,7 @@ import path from 'path';
 import { git, gitDetailed } from '../utils/exec.js';
 import { getGitRoot } from '../session-state.js';
 import { AttributionExportError, exportAttributionRecords, type AttributionExport } from '../attribution-export.js';
+import { LineClaimsExportError, exportLineClaims, parseMaxPaths } from '../attribution-line-claims-export.js';
 
 const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
@@ -99,7 +100,7 @@ function csvEscape(value: string): string {
   return value;
 }
 
-export interface ExportOptions { format?: string; output?: string; limit?: string; model?: string; session?: string; strict?: boolean }
+export interface ExportOptions { format?: string; output?: string; limit?: string; model?: string; session?: string; strict?: boolean; maxPaths?: string }
 
 /**
  * Write `data` to `target` in one step: a temp file next to it, then a rename,
@@ -175,7 +176,44 @@ function exportRangeCommand(range: string, opts: ExportOptions): void {
   }
 }
 
+/**
+ * `origin export --format=line-claims [--max-paths N] -- <commit>` (OR-21/M1):
+ * the `origin-line-claims/1` document of one full commit id on stdout, or an
+ * error on stderr with nothing on stdout. Read-only and offline, like the range
+ * export; it has no file output, filters or strict mode.
+ */
+function exportLineClaimsCommand(commit: string | undefined, opts: ExportOptions): void {
+  const incompatible = (['output', 'limit', 'model', 'session', 'strict'] as const).filter((k) => opts[k] !== undefined);
+  if (incompatible.length > 0) {
+    failRangeExport(`${incompatible.map((k) => `--${k}`).join(', ')} cannot be used with --format=line-claims.`);
+    return;
+  }
+  if (commit === undefined) {
+    failRangeExport('--format=line-claims needs one full commit id: origin export --format=line-claims -- <commit>.');
+    return;
+  }
+  let output: string;
+  try {
+    output = exportLineClaims(process.cwd(), commit, { maxPaths: parseMaxPaths(opts.maxPaths) }).output;
+  } catch (err) {
+    if (err instanceof LineClaimsExportError) {
+      failRangeExport(err.message);
+      return;
+    }
+    throw err;
+  }
+  process.stdout.write(output);
+}
+
 export async function exportCommand(range: string | undefined, opts?: ExportOptions) {
+  if ((opts?.format ?? '').toLowerCase() === 'line-claims') {
+    exportLineClaimsCommand(range, opts ?? {});
+    return;
+  }
+  if (opts?.maxPaths !== undefined) {
+    failRangeExport('--max-paths applies only to --format=line-claims.');
+    return;
+  }
   if (range !== undefined) {
     exportRangeCommand(range, opts ?? {});
     return;

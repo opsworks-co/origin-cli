@@ -4,12 +4,13 @@
 // home is. Shared helpers still live in hooks.ts and are imported from there.
 import { applySavedRow, nextStopReuseMark, settledRowsToReuse } from '../../stop-reuse.js';
 import { ensureWriteKey } from '../../note-seal.js';
-import { discoverCodexSessionData, findCodexRolloutPath, getCodexPromptsTimeline } from '../../agents/codex.js';
+import { discoverCodexSessionData, findCodexRolloutPath, getCodexPromptsTimeline, type CodexSubagentSpawn } from '../../agents/codex.js';
 import { cursorTranscriptLookupId, discoverCursorTranscript, findCursorTranscriptJsonl, getCursorModelFromDb } from '../../agents/cursor.js';
 import { discoverGeminiTranscriptPath } from '../../agents/gemini.js';
 import { firstSpecificModel, isSpecificModel, sessionMatchesAgent } from '../../agents/registry.js';
 import { api } from '../../api.js';
 import { preferCommitPatchForCommittedTurns } from '../../commit-patch-for-committed-turn.js';
+import { applyCrossRepoCommits } from '../../foreign-trees.js';
 import { preferShadowRangeForTurns } from '../../prefer-shadow-range.js';
 import { WATCHED_ONLY_EVIDENCE, trimWatchedEditsForTurns } from '../../trim-watched-edits.js';
 import { dropVanishedWatchedAdds } from '../../vanished-watched-files.js';
@@ -18,7 +19,7 @@ import { dropInheritedFilesFromTurns } from '../../drop-inherited-files.js';
 import { filesPutBackAcrossTheGap, recordTurnEndShadow, turnWindowEndShadow } from '../../restored-from-history.js';
 import { absentAtRevFromGit, heldRevsFromGit, markWorkDiscardedByLaterTurns, startBasesFromGit } from '../../discarded-by-later-turn.js';
 import { fileNamedByGitPathspec, filesTurnNamedByGitPathspec } from '../../git-pathspec-names.js';
-import { gitMovedFilesForTurn } from '../../git-moved-files.js';
+import { forgetGitLeftFiles, gitLeftContent, gitMovedFilesForTurn } from '../../git-moved-files.js';
 import { commitAuthoredDelta } from '../../history-backfill.js';
 import { recoverCommittedTurnProofs } from '../../rehome-git-only-commit-stamp.js';
 import { backfillCodexPromptMappings } from '../../codex-prompt-mapping.js';
@@ -35,6 +36,7 @@ import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
 import type { CommitDetailWire } from '../../git-capture.js';
 import { writeGitNotes, SESSION_EVENT_NOTE_LOCK_WAIT_MS } from '../../git-notes.js';
 import { attributionSourceFromState } from '../../attribution-note.js';
+import { editCapturesFromEditsJson, lineClaimsForCommits, planStopNoteWrites } from '../../attribution-line-claims.js';
 import { extractTodosFromPrompts, handoffRepresentsWork, writeHandoff } from '../../handoff.js';
 import { isOriginAutoManagedPath, shouldIgnoreFile } from '../../ignore-patterns.js';
 import { writeSessionFiles } from '../../local-entrypoint.js';
@@ -53,16 +55,17 @@ import { clipMappingsToPromptHistory, closeTurn, turnThisStopCloses, discoverGit
 import type { SessionState } from '../../session-state.js';
 import type { ParsedTranscript } from '../../transcript.js';
 import { samePath, shellWindowTarget } from '../../session-worktree.js';
-import { trimToChangedRegion } from '../../shell-write-capture.js';
+import { regionBytes, splitChangedRegions, trimToChangedRegion } from '../../shell-write-capture.js';
 import { SUBAGENT_SPAWN_TOOLS, detectRenamedSpawner } from '../../subagent-tools.js';
 import { countDiffLines } from '../../transcript-adapters.js';
-import { applyEstimatedSplit, estimateSessionCost, extractPromptFileMappings, formatTranscriptForDisplay, parseTranscript, scopeCapturedPath, turnModelUsage } from '../../transcript.js';
+import { applyEstimatedSplit, estimateSessionCost, extractPromptFileMappings, formatTranscriptForDisplay, parseSessionTranscript, parseTranscript, scopeCapturedPath, turnModelUsage } from '../../transcript.js';
 import { durableUpdateSession, persistUpdateBeforeWork } from '../../update-queue.js';
 import { querySqlite } from '../../utils/sqlite.js';
-import { markTurnAt, readJournal } from '../../write-journal-watch.js';
+import { markTurnAt, readJournal, readJournalEntries } from '../../write-journal-watch.js';
 import { giveAbsorbedPromptsTheirTurns } from '../../absorbed-prompt-turn.js';
 import { filesWrittenDuring } from '../../write-journal.js';
 import { createSnapshot } from '../snapshot.js';
+import { notifyTurnFinishedOnDesktop } from '../../agent-notify.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -70,7 +73,7 @@ import path from 'path';
 import { localTurnForServerRow, serverRowForLocalTurn, turnIdForServerRow, turnStartFields } from '../../turn-index.js';
 import { chatOnlyStateFlag } from '../../chat-only-flag.js';
 import { applyRewritePairsToState, finalRewriteOf, firstUnanchoredPrompt, markSkippedPromptBaselines, markStopSentOnDisk, markTurnClosedOnDisk, recordPromptShadow } from '../../session-state.js';
-import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, archiveIsAnotherConversation, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, batchedReadAtRev, inheritedBaselineForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, commitsThisSessionMayNote, gitCommonDirOnce, readCommitOwnershipFactsBatch, type CommitOwnershipFacts, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts, sessionAbandonedCommits, liveCommitTurns, liveSessionCommitShas, abandonedOnlyFiles, sessionAuthoredNothing } from '../hooks.js';
+import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, archiveIsAnotherConversation, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, batchedReadAtRev, diffMeasuredFromGitLeft, inheritedBaselineForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, commitsThisSessionMayNote, gitCommonDirOnce, readCommitOwnershipFactsBatch, type CommitOwnershipFacts, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts, sessionAbandonedCommits, liveCommitTurns, liveSessionCommitShas, abandonedOnlyFiles, sessionAuthoredNothing } from '../hooks.js';
 
 
 // ─── Debug Logger ─────────────────────────────────────────────────────────
@@ -1186,6 +1189,26 @@ function enrichCursorTranscript({ agentSlug, parsed, input, state, displayTransc
   }
   return { displayTranscript };
 }
+/** Add the rollout's `spawn_agent` calls to state.subagentSpawns, once each. */
+export function mergeCodexSubagentSpawns(state: SessionState, spawns: CodexSubagentSpawn[] | undefined): void {
+  if (!spawns?.length) return;
+  const list = state.subagentSpawns ?? [];
+  const known = new Set(list.map((s) => s.toolCallId));
+  for (const s of spawns) {
+    if (!s.toolCallId || known.has(s.toolCallId)) continue;
+    known.add(s.toolCallId);
+    list.push({
+      toolCallId: s.toolCallId,
+      subagentType: s.subagentType,
+      description: s.description,
+      prompt: null,
+      promptIndex: s.promptIndex,
+      startedAt: s.startedAt || new Date().toISOString(),
+    });
+  }
+  state.subagentSpawns = list;
+}
+
 export function backfillCodexRollout({ codexData, parsed, state, displayTranscript }: { codexData: ReturnType<typeof discoverCodexSessionData> | null; parsed: ParsedTranscript; state: SessionState; displayTranscript: ReturnType<typeof formatTranscriptForDisplay> }): { displayTranscript: ReturnType<typeof formatTranscriptForDisplay> } {
   if (codexData) {
     debugLog('stop', 'supplementing with Codex data', {
@@ -1239,6 +1262,10 @@ export function backfillCodexRollout({ codexData, parsed, state, displayTranscri
       parsed.modelUsage = codexData.modelUsage;
       parsed.turnUsage = codexData.turnUsage;
     }
+    // The sub-agents the chat spawned. Origin registers no tool hooks for
+    // Codex, so pre-tool-use never recorded them; the rollout is the record.
+    // Their usage is already in the counts above (codexReviewCalls).
+    mergeCodexSubagentSpawns(state, codexData.subagentSpawns);
     // Prefer the rollout-parsed transcript over the synthesized-from-prompts
     // fallback — it includes assistant text, reasoning, and tool I/O.
     if (codexData.transcript) {
@@ -1460,7 +1487,7 @@ function enrichDevinTurn({ agentSlug, state, input, parsed, displayTranscript }:
 function synthesizeDisplayTranscript({ displayTranscript, state }: { displayTranscript: ReturnType<typeof formatTranscriptForDisplay>; state: SessionState }): { displayTranscript: ReturnType<typeof formatTranscriptForDisplay> } {
   // For Codex (and other agents without transcripts): synthesize displayTranscript from captured prompts
   if (!displayTranscript && state.prompts.length > 0) {
-    const turns: Array<{ role: string; content: string }> = [];
+    const turns: Array<{ role: string; content: string; parts?: DisplayPart[] }> = [];
     // Include the system message so users can see what context was injected
     if (state.agentSystemPrompt) {
       turns.push({ role: 'system', content: state.agentSystemPrompt });
@@ -1471,7 +1498,7 @@ function synthesizeDisplayTranscript({ displayTranscript, state }: { displayTran
       // Interleave the assistant reply we captured (Gemini, agents
       // without transcripts) so the dashboard shows the response.
       if (responses[i]) {
-        turns.push({ role: 'assistant', content: responses[i] });
+        turns.push({ role: 'assistant', content: responses[i], ...partsField([replyTextPart(responses[i])]) });
       }
     }
     displayTranscript = JSON.stringify(turns);
@@ -2759,6 +2786,9 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
         windowInheritsCommits: (fromShadow, toShadow, localTurn) => windowInheritsCommitsForTurn(
           state.repoPath || hookCwd, state as any, fromShadow, toShadow, localTurn,
         ),
+        remeasureWindow: (localTurn, fromShadow, toShadow, diff) => diffMeasuredFromGitLeft(
+          state.repoPath || hookCwd, state, fromShadow, localTurn, diff, toShadow,
+        ),
       },
     );
     if (fromShadows > 0) {
@@ -2877,6 +2907,11 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
     } catch (err: unknown) {
       debugLog('stop', 'later-discard pass failed (non-fatal)', { message: err instanceof Error ? err.message : String(err) });
     }
+    // A commit a turn made in ANOTHER repository, which none of the passes
+    // above can see from this one (they read the session's own tree, and the
+    // vanished-file pass drops the commit's files as never on disk here) — so
+    // last, over every row. See foreign-trees.ts.
+    applyCrossRepoCommits(state, promptMappings as any, (event, data) => debugLog('stop', event, data));
 
     // The server can HARD-DELETE this row out from under us between the
     // session's creation and this PATCH (see isSessionGoneError). The payload
@@ -2935,6 +2970,12 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
       // mid-run, and Claude Code rewrites the record each time.
       agentSessionName: resolveAgentSessionName(state) || undefined,
       durationMs: durationMs > 0 ? durationMs : undefined,
+      // When this turn ended, by our clock. The server otherwise stamps its
+      // receive time, and only for grown metrics — so this upload, queued
+      // behind a slow box and replayed after /session/end stored the same
+      // tokens, recorded no activity at all (d403e181: active time 26 s for a
+      // ten-minute `claude -p` turn).
+      lastActivityAt: new Date().toISOString(),
       costUsd: costUsd > 0 ? costUsd : undefined,
       gitCapture: sessionGitCapture,
       // ATTESTATION: which turn each commit landed under, observed rather
@@ -3108,13 +3149,25 @@ function writeCommitNotes({ gitCapture, state, model, agentSlug, prompts, prompt
       // The turn window holds every commit HEAD moved past — a pull, a merge of
       // main — not only this session's. Note-less is not the same as ours.
       const ownNoteCommits = new Set(commitsThisSessionMayNote(state.repoPath, state, noteCommits));
-      const missingNotes = noteCommits.filter(sha => ownNoteCommits.has(sha)).filter(sha => {
-        try {
-          execFileSync('git', ['notes', '--ref=origin', 'show', sha], execOptsNotes);
-          return false; // already has a note
-        } catch {
-          return true; // no note yet
-        }
+      // Notes first, projection second: only commits with no note, and own
+      // commit-level notes post-commit could not give lines (no capture yet),
+      // are projected — through the same preparation path post-commit and
+      // SessionEnd use. A missing note is always written; an existing one only
+      // when its lines are now proven and publishable.
+      const { write: missingNotes, lineClaims } = planStopNoteWrites({
+        repoPath: state.repoPath,
+        sessionId: state.sessionId,
+        shas: noteCommits.filter(sha => ownNoteCommits.has(sha)),
+        readNote: (sha) => {
+          try {
+            return execFileSync('git', ['notes', '--ref=origin', 'show', sha], execOptsNotes);
+          } catch {
+            return null; // no note yet
+          }
+        },
+        project: (candidates) => lineClaimsForCommits(
+          state.repoPath, agentSlug || state.agentSlug, state, candidates, () => editCapturesFromEditsJson(promptEditsByIndex),
+        ),
       });
       if (missingNotes.length > 0) {
         writeGitNotes(state.repoPath, missingNotes, {
@@ -3136,6 +3189,7 @@ function writeCommitNotes({ gitCapture, state, model, agentSlug, prompts, prompt
           originUrl: state.sessionId ? `${config?.apiUrl || 'https://getorigin.io'}/sessions/${state.sessionId}` : '',
           attribution: attributionSourceFromState(state, {
             agentSlug, model, costUsd, connected: isConnectedMode(), apiUrl: config?.apiUrl || 'https://getorigin.io',
+            lineClaims,
           }),
         }, { lockWaitMs: SESSION_EVENT_NOTE_LOCK_WAIT_MS });
         debugLog('stop', 'git notes written for missing commits', { count: missingNotes.length });
@@ -3728,7 +3782,7 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
 
   try {
     debugLog('stop', 'parsing transcript', { transcriptPath: state.transcriptPath });
-    const parsed = parseTranscript(state.transcriptPath, { since: state.startedAt, repoRoots: sessionRepoRoots(state) });
+    const parsed = parseSessionTranscript(state.transcriptPath, state, sessionRepoRoots(state));
 
     // Format transcript for dashboard display (converts JSONL → [{role, content}] JSON)
     let displayTranscript = formatTranscriptForDisplay(state.transcriptPath, { verbose: !!state.verboseCapture });
@@ -3852,12 +3906,14 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     // or sent; its turn begins there.
     const absorbed = giveAbsorbedPromptsTheirTurns(state, parsed, {
       markAt: (turnId, at, afterTurnId) => !!state.writeJournalPath && markTurnAt(state.writeJournalPath, turnId, at, afterTurnId),
+      marksAt: (at) => !state.writeJournalPath ? [] : readJournalEntries(state.writeJournalPath)
+        .flatMap((e) => (e.kind === 'turn' && e.at === at ? [e.turnId] : [])),
     });
     if (absorbed.length > 0) {
       debugLog('stop', 'a prompt with no submit record got its own turn', {
         turns: absorbed.map((a) => ({
           promptIndex: a.promptIndex, turnId: a.turnId, at: new Date(a.at).toISOString(), midTurn: a.midTurn,
-          splitFrom: a.splitFrom, marked: a.marked, commits: a.commits.map((c) => c.slice(0, 8)),
+          splitFrom: a.splitFrom, marked: a.marked, adopted: !!a.adopted, commits: a.commits.map((c) => c.slice(0, 8)),
         })),
       });
     }
@@ -3953,6 +4009,21 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     // fullContext: per-prompt diff feeds AI Blame's replay. Full-file
     // context lets every editsJson edit anchor at an exact position.
     const gitCapture = captureGitState(state.repoPath, promptBaseline, { fullContext: true });
+    // A file a STOPPED merge or pick left in the tree is measured from what
+    // git left in it, not from the baseline (TODO 1de72a6e): the safety-net
+    // row below is built from these diffs, and from the turn's start it
+    // carried the merge's clean files and the incoming branch's lines.
+    try {
+      const before = gitCapture.workingTreeDiff.length + gitCapture.uncommittedDiff.length;
+      gitCapture.workingTreeDiff = diffMeasuredFromGitLeft(state.repoPath, state, promptBaseline, closingLocal, gitCapture.workingTreeDiff);
+      gitCapture.uncommittedDiff = diffMeasuredFromGitLeft(state.repoPath, state, promptBaseline, closingLocal, gitCapture.uncommittedDiff);
+      const after = gitCapture.workingTreeDiff.length + gitCapture.uncommittedDiff.length;
+      if (before !== after) {
+        debugLog('stop', 'turn diffs re-measured from what a stopped operation left', { promptIndex: closingLocal, before, after });
+      }
+    } catch (err: unknown) {
+      debugLog('stop', 'stopped-operation re-measure failed (non-fatal)', { message: err instanceof Error ? err.message : String(err) });
+    }
     // A shared checkout means `promptBaseline..HEAD` can contain another
     // agent's commits. Drop them before anything downstream reads the range,
     // and remember their files so they can't reach this turn's diff either
@@ -4062,6 +4133,14 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     writeCommitNotes({ gitCapture, state, model, agentSlug, prompts, promptEditsByIndex, parsed, costUsd, durationMs, config });
     // Phase: claimTurnCloses.
     claimTurnCloses({ state, parsed, gitCapture, stopHookReply });
+    // Opt-in desktop popup when this turn committed on a feature branch. Read
+    // the turn's starting HEAD before advanceTurnBaselines moves it.
+    notifyTurnFinishedOnDesktop({
+      repoPath: state.repoPath,
+      branch: getBranch(state.repoPath),
+      headBefore: state.headShaAtLastStop || state.headShaAtStart,
+      headAfter: gitCapture.headAfter,
+    });
     // Phase: advanceTurnBaselines.
     advanceTurnBaselines({ state, gitCapture });
     // The running turn is finished. Closing it here — rather than letting the
@@ -4109,6 +4188,12 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     publishSessionFiles({ config, state, parsed, promptMappings, gitCapture, promptEditsByIndex });
     // Phase: refreshHandoff.
     refreshHandoff({ prompts, state, agentSlug, model, found, parsed, filesChanged, gitCapture });
+    // Phase: pickUpUnseenCommits — commits made where Origin's hooks never ran
+    // (another git client, hooks off), now that this turn's end is recorded.
+    try {
+      const { pickUpUnseenCommits } = await import('../../reflog-pickup.js');
+      await pickUpUnseenCommits(state.repoPath || hookCwd, { budgetMs: 2_000 });
+    } catch { /* best-effort */ }
   } catch (err: any) {
     debugLog('stop', 'ERROR', { message: err.message, stack: err.stack });
     process.stderr.write(`[origin] stop error: ${err.message}\n`);
@@ -4121,6 +4206,7 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
 // (`from './commands/hooks.js'`) keeps resolving.
 import { isInsideRepo } from '../../paths.js';
 import { compareResolverWithPasses, createTurnObserver, observeReconstruction } from '../../resolve-turn.js';
+import { partsField, replyTextPart, type DisplayPart } from '../../display-parts.js';
 export { isInsideRepo };
 
 
@@ -4173,7 +4259,13 @@ export function recordProbedShellEdits(
   // Which ledger slot and provenance to write. Defaults keep the shell-probe
   // behaviour; the edit-hook path passes its own so the two never overwrite
   // each other's entries for the same turn.
-  opts?: { toolLabel?: string; evidence?: PromptEdit['evidence']; command?: string },
+  opts?: {
+    toolLabel?: string; evidence?: PromptEdit['evidence']; command?: string;
+    // Files git put in place (a tree-moving command the agent did not name
+    // them in): back at the turn's start they clear an earlier entry, as any
+    // file does, but they never become the turn's edit or replace one.
+    settleOnly?: ReadonlySet<string>;
+  },
 ): boolean {
   if (liveLedgerBytes(state) >= LIVE_EDIT_MAX_TOTAL_BYTES) return false;
   const edits: PromptEdit[] = [];
@@ -4202,8 +4294,22 @@ export function recordProbedShellEdits(
     // the blame's per-prompt list read them as the turn's files.
     if ((baselineSha && oldContent === newContent) || (oldContent === null && newContent === null)) {
       settledBack.push(file);
+      // Back at the turn's start, so what a stopped merge or pick left in it
+      // is gone too (an abort): the next write is measured from the start.
+      forgetGitLeftFiles(state, promptIndex, tree, [file]);
       continue;
     }
+    // A STOPPED merge or pick left this file holding the incoming side, or
+    // both sides and the markers (TODO 1de72a6e). That is the state this
+    // write changed — not the turn's start, which would bill the turn the
+    // incoming branch's lines it kept. One that still holds exactly what git
+    // left is no edit either, and the record stands for the write to come.
+    const left = gitLeftContent(state, promptIndex, tree, file);
+    if (left !== null) {
+      if (left === newContent) { settledBack.push(file); continue; }
+      oldContent = left;
+    }
+    if (opts?.settleOnly?.has(file)) continue;
     const edit: PromptEdit = {
       file,
       op: newContent === null ? 'delete' : (oldContent === null ? 'create' : 'write'),
@@ -4233,6 +4339,10 @@ export function recordProbedShellEdits(
       const whole = edit.op === 'write' && oldContent !== null && newContent !== null
         ? trimToChangedRegion(oldContent, newContent)
         : null;
+      const regions = (!whole || whole.oldContent.length + whole.newContent.length > LIVE_EDIT_CONTENT_MAX)
+        && edit.op === 'write' && oldContent !== null && newContent !== null
+        ? splitChangedRegions(oldContent, newContent)
+        : null;
       if (whole && whole.oldContent.length + whole.newContent.length <= LIVE_EDIT_CONTENT_MAX) {
         edit.op = 'edit';
         edit.oldContent = whole.oldContent;
@@ -4242,6 +4352,17 @@ export function recordProbedShellEdits(
         debugLog('post-tool-use', 'edit trimmed to its changed region for the ledger', {
           promptIndex, file, startLine: whole.startLine, bytes: editContentBytes(edit), cap: LIVE_EDIT_CONTENT_MAX,
         });
+      } else if (regions && regionBytes(regions) <= LIVE_EDIT_CONTENT_MAX) {
+        // Changed near both ends, so the one trimmed region is still the whole
+        // file — a lockfile after a dependency bump (d403e181's pnpm-lock.yaml:
+        // 339 KB trimmed, five small hunks). One anchored edit per region.
+        for (const r of regions) {
+          edits.push({ ...edit, op: 'edit', oldContent: r.oldContent, newContent: r.newContent, oldStart: r.oldStart, newStart: r.newStart });
+        }
+        debugLog('post-tool-use', 'edit split into its changed regions for the ledger', {
+          promptIndex, file, regions: regions.length, bytes: regionBytes(regions), cap: LIVE_EDIT_CONTENT_MAX,
+        });
+        continue;
       } else {
         // Say so. A file over the cap produced NO entry and NO line, so when it
         // was the only file the caller saw a bare `false` and could not tell

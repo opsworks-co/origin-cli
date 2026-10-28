@@ -72,6 +72,21 @@ describe('giveAbsorbedPromptsTheirTurns', () => {
     expect(s.commitTurns.map((c) => [c.sha, c.turnId])).toEqual([['c1', 't_A'], ['c2', 't_B']]);
   });
 
+  it('adopts the mark its own submit left when only its record was lost', () => {
+    // Session a325d2ee prompt 12: submit marked t_4f780e at the prompt's time
+    // and commits were attested to it; a Stop beside it saved the record away.
+    const s = state();
+    s.commitTurns.push({ sha: 'c3', turnId: 't_submit', at: '2026-09-26T10:08:00.000Z' });
+    const out = giveAbsorbedPromptsTheirTurns(s, parsed, {
+      markAt: () => { throw new Error('the journal already marks it'); },
+      marksAt: (at) => (at === T ? ['t_A', 't_submit'] : []),
+      newId: () => 't_new',
+    });
+    expect(out).toEqual([{ promptIndex: 1, turnId: 't_submit', at: T, splitFrom: 't_A', midTurn: true, marked: true, commits: ['c2'], adopted: true }]);
+    expect(s.promptTurnIds).toEqual(['t_A', 't_submit']);
+    expect(s.commitTurns.map((c) => [c.sha, c.turnId])).toEqual([['c1', 't_A'], ['c2', 't_submit'], ['c3', 't_submit']]);
+  });
+
   it('leaves a prompt whose hook ran alone', () => {
     const s = { ...state(), promptTurnIds: ['t_A', 't_hook'] };
     const out = giveAbsorbedPromptsTheirTurns(s, parsed, { markAt: () => { throw new Error('no'); } });

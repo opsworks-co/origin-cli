@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runDetailed } from '../utils/exec.js';
 import { saveSessionState, type SessionState } from '../session-state.js';
 import { isManuallyEnded, skipManuallyEndedHook } from '../manual-session-end.js';
+import { removeTestTree, stopBackgroundDaemons } from './helpers/background-daemons.js';
 
 const bin = path.resolve(__dirname, '../../dist/index.js');
 const sessionId = 'ab123456-0000-4000-8000-000000000001';
@@ -42,7 +43,12 @@ beforeEach(() => {
       capturedAt: new Date().toISOString(), linesAdded: 0, linesRemoved: 0 }],
   };
 });
-afterEach(() => fs.rmSync(repo, { recursive: true, force: true }));
+// The resuming prompt spawns a journal watcher whose cwd is the repo; on
+// Windows the repo cannot be removed until it exits.
+afterEach(async () => {
+  await stopBackgroundDaemons();
+  removeTestTree(repo);
+});
 
 describe('an explicit end survives the hooks of the releasing turn', () => {
   it.each(['claude-code', 'codex', 'cursor'])('%s stays final until the next prompt', agent => {

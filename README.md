@@ -17,7 +17,7 @@
 ---
 
 Origin runs silently next to any AI coding agent — Claude Code, Cursor, Codex,
-Gemini CLI, Aider, Windsurf, Copilot, and more — and captures every session:
+Gemini CLI, Copilot, Devin, Antigravity, Aider, and more — and captures every session:
 prompts, files touched, tokens, cost, diffs. All of it lives in your git repo as
 notes and refs. `git clone` brings the history with the code. No server, no
 login, no API keys required.
@@ -46,9 +46,9 @@ Origin maps to one idea per verb. Everything else is detail.
 
 ### 01 — Every agent.
 
-Auto-detected. Claude Code, Cursor, Codex, Gemini CLI, Aider, Windsurf, Copilot,
-Continue, Cody, Cline, Codeium, Roo, Kilo. One command picks up whichever tool
-you use.
+Auto-detected. Claude Code, Cursor, Codex, Gemini CLI, Copilot, Devin
+(formerly Windsurf), Antigravity and Aider, plus commit-time detection for
+Continue, Cody, Cline, Codeium and more. One command picks up whichever tool you use.
 
 ```bash
 origin enable           # detect agents + install hooks
@@ -62,7 +62,7 @@ Each turn is captured as a snapshot: prompt text, model, files touched, diff,
 tokens, cost, duration.
 
 ```bash
-origin snapshot       # list per-prompt snapshots in the current session
+origin snapshot list  # list shadow snapshots in this repo
 origin sessions       # list all sessions
 origin session <id>   # replay a single session
 origin rewind --to <sha>   # restore working tree to any snapshot
@@ -82,8 +82,9 @@ origin search "auth bug"     # full-text search across prompts
 
 ### 04 — In your git repo.
 
-Nothing leaves your machine. Sessions live in `refs/notes/origin` and the
-`origin-sessions` branch — the history moves with the repo, not through a server.
+Nothing leaves your machine. Sessions live in `refs/notes/origin`, per-session
+refs under `refs/origin/sessions/`, and the `origin-sessions` branch — the
+history moves with the repo, not through a server.
 
 ```
 refs/notes/origin              per-commit model / session / cost / tokens
@@ -91,6 +92,7 @@ refs/notes/origin-memory       cross-session memory (what past sessions did)
 refs/notes/origin-memory-brief distilled continuation brief for the next session
 refs/notes/origin-acceptance   how much of a past agent's output survived
 refs/notes/origin-repo-brief   repo brief (what this repo is) — opt-in
+refs/origin/sessions/<id>      one session's files (default local store)
 origin-sessions                transcripts, prompts, file changes
 ~/.origin/config.json          CLI config (machine-local)
 ```
@@ -136,15 +138,17 @@ origin context brief              # show the cached brief
 origin context brief --refresh    # regenerate now (uses your Anthropic key)
 ```
 
-Session memory is on by default and never leaves your machine. The repo brief is
-the only piece that calls an external service, and only after you enable it.
+Session memory is on by default. It is pushed with the repo only if you opt in
+with `notesIncludePrompts: true`. The repo brief is the only piece that calls an
+external service, and only after you enable it.
 
 ---
 
 ## Supported agents
 
-**Full session capture (native hooks):** Claude Code · Cursor · Codex CLI · Gemini CLI · GitHub Copilot · Windsurf · Antigravity
-**Commit-time detection:** Aider · Cody · Continue · Codeium · Cline · Amp · Junie · OpenCode · Rovo Dev · Droid
+**Full session capture (native hooks):** Claude Code · Cursor · Codex CLI · Gemini CLI · GitHub Copilot · Devin (formerly Windsurf) · Antigravity
+**Repo-level hooks:** Aider (`origin enable --local --agent aider`)
+**Commit-time detection:** Cody · Continue · Codeium · Cline · Amp · Junie · OpenCode · Rovo Dev · Droid
 
 Detection runs on CLI availability, IDE extension inspection, MCP config, and
 process detection at commit time.
@@ -161,7 +165,7 @@ Commonly used beyond the four beats:
 
 ```bash
 origin stats                 # AI vs human stats for the repo
-origin handoff show          # pass context to the next agent
+origin context handoff       # context passed to the next agent
 origin recap                 # end-of-day summary
 origin backfill --apply      # retroactively tag old commits
 origin policies              # list active governance policies

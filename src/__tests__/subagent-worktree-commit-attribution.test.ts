@@ -290,7 +290,9 @@ describe('session-write-trees', () => {
     expect(keepWriteTreesSavedMeanwhile(mine, {
       sessionId: PARENT, writeTrees: [wrote(wt.A, ['a2.ts']), wrote(wt.B, ['b.ts'])],
     })).toBe(2);
-    expect(mine.writeTrees.map((w) => w.path).sort()).toEqual([wt.A, wt.B, wt.C].sort());
+    // `wrote` stores the native realpath; `wt.*` keeps an 8.3 short name
+    // (RUNNER~1) on Windows, so compare in the stored form.
+    expect(mine.writeTrees.map((w) => w.path).sort()).toEqual([wt.A, wt.B, wt.C].map((p) => fs.realpathSync.native(p)).sort());
     expect(filesWrittenInTree(mine, wt.A).sort()).toEqual(['a.ts', 'a2.ts']);
     expect(keepWriteTreesSavedMeanwhile(mine, { sessionId: OTHER, writeTrees: [wrote(wt.D, ['d.ts'])] })).toBe(0);
   });

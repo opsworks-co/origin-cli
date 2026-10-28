@@ -81,8 +81,14 @@ export function reflogSubjectThatCreated(repoPath: string, sha: string): string 
   return readSubjectThatCreated(repoPath, sha) ?? null;
 }
 
-/** As reflogSubjectThatCreated, but `undefined` when the reflog could not be read at all. */
-function readSubjectThatCreated(repoPath: string, sha: string): string | null | undefined {
+/**
+ * As reflogSubjectThatCreated, but `undefined` when the reflog could not be
+ * read at all (the `git reflog` subprocess failed — on a starved host, its
+ * 5 s timeout), so a caller can tell "unreadable" from "no entry". Exported
+ * for post-commit's keepSessionTheTrailerNames, which falls back to
+ * prepare-commit-msg's fresh-stamp marker then (fresh-stamp-marker.ts).
+ */
+export function readSubjectThatCreated(repoPath: string, sha: string): string | null | undefined {
   if (!repoPath || !/^[a-fA-F0-9]{40,64}$/.test(sha || '')) return null;
   let out: string;
   try {
@@ -121,4 +127,34 @@ export function replayInProgressInGitDir(dir: string): ReplayKind | null {
   // Not `sequencer/`: a multi-commit `git revert` uses it too, and a revert is authored.
   if (fs.existsSync(path.join(dir, 'CHERRY_PICK_HEAD'))) return 'cherry-pick';
   return null;
+}
+
+/**
+ * The commit an amend replaced: `sha` was created by a `commit (amend):` entry
+ * in HEAD's reflog, and the entry just older than it is the commit HEAD held
+ * before — the one `git commit --amend` rewrote. `null` when `sha` was not
+ * made by an amend (or is not in the reflog); `undefined` when the reflog
+ * could not be read.
+ *
+ * post-commit reads this to know, before post-rewrite's pair arrives, that the
+ * running turn rewrote a commit — possibly another turn's — rather than making
+ * one of its own.
+ */
+export function amendedAwayBy(repoPath: string, sha: string): string | null | undefined {
+  if (!repoPath || !/^[a-fA-F0-9]{40,64}$/.test(sha || '')) return null;
+  let out: string;
+  try {
+    out = execFileSync('git', ['reflog', 'show', `-n${REFLOG_WINDOW}`, '--format=%H%x00%gs', 'HEAD', '--'], { ...READ, cwd: repoPath });
+  } catch { return undefined; }
+  const want = sha.toLowerCase();
+  const lines = out.split('\n').filter((l) => l.includes('\0'));
+  // Newest first — the LAST match is the entry that created the sha.
+  let created = -1;
+  for (let i = 0; i < lines.length; i++) if (lines[i].slice(0, lines[i].indexOf('\0')).toLowerCase() === want) created = i;
+  if (created < 0) return null;
+  if (!/^commit \(amend\):/.test(lines[created].slice(lines[created].indexOf('\0') + 1))) return null;
+  const before = lines[created + 1];
+  if (!before) return null;
+  const away = before.slice(0, before.indexOf('\0'));
+  return /^[a-fA-F0-9]{40,64}$/.test(away) && away.toLowerCase() !== want ? away : null;
 }

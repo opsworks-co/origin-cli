@@ -51,7 +51,7 @@ export interface CaptureInputs {
   // Optional because it only exists when a turn was open — a manual commit
   // between prompts, a rebase or an amend legitimately has none, and those
   // still fall through to the heuristic below.
-  commitTurns?: Array<{ sha: string; turnId: string; via?: 'post-commit' | 'transcript' }>;
+  commitTurns?: Array<{ sha: string; turnId: string; via?: 'post-commit' | 'transcript' | 'trailer' }>;
   // index -> turnId for this session (SessionState.promptTurnIds). Used only
   // to resolve a capture to the identity commitTurns attests against; kept
   // out of PromptCapture so extractors stay unaware of turn identity.
@@ -1094,6 +1094,32 @@ function makeRepoRelative(filePath: string, repoPath: string): string {
 // Tool names: `replace` (Edit-equivalent), `write_file`, plus non-edit
 // tools like `run_shell_command`, `update_topic`, `update_plan`. We
 // walk tool calls and emit a PromptEdit for the file-touching ones.
+//
+// Each recorded call carries its outcome in `status` (Gemini CLI's
+// CoreToolCallStatus). The scheduler sets 'success' only when the tool
+// returned no error and was not aborted; a `replace` whose old_string was
+// not found is 'error', a denied or interrupted one 'cancelled'. Those wrote
+// nothing and are dropped, as Claude's is_error and Copilot's success:false
+// are (G3). Only a 'success' call is stamped `evidence: 'tool_call'` — the
+// proof line claims require. Any other status (missing, or a call recorded
+// mid-flight) keeps the edit for the turn's file list but proves nothing.
+// Append-only recordings (0.64+) may write one call more than once as it
+// fills in, so a call's outcome is the LAST status recorded under its id,
+// and only its first appearance is stamped — a re-append is not a second edit.
+const GEMINI_FAILED_STATUSES = new Set(['error', 'cancelled']);
+
+function geminiFinalStatusById(raw: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const line of raw.split('\n')) {
+    if (!line.includes('"toolCalls"')) continue;
+    let evt: any;
+    try { evt = JSON.parse(line); } catch { continue; }
+    for (const tc of Array.isArray(evt?.toolCalls) ? evt.toolCalls : []) {
+      if (tc && typeof tc.id === 'string' && tc.id && typeof tc.status === 'string' && tc.status) out.set(tc.id, tc.status);
+    }
+  }
+  return out;
+}
 // ─── GitHub Copilot CLI ────────────────────────────────────────────────────
 //
 // Store: ~/.copilot/session-state/<sessionId>/events.jsonl — a flat event log,
@@ -1124,6 +1150,12 @@ function makeRepoRelative(filePath: string, repoPath: string): string {
 //     how a turn read +240 against git's +124 (#1249) — so failed calls are
 //     dropped rather than trusted.
 //
+//     Not failed is not proven, though (G1). Only a completion with
+//     `success: true` stamps `evidence: 'tool_call'`. A call with no
+//     completion — the turn was aborted, or the log was read before it was
+//     flushed — or with no boolean verdict keeps its edit for the turn's file
+//     list but proves nothing, so it can never open line claims.
+//
 // `bash` is Copilot's most-used tool, but in this sample it runs and compiles
 // rather than authors (python -m py_compile, rm -r __pycache__). Genuine shell
 // writes stay with the shell-write probe, which covers every agent.
@@ -1138,15 +1170,7 @@ function extractFromCopilotEvents(opts: CaptureInputs): PromptCapture[] {
     try { events.push(JSON.parse(line)); } catch { /* skip a torn line */ }
   }
 
-  // Which tool calls FAILED. Collected in a first pass because the verdict
-  // arrives in a later event than the arguments.
-  const failed = new Set<string>();
-  for (const e of events) {
-    if (e?.type !== 'tool.execution_complete') continue;
-    const id = e?.data?.toolCallId;
-    if (typeof id === 'string' && e?.data?.success === false) failed.add(id);
-  }
-
+  const verdicts = copilotCallVerdicts(events);
   const turns: PromptCapture[] = [];
   let current: PromptCapture | null = null;
 
@@ -1171,55 +1195,100 @@ function extractFromCopilotEvents(opts: CaptureInputs): PromptCapture[] {
     const data = e?.data || {};
     const toolName = String(data.toolName || '');
     if (!COPILOT_EDIT_TOOLS.has(toolName)) continue;
-    if (typeof data.toolCallId === 'string' && failed.has(data.toolCallId)) continue;
+    const verdict = copilotVerdictOf(verdicts, data.toolCallId);
+    if (verdict === 'failed') continue;
+    const proof = verdict === 'succeeded' ? { evidence: 'tool_call' as const } : {};
     // An edit before any user.message belongs to no prompt we can name. Open a
     // turn for it rather than dropping it, so the work is still attributed
     // somewhere visible instead of vanishing.
     if (!current) current = { promptIndex: 0, promptText: '', agent: 'copilot', edits: [], commits: [] };
     const turn: PromptCapture = current;
-
-    const args = data.arguments || {};
-    if (toolName === 'apply_patch') {
-      // parseApplyPatch is shared with Codex and stamps no evidence, but these
-      // edits were witnessed in a tool call like any other — leaving them
-      // unmarked would throw away the one signal that separates proof from the
-      // working-tree inference this extractor exists to replace.
-      for (const edit of parseApplyPatch(copilotPatchText(args), opts.repoPath)) {
-        turn.edits.push({ ...edit, source: 'tool_call', evidence: 'tool_call' });
-      }
-      continue;
+    for (const edit of copilotStartEdits(toolName, data.arguments, opts.repoPath).edits) {
+      turn.edits.push({ ...edit, ...proof });
     }
+  }
 
-    const file = typeof args.path === 'string' ? args.path : '';
-    if (!file) continue;
-    const repoRelative = makeRepoRelative(file, opts.repoPath);
+  if (current) turns.push(current);
+  return turns;
+}
 
-    if (toolName === 'create') {
-      turn.edits.push({
+export interface CopilotCallVerdicts {
+  failed: Set<string>;
+  succeeded: Set<string>;
+  /** Every call that has a tool.execution_complete at all. */
+  completed: Set<string>;
+}
+
+/**
+ * The G1 verdict of every call in a Copilot events log, joined by toolCallId.
+ * Collected in a first pass because the verdict arrives in a later event than
+ * the arguments. A call reported both ways counts as failed. The one reading
+ * of success both the extractor and post-commit's turn proof use.
+ */
+export function copilotCallVerdicts(events: readonly any[]): CopilotCallVerdicts {
+  const out: CopilotCallVerdicts = { failed: new Set(), succeeded: new Set(), completed: new Set() };
+  for (const e of events) {
+    if (e?.type !== 'tool.execution_complete') continue;
+    const id = e?.data?.toolCallId;
+    if (typeof id !== 'string' || !id) continue;
+    out.completed.add(id);
+    if (e?.data?.success === false) out.failed.add(id);
+    else if (e?.data?.success === true) out.succeeded.add(id);
+  }
+  return out;
+}
+
+/** 'succeeded' only for a call proven so and never reported failed; 'unknown' for no id or no boolean verdict. */
+export function copilotVerdictOf(v: CopilotCallVerdicts, toolCallId: unknown): 'succeeded' | 'failed' | 'unknown' {
+  if (typeof toolCallId !== 'string' || !toolCallId) return 'unknown';
+  if (v.failed.has(toolCallId)) return 'failed';
+  return v.succeeded.has(toolCallId) ? 'succeeded' : 'unknown';
+}
+
+/**
+ * The edits one Copilot edit/create/apply_patch start describes, with
+ * `source: 'tool_call'` and no evidence (the verdict decides that), and whether
+ * its arguments actually carried the content — an edit whose old_str/new_str
+ * or a create whose file_text is missing reads as '' here, and is not content.
+ */
+export function copilotStartEdits(toolName: string, rawArgs: unknown, repoPath: string): { edits: PromptEdit[]; contentBearing: boolean } {
+  if (toolName === 'apply_patch') {
+    // As recorded: an object (character-indexed or not) or the patch string
+    // itself, which copilotPatchText reads through its indices. parseApplyPatch
+    // is shared with Codex and stamps no evidence; the caller stamps these like
+    // any other witnessed tool call.
+    const edits = parseApplyPatch(copilotPatchText((rawArgs || {}) as Record<string, any>), repoPath)
+      .map((edit) => ({ ...edit, source: 'tool_call' as const }));
+    return { edits, contentBearing: edits.length > 0 };
+  }
+  const args: Record<string, any> = rawArgs && typeof rawArgs === 'object' ? rawArgs as Record<string, any> : {};
+  const file = typeof args.path === 'string' ? args.path : '';
+  if (!file || !COPILOT_EDIT_TOOLS.has(toolName)) return { edits: [], contentBearing: false };
+  const repoRelative = makeRepoRelative(file, repoPath);
+  if (toolName === 'create') {
+    return {
+      edits: [{
         file: repoRelative,
         op: 'create',
         oldContent: '',
         newContent: typeof args.file_text === 'string' ? args.file_text : '',
         source: 'tool_call',
-        evidence: 'tool_call',
-      });
-      continue;
-    }
-
-    // 'edit' — old_str/new_str, the same shape Claude's Edit carries, so both
-    // sides of the change are present and the server needs no inference.
-    turn.edits.push({
+      }],
+      contentBearing: typeof args.file_text === 'string',
+    };
+  }
+  // 'edit' — old_str/new_str, the same shape Claude's Edit carries, so both
+  // sides of the change are present and the server needs no inference.
+  return {
+    edits: [{
       file: repoRelative,
       op: 'edit',
       oldContent: typeof args.old_str === 'string' ? args.old_str : '',
       newContent: typeof args.new_str === 'string' ? args.new_str : '',
       source: 'tool_call',
-      evidence: 'tool_call',
-    });
-  }
-
-  if (current) turns.push(current);
-  return turns;
+    }],
+    contentBearing: typeof args.old_str === 'string' && typeof args.new_str === 'string',
+  };
 }
 
 const COPILOT_EDIT_TOOLS = new Set(['edit', 'create', 'apply_patch']);
@@ -1257,6 +1326,8 @@ function extractFromGeminiTranscript(opts: CaptureInputs): PromptCapture[] {
     commits: [],
   });
   let current: PromptCapture | null = null;
+  const finalStatus = geminiFinalStatusById(raw);
+  const stampedCalls = new Set<string>();
 
   // Trim the metadata-header line up front so we don't misclassify it.
   for (const line of raw.split('\n')) {
@@ -1286,6 +1357,12 @@ function extractFromGeminiTranscript(opts: CaptureInputs): PromptCapture[] {
       const args = tc.args || {};
       const file = pickFilePath(args);
       if (!file) continue;
+      const callId = typeof tc.id === 'string' && tc.id ? tc.id : null;
+      const status = (callId && finalStatus.get(callId)) || (typeof tc.status === 'string' ? tc.status : '');
+      if (GEMINI_FAILED_STATUSES.has(status)) continue;
+      const firstSeen = !callId || !stampedCalls.has(callId);
+      if (callId) stampedCalls.add(callId);
+      const proof = status === 'success' && firstSeen ? { evidence: 'tool_call' as const } : {};
       const repoRelative = makeRepoRelative(file, opts.repoPath);
       if (CLAUDE_EDIT_TOOLS.has(name)) {
         current.edits.push({
@@ -1294,6 +1371,7 @@ function extractFromGeminiTranscript(opts: CaptureInputs): PromptCapture[] {
           oldContent: typeof args.old_string === 'string' ? args.old_string : '',
           newContent: typeof args.new_string === 'string' ? args.new_string : '',
           source: 'tool_call',
+          ...proof,
         });
       } else if (CLAUDE_WRITE_TOOLS.has(name)) {
         const content = typeof args.content === 'string'
@@ -1304,6 +1382,7 @@ function extractFromGeminiTranscript(opts: CaptureInputs): PromptCapture[] {
           op: 'write',
           newContent: content,
           source: 'tool_call',
+          ...proof,
         });
       } else if (CLAUDE_MULTI_EDIT_TOOLS.has(name) && Array.isArray(args.edits)) {
         for (const e of args.edits) {
@@ -1314,6 +1393,7 @@ function extractFromGeminiTranscript(opts: CaptureInputs): PromptCapture[] {
             oldContent: typeof e.old_string === 'string' ? e.old_string : '',
             newContent: typeof e.new_string === 'string' ? e.new_string : '',
             source: 'tool_call',
+            ...proof,
           });
         }
       } else {
@@ -1855,8 +1935,10 @@ function supplementUncoveredCommittedFiles(turns: PromptCapture[], opts: Capture
   // a transcript pairing is the agent reporting it afterwards, resolved from a
   // short sha in prose. Both beat the positional guess below, but they are not
   // equal to each other, and collapsing them would hide which one a given
-  // attribution actually rests on.
-  const RANK: Record<string, number> = { 'post-commit': 2, transcript: 1 };
+  // attribution actually rests on. A trailer attestation sits between: our own
+  // trailer on a commit whose files the turn's recorded edits wrote, picked
+  // up on resume because post-commit skipped an ended session.
+  const RANK: Record<string, number> = { 'post-commit': 3, trailer: 2, transcript: 1 };
   const attestedTurnForSha = new Map<string, string>();
   const attestedRank = new Map<string, number>();
   for (const c of opts.commitTurns || []) {

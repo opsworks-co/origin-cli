@@ -4,6 +4,15 @@
  *
  * Asked of each hop, not only of the final survivor: a squash that was itself
  * rebased afterwards is still where the turns' work merged.
+ *
+ * A target's OWN attestation counts as one of those turns. An amend by the
+ * next turn is the same shape with one hop: turn A's commit folds into the
+ * amended commit, which post-commit attested to turn B as it landed. Session
+ * 597b3d88 (2026-10-21): turn 1 wrote the Dashboard split, turn 2 amended
+ * three import lines into it, and the amended commit — all +2749/-2625 of it
+ * — read as turn 2's. Only targets some attestation hops INTO are asked; a
+ * survivor the fold already collapsed onto stands alone and is not shared
+ * with itself.
  */
 export function crossTurnSquashTargets(
   commitTurns: ReadonlyArray<{ sha?: string; turnId?: string }> | null | undefined,
@@ -28,6 +37,10 @@ export function crossTurnSquashTargets(
       turnsThrough.set(key, (turnsThrough.get(key) || new Set<string>()).add(ct.turnId));
       cur = next;
     }
+  }
+  for (const ct of commitTurns) {
+    if (!ct?.sha || !ct.turnId) continue;
+    for (const [to, turnIds] of turnsThrough) if (same(to, ct.sha)) turnIds.add(ct.turnId);
   }
   for (const [to, turnIds] of turnsThrough) if (turnIds.size > 1) out.add(to);
   return out;

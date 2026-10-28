@@ -142,6 +142,85 @@ describe('sessionAuthoredSnapshot', () => {
     }
   });
 
+  // Session f6c7b6ef (2026-10-26): a file created in one commit (+673) and
+  // edited in the next (+4/-2) was coalesced LAST-wins, and the header counted
+  // +4/-2 for it. The release gate blocked on header_exceeds_turns.
+  it('counts a file created in one commit and edited in the next as its whole net, not the last commit', () => {
+    git('checkout', '-q', '-b', 'create-then-edit', sessionStart);
+    try {
+      const body = Array.from({ length: 50 }, (_, i) => `export const L${i} = ${i};`);
+      fs.writeFileSync(path.join(repo, 'big.ts'), body.join('\n') + '\n');
+      git('add', '-A'); git('commit', '-q', '-m', 'create big');
+      const first = git('rev-parse', 'HEAD');
+      body[3] = 'export const L3 = 33;';
+      fs.writeFileSync(path.join(repo, 'big.ts'), body.join('\n') + '\n');
+      git('add', '-A'); git('commit', '-q', '-m', 'edit big');
+      const second = git('rev-parse', 'HEAD');
+
+      const snap = sessionAuthoredSnapshot(repo, stateWith([first, second]));
+      expect(hasDuplicateFileSections(snap.diff)).toBe(false);
+      expect([snap.linesAdded, snap.linesRemoved]).toEqual([50, 0]);
+      expect(snap.diff).toContain('+export const L3 = 33;');
+    } finally {
+      git('checkout', '-q', 'main');
+    }
+  });
+
+  it('the transcript watcher\'s render counts the same file the same way', () => {
+    git('checkout', '-q', '-b', 'watcher-create-then-edit', sessionStart);
+    try {
+      fs.writeFileSync(path.join(repo, 'w.ts'), 'a\nb\nc\nd\n');
+      git('add', '-A'); git('commit', '-q', '-m', 'create w');
+      const first = git('rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(repo, 'w.ts'), 'a\nB\nc\nd\n');
+      git('add', '-A'); git('commit', '-q', '-m', 'edit w');
+      const second = git('rev-parse', 'HEAD');
+      const r = renderAuthoredCommits(repo, [first, second]);
+      expect([r.linesAdded, r.linesRemoved]).toEqual([4, 0]);
+    } finally {
+      git('checkout', '-q', 'main');
+    }
+  });
+
+  it('measures a committed file the session kept editing from before its commit to the working tree', () => {
+    git('checkout', '-q', '-b', 'commit-then-dirty', sessionStart);
+    try {
+      fs.writeFileSync(path.join(repo, 'grow.ts'), 'a\nb\nc\n');
+      git('add', '-A'); git('commit', '-q', '-m', 'create grow');
+      const first = git('rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(repo, 'grow.ts'), 'a\nb\nc\nd\n');
+      const uncommitted = git('diff', '--no-color', 'HEAD', '--', 'grow.ts');
+
+      const snap = sessionAuthoredSnapshot(repo, stateWith([first]), { uncommittedDiff: uncommitted });
+      expect(hasDuplicateFileSections(snap.diff)).toBe(false);
+      expect([snap.linesAdded, snap.linesRemoved]).toEqual([4, 0]);
+    } finally {
+      git('checkout', '-q', '--', '.');
+      git('checkout', '-q', 'main');
+    }
+  });
+
+  it('keeps every section of a file when someone else\'s commit sits between ours — never drops a commit', () => {
+    git('checkout', '-q', '-b', 'interleaved', sessionStart);
+    try {
+      fs.writeFileSync(path.join(repo, 'mixed.ts'), 'one\ntwo\n');
+      git('add', '-A'); git('commit', '-q', '-m', 'ours 1');
+      const first = git('rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(repo, 'mixed.ts'), 'one\ntwo\nTHEIRS\n');
+      git('add', '-A'); git('-c', 'user.email=them@example.com', 'commit', '-q', '-m', 'theirs');
+      fs.writeFileSync(path.join(repo, 'mixed.ts'), 'one\ntwo\nTHEIRS\nthree\n');
+      git('add', '-A'); git('commit', '-q', '-m', 'ours 2');
+      const second = git('rev-parse', 'HEAD');
+
+      const snap = sessionAuthoredSnapshot(repo, stateWith([first, second]));
+      // Not provable as one net: both of our commits' lines stay, and theirs stays out.
+      expect([snap.linesAdded, snap.linesRemoved]).toEqual([3, 0]);
+      expect(snap.diff).not.toContain('+THEIRS');
+    } finally {
+      git('checkout', '-q', 'main');
+    }
+  });
+
   it('renders owned commits by their authored contribution — a merge adds none of the branch it absorbed', () => {
     const snap = sessionAuthoredSnapshot(repo, stateWith([ourSha, cleanMergeSha]));
     expect(snap.source).toBe('owned');

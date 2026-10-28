@@ -72,10 +72,29 @@ export interface PreferShadowRangeDeps {
    */
   windowInheritsCommits?: (fromShadow: string, toShadow: string | null, localTurn: number) => boolean;
   /**
+   * The window's diff with each file a STOPPED merge or pick left in the tree
+   * re-measured from what git left (TODO 1de72a6e) — see
+   * diffMeasuredFromGitLeft. Unchanged text means no such file. `toShadow`
+   * null is the live worktree, as for `windowInheritsCommits`.
+   */
+  remeasureWindow?: (localTurn: number, fromShadow: string, toShadow: string | null, diff: string) => string;
+  /**
    * What the window said for each row, before this pass weighs it against the
    * row it already holds — see resolve-turn.ts.
    */
   observe?: (promptIndex: number, observation: TurnObservation) => void;
+}
+
+/** Files and line counts read off a unified diff's own text. */
+function measureDiff(diff: string): { filesChanged: string[]; linesAdded: number; linesRemoved: number } {
+  const filesChanged = [...new Set([...diff.matchAll(/^diff --git a\/(.*?) b\//gm)].map((m) => m[1]).filter(Boolean))];
+  let linesAdded = 0;
+  let linesRemoved = 0;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) linesAdded++;
+    else if (line.startsWith('-') && !line.startsWith('---')) linesRemoved++;
+  }
+  return { filesChanged, linesAdded, linesRemoved };
 }
 
 function blank(pm: ShadowRangeMapping): void {
@@ -189,6 +208,25 @@ export function preferShadowRangeForTurns(
       if (win.status === 'identical-sha' || win.status === 'unavailable' || win.status === 'not-shadow') {
         declined(pm, `window ${win.status}`);
         continue;
+      }
+      // What a STOPPED merge or pick left in a file is the state the turn's
+      // write to it changed (TODO 1de72a6e). Measured from the turn's start,
+      // the window carries the incoming branch's lines and the files the
+      // operation merged cleanly — and this pass is the last writer, so the
+      // ledger's and the safety net's correct answers were replaced with
+      // exactly that. A window that says nothing once re-measured is empty.
+      if (win.status === 'changed' && deps.remeasureWindow) {
+        try {
+          const diff = deps.remeasureWindow(local, from, to, win.diff || '');
+          if (diff !== (win.diff || '')) {
+            win = diff.trim()
+              ? { ...win, diff, ...measureDiff(diff) }
+              : { ...win, status: 'empty', diff: '', filesChanged: [], linesAdded: 0, linesRemoved: 0 };
+            deps.log?.('shadow window re-measured from what a stopped operation left', {
+              promptIndex: pm.promptIndex, files: win.filesChanged.length, linesAdded: win.linesAdded, linesRemoved: win.linesRemoved,
+            });
+          }
+        } catch { /* the window stands as git cut it */ }
       }
       if (win.status === 'empty') {
         deps.observe?.(pm.promptIndex, { source: 'turn-window', outcome: 'empty', completeBaseline: start?.completeBaseline === true });

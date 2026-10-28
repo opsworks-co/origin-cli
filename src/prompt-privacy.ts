@@ -54,15 +54,87 @@ function repoPromptSetting(repoPath: string): RepoPromptSetting {
 // Notes written earlier are not rewritten; `origin scrub-notes --push` cleans
 // them.
 export function shouldIncludePromptText(repoPath: string): boolean {
+  return promptTextDecision(repoPath).include;
+}
+
+/**
+ * Where the decision came from, for a user who has to change it: `repo` its
+ * .origin.json key, `repo-invalid` a broken .origin.json, `repo-sealed` its
+ * notesEncryptPrompts, `machine` an explicit key in ~/.origin/config.json,
+ * `default` nobody set anything (metadata only).
+ */
+export type PromptTextSource = 'repo' | 'repo-invalid' | 'repo-sealed' | 'machine' | 'default';
+
+export function promptTextDecision(repoPath: string): { include: boolean; source: PromptTextSource } {
   const repo = repoPromptSetting(repoPath);
-  if (repo.kind === 'set') return repo.value;
-  if (repo.kind === 'invalid') return false;
-  if (repo.seals) return false;
+  if (repo.kind === 'set') return { include: repo.value, source: 'repo' };
+  if (repo.kind === 'invalid') return { include: false, source: 'repo-invalid' };
+  if (repo.seals) return { include: false, source: 'repo-sealed' };
   try {
-    return loadConfig()?.notesIncludePrompts === true;
+    const cfg = loadConfig();
+    const value = cfg?.notesIncludePrompts;
+    if (value === undefined) return { include: false, source: 'default' };
+    return { include: value === true, source: 'machine' };
   } catch {
-    return false;
+    return { include: false, source: 'default' };
   }
+}
+
+/**
+ * Where the memory-push decision came from, for a user who has to change it:
+ * `repo` / `machine` an explicit key (notesPushMemory, or the older
+ * notesIncludePrompts: false that used to hold memory back), `repo-invalid` a
+ * broken .origin.json, `default` nobody set anything.
+ */
+export type MemoryPushSource = 'repo' | 'repo-invalid' | 'machine' | 'default';
+
+/**
+ * Whether the memory notes (refs/notes/origin-memory and its brief) are
+ * pushed. ON by default, separately from prompt text: with prompt text off,
+ * memory is written without it (buildMemoryEntry, scrubPromptTextFromMemory),
+ * so what travels is the agents' summaries, decisions, TODOs and file notes.
+ *
+ *   - .origin.json `notesPushMemory: true|false` → that;
+ *   - .origin.json `notesIncludePrompts` without notesPushMemory → that: it
+ *     was the memory switch before memory had its own, so `false` stays an
+ *     opt-out after an upgrade and `true` still pushes;
+ *   - .origin.json unreadable, not a JSON object, or either key not a boolean
+ *     → off, without consulting the machine (fail closed, as for prompts);
+ *   - otherwise the machine config, by the same two rules; otherwise on.
+ */
+export function memoryPushDecision(repoPath: string): { push: boolean; source: MemoryPushSource; key?: 'notesPushMemory' | 'notesIncludePrompts' } {
+  let raw: string | null = null;
+  try {
+    raw = fs.readFileSync(path.join(repoPath, '.origin.json'), 'utf-8');
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') return { push: false, source: 'repo-invalid' };
+  }
+  if (raw !== null) {
+    let cfg: unknown;
+    try { cfg = JSON.parse(raw); } catch { return { push: false, source: 'repo-invalid' }; }
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return { push: false, source: 'repo-invalid' };
+    const c = cfg as Record<string, unknown>;
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(c, k);
+    if (has('notesPushMemory')) {
+      return typeof c.notesPushMemory === 'boolean' ? { push: c.notesPushMemory, source: 'repo', key: 'notesPushMemory' } : { push: false, source: 'repo-invalid' };
+    }
+    // The repo's prompt key decides for it either way, as it always did: true
+    // was the old way to push memory, false the old way to keep it local.
+    if (has('notesIncludePrompts')) {
+      if (typeof c.notesIncludePrompts !== 'boolean') return { push: false, source: 'repo-invalid' };
+      return { push: c.notesIncludePrompts, source: 'repo', key: 'notesIncludePrompts' };
+    }
+  }
+  try {
+    const m = loadConfig() as { notesPushMemory?: unknown; notesIncludePrompts?: unknown } | null;
+    if (m && typeof m.notesPushMemory === 'boolean') return { push: m.notesPushMemory, source: 'machine', key: 'notesPushMemory' };
+    if (m && m.notesIncludePrompts === false) return { push: false, source: 'machine', key: 'notesIncludePrompts' };
+  } catch { /* an unreadable machine config is no opt-out */ }
+  return { push: true, source: 'default' };
+}
+
+export function shouldPushMemory(repoPath: string): boolean {
+  return memoryPushDecision(repoPath).push;
 }
 
 /** Where an automatic push of the origin-sessions branch may go. */
@@ -78,9 +150,11 @@ export type SessionBranchPushTrigger = 'publish-moment' | 'pre-push';
 
 // A snapshotRepo value may be a remote name, path or URL the user typed:
 // restricted characters, and never something git would read as an option.
+// On Windows a path is spelled with backslashes (`C:\repos\snapshot.git`).
 function validSnapshotRepo(value: unknown): value is string {
+  const chars = process.platform === 'win32' ? /^[a-zA-Z0-9_./\\:@+%~=-]+$/ : /^[a-zA-Z0-9_./:@+%~=-]+$/;
   return typeof value === 'string' && value.length > 0 && !value.startsWith('-')
-    && /^[a-zA-Z0-9_./:@+%~=-]+$/.test(value);
+    && chars.test(value);
 }
 
 /**

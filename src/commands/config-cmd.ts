@@ -30,6 +30,7 @@ const KEY_ALIASES: Record<string, string> = {
   'machine-id': 'machineId',
   'agent-slugs': 'agentSlugs',
   'auto-snapshot': 'autoSnapshot',
+  'desktop-notifications': 'desktopNotifications',
   'sign-snapshots': 'signSnapshots',
   'anthropic-api-key': 'anthropicApiKey',
 };
@@ -62,8 +63,10 @@ const CONFIG_KEYS: Record<string, { type: 'string' | 'boolean' | 'enum' | 'map';
   autoSnapshot:    { type: 'boolean', description: 'Auto-snapshot working tree before agent file edits' },
   signSnapshots:   { type: 'boolean', description: 'Sign Origin\'s own commits (snapshots, session branch). Honors git signing config; falls back to unsigned if signing fails.' },
   anthropicApiKey: { type: 'string',  description: 'Anthropic API key for `origin pre-review` / `origin chat` / `origin ask` (overridden by ANTHROPIC_API_KEY env var)', secret: true },
+  reviewerKey:     { type: 'enum',    values: ['team', 'machine'], description: 'What reviewer runs on this machine bill: the team\'s API key from the Agents page (team, default) or this machine\'s own agent sign-in, e.g. your Claude subscription (machine)' },
   memoryUpdate:    { type: 'enum',    values: ['session-end', 'commit', 'both'], description: 'When to refresh cross-session memory: at session end (default), on every commit, or both' },
   memorySummary:   { type: 'enum',    values: ['heuristic', 'llm'], description: 'How memory summaries are written: heuristic (default) or llm (synthesize a one-line summary via your Anthropic key)' },
+  desktopNotifications: { type: 'boolean', description: 'Native desktop notifications when an agent waits for you or finishes a turn with new commits (default: off)' },
 };
 
 /**

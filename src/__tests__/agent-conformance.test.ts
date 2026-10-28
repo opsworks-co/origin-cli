@@ -26,6 +26,9 @@ import {
 const HANDLED_EVENTS = new Set([
   'session-start', 'user-prompt-submit', 'stop', 'session-end',
   'pre-tool-use', 'post-tool-use', 'post-tool-use-failure', 'after-file-edit',
+  // Claude Code's Notification — handled ahead of the switch in runHookEvent
+  // (agent-notify.ts), not a capture event.
+  'notification',
 ]);
 
 /**

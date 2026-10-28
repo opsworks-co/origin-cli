@@ -2,6 +2,7 @@
 //
 // Moved out of commands/hooks.ts mechanically: the text is unchanged, only its
 // home is. Shared helpers still live in hooks.ts and are imported from there.
+import { publishLeftovers } from '../../memory-publish-queue.js';
 import { variantAllowsRepoContext } from '../../context-variant.js';
 import { discoverCodexSessionData, isKnownCodexInternalPrompt } from '../../agents/codex.js';
 import { findCursorTranscriptJsonl } from '../../agents/cursor.js';
@@ -10,7 +11,7 @@ import { isSpecificModel, sessionMatchesAgent } from '../../agents/registry.js';
 import { api, readAuthStatus } from '../../api.js';
 import { buildAttributionContext } from '../../attribution.js';
 import { BUDGET_BLOCKING_AGENTS, buildBudgetWarningBanner } from '../../budget-breach.js';
-import { contentionAdvice, detectContention, neverRanATurn, noteContendersGone, peerLastActivityMs } from '../../checkout-contention.js';
+import { contentionAdvice, detectContention, neverRanATurn, noteContendersBack, noteContendersGone, peerIdleSinceMs, peerIdleThroughTurn, peerLastActivityMs } from '../../checkout-contention.js';
 import { ensureConfigDir, isConnectedMode, loadAgentConfig, loadConfig, loadRepoConfig, saveAgentConfig } from '../../config.js';
 import { assembleRepoContext } from '../../context-injection.js';
 import { debugLog } from '../../debug-log.js';
@@ -37,7 +38,7 @@ import { openTurnLiveness } from '../../turn-liveness.js';
 import { turnIsClosed } from '../../turn-commit-scope.js';
 import { samePath, sessionWorkTree } from '../../session-worktree.js';
 import { detectTools } from '../../tools-detector.js';
-import { estimateSessionCost, extractPromptFileMappings, formatTranscriptForDisplay, isKnownCursorInternalPrompt, parseTranscript, promptTextForEntry, readCopilotModel } from '../../transcript.js';
+import { estimateSessionCost, extractPromptFileMappings, formatTranscriptForDisplay, isKnownCursorInternalPrompt, parseSessionTranscript, parseTranscript, promptTextForEntry, readCopilotModel } from '../../transcript.js';
 import type { ParsedTranscript, PromptFileMapping } from '../../transcript.js';
 import { persistUpdateBeforeWork } from '../../update-queue.js';
 import { markTurn } from '../../write-journal-watch.js';
@@ -55,6 +56,8 @@ import path from 'path';
 import { turnIdForServerRow, turnStartFields } from '../../turn-index.js';
 import { STABLE_SESSION_ID_AGENTS, agentsMdExpected, agentsMdLoadedInTranscript, recordAgentsMdObservation, archiveIsAnotherConversation, captureStamp, currentSessionWorkTree, dropForeignCommitsFromCapture, inheritedBaselineForTurn, durableUpdate, ensureServerSession, ensureWriteJournal, filterUncommittedDiff, findStateForHook, findStateForHookInput, getWorkingTreeSha, hookLookupSessionId, journalHasMark, normalizeWorkspaceRoot, resolveAutoAgentSessionId, resumeEndedConversationState, serverRowForLocalTurn, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, turnIdFor, uncommittedExcludeUnion } from '../hooks.js';
 import { budgetRowDiffs, withCutFiles } from '../../budgeted-row-diff.js';
+import { partsField, replyTextPart, type DisplayPart } from '../../display-parts.js';
+import { resolveAgentOwner } from '../../process-owner.js';
 
 
 export function retroactiveTurnFiles(
@@ -477,7 +480,10 @@ export function selectRecoverableArchiveSession(
     // ...but never a row the user archived or deleted on the web. The
     // heartbeat marks those when it drops them (dropLocalSessionAndExit).
     if (s.serverTerminal === true) continue;
-    if (s.repoPath !== opts.repoPath && s.repoPath !== opts.canonicalRepoPath) continue;
+    // samePath, not `!==`: git answers `C:/…` and the archive may hold `C:\…`
+    // (or an 8.3 short form) for the same tree, so on Windows the raw compare
+    // never matched and the chat's own ended session was replaced by a twin.
+    if (!samePathNormalized(s.repoPath, opts.repoPath) && !samePathNormalized(s.repoPath, opts.canonicalRepoPath)) continue;
     if (opts.agentSlug && !sessionMatchesAgent(s, opts.agentSlug)) continue;
     // Don't recover a different Cursor chat's session (see note above).
     if (!cursorSessionReusable(opts.agentSlug, opts.incomingChatId, s.agentSessionId)) continue;
@@ -985,6 +991,8 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
       // case is a bounded stall rather than an unbounded one.
       try {
         syncNotesForSessionStart(repoPath);
+        // Memory written here earlier and still not on the remote: publish it now.
+        try { publishLeftovers(repoPath); } catch { /* the next session start tries again */ }
       } catch { /* never block a prompt on the network */ }
 
       // Look again before minting. The lookup that sent us down this path ran
@@ -2154,6 +2162,12 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
       } catch { /* non-fatal */ }
     }
 
+    // The agent process running this turn — a resumed conversation can be a
+    // new process — so prepare-commit-msg can tell its commits from another
+    // agent's in the same checkout (process-owner.ts).
+    const owner = resolveAgentOwner(agentSlug);
+    if (owner) state.ownerProcess = owner;
+
     // Ensure session stays RUNNING (may have been auto-expired by listAllActiveSessions)
     state.status = 'RUNNING';
     saveSessionState(state, state.repoPath || hookCwd, state.sessionTag);
@@ -2181,7 +2195,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
         let displayTranscript = '';
         try {
           if (state.transcriptPath) {
-            parsed = parseTranscript(state.transcriptPath, { since: state.startedAt, repoRoots: sessionRepoRoots(state) });
+            parsed = parseSessionTranscript(state.transcriptPath, state, sessionRepoRoots(state));
             displayTranscript = formatTranscriptForDisplay(state.transcriptPath, { verbose: !!state.verboseCapture });
           }
         } catch {
@@ -2251,7 +2265,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
               }
             }
             if (state.transcriptPath && fs.existsSync(state.transcriptPath)) {
-              parsed = parseTranscript(state.transcriptPath, { since: state.startedAt, repoRoots: sessionRepoRoots(state) });
+              parsed = parseSessionTranscript(state.transcriptPath, state, sessionRepoRoots(state));
               displayTranscript = formatTranscriptForDisplay(state.transcriptPath, { verbose: !!state.verboseCapture });
             }
           } catch { /* best effort */ }
@@ -2265,7 +2279,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
         // stop hook just persisted (mainly affects Gemini, whose transcript
         // file is unflushed mid-session so we depend on stop-hook captures).
         if (!displayTranscript && state.prompts.length > 0) {
-          const turns: Array<{ role: string; content: string }> = [];
+          const turns: Array<{ role: string; content: string; parts?: DisplayPart[] }> = [];
           if (state.agentSystemPrompt) {
             turns.push({ role: 'system', content: state.agentSystemPrompt });
           }
@@ -2273,7 +2287,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           for (let i = 0; i < state.prompts.length; i++) {
             turns.push({ role: 'user', content: state.prompts[i] });
             if (responses[i]) {
-              turns.push({ role: 'assistant', content: responses[i] });
+              turns.push({ role: 'assistant', content: responses[i], ...partsField([replyTextPart(responses[i])]) });
             }
           }
           displayTranscript = JSON.stringify(turns);
@@ -2611,19 +2625,26 @@ export function noteCheckoutContention(state: SessionState): boolean {
         try { return fs.statSync(p.__statePath).mtimeMs; } catch { return undefined; }
       })()),
       neverRanATurn: neverRanATurn(p),
+      idleSinceMs: peerIdleSinceMs(p),
     }));
+    const turnStart = typeof state.currentTurnStartedAt === 'number' ? state.currentTurnStartedAt : Date.now();
     // Rivals recorded earlier that are no longer live: gone as of this turn's
     // start, which this hook stamped just before calling us (the rival was
-    // ENDED or absent when we looked, so it wrote nothing in between).
-    const gone = noteContendersGone(state, new Set(peers.map((p: { sessionId: string }) => p.sessionId)),
-      typeof state.currentTurnStartedAt === 'number' ? state.currentTurnStartedAt : Date.now());
-    const report = detectContention(state, tree, peers);
+    // ENDED or absent when we looked, so it wrote nothing in between). A rival
+    // still listed but idle — its last turn closed, nothing since, all before
+    // this turn began — is gone in the same sense: it writes nothing until its
+    // next prompt, and that prompt makes it a rival again (noteContendersBack).
+    const live = new Set<string>();
+    for (const p of peers) if (!peerIdleThroughTurn(p, turnStart)) live.add(p.sessionId);
+    const gone = noteContendersGone(state, live, turnStart);
+    const report = detectContention(state, tree, peers, Date.now(), turnStart);
     if (!report.contested) return gone;
 
     const ids = new Set(state.contendingSessionIds || []);
     let added = false;
     for (const p of report.peers) if (!ids.has(p.sessionId)) { ids.add(p.sessionId); added = true; }
-    if (!added) return false;
+    const back = noteContendersBack(state, report.peers.map((p) => p.sessionId));
+    if (!added) return gone || back;
     state.contendingSessionIds = [...ids];
     debugLog('contention', 'sharing this checkout with other live sessions', {
       tree, peers: report.peers.map((p) => p.sessionId), advice: contentionAdvice(report),

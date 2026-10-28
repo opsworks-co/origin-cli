@@ -125,7 +125,10 @@ function transcriptFor(conversation: string): string {
  * that is alive (this test process), so the dead-owner reaper cannot take it.
  */
 function holdStateLock(statePath: string): () => void {
-  const canonical = path.join(fs.realpathSync.native(path.dirname(statePath)), path.basename(statePath));
+  let canonical = path.join(fs.realpathSync.native(path.dirname(statePath)), path.basename(statePath));
+  // Keyed exactly as withSessionStateLock keys it, case-folded on Windows —
+  // otherwise this holds a lock the hook never asks for.
+  if (process.platform === 'win32') canonical = canonical.toLowerCase();
   const dir = path.join(os.homedir(), '.origin', 'state-locks');
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const lockPath = path.join(dir, `${crypto.createHash('sha256').update(canonical).digest('hex')}.state-save-lock`);

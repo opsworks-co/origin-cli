@@ -185,12 +185,12 @@ describe.skipIf(!haveDist)('a legacy-reconstructed turn that pulls keeps only it
   });
 
   it('the pulled lines inside a file the turn also edited are not the turn\'s', async () => {
-    // A sibling parked in the same checkout forces the legacy reconstruction.
+    // A sibling mid-turn in the same checkout forces the legacy
+    // reconstruction. One that had already Stopped would be idle through the
+    // working turn and no rival (capture-e2e-idle-sibling-does-not-contend).
     expect((await run(SIBLING_CONV, 'session-start', { source: 'startup' })).code).toBe(0);
     say(SIBLING_CONV, 'what does this repo do?');
     expect((await run(SIBLING_CONV, 'user-prompt-submit', { prompt: 'what does this repo do?' })).code).toBe(0);
-    assistantSays(SIBLING_CONV, 'It is a demo.');
-    expect((await run(SIBLING_CONV, 'stop', { stop_hook_active: false })).code).toBe(0);
 
     expect((await run(WORK_CONV, 'session-start', { source: 'startup' })).code).toBe(0);
     say(WORK_CONV, 'pull main, then add my line to shared.py');

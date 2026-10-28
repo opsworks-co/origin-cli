@@ -126,9 +126,16 @@ function getLatestSnapshotSha(repoPath: string, branch: string): string | null {
 function parseSnapshotMeta(repoPath: string, commitSha: string): SnapshotMeta | null {
   if (!HEX.test(commitSha)) return null;
   try {
-    const message = git(['log', '-1', '--format=%B', commitSha], gitOpts(repoPath));
-    const meta = JSON.parse(message.trim());
-    return meta as SnapshotMeta;
+    return parseSnapshotMessage(git(['log', '-1', '--format=%B', commitSha], gitOpts(repoPath)));
+  } catch {
+    return null;
+  }
+}
+
+/** A snapshot commit's message as its meta, or null for any other commit. */
+function parseSnapshotMessage(message: string): SnapshotMeta | null {
+  try {
+    return JSON.parse(message.trim()) as SnapshotMeta;
   } catch {
     return null;
   }
@@ -137,19 +144,30 @@ function parseSnapshotMeta(repoPath: string, commitSha: string): SnapshotMeta | 
 /**
  * List all snapshots on a shadow branch by walking the commit chain.
  */
+/** A snapshot commit's message is its JSON meta, which always opens like this. */
+const SNAPSHOT_MESSAGE_PREFIX = '{"id":';
+
 function walkSnapshotChain(repoPath: string, branch: string): SnapshotMeta[] {
   if (!SAFE_BRANCH.test(branch)) return [];
   const metas: SnapshotMeta[] = [];
   try {
-    // Get all commit SHAs on the orphan branch (these are parentless or chained)
+    // ONE git call for the whole chain, messages included, filtered by git.
+    // The branch is not an orphan: its first snapshot sits on the repo's
+    // HEAD, so `git log <branch>` is the repo's entire history, and reading
+    // each commit's message with its own `git log -1` cost one process per
+    // commit — 56 s at session-end on a 3186-commit repo (supervised
+    // `claude -p` run 3a552f34, 2026-10-14), which is why every headless
+    // Claude run waited out its 60 s SessionEnd budget and exited late.
     const log = git(
-      ['log', '--format=%H', branch],
+      ['log', '-F', `--grep=${SNAPSHOT_MESSAGE_PREFIX}`, '--format=%H%x1f%B%x1e', branch],
       gitOpts(repoPath),
-    ).trim();
-    if (!log) return [];
+    );
+    if (!log.trim()) return [];
 
-    for (const sha of log.split('\n').filter(Boolean).reverse()) {
-      const meta = parseSnapshotMeta(repoPath, sha);
+    for (const record of log.split('\x1e').reverse()) {
+      const sep = record.indexOf('\x1f');
+      if (sep < 0) continue;
+      const meta = parseSnapshotMessage(record.slice(sep + 1));
       if (meta) metas.push(meta);
     }
   } catch { /* branch doesn't exist yet */ }
@@ -872,16 +890,95 @@ export async function snapshotListCommand(opts: { session?: string } = {}): Prom
   console.log('');
 }
 
+export interface SnapshotRestoreOptions {
+  branch?: string;
+  hard?: boolean;
+  base?: string;
+  session?: string;
+  turn?: string;
+}
+
+/**
+ * The tree/commit a restore ref names: a sha git has (a turn's tree from the
+ * dashboard, or a commit), else a snapshot id from `origin snapshot list`.
+ */
+export function resolveRestoreRef(repoPath: string, ref: string): { treeSha?: string; commitSha?: string; baseSha?: string } | null {
+  if (HEX.test(ref)) {
+    const t = gitDetailed(['cat-file', '-t', ref], gitOpts(repoPath));
+    const type = t.status === 0 ? t.stdout.trim() : '';
+    if (type === 'tree') return { treeSha: ref };
+    if (type === 'commit') return { commitSha: ref };
+  }
+  const meta = findSnapshotById(repoPath, ref);
+  if (!meta || !HEX.test(meta.treeSha)) return null;
+  return { treeSha: meta.treeSha, ...(meta.commitSha && { baseSha: meta.commitSha }) };
+}
+
+/**
+ * origin snapshot restore <ref> --branch <name> | --hard — the dashboard's
+ * "Restore to this turn" run by hand. Never discards or stashes uncommitted
+ * work (restore-turn.ts); with --session the result is reported back so the
+ * page shows it.
+ */
+async function restoreTurnFromCli(repoPath: string, ref: string, opts: SnapshotRestoreOptions): Promise<void> {
+  const resolved = resolveRestoreRef(repoPath, ref);
+  if (!resolved) {
+    console.error(chalk.red(`  Snapshot not found in this clone: ${ref}`));
+    console.log(chalk.gray('  It may have been captured on another machine, or git garbage-collected it. Run: origin snapshot list'));
+    process.exit(1);
+  }
+  const turnNo = opts.turn != null ? parseInt(opts.turn, 10) : NaN;
+  const targetPromptIndex = Number.isInteger(turnNo) && turnNo >= 1 ? turnNo - 1 : null;
+  const mode: 'soft' | 'hard' = opts.hard ? 'hard' : 'soft';
+  const { runRestoreTurn } = await import('../restore-turn.js');
+  const result = runRestoreTurn(repoPath, {
+    mode,
+    ...resolved,
+    ...(opts.base && { baseSha: opts.base }),
+    branchName: opts.branch || null,
+    targetPromptIndex,
+    sessionId: opts.session || null,
+  });
+  if (opts.session) {
+    try {
+      const { isConnectedMode } = await import('../config.js');
+      if (isConnectedMode()) {
+        const { api } = await import('../api.js');
+        await api.reportCommandResult(opts.session, 'restore-turn', result.status, result.message, {
+          mode,
+          // Hard back to the session's starting commit rewinds every turn (-1).
+          targetPromptIndex: targetPromptIndex ?? (mode === 'hard' && resolved.commitSha ? -1 : null),
+        });
+      }
+    } catch { /* the restore ran; the page just won't hear about it */ }
+  }
+  if (result.status === 'success') {
+    console.log(chalk.green(`\n  ${result.message}\n`));
+  } else {
+    console.error(chalk.red(`  ${result.message}`));
+    process.exit(1);
+  }
+}
+
 /**
  * origin snapshot restore <id> — restore working tree to a snapshot
  */
-export async function snapshotRestoreCommand(id: string): Promise<void> {
+export async function snapshotRestoreCommand(id: string, opts: SnapshotRestoreOptions = {}): Promise<void> {
   const cwd = process.cwd();
   const repoPath = getGitRoot(cwd);
 
   if (!repoPath) {
     console.error(chalk.red('  Not a git repository.'));
     process.exit(1);
+  }
+
+  if (opts.branch || opts.hard) {
+    if (opts.branch && opts.hard) {
+      console.error(chalk.red('  Pick one: --branch (a new branch, checkout untouched) or --hard (reset this branch).'));
+      process.exit(1);
+    }
+    await restoreTurnFromCli(repoPath, id, opts);
+    return;
   }
 
   const targetMeta = findSnapshotById(repoPath, id);

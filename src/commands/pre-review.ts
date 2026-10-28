@@ -17,7 +17,7 @@ import chalk from 'chalk';
 import fs from 'fs';
 import { execFileSync } from 'child_process';
 import { getGitRoot } from '../session-state.js';
-import { getLineBlame, getSessionContextForCommit, type LineAttribution, type SessionContext } from '../attribution.js';
+import { getLineBlame, getSessionContextForCommit, isLineProvenAttribution, type LineAttribution, type SessionContext } from '../attribution.js';
 import { callLLM, getAnthropicKey } from '../llm.js';
 
 interface PreReviewOpts {
@@ -80,22 +80,37 @@ function truncate(text: string, maxBytes: number): string {
 
 interface FileReviewContext {
   file: string;
+  /** Both AI tiers. */
   aiLines: number;
+  /** Of `aiLines`: AI evidence on the commit only, no line-level proof ([AI~]). Absent: none. */
+  commitLevelAiLines?: number;
   humanLines: number;
   mixedLines: number;
+  /** Lines with no proof either way: counted apart, never as human. */
+  unknownLines: number;
+  /** Sessions of line-proven lines only: a commit-level session is not a line's author. */
   sessionIds: string[];
 }
 
-function summarizeBlame(file: string, lines: LineAttribution[]): FileReviewContext {
-  let ai = 0, human = 0, mixed = 0;
+export function summarizeBlame(file: string, lines: LineAttribution[]): FileReviewContext {
+  let ai = 0, commitLevel = 0, human = 0, mixed = 0, unknown = 0;
   const sessionIds = new Set<string>();
   for (const l of lines) {
-    if (l.authorship === 'ai') ai++;
+    if (l.authorship === 'ai') { ai++; if (!isLineProvenAttribution(l)) commitLevel++; }
     else if (l.authorship === 'human') human++;
-    else mixed++;
-    if (l.sessionId) sessionIds.add(l.sessionId);
+    else if (l.authorship === 'mixed') mixed++;
+    else unknown++;
+    if (isLineProvenAttribution(l) && l.sessionId) sessionIds.add(l.sessionId);
   }
-  return { file, aiLines: ai, humanLines: human, mixedLines: mixed, sessionIds: Array.from(sessionIds) };
+  return {
+    file,
+    aiLines: ai,
+    ...(commitLevel > 0 ? { commitLevelAiLines: commitLevel } : {}),
+    humanLines: human,
+    mixedLines: mixed,
+    unknownLines: unknown,
+    sessionIds: Array.from(sessionIds),
+  };
 }
 
 /**
@@ -117,11 +132,12 @@ function gatherContext(
     fileCtxs.push(summarizeBlame(file, blame));
     if (seenSessions.size >= SESSIONS_MAX) continue;
     for (const l of blame) {
-      if (!l.commitSha || seenCommits.has(l.commitSha)) continue;
+      // Only a proven line names a session; its commit's note must describe that session.
+      if (!isLineProvenAttribution(l) || !l.commitSha || seenCommits.has(l.commitSha)) continue;
       if (!l.sessionId || seenSessions.has(l.sessionId)) continue;
       seenCommits.add(l.commitSha);
       const ctx = getSessionContextForCommit(repo, l.commitSha);
-      if (ctx) {
+      if (ctx && ctx.sessionId === l.sessionId) {
         seenSessions.set(ctx.sessionId, ctx);
         if (seenSessions.size >= SESSIONS_MAX) break;
       }
@@ -186,7 +202,11 @@ Be specific. Cite line numbers from the diff. If the prompt and diff disagree, s
   // File-level attribution table
   const fileTable = files
     .slice(0, 40)
-    .map(f => `- \`${f.file}\` — AI lines: ${f.aiLines}, human lines: ${f.humanLines}, mixed: ${f.mixedLines}`)
+    .map(f => `- \`${f.file}\` — AI lines: ${f.aiLines}` +
+      (f.commitLevelAiLines
+        ? ` (${f.aiLines - f.commitLevelAiLines} line-proven, ${f.commitLevelAiLines} commit-level attribution — no line-level proof)`
+        : '') +
+      `, human lines: ${f.humanLines}, mixed: ${f.mixedLines}, unknown (no line-level attribution): ${f.unknownLines}`)
     .join('\n');
 
   // Session context: prior sessions that touched these files, with acceptance.

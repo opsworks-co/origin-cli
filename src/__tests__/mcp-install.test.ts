@@ -10,6 +10,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import {
   installMcpForAgent,
   uninstallMcpForAgent,
@@ -553,5 +554,15 @@ describe('scope prose matches scope behaviour', () => {
   it('keeps claude as the only project-scoped agent', () => {
     const projectScoped = MCP_SUPPORTED_AGENTS.filter(isProjectScopedMcpAgent);
     expect(projectScoped).toEqual(['claude']);
+  });
+});
+
+describe('origin mcp install --agent help', () => {
+  // The help listed four agents while parseAgents accepted six.
+  it('names every agent the command accepts', () => {
+    const index = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'index.ts'), 'utf-8');
+    const block = index.slice(index.indexOf("mcp.command('install')"));
+    const help = block.match(/\.option\('--agent <slugs>', '([^']*)'\)/)![1];
+    for (const agent of MCP_SUPPORTED_AGENTS) expect(help).toContain(agent);
   });
 });

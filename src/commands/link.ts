@@ -4,7 +4,7 @@ import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
 import { syncNotesFromRemote } from '../git-notes.js';
 
-export async function linkCommand(slug?: string, opts?: { clear?: boolean }): Promise<void> {
+export async function linkCommand(slug?: string, opts?: { clear?: boolean; unlink?: boolean; list?: boolean }): Promise<void> {
   const config = loadConfig();
   if (!config) {
     console.log(chalk.red('Not logged in. Run: origin login'));
@@ -22,15 +22,15 @@ export async function linkCommand(slug?: string, opts?: { clear?: boolean }): Pr
   // refspec so plain `git pull` keeps them synced from here on.
   syncNotesFromRemote(gitRoot);
 
-  // Clear mode
-  if (opts?.clear) {
+  // Clear mode (--unlink is the same thing)
+  if (opts?.clear || opts?.unlink) {
     clearRepoConfig(gitRoot);
     console.log(chalk.green('\n  ✓ Agent mapping removed (.origin.json deleted)\n'));
     return;
   }
 
-  // Show current mapping
-  if (!slug) {
+  // Show current mapping (--list shows it even when a slug was given)
+  if (!slug || opts?.list) {
     const repoConfig = loadRepoConfig(gitRoot);
     if (repoConfig?.agent) {
       console.log(chalk.bold('\n🔗 Current agent mapping:\n'));

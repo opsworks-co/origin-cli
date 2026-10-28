@@ -1,13 +1,31 @@
 import chalk from 'chalk';
-import { withOpenedPrompts } from '../note-seal.js';
 import path from 'path';
 import { getGitRoot, getWorkingGitRoot } from '../session-state.js';
 import { ProvenanceRoots, provenanceRoots, resolveQueryTarget } from '../session-worktree.js';
-import { getLineBlame, LineAttribution } from '../attribution.js';
+import {
+  aiConfidenceSplit,
+  getLineBlame,
+  isLineProvenAttribution,
+  resolveLineAttribution,
+  type HistoryAnchor,
+  type LineAttribution,
+  type LineAttributionResolution,
+} from '../attribution.js';
+import { linesOf } from '../attribution-line-reanchor.js';
+import { isCanonicalRepoPath } from '../attribution-line-ranges.js';
+import { withOpenedPrompts } from '../note-seal.js';
 import { isConnectedMode, loadConfig } from '../config.js';
 import { git, gitOrNull, runDetailed } from '../utils/exec.js';
 
 const HEX = /^[a-fA-F0-9]{4,64}$/;
+const FULL_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** Commits of a line's history asked about, the current one included. */
+const LINE_HISTORY_MAX = 6;
+/** Server lookups one `why --trace` makes at most, over all its frames. */
+const TRACE_SERVER_LOOKUPS_MAX = 50;
+
+/** One server question about a commit and a line; `tryServerWhy` unless a caller budgets it. */
+type ServerLookup = (roots: ProvenanceRoots, relPath: string, sha: string, lineContent: string) => Promise<any | null>;
 
 function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -40,43 +58,6 @@ function readOriginNote(repoPath: string, sha: string): any | null {
   }
 }
 
-function getCommitForLine(repoPath: string, filePath: string, lineNum: number): string | null {
-  if (!Number.isInteger(lineNum) || lineNum < 1) return null;
-  try {
-    const output = git(
-      ['blame', '-L', `${lineNum},${lineNum}`, '--porcelain', '--', filePath],
-      { cwd: repoPath }
-    ).trim();
-    const match = output.match(/^([0-9a-f]{40})/);
-    return match ? match[1] : null;
-  } catch {
-    return null;
-  }
-}
-
-// The commits that changed this specific line over time, newest→oldest, via
-// `git log -L`. Used by drift recovery to find the INTRODUCING commit when the
-// current-blame commit only reformatted/moved the line. Capped so a line with
-// deep history doesn't fan out into dozens of server calls.
-function getLineHistoryCommits(repoPath: string, filePath: string, lineNum: number): string[] {
-  if (!Number.isInteger(lineNum) || lineNum < 1) return [];
-  try {
-    const out = git(
-      ['log', '-L', `${lineNum},${lineNum}:${filePath}`, '--format=%H', '-s', '--max-count=6'],
-      { cwd: repoPath },
-    );
-    const shas: string[] = [];
-    const seen = new Set<string>();
-    for (const l of out.split('\n')) {
-      const s = l.trim();
-      if (/^[0-9a-f]{40}$/.test(s) && !seen.has(s)) { seen.add(s); shas.push(s); }
-    }
-    return shas;
-  } catch {
-    return [];
-  }
-}
-
 function getCommitInfo(repoPath: string, sha: string): { date: string; author: string; message: string } | null {
   if (!HEX.test(sha)) return null;
   try {
@@ -98,14 +79,12 @@ async function showLineWhy(roots: ProvenanceRoots, filePath: string, lineNum: nu
   // attribute, and every line came back "Uncommitted change".
   const { relPath, root: repoPath } = resolveQueryTarget(filePath, roots, process.cwd());
 
-  // Get file content for display
-  const fullPath = path.resolve(repoPath, relPath);
-  let lineContent = '';
-  try {
-    const { readFileSync } = await import('fs');
-    const lines = readFileSync(fullPath, 'utf-8').split('\n');
-    lineContent = lines[lineNum - 1] || '';
-  } catch { /* ignore */ }
+  // The line's proven authorship and its text, from one resolution: the text
+  // shown is the text the attribution numbers (see resolveLineAttribution).
+  const resolution = Number.isInteger(lineNum) && lineNum >= 1 ? resolveLineAttribution(repoPath, relPath) : null;
+  const attr = resolution?.lines[lineNum - 1];
+  const anchor = resolution?.historyAnchors[lineNum - 1] ?? null;
+  const lineContent = resolution ? (linesOf(resolution.text)[lineNum - 1] ?? '') : '';
 
   console.log(chalk.bold(`\n  Line ${lineNum} in ${relPath}`));
   if (lineContent) {
@@ -113,38 +92,11 @@ async function showLineWhy(roots: ProvenanceRoots, filePath: string, lineNum: nu
   }
   console.log('');
 
-  // Step 1: git blame to find commit SHA
-  const commitSha = getCommitForLine(repoPath, relPath, lineNum);
-  if (!commitSha || commitSha.startsWith('0000000')) {
+  // Step 1: the commit strict blame names for the line, at HEAD.
+  const commitSha = attr?.commitSha;
+  if (!attr || !commitSha) {
     console.log(chalk.yellow('  Uncommitted change — not yet attributed.\n'));
     return;
-  }
-
-  // Server-first: Origin's attribution engine resolves session + prompt from
-  // the commit SHA directly (DB-side), so it works even when git notes aren't
-  // present locally — a fresh clone, squashed/rebased history, or notes the
-  // client never fetched. This is the robust path; the git-notes logic below
-  // stays as the offline/standalone fallback.
-  if (isConnectedMode()) {
-    let card = await tryServerWhy(roots, relPath, commitSha, lineContent);
-    // Drift recovery: `git blame` credits whoever LAST touched the line, which
-    // may be a later reformat/rename, not the turn that INTRODUCED it. When the
-    // blame commit gives a weak match, walk the line's own history (git log -L)
-    // to older commits and prefer the one whose session authored this exact line
-    // (confidence: high). Marks the card `drifted` so the reader knows the line
-    // moved since it was written.
-    if (!card || card.session == null || card.confidence !== 'high') {
-      for (const sha of getLineHistoryCommits(repoPath, relPath, lineNum)) {
-        if (sha === commitSha) continue;
-        const alt = await tryServerWhy(roots, relPath, sha, lineContent);
-        if (alt && alt.session) {
-          alt.drifted = true;
-          if (alt.confidence === 'high') { card = alt; break; }
-          if (!card || card.session == null) card = alt; // first attributable fallback
-        }
-      }
-    }
-    if (card && card.session) { renderServerCard(card, relPath, lineNum, lineContent); return; }
   }
 
   // Step 2: get commit info
@@ -153,75 +105,108 @@ async function showLineWhy(roots: ProvenanceRoots, filePath: string, lineNum: nu
     ? new Date(commitInfo.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
     : '—';
 
-  // Step 3: check git notes for Origin session
-  // Sealed prompts open here when this user can still get the key (note-seal.ts).
-  const rawNote = readOriginNote(repoPath, commitSha);
-  const note = rawNote ? await withOpenedPrompts(rawNote) : null;
+  // A committed line without line proof ([AI~], human, unknown): the server
+  // may know its commit — a fresh clone has no notes. Asked once, for the
+  // blamed commit and the shown text, before any local answer. Its card is
+  // commit-level: it never proves the line, and the resolver's answer stays.
+  if (!isLineProvenAttribution(attr) && isConnectedMode()) {
+    const card = await commitLevelServerCard(roots, repoPath, relPath, anchor, commitSha, lineContent);
+    if (card) { renderServerCard(card, relPath, lineNum, lineContent, { commitLevel: true }); return; }
+  }
 
-  if (!note?.sessionId) {
-    // Human-written or Origin wasn't tracking
+  if (attr.authorship === 'human') {
+    // HUMAN_WHEN_NO_AI_EVIDENCE: the commit carries no Origin AI evidence at all.
     console.log(chalk.white(`  Written by ${chalk.cyan(commitInfo?.author || 'unknown')} · ${dateStr}`));
     console.log(chalk.gray(`  Commit: ${commitSha.slice(0, 8)} — ${commitInfo?.message || ''}`));
     console.log(chalk.gray('\n  No Origin session found for this commit.'));
     console.log(chalk.gray('  This line was committed without an active Origin session.\n'));
     return;
   }
+  if (attr.authorship !== 'ai') {
+    // No evidence either way: no agent, model or prompt.
+    console.log(chalk.white(`  Committed by ${chalk.cyan(commitInfo?.author || 'unknown')} · ${dateStr}`));
+    console.log(chalk.gray(`  Commit: ${commitSha.slice(0, 8)} — ${commitInfo?.message || ''}`));
+    console.log(chalk.gray(`\n  Line-level attribution unknown (${attr.unknownReason ?? 'no_record'}).`));
+    console.log(chalk.gray('  Origin has no proof of who wrote this line.\n'));
+    return;
+  }
+  if (!isLineProvenAttribution(attr)) {
+    // [AI~]: the line's commit carries AI evidence (a commit-level record, a
+    // legacy note, a trailer, an active session), but nothing proves this
+    // line. Said as such: no line prompt, no server card for a proven line.
+    const who = attr.agent || attr.model || 'AI';
+    console.log(chalk.white(`  AI commit: ${chalk.cyan(who)} · ${dateStr}` +
+      (attr.sessionId ? ` · Session ${chalk.cyan(attr.sessionId.slice(0, 8))}` : '')));
+    console.log(chalk.gray(`  Commit: ${commitSha.slice(0, 8)} — ${commitInfo?.message || ''}`));
+    console.log(chalk.gray('\n  commit-level attribution: this commit carries AI evidence, but there is no line-level proof'));
+    console.log(chalk.gray('  that it wrote this line. No prompt is attributed to the line.'));
+    await showCommitLevelSessionPrompt(repoPath, commitSha, attr.sessionId);
+    console.log('');
+    return;
+  }
 
-  // AI-written line with session
-  const agent = note.agent || note.model || 'AI';
-  const sessionId = note.sessionId;
+  // A proven line claim. The server may enrich it, but only for the very
+  // session the canonical record names (provenServerCard); otherwise the
+  // local answer below stands.
+  if (isConnectedMode()) {
+    const card = await provenServerCard(roots, relPath, attr, lineContent);
+    if (card) { renderServerCard(card, relPath, lineNum, lineContent); return; }
+  }
+
+  // Its session comes from the canonical record. The prompt is shown only when
+  // the claim names it (iterationIndex) and the platform has exactly that
+  // prompt of exactly that session: no guess from the file, the line's text,
+  // a diff hunk, a single-prompt session or a session-wide summary. The legacy
+  // note adds session metadata only when it describes that same session.
+  const rawNote = readOriginNote(repoPath, commitSha);
+  const note = attr.sessionId && rawNote?.sessionId === attr.sessionId ? rawNote : null;
+  const agent = attr.agent || attr.model || 'AI';
+  const sessionId = attr.sessionId;
+
+  if (!sessionId) {
+    console.log(chalk.white(`  Written by ${chalk.cyan(agent)} · ${dateStr}`));
+    console.log(chalk.gray(`  Commit: ${commitSha.slice(0, 8)} — ${commitInfo?.message || ''}\n`));
+    return;
+  }
 
   console.log(chalk.white(`  Written by ${chalk.cyan(agent)} · ${dateStr} · Session ${chalk.cyan(sessionId.slice(0, 8))}`));
 
-  // Step 4: try to find which prompt in the session wrote this line
-  // First try platform API
+  // Step 4: the claim's own prompt, from the platform
   if (isConnectedMode()) {
     try {
       const { api } = await import('../api.js');
       const session = await api.getSession(sessionId) as any;
+      const changes: any[] = Array.isArray(session?.promptChanges) ? session.promptChanges : [];
+      const exact = attr.iterationIndex === undefined
+        ? []
+        : changes.filter((pc) => pc?.promptIndex === attr.iterationIndex);
 
-      if (session?.promptChanges?.length) {
-        // Find which prompt's diff contains this line
-        const matchingPrompt = findPromptForLine(session.promptChanges, relPath, lineNum, lineContent);
-
+      if (exact.length === 1) {
+        const pc = exact[0];
+        console.log(chalk.green(`  Prompt #${pc.promptIndex}: "${pc.promptText}"`));
         // What KIND of change this was, from the server's frozen taxonomy.
-        // Printed only when the server had an opinion — roughly one turn in
-        // ten legitimately has none, and "Changed: unknown" would read as a
-        // failure rather than as silence.
-        const printKinds = (pc: { changeKinds?: string[] } | undefined) => {
-          const kinds = pc?.changeKinds;
-          if (kinds && kinds.length > 0) {
-            console.log(chalk.gray(`  Changed: ${kinds.join(', ')}`));
-          }
-        };
-
-        if (matchingPrompt) {
-          console.log(chalk.green(`  Prompt: "${matchingPrompt.promptText}"`));
-          printKinds(matchingPrompt);
-          if (matchingPrompt.filesChanged?.length) {
-            console.log(chalk.gray(`  Files: ${matchingPrompt.filesChanged.join(', ')}`));
-          }
-        } else {
-          // Show the session's prompt if only one
-          if (session.promptChanges.length === 1) {
-            console.log(chalk.green(`  Prompt: "${session.promptChanges[0].promptText}"`));
-            printKinds(session.promptChanges[0]);
-          } else {
-            console.log(chalk.gray(`  Session had ${session.promptChanges.length} prompts (couldn't determine which wrote this line)`));
-          }
+        // Printed only when the server had an opinion.
+        if (Array.isArray(pc.changeKinds) && pc.changeKinds.length > 0) {
+          console.log(chalk.gray(`  Changed: ${pc.changeKinds.join(', ')}`));
         }
+        if (pc.filesChanged?.length) {
+          console.log(chalk.gray(`  Files: ${[].concat(pc.filesChanged).join(', ')}`));
+        }
+      } else if (attr.iterationIndex === undefined) {
+        console.log(chalk.gray('  Prompt: not recorded for this line (the claim names the session only)'));
+      } else {
+        console.log(chalk.gray(`  Prompt #${attr.iterationIndex}: not available from Origin`));
+      }
 
+      if (changes.length > 0) {
         // Session summary
-        const turns = session.promptChanges.length;
+        const turns = changes.length;
         const cost = session.costUsd ? `$${session.costUsd.toFixed(2)}` : '$0.00';
         const filesCount = (() => {
           try { return JSON.parse(session.filesChanged || '[]').length; } catch { return 0; }
         })();
         const duration = session.durationMs ? formatDuration(session.durationMs) : '—';
-
         console.log(chalk.gray(`\n  Session: ${turns} turn${turns === 1 ? '' : 's'} · ${cost} · ${filesCount} files · ${duration}`));
-      } else if (session?.prompt) {
-        console.log(chalk.green(`  Prompt: "${session.prompt}"`));
       }
 
       console.log(chalk.gray(`  Run ${chalk.cyan(`origin explain ${sessionId.slice(0, 8)}`)} for full details\n`));
@@ -231,10 +216,9 @@ async function showLineWhy(roots: ProvenanceRoots, filePath: string, lineNum: nu
     }
   }
 
-  // Local-only: show what we know from git notes
-  if (note.promptSummary) {
-    console.log(chalk.green(`  Prompt: "${note.promptSummary}"`));
-  } else if (note.promptTextWithheld === true) {
+  // Local-only: show what we know from git notes. A note's prompt summary is
+  // session-wide, not this line's prompt: it is not shown as one.
+  if (note?.promptTextWithheld === true) {
     // Metadata-only note (the default): the prompt lives in the permissioned
     // Origin record, not in the repository.
     const where = typeof note.originUrl === 'string' && /^https?:\/\//.test(note.originUrl) ? ` — ${note.originUrl}` : '';
@@ -242,59 +226,46 @@ async function showLineWhy(roots: ProvenanceRoots, filePath: string, lineNum: nu
       ? `  Prompt: sealed in git notes — no key for this user (needs repo access in Origin)${where}`
       : `  Prompt: not stored in git notes${where}`));
   }
-  const cost = note.costUsd ? `$${note.costUsd.toFixed(2)}` : '';
-  const tokens = note.tokensUsed ? `${(note.tokensUsed / 1000).toFixed(1)}k tokens` : '';
-  const meta = [cost, tokens, note.promptCount ? `${note.promptCount} turns` : ''].filter(Boolean).join(' · ');
+  const cost = note?.costUsd ? `$${note.costUsd.toFixed(2)}` : '';
+  const tokens = note?.tokensUsed ? `${(note.tokensUsed / 1000).toFixed(1)}k tokens` : '';
+  const meta = [cost, tokens, note?.promptCount ? `${note.promptCount} turns` : ''].filter(Boolean).join(' · ');
   if (meta) console.log(chalk.gray(`  ${meta}`));
 
   console.log(chalk.gray(`  Commit: ${commitSha.slice(0, 8)} — ${commitInfo?.message || ''}`));
   console.log(chalk.gray(`  Run ${chalk.cyan(`origin explain ${sessionId.slice(0, 8)}`)} for full details\n`));
 }
 
-function findPromptForLine(
-  promptChanges: any[],
-  filePath: string,
-  lineNum: number,
-  lineContent: string,
-): any | null {
-  // Walk prompts in reverse (later prompts override earlier ones)
-  for (let i = promptChanges.length - 1; i >= 0; i--) {
-    const pc = promptChanges[i];
-    const files: string[] = Array.isArray(pc.filesChanged) ? pc.filesChanged : [];
-
-    // Check if this prompt touched the file
-    const touchesFile = files.some((f: string) => {
-      const nf = f.replace(/^\//, '');
-      const nt = filePath.replace(/^\//, '');
-      return nf === nt || nf.endsWith(nt) || nt.endsWith(nf);
-    });
-
-    if (!touchesFile) continue;
-
-    // If we have a diff, check if it includes the line
-    if (pc.diff) {
-      // Look for the line content in added lines of the diff
-      const trimmedContent = lineContent.trim();
-      if (trimmedContent && pc.diff.includes(trimmedContent)) {
-        return pc;
-      }
-
-      // Check line number in diff hunk headers
-      const hunkRegex = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm;
-      let match;
-      while ((match = hunkRegex.exec(pc.diff)) !== null) {
-        const start = parseInt(match[1], 10);
-        const count = match[2] ? parseInt(match[2], 10) : 1;
-        if (lineNum >= start && lineNum < start + count) {
-          return pc;
-        }
-      }
-    }
-
-    // If no diff but file matches, this is our best guess
-    if (touchesFile) return pc;
+/**
+ * The session prompt of an [AI~] line, from the legacy note of its blamed
+ * commit — only when the line names exactly one session and that note
+ * describes the same one (no aggregate of several). It is the session's
+ * summary, said as commit-level, never this line's prompt: no `Prompt #N`,
+ * no element of `prompts`, no `fullPrompt`. A seal that cannot be opened
+ * leaves the metadata-only answer.
+ */
+async function showCommitLevelSessionPrompt(repoPath: string, commitSha: string, sessionId: string | undefined): Promise<void> {
+  if (!sessionId) return;
+  const note = readOriginNote(repoPath, commitSha);
+  if (!note || typeof note !== 'object' || note.sessionId !== sessionId) return;
+  const sessions = new Set([note.sessionId, ...(Array.isArray(note.sessionIds) ? note.sessionIds : [])]
+    .filter((id) => typeof id === 'string' && id && id !== 'unknown'));
+  if (sessions.size !== 1) return;
+  let opened: Record<string, any> = note;
+  try { opened = await withOpenedPrompts(note); } catch { /* no key, no server: metadata only */ }
+  const caveat = '(commit-level; not proof for this line)';
+  if (typeof opened.promptSummary === 'string' && opened.promptSummary.trim()) {
+    console.log(chalk.gray(`  Session prompt ${caveat}: ${opened.promptSummary.replace(/\s+/g, ' ').trim()}`));
+  } else if (note.sealed) {
+    console.log(chalk.gray(`  Session prompt: sealed in git notes — no key for this user ${caveat}`));
+  } else if (note.promptTextWithheld === true) {
+    console.log(chalk.gray(`  Session prompt: not stored in git notes ${caveat}`));
   }
-  return null;
+  const meta = [
+    typeof note.costUsd === 'number' ? `$${note.costUsd.toFixed(2)}` : '',
+    typeof note.tokensUsed === 'number' && note.tokensUsed ? `${(note.tokensUsed / 1000).toFixed(1)}k tokens` : '',
+    note.promptCount ? `${note.promptCount} turns` : '',
+  ].filter(Boolean).join(' · ');
+  if (meta) console.log(chalk.gray(`  Session metadata: ${meta}`));
 }
 
 async function showFileWhy(roots: ProvenanceRoots, filePath: string): Promise<void> {
@@ -309,31 +280,43 @@ async function showFileWhy(roots: ProvenanceRoots, filePath: string): Promise<vo
 
   const total = lines.length;
   const aiLines = lines.filter(l => l.authorship === 'ai').length;
+  const { lineProvenAiLines, commitConfidenceAiLines } = aiConfidenceSplit(lines);
   const humanLines = lines.filter(l => l.authorship === 'human').length;
+  const unknownLines = lines.filter(l => l.authorship === 'unknown').length;
   const aiPct = Math.round((aiLines / total) * 100);
   const humanPct = Math.round((humanLines / total) * 100);
+  const unknownPct = Math.round((unknownLines / total) * 100);
 
   console.log(chalk.bold(`\n  ${relPath}`));
   console.log(chalk.gray(`  ${total} lines — `) +
     chalk.green(`${aiPct}% AI (${aiLines})`) +
+    (commitConfidenceAiLines > 0
+      ? chalk.gray(` [${lineProvenAiLines} line-proven, ${commitConfidenceAiLines} commit-level attribution — no line-level proof]`)
+      : '') +
     chalk.gray(' · ') +
-    chalk.white(`${humanPct}% human (${humanLines})`));
+    chalk.white(`${humanPct}% human (${humanLines})`) +
+    chalk.gray(' · ') +
+    chalk.gray(`${unknownPct}% unknown (${unknownLines})`));
   console.log('');
 
-  // Group by session/agent
-  const sessionMap = new Map<string, { model: string; lines: number; sessionId: string }>();
+  // Group by session/agent. Unknown lines belong to no session and no human.
+  // A commit-level row is kept apart from a proven one of the same session.
+  const sessionMap = new Map<string, { model: string; lines: number; sessionId: string; commitLevel: boolean }>();
   let humanCount = 0;
   for (const line of lines) {
     if (line.authorship === 'human') {
       humanCount++;
       continue;
     }
-    const key = line.sessionId || 'unknown';
+    if (line.authorship === 'unknown') continue;
+    const commitLevel = !isLineProvenAttribution(line);
+    const sessionId = line.sessionId || 'unknown';
+    const key = `${sessionId}|${commitLevel ? 'commit' : 'line'}`;
     const existing = sessionMap.get(key);
     if (existing) {
       existing.lines++;
     } else {
-      sessionMap.set(key, { model: line.model || line.tool || 'AI', lines: 1, sessionId: key });
+      sessionMap.set(key, { model: line.model || line.tool || 'AI', lines: 1, sessionId, commitLevel });
     }
   }
 
@@ -345,13 +328,19 @@ async function showFileWhy(roots: ProvenanceRoots, filePath: string): Promise<vo
     console.log(
       chalk.cyan(`  ${a.model.padEnd(20)}`) +
       chalk.green(`${String(a.lines).padStart(4)} lines  ${String(pct).padStart(3)}%`) +
-      chalk.gray(`  session ${a.sessionId.slice(0, 8)}`)
+      chalk.gray(`  session ${a.sessionId.slice(0, 8)}`) +
+      (a.commitLevel ? chalk.gray('  (commit-level attribution, no line-level proof)') : '')
     );
   }
   if (humanCount > 0) {
     const pct = Math.round((humanCount / total) * 100);
     console.log(
       chalk.white(`  ${'Human'.padEnd(20)}${String(humanCount).padStart(4)} lines  ${String(pct).padStart(3)}%`)
+    );
+  }
+  if (unknownLines > 0) {
+    console.log(
+      chalk.gray(`  ${'Unknown'.padEnd(20)}${String(unknownLines).padStart(4)} lines  ${String(unknownPct).padStart(3)}%`)
     );
   }
 
@@ -375,6 +364,69 @@ async function resolveOriginRepoId(repoPath: string): Promise<{ id: string } | n
   } catch {
     return null;
   }
+}
+
+/**
+ * Server enrichment of a PROVEN line (OR-46). Only a line-proven `ai` line
+ * (`confidence: 'line'`, never `[AI~]`) asks, for the
+ * commit that holds its claim; the card is kept only when it names the same
+ * session as the canonical record, and its prompt only when the claim names
+ * that same prompt (iteration). No other commit is searched: the resolver
+ * already found the line's source, so no `git log -L` drift walk looks for a
+ * different author. Null means "answer locally".
+ */
+async function provenServerCard(
+  roots: ProvenanceRoots, relPath: string, attr: LineAttribution, lineContent: string, lookup: ServerLookup = tryServerWhy,
+): Promise<any | null> {
+  if (!isLineProvenAttribution(attr) || !attr.commitSha || !attr.sessionId) return null;
+  const card = await lookup(roots, relPath, attr.commitSha, lineContent);
+  if (!card?.session || card.session.id !== attr.sessionId) return null;
+  const p = card.prompt;
+  const promptProven = !!p && attr.iterationIndex !== undefined && p.index === attr.iterationIndex;
+  const { drifted: _drifted, ...rest } = card;
+  return { ...rest, prompt: promptProven ? p : undefined };
+}
+
+/**
+ * The commits that touched one line, newest first, at most LINE_HISTORY_MAX:
+ * `git log -L` without a shell, started at the line's strict-blame origin
+ * (its source revision, path and line) — never at the displayed line number,
+ * which a dirty worktree shifts. Empty without an anchor, for an anchor that
+ * could not name one line of one commit, and on any git error.
+ */
+function lineHistory(repoPath: string, anchor: HistoryAnchor | null): string[] {
+  if (!anchor || !FULL_SHA.test(anchor.revision) || !isCanonicalRepoPath(anchor.path)
+    || !Number.isSafeInteger(anchor.line) || anchor.line < 1) return [];
+  const { revision, path: p, line } = anchor;
+  const r = runDetailed('git', ['log', `-L${line},${line}:${p}`, '--format=%H', '-s', `--max-count=${LINE_HISTORY_MAX}`, revision], { cwd: repoPath });
+  if (r.status !== 0) return [];
+  return [...new Set(r.stdout.split('\n').map((l) => l.trim()).filter((l) => FULL_SHA.test(l)))];
+}
+
+/**
+ * The server card of a committed line WITHOUT line proof. The current blamed
+ * commit first: a high-confidence card with a session ends the search. Else
+ * the line's bounded history, newest first: an older high card wins; an older
+ * weak one is kept only when the current commit had no usable card. A
+ * historical card is marked `drifted`. Null: answer locally. Never used for a
+ * line-proven line (provenServerCard).
+ */
+async function commitLevelServerCard(
+  roots: ProvenanceRoots, repoPath: string, relPath: string, anchor: HistoryAnchor | null, sha: string, lineContent: string,
+  lookup: ServerLookup = tryServerWhy,
+): Promise<any | null> {
+  const current = await lookup(roots, relPath, sha, lineContent);
+  const usable = current?.session ? current : null;
+  if (usable?.confidence === 'high') return usable;
+  let historical: any = null;
+  for (const older of lineHistory(repoPath, anchor)) {
+    if (older === sha) continue;
+    const card = await lookup(roots, relPath, older, lineContent);
+    if (!card?.session) continue;
+    if (card.confidence === 'high') return { ...card, drifted: true };
+    if (!usable && !historical) historical = { ...card, drifted: true };
+  }
+  return usable ?? historical;
 }
 
 // Ask the server which session + prompt authored this line. Returns null on any
@@ -405,7 +457,7 @@ async function tryServerWhy(roots: ProvenanceRoots, relPath: string, sha: string
   }
 }
 
-function renderServerCard(card: any, relPath: string, lineNum: number, lineContent: string): void {
+function renderServerCard(card: any, relPath: string, lineNum: number, lineContent: string, opts: { commitLevel?: boolean } = {}): void {
   const s = card.session || {};
   const p = card.prompt;
   const apiUrl = loadConfig()?.apiUrl || 'https://getorigin.io';
@@ -415,13 +467,18 @@ function renderServerCard(card: any, relPath: string, lineNum: number, lineConte
 
   // The caller (showLineWhy) already printed the "Line N in file" + content
   // header before choosing this path — don't repeat it.
+  if (opts.commitLevel) {
+    // Whatever the server's own confidence, locally this is commit-level.
+    console.log(chalk.yellow('  commit-level · server attribution; local line proof unavailable'));
+  }
   console.log(
     chalk.white(`  Written by ${chalk.cyan(s.agent || s.model || 'AI')}`) +
       (s.model ? chalk.gray(` · ${s.model}`) : '') +
       (dateStr ? chalk.gray(` · ${dateStr}`) : ''),
   );
   if (p) {
-    console.log(chalk.green(`  Prompt #${p.index}: "${(p.text || '').replace(/\s+/g, ' ').trim()}"`));
+    const label = opts.commitLevel ? `Server prompt #${p.index}` : `Prompt #${p.index}`;
+    console.log(chalk.green(`  ${label}: "${(p.text || '').replace(/\s+/g, ' ').trim()}"`));
   }
   const meta = [
     typeof s.costUsd === 'number' ? `$${s.costUsd.toFixed(2)}` : '',
@@ -559,16 +616,39 @@ async function whyTraceCommand(
   // share it. (tryServerWhy resolves it too, but we need the id here anyway.)
   const repo = await resolveOriginRepoId(roots.canonicalRoot);
 
-  const results: Array<{ file: string; line: number; content: string; sha: string; card: any }> = [];
+  // Every frame goes through the same gates as `origin why <file>:<line>`: a
+  // proven line asks only for its own commit and keeps only a card of its own
+  // session ([AI]); any other committed line takes the bounded commit-level
+  // lookup from its strict-blame anchor ([AI~]: server attribution, no local
+  // line proof). An uncommitted frame is never sent.
+  const resolutions = new Map<string, LineAttributionResolution | null>();
+  const results: Array<{ file: string; line: number; content: string; sha: string; card: any; tier: 'line' | 'commit' }> = [];
+  // One budget of server lookups for the whole trace, proven, direct and
+  // history alike. Past it nothing more is asked: frames already answered
+  // keep their results, and no answer is made up for the rest.
+  let serverLookups = 0;
+  let serverLookupLimitReached = false;
+  const lookup: ServerLookup = async (r, relPath, sha, lineContent) => {
+    if (serverLookups >= TRACE_SERVER_LOOKUPS_MAX) { serverLookupLimitReached = true; return null; }
+    serverLookups++;
+    return tryServerWhy(r, relPath, sha, lineContent);
+  };
   for (const fr of frames) {
     const rel = resolveFrameFile(fr.file, repoPath, repoFiles);
     if (!rel) continue;
-    const sha = getCommitForLine(repoPath, rel, fr.line);
-    if (!sha || sha.startsWith('0000000')) continue;
-    let content = '';
-    try { content = (readFileSync(path.join(repoPath, rel), 'utf-8').split('\n')[fr.line - 1] || '').trim(); } catch { /* ignore */ }
-    const card = await tryServerWhy(roots, rel, sha, content);
-    if (card && card.session) results.push({ file: rel, line: fr.line, content, sha, card });
+    if (!resolutions.has(rel)) resolutions.set(rel, resolveLineAttribution(repoPath, rel));
+    const resolution = resolutions.get(rel);
+    const attr = resolution?.lines[fr.line - 1];
+    if (!resolution || !attr || !attr.commitSha) continue;
+    const content = (linesOf(resolution.text)[fr.line - 1] ?? '').trim();
+    if (isLineProvenAttribution(attr)) {
+      const card = await provenServerCard(roots, rel, attr, content, lookup);
+      if (card) results.push({ file: rel, line: fr.line, content, sha: attr.commitSha, card, tier: 'line' });
+    } else {
+      const anchor = resolution.historyAnchors[fr.line - 1] ?? null;
+      const card = await commitLevelServerCard(roots, repoPath, rel, anchor, attr.commitSha, content, lookup);
+      if (card) results.push({ file: rel, line: fr.line, content, sha: attr.commitSha, card, tier: 'commit' });
+    }
   }
 
   const apiUrl = loadConfig()?.apiUrl || 'https://getorigin.io';
@@ -580,11 +660,17 @@ async function whyTraceCommand(
     console.log(JSON.stringify({
       frames: frames.length,
       attributed: results.length,
+      serverLookups,
+      serverLookupLimitReached,
       results: results.map((r) => ({
         file: r.file, line: r.line, sha: r.sha, content: r.content,
         session: { id: r.card.session?.id, agent: r.card.session?.agent, model: r.card.session?.model, url: `${apiUrl}${r.card.session?.url || '/sessions/' + r.card.session?.id}` },
         prompt: r.card.prompt || null,
+        // The server's own confidence in its card; the local tier is apart:
+        // `line` is canonical line proof, `commit` is server attribution only.
         confidence: r.card.confidence,
+        attributionConfidence: r.tier,
+        drifted: r.card.drifted === true,
         verify: r.card.markers?.verifies || [],
       })),
     }, null, 2));
@@ -593,6 +679,9 @@ async function whyTraceCommand(
 
   if (!opts?.json) {
     console.log(chalk.bold(`\n  Origin Why · stack trace`) + chalk.gray(`  (${frames.length} frames, ${results.length} attributed in this repo)`));
+    if (serverLookupLimitReached) {
+      console.log(chalk.yellow(`  Server lookup limit reached (${TRACE_SERVER_LOOKUPS_MAX}): later frames were not queried.`));
+    }
   }
   if (results.length === 0) {
     if (!opts?.json) console.log(chalk.gray('\n  No frames mapped to AI-authored code in this repo.\n'));
@@ -603,7 +692,10 @@ async function whyTraceCommand(
       const s = r.card.session || {};
       const p = r.card.prompt;
       console.log('');
-      console.log('  ' + chalk.white(`${r.file}:${r.line}`) + (r.content ? chalk.gray(`  ${r.content.slice(0, 60)}`) : ''));
+      const tag = r.tier === 'line' ? chalk.green('[AI] ') : chalk.greenBright('[AI~]');
+      console.log('  ' + tag + ' ' + chalk.white(`${r.file}:${r.line}`) + (r.content ? chalk.gray(`  ${r.content.slice(0, 60)}`) : ''));
+      if (r.tier === 'commit') console.log('    ' + chalk.yellow('commit-level · server attribution; local line proof unavailable'));
+      if (r.card.drifted) console.log('    ' + chalk.gray('(line moved since it was written — traced to the introducing commit)'));
       console.log('    ' + chalk.cyan(s.agent || s.model || 'AI') + (p ? chalk.gray(` · prompt #${p.index} `) + chalk.green(`"${(p.text || '').replace(/\s+/g, ' ').trim().slice(0, 60)}"`) : ''));
       const vs = r.card.markers?.verifies || [];
       if (vs.length) console.log('    ' + chalk.yellow('Verify: ') + chalk.gray(vs[0]) + chalk.gray(' — checked?'));

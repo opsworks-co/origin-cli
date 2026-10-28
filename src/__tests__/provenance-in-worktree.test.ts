@@ -57,6 +57,31 @@ const WT_SESSION_ID = 'bb22cc33-dd44-ee55-ff66-778899aabbcc';
 const WT_ONLY_LINE = 'export const reuseAgeFloor = undefined;';
 
 /**
+ * The note an Origin writer puts on a session commit: the legacy payload the
+ * commit-level readers use, and a canonical v1 record whose line claims are
+ * what `blame`/`why` attribute lines from (OR-46).
+ */
+function sessionNote(sha: string, sessionId: string, startLine: number, endLine: number): string {
+  return JSON.stringify({
+    origin: { sessionId, model: 'claude-opus-5', agent: 'claude-code' },
+    attribution_record: {
+      schema_version: '1.0',
+      revision: { vcs: 'git', id: sha },
+      attribution_level: 'line',
+      recorded_at: '2026-10-20T00:00:00Z',
+      producer: { name: 'origin-cli', version: '0.20261020.1504' },
+      contributions: [{
+        evidence: 'session_capture',
+        agent: { id: 'claude-code' },
+        model: { id: 'claude-opus-5' },
+        session: { id: sessionId },
+        files: [{ path: POSIX_FILE, ranges: [{ start_line: startLine, end_line: endLine }] }],
+      }],
+    },
+  });
+}
+
+/**
  * A repo with one AI-attributed commit, plus a linked worktree INSIDE it —
  * `<repo>/.claude/worktrees/<name>`, exactly where Claude Code puts one. The
  * location is the whole point: a worktree beside the repo resolves to a `../`
@@ -78,8 +103,7 @@ function makeRepoWithWorktree(): { tmp: string; main: string; wt: string; sha: s
   const sha = git(main, ['rev-parse', 'HEAD']);
 
   // The Origin note both commands read to turn a commit into a session.
-  git(main, ['notes', '--ref=origin', 'add', '-m',
-    JSON.stringify({ sessionId: SESSION_ID, model: 'claude-opus-5', agent: 'claude-code' }), sha]);
+  git(main, ['notes', '--ref=origin', 'add', '-m', sessionNote(sha, SESSION_ID, 1, 2), sha]);
 
   const wt = path.join(main, '.claude', 'worktrees', 'session-reuse-old-agent-f7056f');
   git(main, ['worktree', 'add', '-q', '-b', 'claude/session-reuse', wt]);
@@ -92,8 +116,7 @@ function makeRepoWithWorktree(): { tmp: string; main: string; wt: string; sha: s
   git(wt, ['config', 'user.name', 'T']);
   git(wt, ['commit', '-q', '-am', 'feat(api): worktree-only change']);
   const wtSha = git(wt, ['rev-parse', 'HEAD']);
-  git(wt, ['notes', '--ref=origin', 'add', '-m',
-    JSON.stringify({ sessionId: WT_SESSION_ID, model: 'claude-opus-5', agent: 'claude-code' }), wtSha]);
+  git(wt, ['notes', '--ref=origin', 'add', '-m', sessionNote(wtSha, WT_SESSION_ID, 3, 3), wtSha]);
   return { tmp, main, wt, sha, wtSha };
 }
 

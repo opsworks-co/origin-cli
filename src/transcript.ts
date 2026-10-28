@@ -5,6 +5,8 @@ import { debugLog } from './debug-log.js';
 import { isOriginAutoManagedPath, shouldIgnoreFile } from './ignore-patterns.js';
 import { isShellTool, shellCommandText, commandWritesFiles } from './shell-write-capture.js';
 import { isInsideRepo, toRepoRelativePath , abbreviateHome, MAX_OUT_OF_REPO_FILES } from './paths.js';
+import { partsField, replyTextPart, replyToolPart, type DisplayPart } from './display-parts.js';
+import { eventTime, eventTokens, inputPreview, appendTurnEvents, spanMs, type DisplayEvent } from './display-events.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -287,6 +289,22 @@ export function convertCopilotEventsToClaude(raw: string): string | null {
   // per-message `outputTokens` already sum to the session output total).
   let lastAssistant: Record<string, any> | null = null;
   let shutdownTotals: Usage | null = null;
+  // Copilot CLI ≥1.0.9x records each model call's usage as its own
+  // `session.usage_record` event and no longer puts `outputTokens` on
+  // `assistant.message` — so output read as 0, and before the shutdown event
+  // (every Stop) input did too. Summed here: inputTokens includes the cached
+  // part, which the Claude shape keeps separate.
+  let recordTotals: Usage | null = null;
+  let messageOutput = 0;
+  // `/fork` (Copilot ≥1.0.88) starts the new session's events.jsonl with its
+  // own `session.start`, then a COPY of the parent's history up to the fork,
+  // then `session.info {infoType:"fork"}` and `session.resume`. The copy kept
+  // the parent's timestamps, so it is everything dated before this session
+  // started. Read as the fork's own, the parent's prompt became the fork's
+  // prompt 1 and the fork's real prompt was mapped one row past the end
+  // (Copilot 1.0.98, 2026-10-15). A plain `--resume` appends to the same file
+  // under the original start time, so nothing of its own predates it.
+  let sessionStartMs = NaN;
 
   for (const line of trimmed.split('\n')) {
     const t = line.trim();
@@ -300,7 +318,24 @@ export function convertCopilotEventsToClaude(raw: string): string | null {
     const d = ev?.data || {};
     const ts = ev?.timestamp;
 
+    if (ev?.type === 'session.start') {
+      if (Number.isNaN(sessionStartMs)) {
+        const at = [Date.parse(d.startTime ?? ''), Date.parse(ts ?? '')].filter(Number.isFinite);
+        if (at.length) sessionStartMs = Math.min(...at);
+      }
+      continue;
+    }
+    if (Number.isFinite(sessionStartMs) && typeof ts === 'string' && Date.parse(ts) < sessionStartMs) continue;
+
     if (ev?.type === 'user.message') {
+      // A `task` sub-agent's dispatch prompt, written into the parent's log
+      // with the sub-agent's id as a top-level `agentId` (Copilot ≥1.0.81).
+      // Nobody typed it: it became prompt 2 of a one-prompt session and took
+      // the turn's files with it (Copilot 1.0.96, 2026-10-15). The parent's own
+      // user.message has no `agentId` — every one carries `parentAgentTaskId`,
+      // so that field says nothing. The sub-agent's replies stay: their tool
+      // calls are work done for the parent's prompt.
+      if (typeof ev.agentId === 'string' && ev.agentId) continue;
       // `content` is the clean user text; `transformedContent` is the same
       // wrapped in Copilot's own envelope blocks.
       let content = typeof d.content === 'string' ? d.content : '';
@@ -325,7 +360,7 @@ export function convertCopilotEventsToClaude(raw: string): string | null {
       }
       if (!blocks.length) continue;
       const usage: Usage = {};
-      if (typeof d.outputTokens === 'number') usage.output_tokens = d.outputTokens;
+      if (typeof d.outputTokens === 'number') { usage.output_tokens = d.outputTokens; messageOutput += d.outputTokens; }
       const entry: Record<string, any> = {
         type: 'assistant',
         message: { id: d.messageId, role: 'assistant', model: d.model, content: blocks, usage },
@@ -333,6 +368,19 @@ export function convertCopilotEventsToClaude(raw: string): string | null {
       };
       out.push(entry);
       lastAssistant = entry;
+    } else if (ev?.type === 'session.usage_record') {
+      const u = d.usage;
+      if (u && typeof u === 'object') {
+        const num = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
+        const cacheRead = num(u.cacheReadTokens);
+        const cacheWrite = num(u.cacheWriteTokens);
+        const t: Usage = recordTotals ?? { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+        t.input_tokens! += Math.max(0, num(u.inputTokens) - cacheRead - cacheWrite);
+        t.output_tokens! += num(u.outputTokens);
+        t.cache_read_input_tokens! += cacheRead;
+        t.cache_creation_input_tokens! += cacheWrite;
+        recordTotals = t;
+      }
     } else if (ev?.type === 'session.shutdown') {
       // Prefer the aggregate tokenDetails; the last shutdown wins (resume writes
       // one per lifecycle) and reflects the final session totals.
@@ -347,14 +395,20 @@ export function convertCopilotEventsToClaude(raw: string): string | null {
     }
   }
 
-  if (lastAssistant && shutdownTotals) {
+  const inputTotals = shutdownTotals ?? recordTotals;
+  if (lastAssistant && inputTotals) {
     // Attach input/cache totals to a single message so the parser (which sums
     // per-message usage) counts them exactly once. Output stays per-message.
     Object.assign(lastAssistant.message.usage, {
-      input_tokens: shutdownTotals.input_tokens ?? 0,
-      cache_read_input_tokens: shutdownTotals.cache_read_input_tokens ?? 0,
-      cache_creation_input_tokens: shutdownTotals.cache_creation_input_tokens ?? 0,
+      input_tokens: inputTotals.input_tokens ?? 0,
+      cache_read_input_tokens: inputTotals.cache_read_input_tokens ?? 0,
+      cache_creation_input_tokens: inputTotals.cache_creation_input_tokens ?? 0,
     });
+  }
+  // Output from the usage records only when no message carried its own, so
+  // an older CLI that writes both is not counted twice.
+  if (lastAssistant && recordTotals && messageOutput === 0 && (recordTotals.output_tokens ?? 0) > 0) {
+    lastAssistant.message.usage.output_tokens = recordTotals.output_tokens;
   }
 
   return out.length ? out.map((e) => JSON.stringify(e)).join('\n') : null;
@@ -680,7 +734,9 @@ function readSubagentRecords(
           let file = fp;
           if (cwd && path.isAbsolute(fp)) {
             if (!fp.startsWith(cwd + path.sep)) continue;
-            file = fp.slice(cwd.length + 1);
+            // Forward slashes, as git writes repo-relative paths, on every
+            // platform: `path.sep` is `\` on Windows.
+            file = fp.slice(cwd.length + 1).split(path.sep).join('/');
           }
           edits.push({ file, ts: Number.isFinite(t) ? t : 0, ...(toolUseId ? { toolUseId } : {}) });
         }
@@ -1160,6 +1216,44 @@ export function parseTranscript(
   return result;
 }
 
+/**
+ * parseTranscript for a session's own hooks: prompts since this launch,
+ * token totals since the server row began.
+ *
+ * A resumed row (the heartbeat ended it while idle; the conversation came back
+ * a day later) gets a fresh local state whose `startedAt` is the resume. The
+ * prompt counter must stay on that window — `prompts` holds only this launch's
+ * turns and `promptIndexBase` counts the ones before it. But the session-level
+ * token columns are absolute and the server overwrites them, so totals parsed
+ * since the resume replaced the whole row's: prod 4f161e29 stored 4,350 output
+ * tokens of 93,221. When the server told us the row began earlier
+ * (`sessionStartedAt`), the session totals come from a second parse since then.
+ * Per-turn usage, prompts and files keep the narrow window.
+ */
+export function parseSessionTranscript(
+  transcriptPath: string,
+  state: { startedAt?: string | null; sessionStartedAt?: string | null },
+  repoRoots?: string[],
+): ParsedTranscript {
+  const parsed = parseTranscript(transcriptPath, { since: state.startedAt, repoRoots });
+  const rowMs = Date.parse(state.sessionStartedAt || '');
+  const launchMs = Date.parse(state.startedAt || '');
+  if (!(rowMs < launchMs) || parsed.tokensEstimated) return parsed;
+  const whole = parseTranscript(transcriptPath, { since: state.sessionStartedAt, repoRoots });
+  // An estimate, or a parse that somehow saw less, is no better than what we have.
+  if (whole.tokensEstimated || whole.tokensUsed + whole.cacheReadTokens + whole.cacheCreationTokens
+    < parsed.tokensUsed + parsed.cacheReadTokens + parsed.cacheCreationTokens) return parsed;
+  parsed.tokensUsed = whole.tokensUsed;
+  parsed.inputTokens = whole.inputTokens;
+  parsed.outputTokens = whole.outputTokens;
+  parsed.cacheReadTokens = whole.cacheReadTokens;
+  parsed.cacheCreationTokens = whole.cacheCreationTokens;
+  parsed.cacheCreation1hTokens = whole.cacheCreation1hTokens;
+  parsed.subagentTokens = whole.subagentTokens;
+  parsed.modelUsage = whole.modelUsage;
+  return parsed;
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 /**
@@ -1302,6 +1396,15 @@ export function geminiUserPromptText(msg: any): string | null {
   return withImagePlaceholders(raw ? cleanPrompt(raw) : null, images);
 }
 
+/**
+ * Codex multi-agent envelopes. `<multi_agent_mode>` / `<multi_agent_role>` are
+ * the mode instructions Codex sends ahead of a turn (developer role today, and
+ * replayed into every sub-agent's forked history); `<subagent_notification>`
+ * is how a sub-agent's status reaches the parent chat as a message. None is
+ * something the user typed. Unclosed-tolerant for a 1000-char clip.
+ */
+const CODEX_MULTI_AGENT_ENVELOPE = /<(multi_agent_mode|multi_agent_role|subagent_notification)\b[^>]*>[\s\S]*?(?:<\/\1>|$)/g;
+
 export function codexUserPromptText(text: string): string | null {
   if (!text) return null;
   if (text.includes('<!-- origin-managed -->') || /^#\s+AGENTS\.md instructions for /m.test(text)) {
@@ -1311,6 +1414,10 @@ export function codexUserPromptText(text: string): string | null {
     .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
     .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
     .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+    // Codex (0.145) injects the plugins it suggests as a user-role message
+    // ahead of the first prompt; it was captured as the session's prompt 1.
+    .replace(/<recommended_plugins>[\s\S]*?<\/recommended_plugins>/g, '')
+    .replace(CODEX_MULTI_AGENT_ENVELOPE, '')
     .trim();
   return cleaned || null;
 }
@@ -1419,7 +1526,7 @@ function rawUserEntryText(entry: any): string {
 }
 
 export function isCursorTranscriptUserEntry(entry: any): boolean {
-  return /<(?:timestamp|user_query|image_files|available_subagent_types|hooks_context|system_reminder)\b/i.test(rawUserEntryText(entry));
+  return /<(?:timestamp|user_query|image_files|available_subagent_types|dynamic_tool_catalog|hooks_context|system_reminder)\b/i.test(rawUserEntryText(entry));
 }
 
 /**
@@ -1479,6 +1586,15 @@ export function cleanPrompt(text: string): string | null {
     // chars, so the closing tag is often missing (session 593241fe).
     .replace(/<system_reminder\b[^>]*>[\s\S]*?(?:<\/system_reminder>|$)/gi, '')
     .replace(/<hooks_context\b[^>]*>[\s\S]*?(?:<\/hooks_context>|$)/gi, '')
+    // Gemini CLI's setup turn. Since 0.64 (append-only chat recording) it is
+    // written as an ordinary `type:"user"` record at the top of the chat file
+    // — 0.61 kept it inside a `$set.messages` rewrite the parser skips — so it
+    // became prompt 1 and pushed every real prompt one row down. Gemini's own
+    // resume code ignores user content starting with `<session_context>` or
+    // `<hook_context>` (its BeforeAgent additionalContext wrapper); so do we.
+    // Unclosed-tolerant for the 1000-char clip.
+    .replace(/^\s*<session_context>[\s\S]*?(?:<\/session_context>|$)/i, '')
+    .replace(/<hook_context>[\s\S]*?(?:<\/hook_context>|$)/gi, '')
     // A message from another local Claude session (SendMessage) arrives in the
     // user role: `Another Claude session sent a message:`, a
     // `<cross-session-message from=… from-name=…>` envelope, then permission
@@ -1500,6 +1616,15 @@ export function cleanPrompt(text: string): string | null {
     // sentence so anything typed after it survives, or at the end of the text
     // when the footer is missing (the expired variant, or a 1000-char clip).
     .replace(/^\s*\[Cross-session idle notice\][\s\S]*?(?:This is an automated notice from that session['’]s harness[^\n]*|$)/, '')
+    // The Claude desktop app wakes a session in the user role: a
+    // `<side-sessions-event>` when the sessions it started (subsessions) end a
+    // turn, a `<ci-monitor-event>` when a watched PR needs attention. Session
+    // e32ec30b stored three side-session wake-ups as prompts 2-4 of 4. The
+    // reports around them are `<system-reminder>`s, already stripped above.
+    // Unclosed-tolerant for a 1000-char clip.
+    .replace(/<side-sessions-event\b[^>]*>[\s\S]*?(?:<\/side-sessions-event>|$)/g, '')
+    .replace(/<ci-monitor-event\b[^>]*>[\s\S]*?(?:<\/ci-monitor-event>|$)/g, '')
+    .replace(CODEX_MULTI_AGENT_ENVELOPE, '')
     // Strip internal agent tags that leak when prompts overlap with active execution.
     // A background-task notification is the whole user entry. Unclosed-tolerant
     // for a stored 1000-char clip, but only when `<task-id>` follows, so prose
@@ -1547,6 +1672,13 @@ export function cleanPrompt(text: string): string | null {
     .replace(/<available_subagent_models>[\s\S]*?<\/available_subagent_models>/gi, '')
     .replace(/<dynamic_tool_namespaces>[\s\S]*?<\/dynamic_tool_namespaces>/gi, '')
     .replace(/<dynamic_tools>[\s\S]*?<\/dynamic_tools>/gi, '')
+    // Newer Cursor wraps the namespace list in `<dynamic_tool_catalog>` with a
+    // prose preamble ("These dynamic tool namespaces were available…"), so
+    // stripping the inner tags left that preamble as a prompt (Cursor baton
+    // 31b35b6d: a 10 KB catalog + <hooks_context> became turn 9).
+    // Unclosed-tolerant: the hook stores promptText clipped at 1000 chars,
+    // well inside a catalog that runs to 10 KB.
+    .replace(/<dynamic_tool_catalog\b[^>]*>[\s\S]*?(?:<\/dynamic_tool_catalog>|$)/gi, '')
     // Codex's session-init envelope (kept here too as belt-and-suspenders).
     .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
     .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
@@ -1630,6 +1762,7 @@ export function isKnownCursorInternalPrompt(prompt: unknown): boolean {
     .replace(/<user_query>([\s\S]*?)<\/user_query>/gi, '$1')
     .replace(/<hooks_context\b[^>]*>[\s\S]*?(?:<\/hooks_context>|$)/gi, ' ')
     .replace(/<system_reminder\b[^>]*>[\s\S]*?(?:<\/system_reminder>|$)/gi, ' ')
+    .replace(/<dynamic_tool_catalog\b[^>]*>[\s\S]*?(?:<\/dynamic_tool_catalog>|$)/gi, ' ')
     .replace(/\[image\]/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -1637,7 +1770,7 @@ export function isKnownCursorInternalPrompt(prompt: unknown): boolean {
     // Envelope-only payload. A captionless screenshot also cleans to empty
     // after `[image]` is stripped — those are real turns, so only the
     // injection envelopes count as internal.
-    return /<(?:available_subagent_types|hooks_context)\b/i.test(original);
+    return /<(?:available_subagent_types|dynamic_tool_catalog|hooks_context)\b/i.test(original);
   }
   if (/^<available_subagent_types>/i.test(text)) return true;
   if (/^<hooks_context\b/i.test(text)) return true;
@@ -2625,7 +2758,21 @@ function extractGeminiPromptMappings(raw: string, repoRoots?: string[]): PromptF
 export interface DisplayMessage {
   role: 'user' | 'assistant';
   content: string;
+  // An assistant message's own words and the tools it called, kept apart from
+  // `content` — where tool inputs and outputs are inlined, and a blank line
+  // inside one reads the same as the agent starting a new paragraph. The
+  // public share page shows these and nothing else: no tool input, no tool
+  // output, no reasoning. Text is secret-redacted.
+  parts?: DisplayPart[];
+  // A user message (a prompt) only: when it was sent, and the structured
+  // steps of the turn it started — see display-events.ts.
+  ts?: number;
+  events?: DisplayEvent[];
+  eventsDropped?: number;
 }
+
+export type { DisplayPart } from './display-parts.js';
+export type { DisplayEvent } from './display-events.js';
 
 /**
  * Convert raw transcript (JSONL or Gemini JSON) into a JSON string of
@@ -2771,6 +2918,7 @@ function formatJSONLMessages(raw: string, verbose: boolean): DisplayMessage[] {
   const truncate = makeTruncator(verbose);
   let lastKeptPrompt: string | undefined;
   let cursorTranscript = false;
+  const steps = new ClaudeTurnSteps();
 
   // First pass: collect tool_result blocks keyed by tool_use_id so we can
   // attach them inline with the corresponding [Tool: ...] line in the next
@@ -2803,27 +2951,33 @@ function formatJSONLMessages(raw: string, verbose: boolean): DisplayMessage[] {
     // Claude Code uses `{"type":"user", "message":{...}}` and an older shape
     // nests it as `message.role`. Check all three so one parser handles all.
     const type = entry.type || (entry as any).role || entry.message?.role;
+    steps.read(entry, type);
 
     if (type === 'user') {
       if (isCursorTranscriptUserEntry(entry)) cursorTranscript = true;
       const prompt = transcriptPromptIfNew(entry, lastKeptPrompt, cursorTranscript);
       if (prompt) {
         lastKeptPrompt = prompt;
-        messages.push({ role: 'user', content: prompt });
+        steps.flushInto(messages);
+        const ts = eventTime(entry.timestamp);
+        messages.push({ role: 'user', content: prompt, ...(ts !== undefined && { ts }) });
       }
     }
 
     if (type === 'assistant') {
       const content = entry.message?.content;
       let text = '';
+      const shown: Array<DisplayPart | null> = [];
 
       if (typeof content === 'string' && content) {
         text = content;
+        shown.push(replyTextPart(content));
       } else if (Array.isArray(content)) {
         const parts: string[] = [];
         for (const block of content as any[]) {
           if (block.type === 'text' && block.text) {
             parts.push(block.text);
+            shown.push(replyTextPart(block.text));
           } else if (block.type === 'thinking' && (block.thinking || block.text)) {
             // Claude extended thinking — render as a [Reasoning] block so the
             // web formatter highlights it separately from actions.
@@ -2835,6 +2989,7 @@ function formatJSONLMessages(raw: string, verbose: boolean): DisplayMessage[] {
             // Keep the marker on its own line so the web formatter can group
             // [Tool: ...] + args + [Output] cleanly.
             parts.push(`[Tool: ${block.name}]`);
+            shown.push(replyToolPart(block.name));
             if (argStr) parts.push(truncate(argStr));
             // Inline the matching tool_result if we found one.
             const resultText = block.id ? resultByToolUseId.get(block.id) : undefined;
@@ -2850,14 +3005,119 @@ function formatJSONLMessages(raw: string, verbose: boolean): DisplayMessage[] {
         const last = messages[messages.length - 1];
         if (last && last.role === 'assistant') {
           last.content += '\n\n' + text;
+          const more = partsField(shown).parts;
+          if (more) last.parts = [...(last.parts || []), ...more];
         } else {
-          messages.push({ role: 'assistant', content: text });
+          messages.push({ role: 'assistant', content: text, ...partsField(shown) });
         }
       }
     }
   }
 
+  steps.flushInto(messages);
   return messages;
+}
+
+/**
+ * The structured steps of each turn of a Claude-shaped JSONL transcript
+ * (Claude Code, and Cursor / Copilot through the same formatter, which carry
+ * less). Fed every line in order; `flushInto` hands the steps gathered so far
+ * to the latest prompt message when the next prompt arrives and at the end.
+ *
+ * - model: one per API response (`message.id`). Claude Code writes one line
+ *   per content block, each repeating the response's usage, so it is counted
+ *   once. It starts at the line before it (the prompt or the tool result the
+ *   model was answering) and ends at its last block.
+ * - thinking: a response that thought, from that same start to its thinking
+ *   block.
+ * - tool: from its tool_use line to its tool_result line; `is_error` marks a
+ *   failure.
+ * Sub-agent (sidechain) lines are not this conversation's steps.
+ */
+class ClaudeTurnSteps {
+  private events: DisplayEvent[] = [];
+  private lastBoundary: number | undefined;
+  private models = new Map<string, { ev: DisplayEvent; start?: number; thought: boolean }>();
+  private tools = new Map<string, DisplayEvent>();
+
+  read(entry: TranscriptLine, type: unknown): void {
+    if (entry.isSidechain) return;
+    const at = eventTime(entry.timestamp);
+    const content: unknown = entry.message?.content;
+    if (type === 'user') {
+      if (Array.isArray(content)) {
+        for (const block of content as any[]) {
+          if (block?.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue;
+          const ev = this.tools.get(block.tool_use_id);
+          if (!ev) continue;
+          const d = spanMs(ev.ts, at);
+          if (d !== undefined) ev.durationMs = d;
+          if (block.is_error === true) ev.error = true;
+          this.tools.delete(block.tool_use_id);
+        }
+      }
+      if (at !== undefined) this.lastBoundary = at;
+      return;
+    }
+    if (type !== 'assistant' || !Array.isArray(content)) return;
+    const msg: any = entry.message || {};
+    // A synthetic reply (an API error, an interrupt notice) is no model call.
+    if (msg.model === '<synthetic>') return;
+    const id = typeof msg.id === 'string' ? msg.id : undefined;
+    let call = id ? this.models.get(id) : undefined;
+    if (!call) {
+      const ev: DisplayEvent = { kind: 'model' };
+      if (this.lastBoundary !== undefined) ev.ts = this.lastBoundary;
+      if (typeof msg.model === 'string' && msg.model) ev.model = msg.model;
+      call = { ev, start: this.lastBoundary, thought: false };
+      if (id) this.models.set(id, call);
+      this.events.push(ev);
+    }
+    const d = spanMs(call.start, at);
+    if (d !== undefined) call.ev.durationMs = d;
+    const u = msg.usage;
+    if (u && typeof u === 'object') {
+      const tokens = eventTokens({
+        input: Number(u.input_tokens) || 0,
+        output: Number(u.output_tokens) || 0,
+        cacheRead: Number(u.cache_read_input_tokens) || 0,
+        cacheWrite: Number(u.cache_creation_input_tokens) || 0,
+      });
+      if (tokens) call.ev.tokens = tokens;
+    }
+    for (const block of content as any[]) {
+      if ((block?.type === 'thinking' || block?.type === 'redacted_thinking') && !call.thought) {
+        call.thought = true;
+        const ev: DisplayEvent = { kind: 'thinking' };
+        if (call.start !== undefined) ev.ts = call.start;
+        const td = spanMs(call.start, at);
+        if (td !== undefined) ev.durationMs = td;
+        this.events.push(ev);
+      } else if (block?.type === 'tool_use' && typeof block.name === 'string' && block.name) {
+        const ev: DisplayEvent = { kind: 'tool', tool: block.name };
+        if (at !== undefined) ev.ts = at;
+        const input = block.input && typeof block.input === 'object' ? block.input : {};
+        const raw = serializeToolInput(input);
+        // A tool with no single telling field serializes as pretty JSON, whose
+        // first line is a lone "{" — preview it on one line instead.
+        const preview = inputPreview(raw.trimStart().startsWith('{') ? JSON.stringify(input) : raw);
+        if (preview) ev.input = preview;
+        if (typeof block.id === 'string') this.tools.set(block.id, ev);
+        this.events.push(ev);
+      }
+    }
+  }
+
+  flushInto(messages: DisplayMessage[]): void {
+    let target: DisplayMessage | undefined;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') { target = messages[i]; break; }
+    }
+    // Steps before the first prompt (a resumed transcript's tail) have no turn.
+    if (target) appendTurnEvents(target, this.events);
+    this.events = [];
+    this.models.clear();
+  }
 }
 
 /**
@@ -2930,6 +3190,7 @@ function formatGeminiChatsJsonl(raw: string, verbose: boolean): DisplayMessage[]
 
     if (type === 'gemini' || type === 'model') {
       const parts: string[] = [];
+      const shown: Array<DisplayPart | null> = [];
       // Reasoning summaries
       if (Array.isArray(row.thoughts) && row.thoughts.length > 0) {
         const thoughtText = row.thoughts
@@ -2946,6 +3207,7 @@ function formatGeminiChatsJsonl(raw: string, verbose: boolean): DisplayMessage[]
       // Main response text
       if (typeof row.content === 'string' && row.content.trim()) {
         parts.push(row.content);
+        shown.push(replyTextPart(row.content));
       }
       // Tool calls
       if (Array.isArray(row.toolCalls)) {
@@ -2953,12 +3215,13 @@ function formatGeminiChatsJsonl(raw: string, verbose: boolean): DisplayMessage[]
           const name = tc?.name || tc?.functionCall?.name || 'tool';
           const args = tc?.args || tc?.functionCall?.args || {};
           parts.push(`[Tool: ${name}]`);
+          shown.push(replyToolPart(name));
           const argStr = serializeToolInput(args || {});
           if (argStr) parts.push(truncate(argStr));
         }
       }
       if (parts.length > 0) {
-        messages.push({ role: 'assistant', content: parts.join('\n') });
+        messages.push({ role: 'assistant', content: parts.join('\n'), ...partsField(shown) });
       }
       continue;
     }
@@ -3059,10 +3322,11 @@ function formatGeminiMessages(raw: string, verbose: boolean): DisplayMessage[] {
       if (msgType === 'gemini' || msgType === 'model') {
         if (typeof contentParts === 'string') {
           if (contentParts.trim()) {
-            messages.push({ role: 'assistant', content: contentParts });
+            messages.push({ role: 'assistant', content: contentParts, ...partsField([replyTextPart(contentParts)]) });
           }
         } else if (Array.isArray(contentParts)) {
           const parts: string[] = [];
+          const shown: Array<DisplayPart | null> = [];
           for (const part of contentParts as any[]) {
             // Reasoning takes priority over text — Gemini emits two shapes:
             //   {thought: true, text: "..."}             ← Google AI spec
@@ -3078,10 +3342,12 @@ function formatGeminiMessages(raw: string, verbose: boolean): DisplayMessage[] {
               parts.push(`[Reasoning] ${truncate(thoughtText)}`);
             } else if (part.text) {
               parts.push(part.text);
+              shown.push(replyTextPart(part.text));
             } else if (part.functionCall) {
               const args = part.functionCall.args || {};
               const argStr = serializeToolInput(args);
               parts.push(`[Tool: ${part.functionCall.name}]`);
+              shown.push(replyToolPart(part.functionCall.name));
               if (argStr) parts.push(truncate(argStr));
             } else if (part.functionResponse) {
               // Sometimes function responses are inlined in the same model
@@ -3093,7 +3359,7 @@ function formatGeminiMessages(raw: string, verbose: boolean): DisplayMessage[] {
           }
           const text = parts.join('\n');
           if (text.trim()) {
-            messages.push({ role: 'assistant', content: text });
+            messages.push({ role: 'assistant', content: text, ...partsField(shown) });
           }
         }
       }

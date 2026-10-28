@@ -12,3 +12,10 @@
 [core]
 	# A path that contains no hooks — disables ALL git hooks in fixtures.
 	hooksPath = /dev/null
+[user]
+	# Never guess an identity. A CI runner has none to guess (its account has
+	# no full name: "empty ident name ... not allowed"), while macOS guesses
+	# one from the login account — so a fixture that forgot to configure an
+	# identity passed locally and failed only on CI. Fixtures configure
+	# their own user.name/user.email.
+	useConfigOnly = true

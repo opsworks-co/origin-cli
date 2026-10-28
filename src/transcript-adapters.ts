@@ -40,6 +40,7 @@ import { discoverCursorTranscript, getCursorModelFromDb } from './agents/cursor.
 import { claudeSessionName, claudeSessionTitles, cursorSessionName } from './agent-session-name.js';
 import { querySqlite } from './utils/sqlite.js';
 import { debugLog } from './debug-log.js';
+import { partsField, type DisplayPart } from './display-parts.js';
 import {
   parseAntigravityTranscript,
   estimateAntigravityUsage,
@@ -1046,10 +1047,10 @@ export const antigravityAdapter: TranscriptAdapter = {
     // formatTranscriptForDisplay emits and the web dashboard parses. A plain
     // string here (an earlier bug) isn't valid JSON, so the web fell back to
     // user-only turns ⇒ "no response captured". role/content per turn instead.
-    const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+    const messages: Array<{ role: 'user' | 'assistant'; content: string; parts?: DisplayPart[] }> = [];
     for (let i = 0; i < t.prompts.length; i++) {
       messages.push({ role: 'user', content: t.prompts[i] || '' });
-      if (t.responses[i]) messages.push({ role: 'assistant', content: t.responses[i] });
+      if (t.responses[i]) messages.push({ role: 'assistant', content: t.responses[i], ...partsField(t.responseParts?.[i] || []) });
     }
     // NOTE: parseAntigravityTranscript re-sorts turns by created_at each parse,
     // so a prompt that arrives out of order between polls can shift array

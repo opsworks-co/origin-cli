@@ -8,6 +8,9 @@
 //
 // Plus three WRITE tools (add_todo, close_todo, record_decision) that record
 // into the same git-notes memory the hooks write — see memory-write.ts.
+// And the live task queue (list_tasks, take_task, release_task, finish_task):
+// claims with a lease on the server's issues, so parallel agents don't take
+// the same task — see task-queue.ts.
 //
 // This lived in packages/mcp-server until it was folded into the CLI. It was
 // never installed by `origin enable` and never shipped by the release
@@ -26,15 +29,18 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { loadConfig, loadAgentConfig } from '../config.js';
+import { loadConfig, loadAgentConfig, isConnectedMode } from '../config.js';
 import { cliVersion } from '../cli-version.js';
-import { fetchPolicies, startSession, endSession, updateSession, reportViolation, logToolCall, listSessions, getSession, reviewSession, listAgents, listRepos, getStats, listAuditLogs, getPolicyVersions, getAgentVersions, listNotifications, getUnreadCount, listUsers } from './api.js';
+import { originRequest, fetchPolicies, startSession, endSession, updateSession, reportViolation, logToolCall, listSessions, getSession, reviewSession, listAgents, listRepos, getStats, listAuditLogs, getPolicyVersions, getAgentVersions, listNotifications, getUnreadCount, listUsers } from './api.js';
 import { getGitRoot } from '../session-state.js';
 import { gitOrNull } from '../utils/exec.js';
 import { getFileContext } from './file-context.js';
 import { getRepoMemory } from './repo-memory.js';
 import { HISTORY_KINDS, searchHistory, type HistoryKind } from '../history-search.js';
-import { addTodoTool, closeTodoTool, recordDecisionTool } from './memory-write.js';
+import { addTodoTool, closeTodoTool, recordDecisionTool, resolveCaptureSession } from './memory-write.js';
+import { createTaskQueue } from './task-queue.js';
+import { readSessionClaims, dropSessionClaim } from '../issue-link.js';
+import { getOpenTodos } from '../todo.js';
 
 interface PolicyData {
   id: string;
@@ -151,9 +157,28 @@ const SERVER_INSTRUCTIONS = [
   '',
   'When you are about to edit a specific file, `get_file_context` returns the prompts and reasoning ' +
     'behind the lines already there.',
+  '',
+  'Several agents may work in this repo at once. Before picking up work you were not given, ' +
+    '`take_task` claims it so no other agent does the same task; `finish_task` when done.',
 ].join('\n');
 
 // Create the server
+// One per MCP server process — one agent session — so the claim tokens it
+// holds are this agent's own.
+const taskQueue = createTaskQueue({
+  request: originRequest,
+  connected: isConnectedMode,
+  openTodos: (repoRoot) => getOpenTodos(repoRoot),
+  closeTodo: (a) => closeTodoTool(a) as Record<string, unknown>,
+  addTodo: (a) => addTodoTool(a),
+  session: (repoRoot, workRoot) => {
+    const r = resolveCaptureSession(repoRoot, workRoot);
+    return 'state' in r ? { sessionId: r.state.sessionId, agentSessionId: r.state.agentSessionId, agentSlug: r.state.agentSlug } : null;
+  },
+  sessionClaims: readSessionClaims,
+  dropSessionClaim: (workRoot, sessionId, repoId, shortId) => dropSessionClaim(workRoot, sessionId, repoId, shortId),
+});
+
 const server = new Server(
   // Report the CLI's version, not a second one. The old standalone package
   // hardcoded 0.1.0 and never moved it in a month of CLI releases — with one
@@ -355,7 +380,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'add_todo',
-      description: "Leave an open TODO in THIS REPO's memory for work you are NOT doing now — a follow-up, a known gap, something to verify later — so the next agent or person sees it in get_repo_memory, search_history and `origin todo list`. Written to the repo's git notes (travels with the repo). An identical open TODO is returned instead of duplicated. Not for tracking your own in-progress steps.",
+      description: "Leave an open TODO in THIS REPO's memory for work you are NOT doing now — a follow-up, a known gap, something to verify later — so the next agent or person sees it in get_repo_memory, search_history and `origin todo list`. Written to the repo's git notes (travels with the repo), and listed on the live task queue (list_tasks) right away when Origin is reachable. An identical open TODO is returned instead of duplicated. Not for tracking your own in-progress steps.",
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -377,6 +402,58 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           repo_path: { type: 'string', description: "Path to the git repository (defaults to the server's working directory)" },
         },
         required: ['todo', 'reason'],
+      },
+    },
+    {
+      name: 'list_tasks',
+      description: "List this repo's task queue on Origin — open TODOs and issues, and which ones other agents are working on right now. Use it before starting work you were not given, to pick something nobody holds. Offline it lists the TODOs from the repo's memory note instead (no claims visible).",
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          state: { type: 'string', enum: ['ready', 'claimed', 'all'], description: 'ready (default): free to take now; claimed: held by an agent; all: everything not closed' },
+          limit: { type: 'number', description: 'Most tasks to return (default 20, max 50)' },
+          repo_path: { type: 'string', description: "Path to the git repository (defaults to the server's working directory)" },
+        },
+      },
+    },
+    {
+      name: 'take_task',
+      description: "Take a task from this repo's queue so no other agent works on it at the same time. Name it by id (from list_tasks), or leave task out to get the most important free one. You hold it for a lease (30 min by default). It renews on its own while your Origin session is live (each heartbeat and each turn it records), and list_tasks renews it too; if your session dies or sits idle, the lease runs out and the task frees itself. Then do the work and call finish_task, or release_task to give it back. Offline it tells you to work on it anyway, unclaimed.",
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          task: { type: 'string', description: 'The task id, e.g. "ori-a3f2", "511e4071" or "#123". Omit to take the next ready task.' },
+          lease_minutes: { type: 'number', description: 'How long to hold it before it must be renewed (5–120, default 30)' },
+          repo_path: { type: 'string', description: "Path to the git repository (defaults to the server's working directory)" },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'release_task',
+      description: 'Give back a task you took with take_task, without finishing it — you are blocked, or it turned out to be the wrong task. It goes back to the queue for the next agent.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          task: { type: 'string', description: 'The task id take_task returned' },
+          repo_path: { type: 'string', description: "Path to the git repository (defaults to the server's working directory)" },
+        },
+        required: ['task'],
+      },
+    },
+    {
+      name: 'finish_task',
+      description: "Say you finished a task you took with take_task. An Origin or GitHub/GitLab issue closes now; a TODO from the repo's memory is recorded as done and closes once the work is on main (its closure is also written to the memory note, as close_todo does). Give the commit that carries the work.",
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          task: { type: 'string', description: 'The task id take_task returned' },
+          resolution: { type: 'string', description: 'What was done' },
+          commit_sha: { type: 'string', description: 'The commit carrying the work' },
+          pr_url: { type: 'string', description: 'The pull request, if one is open' },
+          repo_path: { type: 'string', description: "Path to the git repository (defaults to the server's working directory)" },
+        },
+        required: ['task', 'resolution'],
       },
     },
     {
@@ -694,12 +771,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
     }
 
+    // The live task queue (task-queue.ts): a refusal comes back as { error }, never a throw.
+    case 'list_tasks':
+    case 'take_task':
+    case 'release_task':
+    case 'finish_task': {
+      try {
+        const a = (args || {}) as any;
+        const result = name === 'list_tasks' ? await taskQueue.listTasks(a)
+          : name === 'take_task' ? await taskQueue.takeTask(a)
+          : name === 'release_task' ? await taskQueue.releaseTask(a)
+          : await taskQueue.finishTask(a);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
     // The write tools: a refusal comes back as { error }, never a throw.
-    case 'add_todo':
+    // add_todo also lists the new TODO on the server's queue (task-queue.ts).
+    case 'add_todo': {
+      try {
+        return { content: [{ type: 'text', text: JSON.stringify(await taskQueue.addTodo(args || {})) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
     case 'close_todo':
     case 'record_decision': {
       try {
-        const run = name === 'add_todo' ? addTodoTool : name === 'close_todo' ? closeTodoTool : recordDecisionTool;
+        const run = name === 'close_todo' ? closeTodoTool : recordDecisionTool;
         return { content: [{ type: 'text', text: JSON.stringify(run(args || {})) }] };
       } catch (err: any) {
         return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };

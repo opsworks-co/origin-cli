@@ -10,7 +10,7 @@ interface Issue {
   id: string;
   title: string;
   description?: string;
-  type: 'bug' | 'feature' | 'task' | 'chore';
+  type: 'bug' | 'feature' | 'task' | 'chore' | 'epic';
   priority: number; // 1 = critical, 2 = high, 3 = medium, 4 = low
   status: 'open' | 'in-progress' | 'blocked' | 'closed';
   labels: string[];

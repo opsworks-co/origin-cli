@@ -99,7 +99,9 @@ describe('no producer cuts a diff at a byte offset', () => {
   it('has no `.slice(0, 200_000)` or `.slice(0, MAX_PROMPT_DIFF_LEN)` outside comments', () => {
     const offenders: string[] = [];
     for (const f of files) {
-      fs.readFileSync(f, 'utf8').split('\n').forEach((line, i) => {
+      // \r?\n: a CRLF checkout (Windows autocrlf) leaves a `\r` that `.` does
+      // not match, so the comment strip below would keep the whole comment.
+      fs.readFileSync(f, 'utf8').split(/\r?\n/).forEach((line, i) => {
         const code = line.replace(/\/\/.*$/, '').trim();
         if (code.startsWith('*') || code.startsWith('/*')) return;
         if (/\.slice\(0,\s*(200_000|200000|MAX_PROMPT_DIFF_LEN)\)/.test(code)) offenders.push(`${path.relative(src, f)}:${i + 1}`);

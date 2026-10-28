@@ -188,6 +188,25 @@ describe('shellWindowEdits — the turn window becomes edits', () => {
     expect(skipped).toContainEqual({ file: 'big.txt', reason: 'too-large' });
   });
 
+  it('splits a big file changed near both ends into one anchored edit per region', () => {
+    // A lockfile after a dependency bump (d403e181's pnpm-lock.yaml): the one
+    // head-to-tail trim is still the whole file, but each hunk is tiny.
+    const mid = Array.from({ length: 40 }, (_, i) => `line ${i}`);
+    const before = ['top: 1', ...mid, 'end: 1', ''].join('\n');
+    const after = ['top: 2', ...mid, 'end: 2', ''].join('\n');
+    const { edits, skipped } = shellWindowEdits(
+      deps(['pnpm-lock.yaml'], { 'pnpm-lock.yaml': before }, { 'pnpm-lock.yaml': after }),
+      { baselineSha: 'sha', maxFileBytes: 200 },
+    );
+    expect(skipped).toEqual([]);
+    expect(edits.map((e) => [e.op, e.oldStart, e.newStart])).toEqual([['edit', 1, 1], ['edit', 39, 39]]);
+    expect(edits[0].oldContent).toBe(['top: 1', 'line 0', 'line 1', 'line 2'].join('\n'));
+    expect(edits[0].newContent).toBe(['top: 2', 'line 0', 'line 1', 'line 2'].join('\n'));
+    expect(edits[1].oldContent).toBe(['line 37', 'line 38', 'line 39', 'end: 1', ''].join('\n'));
+    expect(edits[1].newContent).toBe(['line 37', 'line 38', 'line 39', 'end: 2', ''].join('\n'));
+    expect(edits.every((e) => e.evidence === 'turn_window')).toBe(true);
+  });
+
   it('claims nothing without a baseline — no baseline, no window, no guessing', () => {
     const { edits } = shellWindowEdits(
       deps(['a.ts'], {}, { 'a.ts': 'x\n' }),

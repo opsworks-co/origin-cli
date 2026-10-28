@@ -36,6 +36,7 @@ import { fileURLToPath } from 'url';
 import { throughLiveInstall } from './live-install-path.js';
 import {
   readRolloutCwd,
+  codexParentThreadOf,
   parseCodexRolloutLive,
   isCodexInternalSubroutine,
   codexApplyPatchesToDiff,
@@ -276,6 +277,12 @@ export function listActiveRollouts(
             if (now - mtimeMs > sinceMs) continue;
             const idMatch = f.match(THREAD_ID_RE);
             if (!idMatch) continue;
+            // A child thread (auto-review, or a sub-agent the chat spawned) is
+            // not a session: it replays the chat's history, so it would be a
+            // copy of the chat's prompt with the child's edits. Its usage is
+            // counted in the chat (codexReviewCalls). An unreadable head is a
+            // rollout still being created — looked at again next poll.
+            if (codexParentThreadOf(fp) !== null) continue;
             const cwd = readRolloutCwd(fp);
             if (!cwd) continue;
             results.push({ rolloutPath: fp, threadId: idMatch[1], cwd, mtimeMs });
@@ -565,7 +572,10 @@ export async function reconcileThread(
     // whenever the incoming one is non-empty, so a turn that finished right
     // after it stopped being `latest` still converges to its full diff, and the
     // re-send is otherwise idempotent.
-    if (patches.length > 0) {
+    // A turn that spawned a sub-agent: the sub-agent's patches are in its own
+    // rollout, so this one's are only part of the turn — the git range below
+    // sees all of it.
+    if (patches.length > 0 && !parsed.spawnedAgentPrompts?.includes(i)) {
       // The turn's own shadow is the file state its patches were applied to, so
       // it's what turns Codex's bare `@@` markers into real line numbers.
       // Without it every Update-File hunk rendered as starting at line 1 in the

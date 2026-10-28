@@ -107,7 +107,41 @@ export function detectTools(): string[] {
   const mcpTools = detectMCPServers();
   for (const tool of mcpTools) found.add(tool);
 
+  // Installed is not usable for Gemini: Google retired the Gemini CLI for
+  // personal accounts ("migrate to Antigravity", 2026-10). The web's Start
+  // menu offers Gemini only where it can run (see geminiCanRun).
+  if (found.has('gemini') && geminiCanRun()) found.add(GEMINI_USABLE_TOOL);
+
   return [...found].sort();
+}
+
+/** Reported beside `gemini` when the Gemini CLI can actually run here. */
+export const GEMINI_USABLE_TOOL = 'gemini-api-key';
+
+/** Gemini auth types that still work: an API key, Vertex AI, or Google Cloud credentials. */
+const GEMINI_RUNNABLE_AUTH = new Set(['gemini-api-key', 'vertex-ai', 'compute-default-credentials', 'cloud-shell']);
+
+/**
+ * Can the Gemini CLI run on this machine? An API key or Vertex in the
+ * environment or `~/.gemini/.env`, or a non-personal auth type in
+ * `~/.gemini/settings.json`. The personal Google login (`oauth-personal`) is
+ * refused by Google now: "This client is no longer supported for Gemini Code
+ * Assist for individuals".
+ */
+export function geminiCanRun(env: NodeJS.ProcessEnv = process.env, home: string = os.homedir()): boolean {
+  const truthy = (v: string | undefined) => !!v && v !== '0' && v.toLowerCase() !== 'false';
+  if (env.GEMINI_API_KEY || env.GOOGLE_API_KEY || truthy(env.GOOGLE_GENAI_USE_VERTEXAI)) return true;
+  try {
+    const dotenv = fs.readFileSync(path.join(home, '.gemini', '.env'), 'utf-8');
+    if (/^\s*(?:export\s+)?(GEMINI_API_KEY|GOOGLE_API_KEY)\s*=\s*\S/m.test(dotenv)) return true;
+    if (/^\s*(?:export\s+)?GOOGLE_GENAI_USE_VERTEXAI\s*=\s*(true|1)\b/im.test(dotenv)) return true;
+  } catch { /* no .env */ }
+  try {
+    const s = JSON.parse(fs.readFileSync(path.join(home, '.gemini', 'settings.json'), 'utf-8'));
+    const type = s?.security?.auth?.selectedType ?? s?.selectedAuthType;
+    if (typeof type === 'string' && GEMINI_RUNNABLE_AUTH.has(type)) return true;
+  } catch { /* no settings */ }
+  return false;
 }
 
 /**

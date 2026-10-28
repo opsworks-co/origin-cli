@@ -8,7 +8,7 @@
 // 452a8cca).
 //
 // This forces it without touching Origin's state: a second live session in the
-// SAME working tree. user-prompt-submit records the peer
+// SAME working tree, mid-turn. user-prompt-submit records the peer
 // (`noteCheckoutContention` → `contendingSessionIds`), which makes
 // preferShadowRangeForTurns stand down, and the ledger declines with "another
 // live session shares this working tree". Nothing else can own the turn, so
@@ -177,12 +177,12 @@ describe.skipIf(!haveDist)('a shared checkout forces the legacy reconstruction',
   });
 
   it('a live sibling in the same tree leaves the turn to the legacy path, which names only what it shows', async () => {
-    // The sibling: a chat parked in the same checkout, still live.
+    // The sibling: a chat in the same checkout with a turn still open. A
+    // sibling that had already Stopped would be idle through the working turn
+    // and, rightly, no rival (capture-e2e-idle-sibling-does-not-contend).
     expect((await run(SIBLING_CONV, 'session-start', { source: 'startup' })).code).toBe(0);
     say(SIBLING_CONV, 'what does this repo do?');
     expect((await run(SIBLING_CONV, 'user-prompt-submit', { prompt: 'what does this repo do?' })).code).toBe(0);
-    assistantSays(SIBLING_CONV, 'It is a demo.');
-    expect((await run(SIBLING_CONV, 'stop', { stop_hook_active: false })).code).toBe(0);
 
     // The working session, in the same tree.
     expect((await run(WORK_CONV, 'session-start', { source: 'startup' })).code).toBe(0);

@@ -8,7 +8,7 @@ import { buildFileAttributionContext } from '../../attribution.js';
 import { buildFileCard, filesNamedByCommand } from '../../file-card.js';
 import { isConnectedMode, loadConfig } from '../../config.js';
 import { debugLog } from '../../debug-log.js';
-import { createShadowCommit, getDirtyFiles } from '../../git-capture.js';
+import { createShadowCommit, getDirtyFiles, readFileAtRev } from '../../git-capture.js';
 import { normalizeToolHookPayload } from '../../hook-payload.js';
 import { isMemoryReadCommand, isMemoryReadToolName } from '../../memory.js';
 import { anchorEditPositions, extractEditsFromToolCall } from '../../prompt-capture/index.js';
@@ -21,14 +21,15 @@ import type { TreeProbe } from '../../shell-command-probe.js';
 import { commandWritesFiles, isShellTool, shellCommandText } from '../../shell-write-capture.js';
 import { commandMakesCommit, gitAliasResolver } from '../../commit-command-in-flight.js';
 import { recordGitPathspecs } from '../../git-pathspec-names.js';
-import { commandMovesTree, filesMovedByCommand, markReflog, recordGitMovedFiles } from '../../git-moved-files.js';
+import { blobsOfWorkingFiles, commandMovesTree, filesMovedByCommand, filesOfStoppedOperation, gitLeftBlobsForTurn, markReflog, recordGitLeftFiles, recordGitMovedFiles } from '../../git-moved-files.js';
 import { isSubagentSpawnTool } from '../../subagent-tools.js';
 import { recordWriteTree } from '../../session-write-trees.js';
+import { recordForeignTrees } from '../../foreign-trees.js';
 import { spawn } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, PENDING_WRITE_TTL_MS, STABLE_SESSION_ID_AGENTS, baselineShaForTree, currentSessionWorkTree, resumeEndedConversationState, editContentBytes, enforceBudgetLockout, findStateForHookInput, isInsideRepo, liveCaptureEnabled, liveLedgerBytes, recordProbedShellEdits } from '../hooks.js';
+import { LIVE_EDIT_CONTENT_MAX, LIVE_EDIT_MAX_TOTAL_BYTES, repoRemoteUrl, PENDING_WRITE_TTL_MS, STABLE_SESSION_ID_AGENTS, baselineShaForTree, currentSessionWorkTree, resumeEndedConversationState, editContentBytes, enforceBudgetLockout, fileNamedInCommand, findStateForHookInput, isInsideRepo, liveCaptureEnabled, liveLedgerBytes, recordProbedShellEdits } from '../hooks.js';
 
 
 /** Cap so a long session cannot grow the claim list without bound. */
@@ -165,7 +166,7 @@ export async function attachReposForFiles(
   let mutated = false;
   for (const root of newRoots) {
     try {
-      await api.attachRepo(state.sessionId, root);
+      await api.attachRepo(state.sessionId, root, repoRemoteUrl(root));
     } catch (err: any) {
       debugLog('attach-repo', 'failed (non-fatal)', { root, error: err?.message });
       continue;
@@ -278,6 +279,14 @@ export async function handlePreToolUse(rawInput: Record<string, any>, agentSlug?
   if (filePaths.length > 0) {
     debugLog('pre-tool-use', 'extracted paths', { filePaths, toolName: input.tool_name });
   }
+  // A checkout of ANOTHER repository this call reaches: a commit there finds
+  // no session in its own .git, and the commit hooks look for it in this
+  // record (foreign-trees.ts). Persisted by the save at the end of this hook.
+  recordForeignTrees(state, {
+    cwd: hookCwd,
+    command: isShellTool(input.tool_name || '') ? shellCommandText(toolInput) : undefined,
+    filePaths: isShellTool(input.tool_name || '') ? [] : filePaths,
+  });
 
   // ── Did this session read its memory? ───────────────────────────────────
   // Session-start hands the agent a directive to read the repo's Origin memory
@@ -591,7 +600,8 @@ export const LIVE_EDIT_MAX_ENTRIES = 2000;
  * begins with "Error:"); some agents put a `success: false` or a top-level
  * `error` alongside it. Unknown shapes are treated as SUCCESS — a capture we
  * wrongly keep is a wrong number, but a capture we wrongly drop is lost work,
- * and the second is unrecoverable.
+ * and the second is unrecoverable. (Gemini's object-valued `error` is read
+ * by geminiToolCallFailed only, for Gemini payloads only.)
  */
 export function toolCallFailed(input: Record<string, any>): boolean {
   if (!input || typeof input !== 'object') return false;
@@ -604,6 +614,37 @@ export function toolCallFailed(input: Record<string, any>): boolean {
     if (typeof res.error === 'string' && res.error.trim()) return true;
   }
   return false;
+}
+
+/**
+ * toolCallFailed for a Gemini AfterTool payload. Gemini CLI hands over the
+ * tool's own ToolResult, `{ llmContent, returnDisplay, error? }`, whose
+ * `error` is an object (`{ message, type }`) set exactly when the call
+ * failed. Other agents keep the generic rule: an object-shaped `error` there
+ * is an unknown shape, and unknown shapes stay SUCCESS.
+ */
+export function geminiToolCallFailed(input: Record<string, any>): boolean {
+  if (toolCallFailed(input)) return true;
+  const res = input && typeof input === 'object' ? ((input as any).tool_response ?? (input as any).toolResponse) : undefined;
+  return !!res && typeof res === 'object' && !!res.error && typeof res.error === 'object';
+}
+
+/** The failure rule for this session's agent: Gemini's, or the generic one. */
+function agentToolCallFailed(state: SessionState, input: Record<string, any>): boolean {
+  return state.agentSlug === 'gemini' ? geminiToolCallFailed(input) : toolCallFailed(input);
+}
+
+/**
+ * Did this Gemini AfterTool payload PROVE the call succeeded? Gemini's
+ * scheduler marks a call successful exactly when its ToolResult has no
+ * `error`, and AfterTool receives that ToolResult. So proof is a ToolResult
+ * (`llmContent` present) without an error; a payload without one names an
+ * edit whose outcome is unknown, which is kept but proves nothing (G3).
+ */
+export function geminiToolSucceeded(input: Record<string, any>): boolean {
+  if (!input || typeof input !== 'object' || geminiToolCallFailed(input)) return false;
+  const res = (input as any).tool_response ?? (input as any).toolResponse;
+  return !!res && typeof res === 'object' && !Array.isArray(res) && 'llmContent' in res;
 }
 
 export function recordLiveEdits(state: SessionState, input: Record<string, any>, repoPath: string): boolean {
@@ -660,7 +701,7 @@ export function recordLiveEdits(state: SessionState, input: Record<string, any>,
     // prompt-capture/index.ts). Session cb853c02 turn 2 read +240 on a file
     // git says gained +124: one failed 5→121-line Edit, captured, plus the
     // successful retry of the same block.
-    if (toolCallFailed(input)) {
+    if (agentToolCallFailed(state, input)) {
       debugLog('post-tool-use', 'live edit skipped — tool reported an error', { tool: toolName });
       return false;
     }
@@ -691,7 +732,10 @@ export function recordLiveEdits(state: SessionState, input: Record<string, any>,
     // fires after the tool wrote the file, so the on-disk content reflects
     // the edit and we can read the true position the blame gutter shows.
     // Without this the server synthesizes line numbers from line 1.
-    for (const e of edits) e.evidence = 'tool_call';
+    // Gemini's edit is proof only when its ToolResult says it landed (G3);
+    // otherwise the entry still lists the file but carries no evidence.
+    const proven = state.agentSlug !== 'gemini' || geminiToolSucceeded(input);
+    if (proven) for (const e of edits) e.evidence = 'tool_call';
     anchorEditPositions(edits, repoPath);
     if (!state.liveEdits) state.liveEdits = [];
     if (state.liveEdits.length >= LIVE_EDIT_MAX_ENTRIES || liveLedgerBytes(state) >= LIVE_EDIT_MAX_TOTAL_BYTES) {
@@ -900,7 +944,7 @@ export function noteWrittenTree(state: SessionState, input: Record<string, any>,
     if (!liveCaptureEnabled()) return false;
     const toolName = String(input.tool_name || '');
     if (!toolName || isShellTool(toolName)) return false;
-    if (toolCallFailed(input)) return false;
+    if (agentToolCallFailed(state, input)) return false;
     const toolInput =
       (input.tool_input && typeof input.tool_input === 'object') ? input.tool_input
         : (input.toolInput && typeof input.toolInput === 'object') ? input.toolInput
@@ -1086,6 +1130,27 @@ export function beginShellProbe(state: SessionState, input: Record<string, any>)
   }
 }
 
+/**
+ * The files a stopped operation left in `tree` during this turn that now hold
+ * exactly what the turn started with — absent then and now included.
+ */
+function leftFilesBackAtStart(state: SessionState, tree: string, baselineSha: string | undefined, promptIndex: number): string[] {
+  const out: string[] = [];
+  const left = gitLeftBlobsForTurn(state, promptIndex, tree);
+  if (left.size === 0 || !baselineSha) return out;
+  for (const f of left.keys()) {
+    let now: string | null = null;
+    try {
+      const abs = path.join(tree, f);
+      now = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : null;
+    } catch { continue; }
+    let started: string | null = null;
+    try { started = readFileAtRev(tree, baselineSha, f); } catch { started = null; }
+    if (now === started) out.push(f);
+  }
+  return out;
+}
+
 // Command text is kept only to answer "did this command name this file?", so
 // a couple of KB is plenty and keeps the state file small.
 export const SHELL_COMMAND_MAX = 4096;
@@ -1169,21 +1234,68 @@ export function endShellProbe(state: SessionState, input: Record<string, any>): 
       const touched = touchedSince(
         { tree: before.tree, stamps: before.stamps, skipped: before.skipped }, after,
       );
+      // A file a stopped operation of this turn had left in the tree, now
+      // back at the turn's start: this command (an abort) rewrote it, but it
+      // ended CLEAN and touchedSince lists only files dirty after. Hand it on
+      // so its record and any earlier entry for it settle.
+      if (before.headBefore) {
+        for (const f of leftFilesBackAtStart(state, before.tree, before.baselineSha, before.promptIndex)) {
+          if (!touched.includes(f)) touched.push(f);
+        }
+      }
       // A tree-moving command: what it changed is git's. The dirty files whose
       // stamps moved, PLUS every file that differs between HEAD before and
       // after — a file a pull brings down ends clean, so the dirty-file probe
       // alone never sees it (the live repro of TODO e87a35d5).
+      //
+      // git's in THIS channel too, not only in the journal's. Session 4c7cbc7e
+      // prompt 2 ran `git rebase <main>` on a PR branch; it stopped on a
+      // conflict with the PR's files dirty, and the probe recorded 13 of them
+      // as the turn's `command_probe` edits a line after naming them git's.
+      // The ledger proved the turn wrote nothing, but a row naming no files
+      // keeps its watched edits (trim-watched-edits.ts), so the card read 9
+      // files, +320/-26 of another session's PR.
+      //
+      // Only a touched file git really moved: one that differs along the HEADs
+      // the command passed through, or between HEAD and the commit a stopped
+      // merge/pick is applying. `echo x > notes.md && git checkout main` keeps
+      // notes.md. A file the command NAMED stays the turn's too — `git
+      // checkout --theirs f` is its own act — and a moved file that ends at
+      // the turn's start still clears an earlier edit.
+      let gitsOnly: Set<string> | undefined;
       if (before.headBefore) {
-        const moved = [
-          ...touched,
-          ...filesMovedByCommand(before.tree, before.headBefore, getHeadSha(before.tree), before.reflogMark),
-        ];
+        const byHeads = filesMovedByCommand(before.tree, before.headBefore, getHeadSha(before.tree), before.reflogMark);
+        const stopped = touched.length > 0 ? filesOfStoppedOperation(before.tree) : [];
+        const gitBrought = new Set([...byHeads, ...stopped]);
+        gitsOnly = new Set(touched.filter((f) =>
+          gitBrought.has(f) && !fileNamedInCommand(before.command || '', f, before.tree)));
+        const moved = [...touched, ...byHeads];
         if (moved.length > 0) {
           recordGitMovedFiles(state, before.promptIndex, before.tree, moved);
           changed = true;
           debugLog('post-tool-use', 'tree-moving command — files recorded as git\'s', {
             promptIndex: before.promptIndex, tree: before.tree, files: new Set(moved).size,
           });
+        }
+        // The command STOPPED on a conflict. What it left in the files it
+        // moved — one side, or both sides and the markers — is in no commit,
+        // and it is the state the turn's next write to them really changes:
+        // a heredoc resolving the conflict, `git checkout --theirs f`. Read
+        // from the turn's start instead, that write billed the turn the
+        // incoming branch's lines (TODO 1de72a6e; session 8a0a80ae turn 1).
+        // Kept as blobs, keyed by turn and file, and consulted before the
+        // shadow by the probe, the shell window and the ledger. A file the
+        // command NAMED is not recorded: `git checkout --theirs f` choosing a
+        // side is the turn's act, measured from what the conflict left.
+        if (stopped.length > 0 && gitsOnly.size > 0) {
+          const left = blobsOfWorkingFiles(before.tree, gitsOnly);
+          if (left.size > 0) {
+            recordGitLeftFiles(state, before.promptIndex, before.tree, left);
+            changed = true;
+            debugLog('post-tool-use', 'stopped operation — what git left in its files recorded', {
+              promptIndex: before.promptIndex, tree: before.tree, files: left.size,
+            });
+          }
         }
       }
       if (touched.length === 0) continue;
@@ -1192,7 +1304,7 @@ export function endShellProbe(state: SessionState, input: Record<string, any>): 
       // per-probe.
       if (recordProbedShellEdits(
         state, before.tree, before.baselineSha, before.promptIndex, touched,
-        { command: before.command },
+        { command: before.command, ...(gitsOnly && gitsOnly.size > 0 ? { settleOnly: gitsOnly } : {}) },
       )) changed = true;
       // The probe is evidence a write LANDED in this tree — the shell half of
       // noteWrittenTree, and the only observation for a sub-agent that writes

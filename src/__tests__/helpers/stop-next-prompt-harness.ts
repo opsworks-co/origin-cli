@@ -79,7 +79,12 @@ export interface AgentSession {
   stop: () => Promise<void>;
 }
 
-export async function createHarness(sessionId: string, serverSession: string): Promise<Harness> {
+export async function createHarness(
+  sessionId: string,
+  serverSession: string,
+  // A test's own answer for a request; undefined falls through to the defaults.
+  opts: { respond?: (method: string, url: string, body: any) => unknown } = {},
+): Promise<Harness> {
   const hits: Hit[] = [];
   const siblings: string[] = [];
   const server = http.createServer((req, res) => {
@@ -98,7 +103,10 @@ export async function createHarness(sessionId: string, serverSession: string): P
       hits.push({ method: req.method || '', url: req.url || '', body, closedOnDisk, promptsOnDisk });
       res.setHeader('content-type', 'application/json');
       const u = req.url || '';
-      if (req.method === 'POST' && u.startsWith('/api/mcp/session/start')) {
+      const custom = opts.respond?.(req.method || '', u, body);
+      if (custom !== undefined) {
+        res.end(JSON.stringify(custom));
+      } else if (req.method === 'POST' && u.startsWith('/api/mcp/session/start')) {
         // A sibling session in the same checkout gets its own server row.
         if (process.env.E2E_DUMP_FILE) fs.appendFileSync(process.env.E2E_DUMP_FILE, `START ${raw.slice(0, 600)}\n`);
         const sib = siblings.find((id) => raw.includes(id));

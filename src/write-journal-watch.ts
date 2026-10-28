@@ -17,6 +17,7 @@ import {
 import { shouldIgnoreFile, isOriginAutoManagedPath } from './ignore-patterns.js';
 import { snapshotFile, storeBytes, pruneUnreferenced, MAX_STORE_BYTES } from './write-journal-store.js';
 import { debugLog } from './debug-log.js';
+import { watchDirTree } from './dir-tree-watch.js';
 
 /** Retention: comfortably longer than any single turn, far shorter than a session. */
 export const JOURNAL_KEEP_MS = 6 * 60 * 60 * 1000;
@@ -169,6 +170,75 @@ export interface JournalOptions {
    * caller that needs it gets it without having to remember to ask.
    */
   holdProcessOpen?: boolean;
+  /**
+   * Watch one directory at a time (dir-tree-watch.ts) instead of
+   * `fs.watch(recursive)`. Defaults to on for Linux, where Node's recursive
+   * watch loses files git replaces and cannot be unref'd; a test seam
+   * elsewhere.
+   */
+  perDirectory?: boolean;
+  /**
+   * Drop events for files untouched since the watcher started (see
+   * `untouchedSinceStart`). Defaults to on for macOS's native recursive watch,
+   * the one backend that delivers writes made before it existed; a test seam
+   * elsewhere.
+   */
+  dropPreStartEvents?: boolean;
+}
+
+/**
+ * Was this file last changed BEFORE the watcher started?
+ *
+ * macOS's recursive fs.watch is FSEvents, which delivers events late and
+ * delivers ones from just before the stream opened. A file written a few ms
+ * before a turn's watcher started arrived ~60 ms after it and was journalled
+ * as that turn's write — the test that caught it wrote a file in setup, then
+ * started the watcher, and the journal billed the setup write to the turn.
+ *
+ * ctime, not mtime: mtime is whatever `touch -d`, `cp -p` or `tar x` set it
+ * to, so an old mtime proves nothing (see mtime-is-not-a-change-signal).
+ * ctime cannot be set from userland and moves on every write, chmod, link and
+ * rename (a file moved into the tree gets a fresh one), so a ctime before the
+ * start means the inode — bytes and name — is exactly what it was when the
+ * watcher began: the same thing a content hash of a start baseline would say,
+ * without hashing the tree. macOS stamps files from the precise clock
+ * Date.now() reads, so there is no tick of slack to allow for.
+ *
+ * A ctime in the SAME millisecond as the start is dropped too. `startedAt` is
+ * Date.now(), a whole millisecond cut down from the real instant; ctime keeps
+ * the sub-millisecond part. A setup write at …029.022 and a start stamped …029
+ * (the real start anywhere in …029.000–.999) cannot be ordered, and a write the
+ * turn cannot be shown to have made is not the turn's: an underclaim, never a
+ * setup write billed to the turn. Caught on macOS with exactly those numbers;
+ * a plain `ctimeMs <= startedAt` let it through.
+ *
+ * Not used on Linux or Windows: inotify and ReadDirectoryChangesW never report
+ * a write from before the watch, Linux stamps files from a coarse clock that
+ * can run a few ms behind Date.now() (a real write just after the start could
+ * look earlier), and the per-directory watcher announces the files of a
+ * directory moved in whole, whose ctimes are old and whose arrival is work.
+ */
+export function untouchedSinceStart(st: { ctimeMs: number }, startedAt: number): boolean {
+  return Number.isFinite(st.ctimeMs) && Math.floor(st.ctimeMs) <= startedAt;
+}
+
+/**
+ * Does a recursive-watch notification name the watched root ITSELF?
+ *
+ * FSEvents reports changes to the root directory too — as `.`, as the root's
+ * absolute path, or as its bare name resolved against the parent. None of them
+ * is a file in the tree, but joined onto the root they name a path that does
+ * not exist, the stat fails, and the event was journalled as a DELETE. Any
+ * root, not one test's temp prefix. A top-level file that happens to share the
+ * root's own name is dropped with them: an underclaim, where the alternative
+ * is a delete nobody made.
+ */
+export function isWatchedRootEvent(rel: string, root: string): boolean {
+  const name = String(rel ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
+  if (name === '' || name === '.') return true;
+  const top = path.resolve(root);
+  if (path.isAbsolute(name)) return path.resolve(name) === top;
+  return !name.includes('/') && name === path.basename(top);
 }
 
 /**
@@ -247,7 +317,7 @@ export function startWriteJournal(
   // legacy reconstruction. Say so once per watcher, not per keystroke.
   let appendFailureLogged = false;
   let stopped = false;
-  let watcher: fs.FSWatcher | null = null;
+  let watcher: { close(): void; on(event: 'error', fn: (err: unknown) => void): unknown } | null = null;
   const lockPath = opts.lockPath ?? journalPath.replace(/\.jsonl$/, '') + '.lock';
   let heartbeat: NodeJS.Timeout | undefined;
   const release = (): void => {
@@ -343,6 +413,11 @@ export function startWriteJournal(
     }
   };
 
+  const perDirectory = opts.perDirectory ?? process.platform === 'linux';
+  const dropPreStart = opts.dropPreStartEvents ?? (process.platform === 'darwin' && !perDirectory);
+  // The real clock, not opts.now: it is compared with the filesystem's stamps.
+  const startedAt = Date.now();
+
   try {
     fs.mkdirSync(path.dirname(journalPath), { recursive: true });
     // recursive:true is native on macOS and Windows and supported on Linux
@@ -361,9 +436,14 @@ export function startWriteJournal(
     // caller treats an empty journal as "no journal here, use the window".
     // Verified by running the built binary: it exited immediately before this
     // change and stays up after it.
-    watcher = fs.watch(repoPath, { recursive: true, persistent: true }, (_event, filename) => {
+    const onEvent = (_event: string, filename: string | Buffer | null): void => {
       if (stopped || !filename) return;
       const rel = String(filename).replace(/\\/g, '/');
+      // FSEvents' notification for the root directory itself: not a file, and
+      // not a delete. Only where FSEvents runs (the same switch as the
+      // pre-start filter); Windows and the per-directory watcher keep their
+      // semantics, a top-level file named like the root included.
+      if (dropPreStart && !perDirectory && isWatchedRootEvent(rel, repoPath)) return;
       // Tests and custom callers may put the journal inside the watched tree.
       // Never observe our own lock entries, snapshots, or compaction temp files.
       const absolute = path.resolve(repoPath, rel);
@@ -383,13 +463,30 @@ export function startWriteJournal(
       try {
         const st = fs.statSync(path.join(repoPath, rel));
         if (!st.isFile()) return;
+        if (dropPreStart && untouchedSinceStart(st, startedAt)) return;
         if (Number.isFinite(st.mtimeMs)) mtime = st.mtimeMs;
       } catch {
         // Gone by the time we looked — a delete. Still this turn's doing.
         gone = true;
       }
       append(rel, gone, mtime);
-    });
+    };
+    const holdOpen = opts.holdProcessOpen ?? (process.env.ORIGIN_JOURNAL_IS_WATCHER === '1');
+    if (perDirectory) {
+      // A directory every file under which is ignored need not be watched at
+      // all: `_` is a name no file pattern targets, so only directory rules
+      // (node_modules/**, .git/) match it.
+      const tree = watchDirTree(repoPath, { persistent: true, skipDir: (rel) => isJournalIgnored(`${rel}/_`) }, onEvent);
+      if (!holdOpen) tree.unref();
+      watcher = tree;
+    } else {
+      const fsWatcher = fs.watch(repoPath, { recursive: true, persistent: true }, onEvent);
+      if (!holdOpen) {
+        // See the note on unref() below.
+        try { (fsWatcher as unknown as { unref?: () => void }).unref?.(); } catch { /* ignore */ }
+      }
+      watcher = fsWatcher;
+    }
     watcher.on('error', () => { stopped = true; release(); try { watcher?.close(); } catch { /* ignore */ } });
 
     // …but only the dedicated watcher PROCESS may be held open by it.
@@ -410,12 +507,10 @@ export function startWriteJournal(
     // journal is still written — and stops it being a reason for the process to
     // stay alive. A missed close is a leak again rather than a hang, which is
     // the failure mode a caller can survive.
-    const holdOpen = opts.holdProcessOpen ?? (process.env.ORIGIN_JOURNAL_IS_WATCHER === '1');
-    if (!holdOpen) {
-      // Not on every Node/platform combination; a watcher without it simply
-      // keeps the old behaviour rather than failing to start.
-      try { (watcher as unknown as { unref?: () => void }).unref?.(); } catch { /* ignore */ }
-    }
+    //
+    // Not on every Node/platform combination, and on Linux Node 20's recursive
+    // watcher has an unref() that does nothing — which is why Linux watches
+    // per directory above (dir-tree-watch.ts).
   } catch {
     release();
     return null;

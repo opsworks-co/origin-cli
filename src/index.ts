@@ -38,6 +38,8 @@ const intentReviewCommand = lazy(() => import('./commands/intent-review.js'), 'i
 const preReviewCommand = lazy(() => import('./commands/pre-review.js'), 'preReviewCommand');
 const agentsCommand = lazy(() => import('./commands/agents.js'), 'agentsCommand');
 const agentCreateCommand = lazy(() => import('./commands/agents.js'), 'agentCreateCommand');
+const agentsCheckAction = lazy(() => import('./commands/agent-setup.js'), 'agentsCheckAction');
+const agentsLoginAction = lazy(() => import('./commands/agent-setup.js'), 'agentsLoginAction');
 const reposCommand = lazy(() => import('./commands/repos.js'), 'reposCommand');
 const repoAddCommand = lazy(() => import('./commands/repos.js'), 'repoAddCommand');
 const auditCommand = lazy(() => import('./commands/audit.js'), 'auditCommand');
@@ -147,6 +149,7 @@ const snapshotSaveCommand = lazy(() => import('./commands/snapshot.js'), 'snapsh
 const snapshotListCommand = lazy(() => import('./commands/snapshot.js'), 'snapshotListCommand');
 const snapshotRestoreCommand = lazy(() => import('./commands/snapshot.js'), 'snapshotRestoreCommand');
 const snapshotCleanCommand = lazy(() => import('./commands/snapshot.js'), 'snapshotCleanCommand');
+const revertPromptCommand = lazy(() => import('./commands/revert-prompt.js'), 'revertPromptCommand');
 const promptStatusCommand = lazy(() => import('./commands/prompt-status.js'), 'promptStatusCommand');
 const shellPromptCommand = lazy(() => import('./commands/shell-prompt.js'), 'shellPromptCommand');
 const issueCreateCommand = lazy(() => import('./commands/issue.js'), 'issueCreateCommand');
@@ -160,6 +163,19 @@ const issueDepAddCommand = lazy(() => import('./commands/issue.js'), 'issueDepAd
 const issueDepRemoveCommand = lazy(() => import('./commands/issue.js'), 'issueDepRemoveCommand');
 const issueDepTreeCommand = lazy(() => import('./commands/issue.js'), 'issueDepTreeCommand');
 const issueLinkCommand = lazy(() => import('./commands/issue.js'), 'issueLinkCommand');
+const issueStartAction = lazy(() => import('./commands/issue-start.js'), 'issueStartAction');
+const issueRunsAction = lazy(() => import('./commands/issue-start.js'), 'issueRunsAction');
+const issueAnswerAction = lazy(() => import('./commands/issue-start.js'), 'issueAnswerAction');
+const issueRaceAction = lazy(() => import('./commands/issue-race.js'), 'issueRaceAction');
+const issueRunEpicAction = lazy(() => import('./commands/issue-run-epic.js'), 'issueRunEpicAction');
+const issueCloudAction = lazy(() => import('./commands/issue-cloud.js'), 'issueCloudAction');
+const replayTasksAction = lazy(() => import('./commands/issue-replay-tasks.js'), 'replayTasksAction');
+const runEndedAction = lazy(() => import('./headless-run-end.js'), 'runEndedAction');
+const runSuperviseAction = lazy(() => import('./background-supervisor.js'), 'runSuperviseAction');
+const urlHandlerAction = lazy(() => import('./commands/url-handler.js'), 'urlHandlerAction');
+const openUrlAction = lazy(() => import('./commands/url-handler.js'), 'openUrlAction');
+const reviewRunAction = lazy(() => import('./commands/review-run.js'), 'reviewRunAction');
+const reviewRunnerAction = lazy(() => import('./commands/review-runner.js'), 'reviewRunnerAction');
 const checkForUpdate = lazy(() => import('./version-check.js'), 'checkForUpdate');
 
 const __filename = fileURLToPath(import.meta.url);
@@ -253,6 +269,14 @@ benchmark.command('replay')
   .option('--keep', 'Keep each arm\'s working copy after grading')
   .option('--timeout-min <n>', 'Per-arm agent timeout in minutes (default 30)')
   .action((opts) => benchmarkReplayCommand(opts));
+benchmark.command('replay-tasks')
+  .description('Turn closed issues whose PR merged into a replay task file: the merge commit is the answer, the issue is the prompt, the tests it added or changed grade each run')
+  .option('--issues <ids>', 'Comma-separated issue ids (default: every closed issue with a merged PR)')
+  .option('--out <file>', 'Where to write the task file (default replay-tasks.json)')
+  .option('--test-command <cmd>', 'Test command for every task, with {tests} for the test files (default: inferred — vitest / jest from the nearest package.json, pytest for Python)')
+  .option('--test-dir <dir>', 'With --test-command: the repo-relative directory it runs in')
+  .option('--setup <cmd>', 'Run once before the arms (default: the lockfile\'s install)')
+  .action(replayTasksAction);
 benchmark.command('replay-sync')
   .description('Upload the results of replay runs on this machine to Origin (Benchmarks → Replays)')
   .option('--only <runIds>', 'Comma-separated run ids to upload')
@@ -273,8 +297,8 @@ program.command('disable')
 program.command('link [slug]')
   .description('Link this repo to an Origin agent (set .origin.json)')
   .option('--clear', 'Remove agent mapping')
-  .option('--list', 'Show current link')
-  .option('--unlink', 'Remove link')
+  .option('--list', 'Show the current link and change nothing')
+  .option('--unlink', 'Same as --clear')
   .action(linkCommand);
 program.command('attach [agent]')
   .description('Attach Origin tracking to an already-running AI agent session')
@@ -468,6 +492,71 @@ issue.command('link <id> <sessionId>')
   .option('--json', 'Output as JSON')
   .action(issueLinkCommand);
 
+issue.command('start <id>')
+  .description('Hand an issue to an agent: check out issue/<id>-<slug>, build its prompt with the relevant repo memory, and launch the agent (its session links to the issue)')
+  .option('-a, --agent <agent>', 'claude | codex | gemini | cursor | copilot | antigravity | print (print, or an agent whose CLI is missing, shows the prompt instead of launching)', 'claude')
+  .option('-b, --branch <name>', 'Branch to work on (default: issue/<id>-<slug>)')
+  .option('--no-branch', 'Stay on the current branch')
+  .option('-w, --worktree [path]', 'Work in a separate worktree of the branch (default: <repo>-worktrees/<branch> beside the repo), so this checkout can stay dirty and agents on different issues don\'t share one')
+  .option('--background', 'Run the agent headless and detached in its worktree (implies --worktree): no terminal, output to a log; see `origin issue runs`')
+  .option('--timeout <minutes>', 'With --background: stop the agent if it is still running after this many minutes (default 120; 0 = no limit)')
+  .option('--force', 'Start even when someone (or another agent) is already working on the issue')
+  .option('--no-publish', 'Leave the work on this machine: by default, when the agent exits cleanly, its branch is pushed and a pull request opened (never merged)')
+  .option('--no-preflight', 'With --background: skip the read-only check of the issue against the code that runs first (it asks here, or on the issue, what it can\'t settle)')
+  .option('--no-resume', 'With --background: start a fresh agent session, even when the one that stopped on a question could go on with your answer')
+  .action(issueStartAction);
+
+issue.command('answer <id> <answer...>')
+  .description('Answer the question an agent asked on an issue (the newest open one) — the next `origin issue start` carries it, and goes on with the session that asked')
+  .option('--question <qid>', 'Answer the question with this id instead of the newest open one')
+  .action(issueAnswerAction);
+
+issue.command('run-supervise <record>', { hidden: true })
+  .description('Internal: run a background agent to the end or its time limit, then end its session')
+  .action(runSuperviseAction);
+
+issue.command('run-ended <record>', { hidden: true })
+  .description('Internal: end the Origin session of a background run whose agent exited')
+  .action(runEndedAction);
+
+issue.command('cloud <id>')
+  .description('Hand an issue to Codex cloud from this machine: submits the task with your own `codex cloud exec` login, reports the run to the issue, and follows the task to its end')
+  .requiredOption('--env <env>', 'The Codex cloud environment to run in (its id, or its name in `codex cloud`)')
+  .option('--runner <runner>', 'The cloud runner (codex)', 'codex')
+  .option('--timeout <hours>', 'Stop following the task after this many hours (default 12)')
+  .action(issueCloudAction);
+
+issue.command('run-epic <id>')
+  .description('Work through an epic one story at a time: claim the next open story under it from the task queue, start the agent on it as `issue start` does, finish or release the claim from how the run ended, then the next, until none is left')
+  .option('-a, --agent <agent>', 'claude | codex | gemini | cursor | copilot | antigravity', 'claude')
+  .option('--max <n>', 'Stop after this many stories')
+  .option('-w, --worktree [path]', 'Each story in a separate worktree of its branch (default: <repo>-worktrees/<branch> beside the repo)')
+  .option('--force', 'Start a story even when someone (or another agent) is already working on it')
+  .option('--no-publish', 'Leave each story\'s work on this machine: by default a story whose agent exits cleanly has its branch pushed and a pull request opened (never merged)')
+  .option('--json', 'Print the stories done and how the loop ended as JSON')
+  .action(issueRunEpicAction);
+
+issue.command('race <id>')
+  .description('Hand an issue to several agents at once, to compare them: each runs headless in its own worktree on issue/<id>-<slug>-<agent>, from the same base, and shows on the issue\'s Attempts table')
+  .requiredOption('--agents <list>', '2–4 agents, comma-separated: claude, codex, gemini, cursor, copilot, antigravity')
+  .option('--timeout <minutes>', 'Stop an agent still running after this many minutes (default 120; 0 = no limit)')
+  .option('--force', 'Start even when someone (or another agent) is already working on the issue')
+  .option('--no-publish', 'Leave each arm\'s work on this machine: by default an arm whose agent exits cleanly pushes its branch and opens a pull request (never merged)')
+  .action(issueRaceAction);
+
+issue.command('runs')
+  .description('List agents started with `origin issue start --background`: running, done or failed, with their worktree and log')
+  .option('--json', 'Output as JSON')
+  .action(issueRunsAction);
+
+program.command('url-handler [action]')
+  .description('Let Start on Origin\'s issue pages launch agents here: install | uninstall | status the getorigin:// link handler (install also remembers the current repo\'s checkout)')
+  .action(urlHandlerAction);
+
+program.command('open-url <url>', { hidden: true })
+  .description('Internal: handle a getorigin:// link (opens a terminal running origin issue start or origin review run)')
+  .action(openUrlAction);
+
 const issueDep = issue.command('dep').description('Manage issue dependencies');
 
 issueDep.command('add <id> <blocksId>')
@@ -592,8 +681,9 @@ program.command('compare <arg1> [arg2]')
   .action(compareCommand);
 
 program.command('export [range]')
-  .description('Export session data as CSV, JSON, or Agent Trace v0.1.0; with a commit range, the canonical attribution records as JSON')
-  .option('-f, --format <format>', 'Output format (json, csv, agent-trace); only json with a range', 'json')
+  .description('Export session data as CSV, JSON, or Agent Trace v0.1.0; with a commit range, the canonical attribution records as JSON; with --format=line-claims and one full commit id, its re-anchored line claims')
+  .option('-f, --format <format>', 'Output format (json, csv, agent-trace, line-claims); only json with a range, only line-claims with one full commit id', 'json')
+  .option('--max-paths <n>', 'With --format=line-claims: resolve at most this many changed paths (1-5000, default 1000)')
   .option('-o, --output <file>', 'Write to file instead of stdout')
   .option('-l, --limit <n>', 'Limit number of sessions')
   .option('-m, --model <name>', 'Filter by model')
@@ -636,10 +726,11 @@ program.command('repair-merges [sessionId]')
   .action(repairMergesCommand);
 
 program.command('backfill')
-  .description('Retroactively tag old commits with AI attribution by matching against agent history and heuristics')
+  .description('Retroactively tag old commits with AI attribution from Origin session records, agent transcripts and commit trailers')
   .option('-d, --days <n>', 'How far back to scan', '90')
   .option('--dry-run', 'Show results without tagging (default behavior)')
   .option('--apply', 'Actually write git notes')
+  .option('--push', 'With --apply: push refs/notes/origin to the remote so Origin can read the notes')
   .option('--min-confidence <level>', 'Only tag commits above this confidence: high, medium, low', 'medium')
   .action(backfillCommand);
 
@@ -696,11 +787,23 @@ snapshot.command('list')
   .option('-s, --session <tag>', 'Only show snapshots for this session tag')
   .action(snapshotListCommand);
 snapshot.command('restore <id>')
-  .description('Restore working tree to a snapshot')
+  .description('Restore working tree to a snapshot (or, with --branch/--hard, to a turn from the dashboard)')
+  .option('-b, --branch <name>', 'Create a new branch at the snapshot instead; HEAD and the working tree are untouched')
+  .option('--hard', 'Reset the current branch to the snapshot; refused unless the working tree is clean')
+  .option('--base <sha>', 'Commit the snapshot sat on (parent of the restore commit; where --hard resets to)')
+  .option('--session <id>', 'Report the result to this Origin session so the dashboard shows it')
+  .option('--turn <n>', 'The turn number being restored (for the report)')
   .action(snapshotRestoreCommand);
 snapshot.command('clean')
   .description('Remove all shadow snapshots')
   .action(snapshotCleanCommand);
+
+program.command('revert-prompt <session> <turn>')
+  .description("Undo the lines one prompt wrote, as a new branch on the default branch (your checkout is not touched)")
+  .option('--base <ref>', 'Branch to revert on (default: origin\'s default branch)')
+  .option('-b, --branch <name>', 'Name of the new branch (default: revert/<session>-prompt-<n>)')
+  .option('--no-push', 'Create the branch but do not push it')
+  .action(revertPromptCommand);
 
 program.command('share <sessionId>')
   .description('Create a shareable prompt bundle from a session')
@@ -855,6 +958,10 @@ hooks.command('git-prepare-commit-msg <msgFile> [source] [sha]')
     // carries its attribution. First, before any skip below. See cherry-pick-source.ts.
     const { rememberCherryPickSource } = await import('./cherry-pick-source.js');
     rememberCherryPickSource(process.cwd());
+    // And the commits a pending `git merge --squash` squashed: SQUASH_MSG is
+    // gone by post-commit too. See reflog-pickup.ts.
+    const { rememberSquashSources } = await import('./reflog-pickup.js');
+    rememberSquashSources(process.cwd());
     // Likewise "this commit is a replay": the backgrounded post-commit may start
     // after the replay's own markers are gone. See replay-marker.ts.
     const { rememberReplayInProgress } = await import('./replay-marker.js');
@@ -869,6 +976,11 @@ hooks.command('git-post-commit').description('Handle git post-commit hook').acti
     const { committedShaForHook } = await import('./commands/hooks/post-commit.js');
     committed = committedShaForHook(hookCwd, { ...process.env });
   } catch { /* no commit to carry to */ }
+  // This commit's hook ran: the reflog scan below leaves it to the handler.
+  try {
+    const { markCommitSeen } = await import('./reflog-pickup.js');
+    markCommitSeen(hookCwd, committed);
+  } catch { /* the scan only looks at it again */ }
   try {
     await handlePostCommit();
   } finally {
@@ -877,6 +989,14 @@ hooks.command('git-post-commit').description('Handle git post-commit hook').acti
     try {
       const { carryCherryPickAttribution } = await import('./cherry-pick-source.js');
       carryCherryPickAttribution(hookCwd, committed);
+    } catch { /* attribution carry is best-effort */ }
+    // A local `git merge --squash`, a reset redone, and commits no hook saw —
+    // all read from git's own record. See reflog-pickup.ts.
+    try {
+      const { carryLocalSquashAttribution, carryResetRedoAttribution, pickUpUnseenCommits } = await import('./reflog-pickup.js');
+      carryLocalSquashAttribution(hookCwd, committed);
+      carryResetRedoAttribution(hookCwd, committed);
+      await pickUpUnseenCommits(hookCwd);
     } catch { /* attribution carry is best-effort */ }
   }
 });
@@ -905,6 +1025,10 @@ hooks.command('drain-queue').description('Internal: replay queued capture upload
   const { drainUpdateQueue } = await import('./update-queue.js');
   const { debugLog } = await import('./debug-log.js');
   await drainUpdateQueue((e, m, d) => debugLog(e, m, d), { background: true });
+});
+hooks.command('publish-memory <repoPath>').description('Internal: push a repo\'s memory notes until nothing written is left unpublished').action(async (repoPath: string) => {
+  const { publishMemoryAction } = await import('./memory-publish-queue.js');
+  await publishMemoryAction(repoPath);
 });
 hooks.command('memory-brief-backfill').description('Internal: generate the continuation brief for a repo that has none').action(() => handleMemoryBriefBackfill());
 hooks.command('git-pre-push').description('Handle git pre-push hook').action(() => handlePrePush());
@@ -983,13 +1107,31 @@ sessions.command('forget')
   .description('Discard queued sessions captured under a previous account')
   .action(async () => { await sessionsForgetCommand(); });
 
-program.command('review <sessionId>')
+const review = program.command('review <sessionId>')
   .description('Review a coding session')
   .option('--approve', 'Approve the session')
   .option('--reject', 'Reject the session')
   .option('--flag', 'Flag the session for review')
   .option('-n, --note <note>', 'Review note')
   .action(reviewCommand);
+
+// Reviewer agents: the PR page's "Run reviewers" opens a getorigin://review/run
+// link, and the handler runs this here (commands/review-run.ts).
+review.command('run <runIds...>')
+  .description('Run queued reviewer runs here: checks the PR head out in a worktree, runs the reviewer agent read-only, posts its findings to the PR on Origin')
+  .option('--keep-worktree', 'Keep the review worktree after the run')
+  .option('--json', 'Output as JSON')
+  .action(reviewRunAction);
+
+// The daemon side: runs queued by a PR event (Pull requests → Reviewers, trigger
+// "when a PR opens" / "on every push") have nobody at a keyboard, so a runner
+// on a machine with the checkout claims and runs them (commands/review-runner.ts).
+review.command('runner [action]')
+  .description('Run reviewer runs queued for this machine\'s repos: polls Origin, checks each PR head out in a worktree, runs the reviewer agent read-only, posts findings. install | uninstall | status it as a background service (launchd on macOS, systemd on Linux) that starts at login and survives upgrades')
+  .option('--once', 'Drain one run and exit')
+  .option('--interval <seconds>', 'Poll interval (default 15)')
+  .option('--repo <path...>', 'Checkouts to watch (default: this repo and the ones Origin knows on this machine); put it after the action')
+  .action(reviewRunnerAction);
 
 program.command('review-pr <url>')
   .description('Analyze AI sessions behind a GitHub PR')
@@ -1057,6 +1199,16 @@ program.command('transcript-watch')
 
 const agents = program.command('agents').description('List agents');
 agents.action(agentsCommand);
+agents.command('check')
+  .description('Which coding agents are installed here, their version, and the account each is signed in with (Settings → Agents)')
+  .option('--json', 'Output as JSON')
+  .option('--report', 'Send the result to Origin (email, plan and sign-in method only — never tokens)')
+  .option('--quiet', 'Print nothing')
+  .action(agentsCheckAction);
+agents.command('login <agent>')
+  .description('Sign an agent in with its own login (claude, codex, cursor, gemini, copilot, antigravity, devin), then report the result')
+  .option('--switch', 'Sign out first, to switch to another account')
+  .action(agentsLoginAction);
 
 program.command('agent:create')
   .description('Create a new agent')
@@ -1195,7 +1347,7 @@ mcp.command('serve')
   .action(() => mcpServeCommand());
 mcp.command('install')
   .description('Register the MCP server with your agents so they can query Origin')
-  .option('--agent <slugs>', 'Comma-separated subset (claude, codex, cursor, gemini)')
+  .option('--agent <slugs>', 'Comma-separated subset (claude, codex, cursor, gemini, antigravity, copilot)')
   .option('--uninstall', 'Remove Origin\'s MCP registration instead')
   .option('--force', 'Register even if the resolved binary reports no `mcp serve` support')
   .action((opts: { agent?: string; uninstall?: boolean; force?: boolean }) => mcpInstallCommand(opts));
@@ -1265,7 +1417,7 @@ context.command('clear')
 const COMMAND_GROUPS: Array<{ label: string; commands: string[] }> = [
   {
     label: 'SETUP',
-    commands: ['login', 'enable', 'status', 'whoami', 'link', 'attach', 'disable'],
+    commands: ['login', 'enable', 'status', 'whoami', 'link', 'attach', 'disable', 'url-handler'],
   },
   {
     label: 'ATTRIBUTION',
@@ -1290,7 +1442,7 @@ const COMMAND_GROUPS: Array<{ label: string; commands: string[] }> = [
   },
   {
     label: 'TIME TRAVEL',
-    commands: ['rewind', 'snapshot'],
+    commands: ['rewind', 'snapshot', 'revert-prompt'],
   },
   {
     label: 'CHAT / AI',

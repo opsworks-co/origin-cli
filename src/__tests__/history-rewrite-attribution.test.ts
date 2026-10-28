@@ -928,10 +928,19 @@ function cherryPickSuite(mode: Mode) {
       f.annotate(s2, sessionNote(s2, 'sess-2', 'codex', 'gpt-5'));
       const plain = f.commit('p3.txt', '3\n', 'p3 (no note)');
       f.git('checkout', '-q', 'main');
+      // main moves on first. Picked onto the very parent it was made on, in the
+      // same second, `s1` is recreated byte for byte — the SAME commit, which is
+      // no pick at all (its note is already on it), and the third batch never
+      // comes. That made this test depend on the clock.
+      f.commit('main.txt', 'main\n', 'main moves on');
       const before = f.batches().length;
       f.git('cherry-pick', s1, s2, plain);
       const [p1, p2, p3] = [f.git('rev-parse', 'HEAD~2'), f.git('rev-parse', 'HEAD~1'), f.git('rev-parse', 'HEAD')];
-      await f.batchesReach(before, 3);
+      expect(new Set([p1, p2, p3, s1, s2, plain]).size).toBe(6);
+      const batches = await f.batchesReach(before, 3);
+      // One batch per pick: two carried, the pick of the note-less commit skipped.
+      expect(batches.filter((b) => b.includes('1 written')).length).toBe(2);
+      expect(batches.filter((b) => b.includes('1 skipped')).length).toBe(1);
       expect(f.note(p1).attribution_record.contributions.map((c: any) => c.session.id)).toEqual(['sess-1']);
       expect(f.note(p1).attribution_record.revision.id).toBe(p1);
       expect(f.note(p2).attribution_record.contributions.map((c: any) => c.session.id)).toEqual(['sess-2']);

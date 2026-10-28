@@ -1,6 +1,11 @@
 // END-TO-END: a turn that rebases an EARLIER turn's commit over an upstream
 // change to the same file is not billed that earlier turn's lines.
 //
+// When the replay conflicts, resolving it is the rebasing turn's own work
+// (#2603: measured from the conflicted text git left), so its row may name
+// the file. The lines it only kept — turn 0's and upstream's — are never its
+// additions.
+//
 // Session 127d3303 (2026-09-30). Turn 0 wrote four files and committed them.
 // Turn 1 started clean, rebased that commit onto a main where #1994 had also
 // edited insights-scope.ts, kept both sides of a one-line conflict, and
@@ -64,6 +69,21 @@ function startFakeApi(): Promise<void> {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const diffLines = (diff: string | undefined, sign: '+' | '-') =>
+  (diff || '').split('\n').filter((l) => l.startsWith(sign) && !l.startsWith(sign.repeat(3))).map((l) => l.slice(1));
+const REPLAYED = ['turn 0 wrote this', 'upstream wrote this'];
+
+/** The row adds none of the replayed lines; it names the replayed file only as the conflict it resolved. */
+function expectNoReplayedCode(row: { filesChanged?: string[]; diff?: string } | undefined, label: string, conflicted: boolean) {
+  const added = diffLines(row?.diff, '+');
+  for (const line of REPLAYED) expect(added.filter((l) => l.includes(line)), `${label}: added lines`).toEqual([]);
+  // without a conflict the replayed code is not even context of the row
+  if (!conflicted) expect(row?.diff || '', label).not.toContain('turn 0 wrote this');
+  if (!(row?.filesChanged || []).includes('src/scope.ts')) return;
+  expect(conflicted, `${label} names the replayed file without a conflict to resolve`).toBe(true);
+  expect(diffLines(row?.diff, '-').some((l) => l.startsWith('<<<<<<<')), `${label}: the resolution removed the markers`).toBe(true);
+}
 
 const numbered = (n: number, edit: (i: number) => string | null = () => null) =>
   Array.from({ length: n }, (_, i) => edit(i + 1) ?? `export const line${i + 1} = ${i + 1};`).join('\n') + '\n';
@@ -316,19 +336,17 @@ describe.skipIf(!haveDist)('a rebase that replays an earlier turn\'s commit', ()
   ];
 
   for (const c of cases) {
-    it(`bills the rebasing turn nothing when ${c.name}`, async () => {
+    it(`does not bill the rebasing turn the replayed code when ${c.name}`, async () => {
       const s = scenario(c.sessionId, c.upstream, c.resolved);
       try {
         await s.setUp(tmp);
         const { turn0, turn1, atItsStop, sent1 } = await s.play();
-        expect(atItsStop?.filesChanged || [], 'at its own Stop').not.toContain('src/scope.ts');
+        const conflicted = c.resolved !== null;
+        expectNoReplayedCode(atItsStop, 'at its own Stop', conflicted);
         expect(turn0?.filesChanged, 'turn 0 keeps its own files').toEqual(expect.arrayContaining(['src/scope.ts', 'src/route.ts']));
-        expect(turn1?.filesChanged || [], 'turn 1 wrote nothing of its own').not.toContain('src/scope.ts');
-        expect(turn1?.diff || '').not.toContain('turn 0 wrote this');
-        for (const r of sent1) {
-          expect(r.filesChanged || [], 'no row sent for turn 1 names the replayed file').not.toContain('src/scope.ts');
-          expect(r.diff || '').not.toContain('turn 0 wrote this');
-        }
+        expect(diffLines(turn0?.diff, '+').some((l) => l.includes('turn 0 wrote this')), 'turn 0 keeps its own line').toBe(true);
+        expectNoReplayedCode(turn1, 'turn 1 after the later Stops', conflicted);
+        for (const r of sent1) expectNoReplayedCode(r, 'a row sent for turn 1', conflicted);
       } finally {
         await s.killJournalWatcher();
       }

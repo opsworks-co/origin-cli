@@ -154,6 +154,20 @@ export function getSnapshot(dir: string, hash: string | null | undefined): strin
   try { return fs.readFileSync(snapshotPath(dir, hash), 'utf-8'); } catch { return null; }
 }
 
+/**
+ * A working-tree file's bytes, as the store would hold them: null when it is
+ * absent, binary or larger than a snapshot is allowed to be. Paths are relative
+ * to `root`, the way the journal names them.
+ */
+export function readWorkingFile(root: string, file: string): string | null {
+  try {
+    const abs = path.join(root, file);
+    if (fs.statSync(abs).size > MAX_SNAPSHOT_BYTES) return null;
+    const buf = fs.readFileSync(abs);
+    return looksBinary(buf) ? null : buf.toString('utf-8');
+  } catch { return null; }
+}
+
 export function hasSnapshot(dir: string, hash: string | null | undefined): boolean {
   if (!hash) return false;
   try { return fs.existsSync(snapshotPath(dir, hash)); } catch { return false; }

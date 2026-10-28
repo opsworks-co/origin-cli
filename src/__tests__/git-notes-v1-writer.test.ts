@@ -385,7 +385,7 @@ describe('auto-push after a note write', () => {
       // Someone else's notes on the remote, unrelated to ours: our push is non-fast-forward.
       const other = path.join(base, 'other');
       execFileSync('git', ['clone', '-q', bare, other], { stdio: 'pipe' });
-      execFileSync('git', ['notes', '--ref=origin', 'add', '-m', '{"origin":{"sessionId":"theirs"}}', a], { cwd: other, stdio: 'pipe' });
+      execFileSync('git', ['-c', 'user.name=Other', '-c', 'user.email=other@example.com', 'notes', '--ref=origin', 'add', '-m', '{"origin":{"sessionId":"theirs"}}', a], { cwd: other, stdio: 'pipe' });
       execFileSync('git', ['push', '-q', 'origin', 'refs/notes/origin'], { cwd: other, stdio: 'pipe' });
 
       writeGitNotes(repo, [a], noteData({ attribution: { sessionId: 'sess-1', agentId: 'codex' } }));

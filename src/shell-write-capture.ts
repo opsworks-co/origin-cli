@@ -37,6 +37,7 @@
 
 import type { PromptEdit, PromptEditOp } from './prompt-capture/types.js';
 import { gitPathspecsNamed } from './git-pathspec-names.js';
+import { diffLines } from './write-journal-diff.js';
 
 /** Stamped on every edit this module produces, so a bad claim is traceable. */
 export const SHELL_WINDOW_SOURCE = 'shell-window';
@@ -260,6 +261,78 @@ export function trimToChangedRegion(
   };
 }
 
+/** Edit distance past which splitChangedRegions gives up (bounds Myers' memory). */
+const SPLIT_MAX_EDIT_DISTANCE = 1000;
+
+export interface ChangedRegion { oldContent: string; newContent: string; oldStart: number; newStart: number }
+
+/**
+ * Split a whole-file before/after pair into each separately changed region,
+ * with a few unchanged lines of context either side — the same regions git
+ * prints as hunks.
+ *
+ * trimToChangedRegion keeps ONE region, from the first change to the last, so
+ * a file changed near both ends stays nearly whole. A dependency bump does
+ * exactly that to a lockfile: prod d403e181's `pnpm-lock.yaml` (170 KB) had
+ * changes at lines 24 and 5001, the trimmed pair was still 339 KB, the edit
+ * was dropped for size — and with only package.json's +1 left in editsJson,
+ * the session's own-lines total read +1/-0 for a +7/-5 commit. Each region
+ * here is small; together they carry every changed line and its real anchor.
+ *
+ * Returns null when the pair is identical or the change is too large to diff
+ * within the bound, leaving the caller on its existing size behaviour.
+ */
+export function splitChangedRegions(
+  oldContent: string,
+  newContent: string,
+  contextLines = 3,
+): ChangedRegion[] | null {
+  if (oldContent === newContent) return null;
+  const ops = diffLines(oldContent.split('\n'), newContent.split('\n'), SPLIT_MAX_EDIT_DISTANCE);
+  if (!ops) return null;
+  const changed: number[] = [];
+  for (let i = 0; i < ops.length; i++) if (ops[i].kind !== 'eq') changed.push(i);
+  if (changed.length === 0) return null;
+  // Change positions merged into ranges that share context, as git does.
+  const ranges: Array<[number, number]> = [];
+  let lo = Math.max(0, changed[0] - contextLines);
+  let hi = Math.min(ops.length - 1, changed[0] + contextLines);
+  for (const idx of changed.slice(1)) {
+    if (idx - contextLines <= hi + 1) {
+      hi = Math.min(ops.length - 1, idx + contextLines);
+    } else {
+      ranges.push([lo, hi]);
+      lo = Math.max(0, idx - contextLines);
+      hi = Math.min(ops.length - 1, idx + contextLines);
+    }
+  }
+  ranges.push([lo, hi]);
+  const oldAt: number[] = new Array(ops.length);
+  const newAt: number[] = new Array(ops.length);
+  for (let i = 0, oi = 1, ni = 1; i < ops.length; i++) {
+    oldAt[i] = oi;
+    newAt[i] = ni;
+    if (ops[i].kind !== 'ins') oi++;
+    if (ops[i].kind !== 'del') ni++;
+  }
+  return ranges.map(([start, end]) => {
+    const oldLines: string[] = [];
+    const newLines: string[] = [];
+    for (let i = start; i <= end; i++) {
+      if (ops[i].kind !== 'ins') oldLines.push(ops[i].line);
+      if (ops[i].kind !== 'del') newLines.push(ops[i].line);
+    }
+    return { oldContent: oldLines.join('\n'), newContent: newLines.join('\n'), oldStart: oldAt[start], newStart: newAt[start] };
+  });
+}
+
+/** Total content bytes of a region list, as the per-file cap measures a pair. */
+export function regionBytes(regions: readonly ChangedRegion[]): number {
+  let n = 0;
+  for (const r of regions) n += r.oldContent.length + r.newContent.length;
+  return n;
+}
+
 // A single file's content pair. A file whose CHANGE still exceeds this after
 // trimToChangedRegion has shed the unchanged edges is skipped, not clamped.
 const DEFAULT_MAX_FILE_BYTES = 96 * 1024;
@@ -405,6 +478,16 @@ export function shellWindowEdits(deps: ShellWindowDeps, opts: ShellWindowOptions
         bytes = oldC.length + newC.length;
       }
     }
+    // Changed near both ends, so one region is still the whole file (a
+    // lockfile after a dependency bump): one edit per changed region instead.
+    let regions: ChangedRegion[] | null = null;
+    if (bytes > maxFileBytes && op === 'edit') {
+      const split = splitChangedRegions(oldContent ?? '', newContent ?? '');
+      if (split && regionBytes(split) <= maxFileBytes) {
+        regions = split;
+        bytes = regionBytes(split);
+      }
+    }
     if (bytes > maxFileBytes) {
       result.skipped.push({ file, reason: 'too-large' });
       continue;
@@ -415,14 +498,19 @@ export function shellWindowEdits(deps: ShellWindowDeps, opts: ShellWindowOptions
     }
     spent += bytes;
 
-    result.edits.push({
+    const pieces = regions
+      ? regions.map((r) => ({ oldContent: r.oldContent, newContent: r.newContent, oldStart: r.oldStart, newStart: r.newStart }))
+      : [{
+        oldContent: oldC,
+        newContent: newC,
+        // Only set when the pair was trimmed — the region no longer starts at
+        // line 1, and without this the hunk would claim it does.
+        ...(anchor !== undefined && { oldStart: anchor, newStart: anchor }),
+      }];
+    for (const piece of pieces) result.edits.push({
       file,
       op,
-      oldContent: oldC,
-      newContent: newC,
-      // Only set when the pair was trimmed — the region no longer starts at
-      // line 1, and without this the hunk would claim it does.
-      ...(anchor !== undefined && { oldStart: anchor, newStart: anchor }),
+      ...piece,
       source: 'uncommitted',
       // INFERENCE, not proof: this file was dirty inside the turn's window,
       // which in a shared checkout also describes a sibling agent's work and

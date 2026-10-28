@@ -1,7 +1,7 @@
 [
   {
     "promptIndex": 0,
-    "diffSource": null,
+    "diffSource": "turn-window",
     "chatOnly": false,
     "filesChanged": [
       "packages/cli/src/a.ts"

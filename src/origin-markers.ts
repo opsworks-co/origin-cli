@@ -364,6 +364,11 @@ export interface CommitEvidence {
    * Places a commit in a transcript with no times, where `at` cannot.
    */
   turn?: number;
+  /**
+   * Made by hand after the session ended: no turn made it, so `at` names
+   * none. Only the turns whose work is in it (`added`) join.
+   */
+  afterEnd?: boolean;
 }
 
 /** Split a transcript at its user prompts and parse each turn's markers. */
@@ -501,6 +506,12 @@ export function markersOfCommitTurns(
   const picked = new Set<number>();
   for (const c of commits) {
     const { at, added, turn } = typeof c === 'number' ? { at: c, added: undefined, turn: undefined } : c;
+    if (typeof c !== 'number' && c.afterEnd) {
+      if (added && added.size > 0) {
+        for (let j = 0; j < turns.length; j++) if (workLanded(turns[j].written, added)) picked.add(j);
+      }
+      continue;
+    }
     let pick = -1;
     if (turn !== undefined) {
       if (Number.isInteger(turn) && turn >= 0 && turn < turns.length) pick = turn;

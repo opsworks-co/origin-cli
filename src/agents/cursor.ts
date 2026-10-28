@@ -8,6 +8,7 @@ import path from 'path';
 import { querySqlite } from '../utils/sqlite.js';
 import { debugLog } from '../debug-log.js';
 import type { PromptTimelineEntry } from './codex.js';
+import { partsField, replyTextPart, replyToolPart, type DisplayPart } from '../display-parts.js';
 
 // ─── Cursor Model Detection ──────────────────────────────────────────────
 // Cursor always sends model:"default" in hooks. Read the actual model from
@@ -355,7 +356,7 @@ export function discoverCursorTranscript(conversationId?: string, hookCwd?: stri
     const TRUNC = opts.verbose ? Number.MAX_SAFE_INTEGER : 2000;
     const truncate = (s: string) => s.length > TRUNC ? s.slice(0, TRUNC) + `… [+${s.length - TRUNC} chars]` : s;
 
-    const turns: Array<{ role: string; content: string }> = [];
+    const turns: Array<{ role: string; content: string; parts?: DisplayPart[] }> = [];
     const estimated = measureCursorJsonlTokens(lines, { cwd: hookCwd });
 
     for (const line of lines) {
@@ -368,14 +369,17 @@ export function discoverCursorTranscript(conversationId?: string, hookCwd?: stri
         // Pull out everything we can render — text + structured tool I/O —
         // so reviewers see what the agent ran, not just the narration.
         const parts: string[] = [];
+        const shown: Array<DisplayPart | null> = [];
 
         if (typeof content === 'string') {
           parts.push(content);
+          shown.push(replyTextPart(content));
         } else if (Array.isArray(content)) {
           for (const c of content as any[]) {
             const t = c?.type;
             if (t === 'text' && typeof c.text === 'string') {
               parts.push(c.text);
+              shown.push(replyTextPart(c.text));
             } else if (t === 'thinking' && (c.thinking || c.text)) {
               // Collapse internal blank lines — the web's reasoning block ends
               // at the first empty line, and thinking is usually multi-paragraph.
@@ -392,6 +396,7 @@ export function discoverCursorTranscript(conversationId?: string, hookCwd?: stri
                     .filter(Boolean).join('\n')
                   : (() => { try { return JSON.stringify(inp, null, 2); } catch { return ''; } })();
               parts.push(`[Tool: ${c.name}]`);
+              shown.push(replyToolPart(c.name));
               if (argStr) parts.push(truncate(argStr));
             } else if (t === 'tool_result') {
               const out =
@@ -411,7 +416,7 @@ export function discoverCursorTranscript(conversationId?: string, hookCwd?: stri
         const cleaned = text.replace(/<\/?user_query>/g, '').trim();
         if (!cleaned) continue;
 
-        turns.push({ role, content: cleaned });
+        turns.push({ role, content: cleaned, ...(role === 'assistant' ? partsField(shown) : {}) });
       } catch {
         // skip malformed lines
       }

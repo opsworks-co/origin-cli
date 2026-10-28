@@ -64,6 +64,45 @@ export function stopAbandonedTurn(
   return now - (mark.at as number) > STOP_ABANDONED_AFTER_MS;
 }
 
+/**
+ * The last turn, when its Stop closed it and then died before sending — the
+ * turn stopAbandonedTurn cannot see.
+ *
+ * stopAbandonedTurn hands a killed Stop's turn back to the heartbeat's diff
+ * tick only while that turn is still `activeTurn`. A chat-only turn never sets
+ * `activeTurn` (no tool hook opens it), and the tick re-sends a diff row, not
+ * usage. Prod fb6968b3: the last turn ("can i close this session?") — Stop
+ * exited 1 between markTurnClosedOnDisk and markStopSentOnDisk, so the row
+ * kept no usage and the session's totals missed that reply, for good: a later
+ * prompt's Stop would have re-sent every turn, but there was none, and the
+ * heartbeat's idle end sends no tokens.
+ *
+ * Returns the local turn to run Stop for again: Stop marked it closed and
+ * never recorded sending it, it is the last prompt (a later one's Stop covers
+ * it), nothing has opened another turn, the mark is older than any Stop may
+ * run, and this process has not already tried it.
+ */
+export function closedTurnLeftUnsent(
+  state: {
+    stopClosing?: { turn?: number; at?: number } | null;
+    stopSentTurnIndex?: number | null;
+    activeTurn?: { index?: number } | null;
+    prompts?: unknown[];
+  },
+  alreadyRan: ReadonlySet<number>,
+  now: number = Date.now(),
+): number | null {
+  const mark = state.stopClosing;
+  if (!mark || !Number.isInteger(mark.turn) || !Number.isFinite(mark.at as number)) return null;
+  const turn = mark.turn as number;
+  if (Number.isInteger(state.stopSentTurnIndex as number) && (state.stopSentTurnIndex as number) >= turn) return null;
+  if ((state.prompts?.length ?? 0) - 1 !== turn) return null;
+  if (state.activeTurn && state.activeTurn.index !== turn) return null;
+  if (now - (mark.at as number) <= STOP_ABANDONED_AFTER_MS) return null;
+  if (alreadyRan.has(turn)) return null;
+  return turn;
+}
+
 // Longer than any Stop hook may run: Codex's is registered with 600 s
 // (enable.ts CODEX_STOP_HOOK_TIMEOUT_SEC), plus a minute of slack.
 export const STOP_ABANDONED_AFTER_MS = 11 * 60_000;

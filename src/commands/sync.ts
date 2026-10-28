@@ -6,8 +6,10 @@ import { api } from '../api.js';
 import { git, gitOrNull } from '../utils/exec.js';
 import { getCanonicalRepoPath } from '../session-state.js';
 import { syncRepoHistory, BACKFILL_TIMEOUT_MS } from '../history-backfill.js';
-import { syncNotesFromRemote } from '../git-notes.js';
-import { publishMemoryNotes } from '../memory-transport.js';
+import { syncNotesFromRemote, resolvePushRemote, redactRemoteCredentials } from '../git-notes.js';
+import { publishMemoryNotes, remoteUrlFor } from '../memory-transport.js';
+import { findShadowingHooksPath } from '../local-hooks-path.js';
+import { memoryPushDecision, type MemoryPushSource } from '../prompt-privacy.js';
 
 function getGitRoot(): string | null {
   return gitOrNull(['rev-parse', '--show-toplevel']);
@@ -22,6 +24,35 @@ function getRepoName(gitRoot: string): string {
   } catch {
     return path.basename(gitRoot);
   }
+}
+
+/**
+ * Why memory was not pushed, and the one edit that changes it. Memory is
+ * pushed by default, so this only runs when something turned it off — name
+ * that key and file. "opted out" alone left people stuck: no command flips it.
+ */
+export function describeMemoryOptOut(decision: { source: MemoryPushSource; key?: string }, gitRoot: string): string[] {
+  const repoFile = path.join(gitRoot, '.origin.json');
+  const machineFile = '~/.origin/config.json';
+  const { source } = decision;
+  const where = source === 'machine' ? machineFile : repoFile;
+  const why = source === 'repo-invalid'
+    ? `${repoFile} is not a valid config (not a JSON object, or notesPushMemory / notesIncludePrompts is not true/false)`
+    : decision.key === 'notesIncludePrompts'
+      ? `notesIncludePrompts is false in ${where}, which also keeps memory on this machine`
+      : `notesPushMemory is false in ${where}`;
+  const set = chalk.white('"notesPushMemory": true');
+  const lines = [chalk.yellow(`  ⚠ Repo memory: not pushed — ${why}.`)];
+  if (source === 'machine') {
+    lines.push(chalk.gray(`    To push it: set ${set} in ${machineFile} (every repo on this machine),`));
+    lines.push(chalk.gray(`    or put {${set}} in ${repoFile} (this repo only). Then run origin sync again.`));
+  } else {
+    // The repo's own file decides; the machine setting cannot override it.
+    lines.push(chalk.gray(`    To push it: set ${set} in ${repoFile}. If that file is committed, this changes it for everyone.`));
+    lines.push(chalk.gray('    Then run origin sync again.'));
+  }
+  lines.push(chalk.gray('    Prompt text stays out of pushed memory unless notesIncludePrompts is true.'));
+  return lines;
 }
 
 export async function syncCommand() {
@@ -42,7 +73,25 @@ export async function syncCommand() {
 
   console.log(chalk.bold('\n🔄 Syncing to Origin\n'));
   console.log(chalk.gray(`  Repository: ${repoName}`));
+  // The remote memory is pushed to, and so the dashboard repo it lands on. A
+  // repo name alone can't tell two clones apart — "origin" read as the
+  // product, and a sync from the wrong clone looked like it had worked.
+  const pushRemote = resolvePushRemote(gitRoot);
+  const pushUrl = pushRemote ? remoteUrlFor(gitRoot, pushRemote) : undefined;
+  console.log(chalk.gray(`  Remote: ${pushUrl ? redactRemoteCredentials(pushUrl) : 'none (memory stays on this machine)'}`));
   console.log(chalk.gray(`  Git root: ${gitRoot}`));
+
+  // A repo-local core.hooksPath hides Origin's global git hooks: commits here
+  // go out with no note and no memory, and everything below still reports
+  // success. Only doctor looked for it, so sync said all green on such a repo.
+  try {
+    const shadow = findShadowingHooksPath(gitRoot);
+    if (shadow) {
+      console.log(chalk.yellow(`\n  ⚠ core.hooksPath = ${shadow.value} replaces Origin's git hooks in this repo.`));
+      console.log(chalk.gray('    New commits here are not captured and carry no memory to the remote.'));
+      console.log(chalk.gray(`    Run ${chalk.white('origin doctor --fix')} to run those hooks after Origin's instead.\n`));
+    }
+  } catch { /* best-effort — doctor has the full check */ }
 
   // Commit history: advertise HEAD's ancestry and backfill whatever the
   // server has never seen. This is the manual trigger for the same round
@@ -98,25 +147,42 @@ export async function syncCommand() {
     console.log(chalk.yellow(`  ⚠ Repo memory & notes fetch failed: ${err.message}`));
   }
   try {
-    const { pushed, memory: mem } = await publishMemoryNotes(gitRoot, 'sync', { timeoutMs: BACKFILL_TIMEOUT_MS });
-    if (pushed) {
+    const { outcome, error, memory: mem } = await publishMemoryNotes(gitRoot, 'sync', { timeoutMs: BACKFILL_TIMEOUT_MS });
+    const onDashboard = mem
+      ? `${mem.sessions} session${mem.sessions === 1 ? '' : 's'}, ${mem.commits} commit${mem.commits === 1 ? '' : 's'}${mem.brief ? ', brief' : ''}`
+      : '';
+    // Each way memory fails to arrive gets its own line: a failed push and a
+    // clone with no memory both used to print a gray "–" that read as fine.
+    if (outcome === 'failed') {
+      console.log(chalk.yellow(`  ⚠ Repo memory push failed: ${error || 'the remote did not accept refs/notes/origin-memory'}`));
+      console.log(chalk.gray('    Nothing reached the remote, so the dashboard has no new memory. It is kept and retried on the next sync.'));
+    } else if (outcome === 'nothing-local') {
       if (mem) {
-        console.log(chalk.green(`  ✓ Repo memory on dashboard: ${mem.sessions} session${mem.sessions === 1 ? '' : 's'}, ${mem.commits} commit${mem.commits === 1 ? '' : 's'}${mem.brief ? ', brief' : ''}`));
+        console.log(chalk.green(`  ✓ Repo memory on dashboard: ${onDashboard} (none written in this clone)`));
       } else {
-        console.log(chalk.gray('  – Repo memory on dashboard: not refreshed (repo not registered, or no memory on the remote yet)'));
+        console.log(chalk.yellow('  ⚠ Repo memory: this clone has none to push (no refs/notes/origin-memory here).'));
+        console.log(chalk.gray('    Memory is written where your agent sessions run. Run origin sync in that clone,'));
+        console.log(chalk.gray('    or check origin doctor here if your sessions do run in this one.'));
       }
+    } else if (outcome === 'pushed') {
+      if (mem) {
+        console.log(chalk.green(`  ✓ Repo memory on dashboard: ${onDashboard}`));
+      } else {
+        console.log(chalk.yellow('  ⚠ Repo memory pushed, but the dashboard did not pick it up (repo not added in Origin, or the server could not read the remote).'));
+      }
+    } else if (outcome === 'no-remote') {
+      console.log(chalk.gray('  – Repo memory: no remote to push to — it stays on this machine'));
     } else {
-      console.log(chalk.gray('  – Repo memory: nothing to publish (no remote, or prompt text opted out)'));
+      for (const line of describeMemoryOptOut(memoryPushDecision(gitRoot), gitRoot)) console.log(line);
     }
   } catch (err: any) {
     console.log(chalk.yellow(`  ⚠ Repo memory publish failed: ${err.message}`));
   }
 
-  // Check for .entire directory
+  // .entire/ is written only by the Entire CLI — Origin never creates it, so
+  // a repo without one is the normal case, not something to warn about.
   if (!fs.existsSync(entireDir)) {
-    console.log(chalk.yellow('\n  ⚠ No .entire/ directory found in this repo.'));
-    console.log(chalk.gray('    The .entire/ directory contains session data for Origin.'));
-    console.log(chalk.gray('    It will be created automatically by the MCP server.\n'));
+    console.log();
     return;
   }
 

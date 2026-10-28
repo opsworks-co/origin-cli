@@ -25,7 +25,7 @@ import {
   type RecordedDecision, type SessionMemoryEntry,
 } from '../memory.js';
 import { isRepoIgnored } from '../ignore-repos.js';
-import { shouldIncludePromptText } from '../prompt-privacy.js';
+import { shouldPushMemory } from '../prompt-privacy.js';
 import { getGitRoot, getWorkingGitRoot, isSessionAlive, listActiveSessions, type SessionState } from '../session-state.js';
 import { addManualTodo, getOpenTodos, readMemoryTodos } from '../todo.js';
 import { matchTodoForClosure, recordPendingClosures, sweepTodoClosures } from '../todo-sweep.js';
@@ -60,10 +60,10 @@ function resolveRepo(repoPathArg: unknown): { repoRoot: string; workRoot: string
 
 /** Whether what was just written leaves this machine with the memory notes. */
 function travels(repoRoot: string): { travels: boolean; note?: string } {
-  if (shouldIncludePromptText(repoRoot)) return { travels: true };
+  if (shouldPushMemory(repoRoot)) return { travels: true };
   return {
     travels: false,
-    note: 'recorded in this clone\'s memory note; it is not pushed because this repo/machine keeps notes metadata-only (notesIncludePrompts is not true)',
+    note: 'recorded in this clone\'s memory note; it is not pushed because this repo/machine keeps memory local (notesPushMemory false, or notesIncludePrompts false)',
   };
 }
 

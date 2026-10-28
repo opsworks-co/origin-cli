@@ -87,8 +87,10 @@ describe('workTreeTop under the environment git gives a hook', () => {
     try {
       process.env.GIT_DIR = path.join(repo, '.git', 'worktrees', path.basename(wt));
       process.env.GIT_INDEX_FILE = path.join(process.env.GIT_DIR, 'index');
-      const top = fs.realpathSync(wt);
-      expect(fs.realpathSync(workTreeTop(path.join(wt, 'src'))!)).toBe(top);
+      // .native on both sides: git answers with the long form, and only the
+      // native realpath expands a Windows 8.3 short name (RUNNER~1) in tmpdir.
+      const top = fs.realpathSync.native(wt);
+      expect(fs.realpathSync.native(workTreeTop(path.join(wt, 'src'))!)).toBe(top);
       const now = Date.now();
       const s = { commitCommandInFlight: { at: new Date(now).toISOString(), cwd: path.join(wt, 'src'), turn: 0 } };
       expect(sessionIsRunningCommitHere(s, wt, workTreeTop, now)).toBe(true);

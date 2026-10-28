@@ -215,4 +215,20 @@ describe('writeSessionMemory upsert-by-sessionId', () => {
     clearSessionMemory(repo);                                     // also drops the brief
     expect(buildMemoryBriefContext(repo)).toBeNull();
   });
+
+  it('a brief that sessions ended more than a day after is not injected; the session list is', () => {
+    const month = '2026-09-13T01:00:00Z';
+    writeSessionMemory(repo, entry({ sessionId: 'old1', summary: 'Old work', endedAt: '2026-09-12T23:00:00Z' }));
+    writeMemoryBrief(repo, { version: 1, brief: 'Recent focus: the September work.', signature: 'x', generatedAt: month });
+    expect(buildMemoryBriefContext(repo)).toContain('the September work');     // nothing newer yet
+
+    // Within the refresh grace: the brief still stands.
+    writeSessionMemory(repo, entry({ sessionId: 'soon', summary: 'Next morning', endedAt: '2026-09-13T20:00:00Z' }));
+    expect(buildMemoryBriefContext(repo)).toContain('the September work');
+
+    // A month on, the LLM never rewrote it (out-of-credit key): stale.
+    writeSessionMemory(repo, entry({ sessionId: 'new1', summary: 'Live task queue design', endedAt: '2026-10-15T22:00:00Z' }));
+    expect(buildMemoryBriefContext(repo)).toBeNull();
+    expect(buildMemoryContext(repo)).toContain('Live task queue design');
+  });
 });

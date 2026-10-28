@@ -88,7 +88,7 @@ function displayLocalStats(stats: AttributionStats, serverCostByModel?: ServerMo
     // acceptance OR a cost from git notes — otherwise the table is all zeros.
     const hasPerModelAcceptance = Array.from(stats.byModel.entries()).some(
       ([model, v]) =>
-        v.acceptedLines + v.overriddenLines + v.deletedLines > 0 ||
+        v.acceptedLines + v.overriddenLines + v.deletedLines + v.unknownLines > 0 ||
         v.costUsd > 0 ||
         (resolveServerCost(model, serverCostByModel) ?? 0) > 0,
     );
@@ -103,8 +103,7 @@ function displayLocalStats(stats: AttributionStats, serverCostByModel?: ServerMo
         chalk.gray('Cost'.padStart(10)),
       );
       for (const [model, data] of stats.byModel) {
-        const denom = data.acceptedLines + data.overriddenLines;
-        const rate = denom > 0 ? Math.round(data.acceptanceRate * 100) + '%' : '—';
+        const rate = data.acceptanceRate === null ? '—' : Math.round(data.acceptanceRate * 100) + '%';
         // Prefer the server's per-model cost (covers agents whose per-commit git
         // notes carry no token counts); fall back to the git-note figure offline.
         const serverCost = resolveServerCost(model, serverCostByModel);
@@ -124,14 +123,20 @@ function displayLocalStats(stats: AttributionStats, serverCostByModel?: ServerMo
 
   // Acceptance metrics
   const acc = stats.acceptance;
-  if (acc.totalAiLines > 0) {
+  if (acc.unavailable) {
+    // Past the tracking bounds: no figures rather than a partial set.
     console.log(chalk.bold('\n  AI Code Acceptance\n'));
-    const accPct = Math.round(acc.acceptanceRate * 100);
+    console.log(`  ${chalk.gray(`unavailable (${acc.unavailable.replace(/_/g, ' ')})`)}`);
+  } else if (acc.totalAiLines > 0) {
+    console.log(chalk.bold('\n  AI Code Acceptance\n'));
+    // No tracked line with a known fate: no rate, rather than an invented 100%.
+    const accPct = acc.acceptanceRate === null ? null : Math.round(acc.acceptanceRate * 100);
     console.log(`  ${chalk.gray('Total AI lines:')}     ${chalk.white(String(acc.totalAiLines))}`);
-    console.log(`  ${chalk.gray('Accepted:')}           ${chalk.green(String(acc.acceptedLines))} (${accPct}%)`);
+    console.log(`  ${chalk.gray('Accepted:')}           ${chalk.green(String(acc.acceptedLines))}${accPct === null ? '' : ` (${accPct}%)`}`);
     console.log(`  ${chalk.gray('Overridden:')}         ${chalk.yellow(String(acc.overriddenLines))}`);
     console.log(`  ${chalk.gray('Deleted:')}            ${chalk.red(String(acc.deletedLines))}`);
-    console.log(`  ${chalk.gray('Acceptance rate:')}    ${renderPercentBar(accPct)} ${accPct}%`);
+    console.log(`  ${chalk.gray('Unknown:')}            ${chalk.gray(String(acc.unknownLines))}`);
+    console.log(`  ${chalk.gray('Acceptance rate:')}    ${accPct === null ? chalk.gray('— (no line with a known fate)') : `${renderPercentBar(accPct)} ${accPct}%`}`);
   }
 
   console.log('');

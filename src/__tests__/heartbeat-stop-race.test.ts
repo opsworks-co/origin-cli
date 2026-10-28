@@ -6,6 +6,7 @@ import { turnIsClosed } from '../turn-commit-scope.js';
 import { openTurnNarrowingBase, scopeUncommittedToOpenTurn } from '../open-turn-uncommitted-scope.js';
 import { compareResolverWithPasses, createTurnObserver, observeReconstruction, onlyDifferences } from '../resolve-turn.js';
 import { redactSessionPayloadContent } from '../captured-diff-redaction.js';
+import { CAPABILITY_HEADERS } from '../client-capabilities.js';
 
 // Exercise the actual daemon function without starting its timers or exiting
 // this test process. External I/O is controlled so Stop can finish inside Git.
@@ -43,7 +44,7 @@ function harness(duringGit: (state: any) => void = () => {}, owns: () => boolean
     scopeUncommittedToOpenTurn, openTurnNarrowingBase, filesChangedSinceShadowOrNull: () => null, filesClaimedByOtherLiveSessions: () => [],
     // The resolver's side-by-side run is pure; the real functions, like the stamp.
     createTurnObserver, observeReconstruction, compareResolverWithPasses, onlyDifferences, debugLog: noop,
-    redactSessionPayloadContent,
+    redactSessionPayloadContent, CAPABILITY_HEADERS,
     fetchWithTimeout: send, apiUrl: 'https://example.test', sessionId: 'session', apiKey: 'test',
     stillOwnsSession: owns,
     replayInProgress: replaying,
@@ -78,6 +79,8 @@ describe('heartbeat racing Stop', () => {
     expect(h.send).toHaveBeenCalledOnce();
     const row = JSON.parse(h.send.mock.calls[0][1].body).promptChanges[0];
     expect(row).toMatchObject({ capturedAt: 1000, promptIndex: 4, turnId: 'turn-a', diff: patch, linesAdded: 1, linesRemoved: 1 });
+    // OR-17: the daemon's PATCH declares the remote-identity capability like every MCP request.
+    expect(h.send.mock.calls[0][1].headers).toMatchObject({ 'X-Origin-Capabilities': 'rhodecode-remote-identity-1' });
     expect(row.captureId).toMatch(/^hb_/);
   });
 

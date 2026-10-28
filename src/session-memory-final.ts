@@ -9,15 +9,19 @@
 // sat a minute or two after its final commit, and a session whose last commit
 // was a merge was remembered by the agent's narration of that moment.
 //
-// This runs from the heartbeat's end, where the transcript is complete.
+// This runs from the heartbeat's end, where the transcript is complete — and
+// again from post-commit when the person commits the session's work by hand
+// after it ended (rememberCommitAfterEnd).
 import { buildMemoryEntry } from './commands/hooks/session-end.js';
-import { commitDecisionsFor, committedSessionMarkers, currentTurnStart, withTurnDiffs } from './committed-markers.js';
+import { shouldIncludePromptText } from './prompt-privacy.js';
+import { commitDecisionsFor, commitEvidence, committedSessionMarkers, currentTurnStart, withTurnDiffs } from './committed-markers.js';
 import {
   enrichDecisionsForSession, memoryUpdateTrigger, readSessionMemoryEntry, sessionCommitSubjects, shouldWriteMemoryOnSessionEnd,
   summarizeFromCommitSubjects, writeSessionMemory,
 } from './memory.js';
-import { parseMarkersFromTranscriptPath, readMarkerTurns } from './origin-markers.js';
+import { parseMarkersFromTranscriptPath, readMarkerTurns, type CommitEvidence } from './origin-markers.js';
 import { parseTranscript } from './transcript.js';
+import { gitOrNull } from './utils/exec.js';
 
 export interface EndingSessionState {
   sessionId: string;
@@ -34,7 +38,23 @@ export interface EndingSessionState {
   currentTurnStartedAt?: number;
   promptSubmittedAt?: string[];
   promptIndexBase?: number;
-  completedPromptMappings?: Array<{ promptIndex: number; diff?: string | null; uncommittedDiff?: string | null }>;
+  completedPromptMappings?: Array<{
+    promptIndex: number; diff?: string | null; uncommittedDiff?: string | null;
+    filesChanged?: string[]; discardedFiles?: string[];
+  }>;
+}
+
+/**
+ * The files the session's turns changed, as Stop recorded them, less the ones
+ * a turn wrote and put back. Pure — exported for testing.
+ */
+export function turnFilesChanged(state: Pick<EndingSessionState, 'completedPromptMappings'>): string[] {
+  const out = new Set<string>();
+  for (const m of state.completedPromptMappings || []) {
+    const discarded = new Set(m.discardedFiles || []);
+    for (const f of m.filesChanged || []) if (f && !discarded.has(f)) out.add(f);
+  }
+  return [...out];
 }
 
 /**
@@ -53,7 +73,10 @@ export function writeFinalSessionMemory(state: EndingSessionState): boolean {
   const repoPath = state.repoPath;
   if (!repoPath || !state.sessionId || !state.startedAt) return false;
   const existing = readSessionMemoryEntry(repoPath, state.sessionId);
-  if (!existing && !shouldWriteMemoryOnSessionEnd(memoryUpdateTrigger())) return false;
+  const afterEnd = commitsAfterEnd(repoPath, state);
+  // A commit of its work after it ended is the session committing, which
+  // `memoryUpdate: commit` asks to remember too.
+  if (!existing && afterEnd.length === 0 && !shouldWriteMemoryOnSessionEnd(memoryUpdateTrigger())) return false;
 
   let lastMessage = '';
   if (state.transcriptPath) {
@@ -74,6 +97,7 @@ export function writeFinalSessionMemory(state: EndingSessionState): boolean {
     const committed = committedSessionMarkers({
       repoPath, sessionId: state.sessionId, turns,
       commitShas: state.sessionCommitShas, currentTurnStartedAt: turnStart,
+      commits: afterEnd,
     });
     const closes = parseMarkersFromTranscriptPath(state.transcriptPath || undefined)?.closes;
     markers = committed || closes ? { ...(committed || {}), ...(closes ? { closes } : {}) } : undefined;
@@ -83,24 +107,53 @@ export function writeFinalSessionMemory(state: EndingSessionState): boolean {
   const summary = summarizeFromCommitSubjects(sessionCommitSubjects(repoPath, state.sessionId))
     || lastMessage.trim()
     || undefined;
-  // Files and line counts are the ones the entry already carries:
-  // writeSessionMemory unions files and keeps the larger count, so passing
-  // what is there only ever keeps it.
+  // Files: the ones each turn recorded, plus any the entry already carries.
+  // With the default `memoryUpdate: session-end` no commit wrote an entry
+  // first, so the entry's own list was empty and every Claude Code session
+  // was remembered with line counts but no files. Line counts are the
+  // larger of the two — writeSessionMemory keeps the larger count anyway.
   writeSessionMemory(repoPath, buildMemoryEntry(
     { ...state, prompts: state.prompts || [], branch: state.branch ?? existing?.branch ?? null },
     {
       agentSlug: state.agentSlug || existing?.agentSlug,
       model: state.model && state.model !== 'unknown' ? state.model : (existing?.model || 'unknown'),
       branch: state.branch ?? existing?.branch ?? null,
-      filesChanged: existing?.filesChanged || [],
+      filesChanged: [...new Set([...(existing?.filesChanged || []), ...turnFilesChanged(state)])],
       linesAdded: Math.max(state.linesAdded || 0, existing?.linesAdded || 0),
       linesRemoved: Math.max(state.linesRemoved || 0, existing?.linesRemoved || 0),
       summary,
       prompts,
+      includePromptText: shouldIncludePromptText(repoPath),
       fileNotes: existing?.fileNotes,
       decisions: [...(markers?.decision || []), ...(existing?.decisions || [])],
       markers,
     },
   ));
   return true;
+}
+
+const MAX_COMMITS_AFTER_END = 50;
+
+/**
+ * The commits made by hand after the session ended that carry its trailer —
+ * prepare-commit-msg stamps one when the staged lines are the ones the session
+ * recorded (ended-session-commit-owner.ts). No turn made them, so each brings
+ * back only the turns whose work is in it.
+ *
+ * Read from git rather than kept on the state, so every rewrite of the entry
+ * sees all of them: the heartbeat's at the end, then one per such commit.
+ */
+export function commitsAfterEnd(repoPath: string, state: Pick<EndingSessionState, 'sessionId' | 'startedAt' | 'sessionCommitShas'>): CommitEvidence[] {
+  const id = (state.sessionId || '').slice(0, 12).toLowerCase();
+  if (!/^[0-9a-f-]{8,12}$/.test(id) || !state.startedAt) return [];
+  const log = gitOrNull(
+    ['log', `--since=${state.startedAt}`, '-n', String(MAX_COMMITS_AFTER_END), '-i', '-E', `--grep=^Origin-Session: *${id}`, '--format=%H', 'HEAD'],
+    { cwd: repoPath, timeoutMs: 10_000 },
+  );
+  if (!log) return [];
+  const own = new Set((state.sessionCommitShas || []).map((s) => s.toLowerCase()));
+  const shas = log.split('\n').map((l) => l.trim()).filter((sha) => sha && !own.has(sha.toLowerCase()));
+  if (shas.length === 0) return [];
+  const evidence = commitEvidence(repoPath, shas);
+  return shas.map((sha) => evidence.get(sha)).filter((ev): ev is CommitEvidence => !!ev).map((ev) => ({ ...ev, afterEnd: true }));
 }

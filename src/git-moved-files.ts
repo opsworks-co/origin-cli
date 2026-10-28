@@ -128,14 +128,152 @@ export function filesMovedByCommand(tree: string, before?: string | null, after?
   return [...files];
 }
 
+/**
+ * Files an operation that STOPPED half way is bringing in: a merge, rebase
+ * pick, cherry-pick or revert waiting on a conflict. HEAD has not reached the
+ * commit being applied yet, so the HEAD chain cannot name its files; what
+ * differs between HEAD and that commit can. Empty when nothing is in progress.
+ *
+ * One spawn to find the gitdir (a linked worktree keeps these refs in its own),
+ * then plain reads: this runs inside post-tool-use, where latency costs prompts.
+ */
+export function filesOfStoppedOperation(tree: string): string[] {
+  if (!tree) return [];
+  let gitDir: string;
+  try {
+    gitDir = path.resolve(tree, execFileSync('git', ['rev-parse', '--git-dir'], {
+      cwd: tree, windowsHide: true, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim());
+  } catch { return []; }
+  const out = new Set<string>();
+  for (const ref of ['MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD']) {
+    let text = '';
+    try { text = fs.readFileSync(path.join(gitDir, ref), 'utf-8'); } catch { continue; } // not in progress
+    // MERGE_HEAD holds one line per merged head (an octopus merge has several).
+    for (const sha of text.split('\n').map((l) => l.trim().split(/\s/)[0]).filter((s) => /^[0-9a-f]{40,64}$/.test(s))) {
+      for (const f of filesChangedBetween(tree, 'HEAD', sha)) out.add(f);
+    }
+  }
+  return [...out];
+}
+
 export type GitMovedState = {
-  gitMovedFilesByTurn?: Array<{ promptIndex: number; tree: string; files: string[] }>;
+  gitMovedFilesByTurn?: Array<{
+    promptIndex: number; tree: string; files: string[];
+    // File → blob of the bytes a STOPPED operation left in it (see
+    // recordGitLeftFiles). A later write to the file is measured from these.
+    left?: Record<string, string>;
+  }>;
 };
 
 const MAX_FILES_PER_TURN = 2000;
 const MAX_TURNS_KEPT = 32;
+// Blobs kept per turn entry. A stopped pick's files, not a whole pull's: the
+// bound keeps a runaway conflict from growing the state file.
+const MAX_LEFT_FILES_PER_TURN = 500;
 
 const sameTree = (a: string, b: string) => path.resolve(a) === path.resolve(b);
+const BLOB_SHA = /^[0-9a-f]{40,64}$/;
+
+/**
+ * Blobs of `files` as they sit in `tree`'s working tree, written to the object
+ * store in ONE spawn. A path that is not a plain file is left out.
+ */
+export function blobsOfWorkingFiles(tree: string, files: Iterable<string>): Map<string, string> {
+  const out = new Map<string, string>();
+  const present = [...new Set([...files])].filter((f) => {
+    try { return fs.statSync(path.join(tree, f)).isFile(); } catch { return false; }
+  });
+  if (!tree || present.length === 0) return out;
+  try {
+    const lines = execFileSync('git', ['hash-object', '-w', '--', ...present], {
+      cwd: tree, windowsHide: true, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 32 * 1024 * 1024,
+    }).split('\n').map((l) => l.trim()).filter(Boolean);
+    if (lines.length !== present.length) return out;
+    present.forEach((f, i) => { if (BLOB_SHA.test(lines[i])) out.set(f, lines[i]); });
+  } catch { /* no blobs: callers keep the baseline they had */ }
+  return out;
+}
+
+/** The bytes of blob `sha` in `tree`'s object store, or null. */
+export function readBlobContent(tree: string, sha: string): string | null {
+  if (!tree || !BLOB_SHA.test(sha)) return null;
+  try {
+    return execFileSync('git', ['cat-file', 'blob', sha], {
+      cwd: tree, windowsHide: true, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 32 * 1024 * 1024,
+    });
+  } catch {
+    return null;
+  }
+}
+
+const normalize = (f: string) => String(f || '').replace(/\\/g, '/').replace(/^\.\//, '');
+
+/**
+ * Remember what a STOPPED merge, rebase pick, cherry-pick or revert left in
+ * each of `left`'s files during LOCAL turn `promptIndex` (file → blob).
+ *
+ * Origin TODO 1de72a6e. The file on disk then holds the incoming side, or
+ * both sides and the markers — put there by git, not by the turn — and that
+ * state exists in no commit: a before-state read at the turn's shadow bills
+ * the turn the incoming branch's lines when it writes the file next (a
+ * heredoc resolving the conflict, `git checkout --theirs`). Session 8a0a80ae
+ * turn 1 recorded package.json and package-lock.json as its own
+ * `command_probe` edits from the turn's start to the conflicted text. A later
+ * record for the same file replaces the earlier one: the second pick that
+ * stops on the same file leaves it anew.
+ */
+export function recordGitLeftFiles(state: GitMovedState, promptIndex: number, tree: string, left: ReadonlyMap<string, string>): void {
+  if (!tree || left.size === 0 || !Number.isInteger(promptIndex) || promptIndex < 0) return;
+  const all = state.gitMovedFilesByTurn || [];
+  const prev = all.find((e) => e.promptIndex === promptIndex && sameTree(e.tree, tree));
+  const rest = all.filter((e) => e !== prev);
+  const merged: Record<string, string> = { ...(prev?.left || {}) };
+  for (const [file, blob] of left) {
+    const f = normalize(file);
+    if (f && BLOB_SHA.test(blob)) merged[f] = blob;
+  }
+  const bounded = Object.fromEntries(Object.entries(merged).slice(-MAX_LEFT_FILES_PER_TURN));
+  state.gitMovedFilesByTurn = [
+    ...rest,
+    { promptIndex, tree, files: prev?.files || [], left: bounded },
+  ].slice(-MAX_TURNS_KEPT);
+}
+
+/**
+ * Drop the record for `files` in LOCAL turn `promptIndex`: the file is back at
+ * the turn's start (an abort, a `git checkout` of it), so what git left in it
+ * is gone and a later write is measured from the turn's start again.
+ */
+export function forgetGitLeftFiles(state: GitMovedState, promptIndex: number, tree: string, files: Iterable<string>): boolean {
+  const entry = (state.gitMovedFilesByTurn || []).find((e) => e.promptIndex === promptIndex && sameTree(e.tree, tree));
+  if (!entry?.left) return false;
+  let changed = false;
+  for (const file of files) {
+    const f = normalize(file);
+    if (f in entry.left) { delete entry.left[f]; changed = true; }
+  }
+  if (changed && Object.keys(entry.left).length === 0) delete entry.left;
+  return changed;
+}
+
+/** File → blob of what git left in `tree` during LOCAL turn `promptIndex`. */
+export function gitLeftBlobsForTurn(state: GitMovedState, promptIndex: number | null | undefined, tree: string | null | undefined): Map<string, string> {
+  const out = new Map<string, string>();
+  if (promptIndex == null || !tree) return out;
+  for (const e of state.gitMovedFilesByTurn || []) {
+    if (e.promptIndex !== promptIndex || !sameTree(e.tree, tree) || !e.left) continue;
+    for (const [f, blob] of Object.entries(e.left)) out.set(f, blob);
+  }
+  return out;
+}
+
+/** The bytes git left in `file` during LOCAL turn `promptIndex`, or null when it left none. */
+export function gitLeftContent(state: GitMovedState, promptIndex: number | null | undefined, tree: string | null | undefined, file: string): string | null {
+  if (!tree) return null;
+  const blob = gitLeftBlobsForTurn(state, promptIndex, tree).get(normalize(file));
+  return blob ? readBlobContent(tree, blob) : null;
+}
 
 /** Add `files` to what git moved in `tree` during LOCAL turn `promptIndex`. */
 export function recordGitMovedFiles(state: GitMovedState, promptIndex: number, tree: string, files: Iterable<string>): void {
@@ -145,7 +283,12 @@ export function recordGitMovedFiles(state: GitMovedState, promptIndex: number, t
   const prev = all.find((e) => e.promptIndex === promptIndex && sameTree(e.tree, tree));
   const rest = all.filter((e) => e !== prev);
   const merged = [...new Set([...(prev?.files || []), ...add])].slice(0, MAX_FILES_PER_TURN);
-  state.gitMovedFilesByTurn = [...rest, { promptIndex, tree, files: merged }].slice(-MAX_TURNS_KEPT);
+  // `left` rides along: a later tree-moving command (`git checkout --theirs
+  // f`, the abort) must not wipe what the stopped operation left.
+  state.gitMovedFilesByTurn = [
+    ...rest,
+    { promptIndex, tree, files: merged, ...(prev?.left ? { left: prev.left } : {}) },
+  ].slice(-MAX_TURNS_KEPT);
 }
 
 /** What git moved in `tree` during LOCAL turn `promptIndex`. */

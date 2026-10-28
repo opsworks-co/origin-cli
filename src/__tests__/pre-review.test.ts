@@ -113,7 +113,7 @@ describe('buildReviewPrompt', () => {
       base: 'origin/main',
       diff: SAMPLE_DIFF,
       files: [
-        { file: 'src/auth.ts', aiLines: 42, humanLines: 3, mixedLines: 1, sessionIds: ['sess-1'] },
+        { file: 'src/auth.ts', aiLines: 42, humanLines: 3, mixedLines: 1, unknownLines: 0, sessionIds: ['sess-1'] },
       ],
       sessions: new Map(),
     });
@@ -151,7 +151,7 @@ describe('buildReviewPrompt', () => {
     const { user } = buildReviewPrompt({
       base: 'origin/main',
       diff: SAMPLE_DIFF,
-      files: [{ file: 'src/auth.ts', aiLines: 0, humanLines: 5, mixedLines: 0, sessionIds: [] }],
+      files: [{ file: 'src/auth.ts', aiLines: 0, humanLines: 5, mixedLines: 0, unknownLines: 0, sessionIds: [] }],
       sessions: new Map(),
     });
     expect(user).toContain('No prior Origin-tracked sessions');

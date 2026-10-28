@@ -18,6 +18,13 @@ import { execFileSync } from 'child_process';
 /** File in Origin's hooks dir holding the user's previous `core.hooksPath`. */
 export const PREVIOUS_HOOKS_PATH_FILE = 'previous-hooks-path';
 
+/**
+ * Repo-local git config key holding the `core.hooksPath` a repo set for itself
+ * before `origin doctor --fix` took it out of the way (local-hooks-path.ts).
+ * Origin's global hooks run that dir in place of `$(git-dir)/hooks`.
+ */
+export const CHAINED_HOOKS_PATH_SETTING = 'origin.chainedHooksPath';
+
 export function originGlobalHooksDir(): string {
   return path.join(os.homedir(), '.origin', 'git-hooks');
 }

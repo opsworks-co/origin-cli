@@ -13,6 +13,13 @@ import * as fzstd from 'fzstd';
 import { debugLog } from '../debug-log.js';
 import { buildCodexThreadByIdQuery, buildCodexThreadByCwdQuery } from '../codex-thread-query.js';
 import { IMAGE_PLACEHOLDER, codexUserPromptText, type ModelUsage } from '../transcript.js';
+import { isSubagentSpawnTool } from '../subagent-tools.js';
+import { partsField, replyTextPart, replyToolPart, type DisplayPart } from '../display-parts.js';
+import { appendTurnEvents, eventTime, eventTokens, inputPreview, spanMs, type DisplayEvent } from '../display-events.js';
+
+// An assistant message's words as a share-safe part; a user's prompt has none.
+const assistantTextParts = (role: string, text: string) =>
+  role === 'assistant' ? partsField([replyTextPart(text)]) : {};
 
 // ─── Codex Session Data Discovery ─────────────────────────────────────────
 
@@ -29,6 +36,9 @@ export interface CodexSessionData {
   toolCalls: number;
   prompt: string;
   prompts?: string[];   // all user prompts from the rollout, in order
+  // Sub-agents the chat spawned. They fire no hooks, so this is the only
+  // record of them; their usage is already inside the token counts above.
+  subagentSpawns?: CodexSubagentSpawn[];
   transcript?: string;  // full JSONL conversation for display
   cwd?: string;         // codex thread's actual cwd — drives repoPath correction
   rolloutPath?: string; // absolute path to the rollout JSONL(.zst) — feed to
@@ -228,15 +238,8 @@ export function discoverCodexSessionData(
     // AGENTS.md replay or its environment-context wrapper, not anything
     // the user typed. Filter the echo out so it never reaches
     // state.prompts / the dashboard.
-    const looksLikeOriginEcho =
-      rawPrompt.includes('<!-- origin-managed -->') ||
-      /^#\s+AGENTS\.md instructions for /m.test(rawPrompt);
-    const stripped = rawPrompt
-      .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
-      .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
-      .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
-      .trim();
-    const prompt = looksLikeOriginEcho ? '' : stripped;
+    // The same gate the rollout parsers use.
+    const prompt = codexUserPromptText(rawPrompt) ?? '';
 
     // Resolve the rollout file once so we can hand the absolute path to
     // the new per-prompt PromptCapture extractor (which decompresses .zst
@@ -283,6 +286,7 @@ export function discoverCodexSessionData(
         prompts: rolloutResult.userPrompts,
         transcript: rolloutResult.transcript,
         ...(rolloutResult.modelUsage && { modelUsage: rolloutResult.modelUsage, turnUsage: rolloutResult.turnUsage }),
+        ...(rolloutResult.subagentSpawns && { subagentSpawns: rolloutResult.subagentSpawns }),
         cwd: threadCwd || undefined,
         rolloutPath: absRolloutPath || undefined,
       };
@@ -1349,6 +1353,155 @@ function withCommandExecutions(turns: Array<{ role: string; content: string }>, 
   return turns;
 }
 
+// A tool call's output says it failed: the exec wrapper's own failure, a
+// rejected patch, or a non-zero exit code in any shape Codex has written.
+// A wrapper that ran several commands fails when any of them did.
+const CODEX_EXIT_CODE = /(?:\\?"exit_code\\?"\s*:\s*|Process exited with code |Exit code:\s*)(-?\d+)/g;
+export function codexToolOutputFailed(output: string): boolean {
+  if (CODEX_PATCH_FAILURE.test(output)) return true;
+  for (const m of output.matchAll(CODEX_EXIT_CODE)) if (Number(m[1]) !== 0) return true;
+  return false;
+}
+
+/**
+ * Each prompt's structured steps (see display-events.ts), read from the
+ * rollout and set on that prompt's user message — the same prompt positions
+ * withCommandExecutions uses. Both rollout parsers call this, so the
+ * heartbeat's transcript and the Stop hook's carry the same events.
+ *
+ * - model: one per `token_count` whose running total grew; its tokens are
+ *   that call's (`last_token_usage`, cached split out of input). Codex writes
+ *   no request start, and the token_count lands after the tool output, so a
+ *   call is timed as Claude's are: it starts at the previous boundary (the
+ *   prompt or the last tool output) and ends at its last output item (an
+ *   assistant message, reasoning, a tool call). It sits where that first
+ *   item did. With no boundary or no output item it keeps the token_count's
+ *   time and has no duration.
+ * - thinking: a `reasoning` item, at its time.
+ * - tool: a call, timed to its output; failed per codexToolOutputFailed, or
+ *   by an `exec_command_end` exit code on older builds.
+ */
+function withCodexEvents<T extends { role: string; content: string }>(turns: T[], lines: string[]): T[] {
+  const users = turns.filter((t) => t.role === 'user' || t.role === 'human') as Array<T & { ts?: number; events?: DisplayEvent[]; eventsDropped?: number }>;
+  const byTurn = new Map<number, DisplayEvent[]>();
+  const tools = new Map<string, DisplayEvent>();
+  let turn = -1;
+  let turnModel: string | undefined;
+  let lastTotal = 0;
+  // The model call in progress: when its input was complete (`boundary`),
+  // when it first and last wrote output, and where in the turn it began.
+  let boundary: number | undefined;
+  let call: { turn: number; index: number; start?: number; end?: number } | undefined;
+  const add = (ev: DisplayEvent) => {
+    if (turn < 0 || !users[turn]) return;
+    let list = byTurn.get(turn);
+    if (!list) { list = []; byTurn.set(turn, list); }
+    list.push(ev);
+  };
+  const modelOutput = (at: number | undefined) => {
+    if (!call) call = { turn, index: byTurn.get(turn)?.length ?? 0, start: boundary };
+    if (at !== undefined && (call.end === undefined || at > call.end)) call.end = at;
+  };
+  for (const line of lines) {
+    let event: any;
+    try { event = JSON.parse(line); } catch { continue; }
+    const p = event?.payload;
+    if (!p) continue;
+    const at = eventTime(event.timestamp);
+    if (event.type === 'turn_context' && typeof p.model === 'string' && p.model) turnModel = p.model;
+    if (p.type === 'message' && (p.role === 'user' || p.role === 'human')) {
+      const text = typeof p.content === 'string' ? p.content
+        : (Array.isArray(p.content) ? p.content.map((b: any) => b?.type === 'input_image' || b?.type === 'image' ? IMAGE_PLACEHOLDER : b?.text || '').join('') : '');
+      if (codexUserPromptText(text)) {
+        turn++;
+        if (at !== undefined && users[turn]) users[turn].ts = at;
+        boundary = at;
+        call = undefined;
+      }
+      continue;
+    }
+    if (p.type === 'message' && p.role === 'assistant') { modelOutput(at); continue; }
+    if (p.type === 'token_count') {
+      const total = Number(p.info?.total_token_usage?.total_tokens) || 0;
+      const last = p.info?.last_token_usage;
+      // Codex repeats a token_count with an unchanged total; that is no new call.
+      if (!last || total <= lastTotal) continue;
+      lastTotal = total;
+      const input = Number(last.input_tokens) || 0;
+      const cached = Number(last.cached_input_tokens) || 0;
+      const ev: DisplayEvent = { kind: 'model' };
+      const timed = call && call.turn === turn && call.start !== undefined && call.end !== undefined ? call : undefined;
+      if (timed) {
+        ev.ts = timed.start;
+        const d = spanMs(timed.start, timed.end);
+        if (d !== undefined) ev.durationMs = d;
+      } else if (at !== undefined) ev.ts = at;
+      if (turnModel) ev.model = turnModel;
+      const tokens = eventTokens({
+        input: Math.max(0, input - cached),
+        output: Number(last.output_tokens) || 0,
+        cacheRead: cached,
+        cacheWrite: Number(last.cache_write_input_tokens) || 0,
+      });
+      if (tokens) ev.tokens = tokens;
+      if (call && call.turn === turn && turn >= 0 && users[turn]) {
+        const list = byTurn.get(turn) ?? [];
+        byTurn.set(turn, list);
+        list.splice(Math.min(call.index, list.length), 0, ev);
+      } else add(ev);
+      // A tool output during the call starts the next one; with none, the
+      // next call has no known start.
+      if (call && boundary === call.start) boundary = undefined;
+      call = undefined;
+    } else if (p.type === 'reasoning') {
+      modelOutput(at);
+      const ev: DisplayEvent = { kind: 'thinking' };
+      if (at !== undefined) ev.ts = at;
+      add(ev);
+    } else if (p.type === 'function_call' || p.type === 'local_shell_call' || p.type === 'custom_tool_call') {
+      modelOutput(at);
+      const rawArgs = p.input ?? p.arguments ?? p.action ?? p.command ?? '';
+      const argStr = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs);
+      const { tool, display } = describeCodexToolCall(p.name || (p.type === 'local_shell_call' ? 'shell' : 'tool'), argStr);
+      const ev: DisplayEvent = { kind: 'tool', tool };
+      if (at !== undefined) ev.ts = at;
+      // A patch's first line is "*** Begin Patch"; the files it touches say more.
+      const patched = tool === 'apply_patch'
+        ? [...display.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)].map((m) => m[1].trim())
+        : [];
+      const preview = inputPreview(patched.length > 0 ? patched.join(', ') : display);
+      if (preview) ev.input = preview;
+      const callId = p.call_id || p.id;
+      if (callId) tools.set(callId, ev);
+      add(ev);
+    } else if (p.type === 'function_call_output' || p.type === 'local_shell_call_output' || p.type === 'custom_tool_call_output') {
+      if (at !== undefined) boundary = at;
+      const ev = tools.get(p.call_id || p.id || '');
+      if (!ev) continue;
+      const d = spanMs(ev.ts, at);
+      if (d !== undefined) ev.durationMs = d;
+      if (codexToolOutputFailed(stringifyCodexToolOutput(p.output))) ev.error = true;
+    } else if (p.type === 'exec_command_end') {
+      if (at !== undefined) boundary = at;
+      const ev = tools.get(p.call_id || '');
+      if (!ev) continue;
+      if (Number.isInteger(p.exit_code) && p.exit_code !== 0) ev.error = true;
+      const secs = Number(p.duration?.secs);
+      if (ev.durationMs === undefined && Number.isFinite(secs)) ev.durationMs = Math.round(secs * 1000 + (Number(p.duration?.nanos) || 0) / 1e6);
+    } else if (p.type === 'web_search_call') {
+      modelOutput(at);
+    } else if (p.type === 'web_search_end') {
+      const ev: DisplayEvent = { kind: 'tool', tool: 'web_search' };
+      if (at !== undefined) ev.ts = at;
+      const preview = inputPreview(typeof p.query === 'string' ? p.query : '');
+      if (preview) ev.input = preview;
+      add(ev);
+    }
+  }
+  for (const [index, events] of byTurn) appendTurnEvents(users[index], events);
+  return turns;
+}
+
 // Lean, live-heartbeat variant of parseCodexRollout used by the CLI heartbeat
 // (pushInflightCodexState). It runs every ~30s on the in-flight rollout to keep
 // the dashboard's transcript/tokens/prompts fresh WHILE the agent is working,
@@ -1363,6 +1516,31 @@ function withCommandExecutions(turns: Array<{ role: string; content: string }>, 
 // user-reported "tool output was there, then disappeared" bug (gpt-5.6-sol,
 // Windows). Co-located here so the two can't drift apart unnoticed again;
 // locked by codex-live-parser.test.ts.
+/** A sub-agent the chat spawned, read from its `spawn_agent` call. */
+export interface CodexSubagentSpawn {
+  toolCallId: string;
+  /** `agent_type` when the model named one (Codex's configured roles). */
+  subagentType: string | null;
+  /** `task_name` — the message itself is often encrypted in the rollout. */
+  description: string | null;
+  promptIndex: number;
+  startedAt: string;
+}
+
+/** The spawn a tool call describes, or null when it is not a `spawn_agent`. */
+function codexSubagentSpawn(payload: any, argStr: string): Pick<CodexSubagentSpawn, 'toolCallId' | 'subagentType' | 'description'> | null {
+  const name = [payload?.namespace, payload?.name].filter(Boolean).join('.');
+  if (!isSubagentSpawnTool(name) && !isSubagentSpawnTool(payload?.name)) return null;
+  let args: any = {};
+  try { args = JSON.parse(argStr || '{}'); } catch { /* unreadable arguments: still a spawn */ }
+  const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
+  return {
+    toolCallId: String(payload?.call_id || payload?.id || ''),
+    subagentType: str(args?.agent_type),
+    description: str(args?.task_name),
+  };
+}
+
 export function parseCodexRolloutLive(rolloutFile: string): {
   userPrompts: string[];
   // Per-prompt timestamps (ms epoch) parsed from the rollout's user message
@@ -1385,6 +1563,10 @@ export function parseCodexRolloutLive(rolloutFile: string): {
   // event is the only place that content survives. Optional so a test double
   // that predates it still satisfies the shape.
   promptDeletedFiles?: Array<Record<string, string>>;
+  // Prompt indexes during which the chat spawned a sub-agent. The sub-agent's
+  // apply_patch calls are in ITS rollout, not this one, so promptPatches is
+  // not the whole of such a turn's edits.
+  spawnedAgentPrompts?: number[];
   transcript: string;
   tokensUsed: number;
   inputTokens: number;
@@ -1411,7 +1593,7 @@ export function parseCodexRolloutLive(rolloutFile: string): {
     }
 
     const lines = content.split('\n').filter(l => l.trim());
-    const turns: Array<{ role: string; content: string }> = [];
+    const turns: Array<{ role: string; content: string; parts?: DisplayPart[] }> = [];
     const promptTimestamps: number[] = [];
     // One entry per user prompt (pushed alongside promptTimestamps); apply_patch
     // tool calls are appended to the current (most recent) prompt's array.
@@ -1421,6 +1603,8 @@ export function parseCodexRolloutLive(rolloutFile: string): {
     // apply_patch call id → where its body sits in promptPatches, so a patch
     // Codex rejected can be blanked out when the failure result arrives.
     const patchByCallId = new Map<string, { prompt: number; at: number }>();
+    // Prompts during which the chat spawned a sub-agent.
+    const spawnedAgentPrompts = new Set<number>();
     const pendingTools = new Map<string, number>();
     let maxInputTokens = 0, maxOutputTokens = 0, maxTotalTokens = 0, maxCachedInputTokens = 0;
     let model: string | undefined;
@@ -1470,7 +1654,7 @@ export function parseCodexRolloutLive(rolloutFile: string): {
             // images are numbered against the same turns these are.
             const cleaned = isUser ? codexUserPromptText(text) : text;
             if (cleaned) {
-              turns.push({ role, content: cleaned });
+              turns.push({ role, content: cleaned, ...assistantTextParts(role, cleaned) });
               // Capture per-user-prompt timestamp from any of Codex's
               // event-level time fields. Without this the prompt baseline
               // falls back to "whenever heartbeat noticed", which is
@@ -1521,11 +1705,12 @@ export function parseCodexRolloutLive(rolloutFile: string): {
           );
           const callId = payload.call_id || payload.id || '';
           const idx = turns.length;
-          turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(display)}` });
+          turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(display)}`, ...partsField([replyToolPart(tool)]) });
           if (callId) pendingTools.set(callId, idx);
           // Attribute the patch to the current turn for per-prompt diffs. The
           // call id is remembered so a patch Codex REJECTS can be withdrawn
           // when its result arrives — see codexPatchCallFailed.
+          if (promptPatches.length > 0 && codexSubagentSpawn(payload, argStr)) spawnedAgentPrompts.add(promptPatches.length - 1);
           if (tool === 'apply_patch' && typeof display === 'string' && display.includes('*** Begin Patch') && promptPatches.length > 0) {
             const bucket = promptPatches[promptPatches.length - 1];
             bucket.push(display);
@@ -1602,7 +1787,8 @@ export function parseCodexRolloutLive(rolloutFile: string): {
       // Drop the withdrawn (rejected) patches.
       promptPatches: promptPatches.map((list) => list.filter(Boolean)),
       promptDeletedFiles,
-      transcript: JSON.stringify(withCommandExecutions(turns, lines)),
+      ...(spawnedAgentPrompts.size > 0 && { spawnedAgentPrompts: [...spawnedAgentPrompts].sort((a, b) => a - b) }),
+      transcript: JSON.stringify(withCodexEvents(withCommandExecutions(turns, lines), lines)),
       tokensUsed: liveNonCachedInput + maxOutputTokens,
       inputTokens: liveNonCachedInput,
       outputTokens: maxOutputTokens,
@@ -1645,9 +1831,9 @@ export interface CodexReviewCall {
 /**
  * Head classification of rollout files, by path. A rollout's first line
  * (`session_meta`) never changes once written, so the heartbeat's repeated
- * scans only open files they have not seen. `null` = not a review thread.
+ * scans only open files they have not seen. `null` = not a child thread.
  */
-const reviewParentByFile = new Map<string, string | null>();
+const childHeadByFile = new Map<string, { id: string | null; parent: string } | null>();
 
 /** The first line of a rollout, or null while it is still being written. */
 function readFirstLine(file: string): string | null {
@@ -1673,42 +1859,87 @@ function readFirstLine(file: string): string | null {
   }
 }
 
-/** The chat a rollout reviews for, when it is an auto-review thread. */
-function reviewParentOf(file: string): string | null {
-  const cached = reviewParentByFile.get(file);
-  if (cached !== undefined) return cached;
-  const head = readFirstLine(file);
-  if (head === null) return null; // not written yet — look again next time
-  let parent: string | null = null;
-  if (head.includes('guardian')) {
-    try {
-      const meta = JSON.parse(head)?.payload;
-      if (meta && JSON.stringify(meta.source ?? '').includes('guardian')) {
-        const id = meta.parent_thread_id || meta.forked_from_id;
-        if (typeof id === 'string' && id) parent = id;
-      }
-    } catch { /* malformed head */ }
-  }
-  reviewParentByFile.set(file, parent);
-  return parent;
+/**
+ * The thread that started this one, read from a rollout's `session_meta`
+ * payload, or null for a thread the user started.
+ *
+ * Codex runs two kinds of child thread, each in a rollout of its own:
+ *   - auto-review ("guardian"): `source: {subagent: {other: 'guardian'}}`;
+ *   - a sub-agent the model spawned (`spawn_agent`, multi-agent mode):
+ *     `source: {subagent: {thread_spawn: {parent_thread_id, depth, …}}}`,
+ *     `thread_source: 'subagent'`, top-level `parent_thread_id`.
+ * Neither fires a SessionStart or Stop hook. A user's own fork of a chat
+ * carries `forked_from_id` alone and IS its own conversation, so that field
+ * names a parent only for a review thread, as it always has.
+ */
+export function codexParentThreadFromMeta(meta: any): string | null {
+  if (!meta || typeof meta !== 'object') return null;
+  const sub = meta.source && typeof meta.source === 'object' ? meta.source.subagent : undefined;
+  const isChild = sub !== undefined || meta.thread_source === 'subagent' || meta.thread_source === 'guardian_review';
+  const candidates = [
+    meta.parent_thread_id,
+    sub?.thread_spawn?.parent_thread_id,
+    isChild && JSON.stringify(sub ?? '').includes('guardian') ? meta.forked_from_id : undefined,
+  ];
+  for (const id of candidates) if (typeof id === 'string' && id) return id;
+  return null;
 }
 
 /**
- * Rollouts of the auto-review threads Codex ran for this chat.
- *
- * Codex's auto-review ("guardian") assesses the chat's risky actions in a
- * thread of its own: its own rollout, `session_meta.source.subagent.other =
- * 'guardian'`, `parent_thread_id` = the chat. It is filtered out as a session
- * (#944), and its usage was then counted nowhere — neither in the chat nor in
- * any turn (TODO 995c166e). A review thread starts on or after its chat, so
- * only day directories from the chat's own day onwards are read. Compressed
- * rollouts are skipped: Codex writes review threads as plain JSONL.
+ * A child rollout's own thread id and its parent's, null for a thread the user
+ * started, undefined while the first line is still being written (look again
+ * next time).
  */
-export function findCodexReviewRollouts(chatRollout: string, chatId: string): string[] {
+function codexChildHead(file: string): { id: string | null; parent: string } | null | undefined {
+  const cached = childHeadByFile.get(file);
+  if (cached !== undefined) return cached;
+  // A compressed rollout is an archived user chat: Codex writes child threads
+  // as plain JSONL. Not opened, so a watcher poll never decompresses it.
+  if (!file.endsWith('.jsonl')) return null;
+  const head = readFirstLine(file);
+  if (head === null) return undefined;
+  let child: { id: string | null; parent: string } | null = null;
+  // Cheap gate before parsing a ~20 KB line: every child head names one.
+  if (/parent_thread_id|"subagent"|guardian/.test(head)) {
+    try {
+      const event = JSON.parse(head);
+      const parent = event?.type === 'session_meta' ? codexParentThreadFromMeta(event.payload) : null;
+      if (parent) child = { id: sessionMetaId(event) ?? null, parent };
+    } catch { /* malformed head */ }
+  }
+  childHeadByFile.set(file, child);
+  return child;
+}
+
+/**
+ * The thread a rollout's thread was started by, when it is a child thread:
+ * the parent's id, null for a thread the user started, undefined while the
+ * first line is still being written (look again next time).
+ */
+export function codexParentThreadOf(file: string): string | null | undefined {
+  const head = codexChildHead(file);
+  return head === undefined ? undefined : head?.parent ?? null;
+}
+
+/**
+ * Rollouts of the child threads Codex ran for this chat: its auto-review
+ * ("guardian") threads and the sub-agents it spawned, and theirs in turn (a
+ * sub-agent can spawn its own).
+ *
+ * Each runs in a rollout of its own whose `session_meta` names its parent
+ * (codexParentThreadFromMeta). Neither kind is a session: review threads were
+ * filtered out (#944), and a spawned sub-agent fires no hooks at all — its
+ * tool hooks carry the PARENT's session_id. Their usage is the chat's, so it
+ * is counted here (TODO 995c166e for review threads). A child starts on or
+ * after its chat, so only day directories from the chat's own day onwards are
+ * read. Compressed rollouts are skipped: Codex writes child threads as plain
+ * JSONL.
+ */
+export function findCodexChildRollouts(chatRollout: string, chatId: string): string[] {
   if (!chatId) return [];
   // <codex>/sessions/YYYY/MM/DD/rollout-….jsonl, or — once Codex archives the
   // chat — <codex>/archived_sessions/rollout-YYYY-MM-DDT….jsonl, while its
-  // reviews stay under sessions/. The file name carries the same local day
+  // children stay under sessions/. The file name carries the same local day
   // as the directory it was written in.
   let sessionsDir: string;
   let chatDay: string;
@@ -1726,7 +1957,8 @@ export function findCodexReviewRollouts(chatRollout: string, chatId: string): st
   const list = (dir: string): string[] => {
     try { return fs.readdirSync(dir).filter((n) => /^\d+$/.test(n)).sort(); } catch { return []; }
   };
-  const found: string[] = [];
+  // Every child rollout in range, grouped by the thread that started it.
+  const byParent = new Map<string, Array<{ file: string; id: string | null }>>();
   for (const y of list(sessionsDir)) {
     if (y < chatDay.slice(0, 4)) continue;
     for (const m of list(path.join(sessionsDir, y))) {
@@ -1739,12 +1971,36 @@ export function findCodexReviewRollouts(chatRollout: string, chatId: string): st
         for (const name of names) {
           if (!name.endsWith('.jsonl')) continue;
           const file = path.join(dir, name);
-          if (file !== chatRollout && reviewParentOf(file) === chatId) found.push(file);
+          if (file === chatRollout) continue;
+          const head = codexChildHead(file);
+          if (!head) continue;
+          const siblings = byParent.get(head.parent) ?? [];
+          siblings.push({ file, id: head.id });
+          byParent.set(head.parent, siblings);
         }
       }
     }
   }
+  // The chat's children, then their children. `seen` stops a cycle.
+  const found: string[] = [];
+  const seen = new Set<string>([chatId]);
+  const queue = [chatId];
+  while (queue.length) {
+    for (const child of byParent.get(queue.shift()!) ?? []) {
+      found.push(child.file);
+      if (child.id && !seen.has(child.id)) { seen.add(child.id); queue.push(child.id); }
+    }
+  }
   return found;
+}
+
+/**
+ * The creation time (ms) a UUIDv7 carries in its first 48 bits, or NaN for
+ * any other id.
+ */
+function uuidV7Ms(id: string): number {
+  const m = /^([0-9a-f]{8})-([0-9a-f]{4})-7[0-9a-f]{3}-/i.exec(id);
+  return m ? parseInt(m[1] + m[2], 16) : NaN;
 }
 
 /**
@@ -1757,6 +2013,15 @@ export function findCodexReviewRollouts(chatRollout: string, chatId: string): st
  * every later one is the growth of the running total. A
  * total that shrinks makes the whole rollout unreadable — none of it is
  * counted rather than a wrong part of it.
+ *
+ * A spawned sub-agent forks its parent: its rollout opens with its own
+ * session_meta, then REPLAYS the parent's history — a second session_meta and
+ * the parent's records, its token_count lines included — and its running
+ * total carries on from the parent's last figure. Those replayed lines are
+ * the parent's calls, already counted in the parent's rollout: they only set
+ * the baseline here. They are told apart by turn: Codex ids are UUIDv7, whose
+ * first 48 bits are the creation time, and every turn the child runs itself
+ * begins at or after the child thread was created.
  */
 export function parseCodexReviewRollout(file: string): CodexReviewCall[] {
   let content: string;
@@ -1770,16 +2035,36 @@ export function parseCodexReviewRollout(file: string): CodexReviewCall[] {
   const calls: CodexReviewCall[] = [];
   let prev: ReturnType<typeof read> | null = null;
   let model = 'codex-auto-review';
+  let ownId: string | undefined;
+  // Inside the parent's replayed history (see above).
+  let replaying = false;
   for (const line of content.split('\n')) {
     if (!line.trim()) continue;
     let event: any;
     try { event = JSON.parse(line); } catch { continue; }
+    const metaId = sessionMetaId(event);
+    if (metaId) {
+      if (!ownId) ownId = metaId;
+      else if (metaId !== ownId) replaying = true;
+      continue;
+    }
+    if (replaying) {
+      const turnId = event?.payload?.turn_id;
+      if ((event?.payload?.type === 'task_started' || event?.type === 'turn_context') && typeof turnId === 'string') {
+        const turnMs = uuidV7Ms(turnId);
+        const ownMs = uuidV7Ms(ownId!);
+        // Ids that carry no time: no way to tell, so the old reading (count
+        // everything from the first turn) holds.
+        if (Number.isNaN(turnMs) || Number.isNaN(ownMs) || turnMs >= ownMs) replaying = false;
+      }
+    }
     if (event?.type === 'turn_context' && typeof event.payload?.model === 'string' && event.payload.model) {
       model = event.payload.model;
     }
     const running = codexRunningUsage(event);
     if (!running) continue;
     const cur = read(running);
+    if (replaying) { prev = cur; continue; }
     if (prev && cur.total <= prev.total) continue;
     let d: ReturnType<typeof read>;
     if (prev) {
@@ -1813,7 +2098,7 @@ const reviewCallsByFile = new Map<string, { size: number; mtimeMs: number; calls
 /** Every auto-review call Codex made for this chat, oldest first. */
 export function codexReviewCalls(chatRollout: string, chatId: string): CodexReviewCall[] {
   const calls: CodexReviewCall[] = [];
-  for (const file of findCodexReviewRollouts(chatRollout, chatId)) {
+  for (const file of findCodexChildRollouts(chatRollout, chatId)) {
     try {
       const st = fs.statSync(file);
       let hit = reviewCallsByFile.get(file);
@@ -1865,7 +2150,7 @@ export function parseCodexRollout(
   rolloutPath: string,
   threadId: string,
   opts: { verbose?: boolean } = {},
-): { tokensUsed: number; inputTokens: number; outputTokens: number; cacheReadTokens?: number; model?: string; turnCount: number; toolCalls: number; transcript?: string; userPrompts?: string[]; modelUsage?: ModelUsage[]; turnUsage?: Array<{ promptIndex: number; modelUsage: ModelUsage[] }> } | null {
+): { tokensUsed: number; inputTokens: number; outputTokens: number; cacheReadTokens?: number; model?: string; turnCount: number; toolCalls: number; transcript?: string; userPrompts?: string[]; modelUsage?: ModelUsage[]; turnUsage?: Array<{ promptIndex: number; modelUsage: ModelUsage[] }>; subagentSpawns?: CodexSubagentSpawn[] } | null {
   try {
     // Try to resolve the rollout file
     let rolloutFile = '';
@@ -1920,6 +2205,8 @@ export function parseCodexRollout(
     let model: string | undefined;
     let turnCount = 0;
     let toolCalls = 0;
+    // The sub-agents this chat spawned, in order (Codex multi-agent mode).
+    const subagentSpawns: CodexSubagentSpawn[] = [];
     // Who each token belongs to. The usage events are running totals, so each
     // new high is the growth since the previous one: it goes to the prompt
     // being answered (its position among the user prompts) and the model the
@@ -1935,7 +2222,7 @@ export function parseCodexRollout(
     const promptStarts: number[] = [];
 
     // Build transcript from conversation events
-    const turns: Array<{ role: string; content: string }> = [];
+    const turns: Array<{ role: string; content: string; parts?: DisplayPart[] }> = [];
 
     // Truncation budget for tool args/output. Verbose mode keeps the full
     // payload so reviewers can see exactly what the agent ran; default mode
@@ -2040,7 +2327,7 @@ export function parseCodexRollout(
             // bogus turn 1 / 2 even though state.prompts filters them.
             const isUser = role === 'user' || role === 'human';
             const cleaned = isUser ? codexUserPromptText(text) : text;
-            if (cleaned) turns.push({ role, content: cleaned });
+            if (cleaned) turns.push({ role, content: cleaned, ...assistantTextParts(role, cleaned) });
             if (isUser && cleaned?.trim()) { promptPos++; promptStarts.push(Date.parse(event?.timestamp ?? '')); }
           }
         } else if (payloadType === 'reasoning') {
@@ -2067,8 +2354,12 @@ export function parseCodexRollout(
           );
           const callId = payload.call_id || payload.id || '';
           const idx = turns.length;
-          turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(display)}` });
+          turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(display)}`, ...partsField([replyToolPart(tool)]) });
           if (callId) pendingTools.set(callId, idx);
+          const spawn = codexSubagentSpawn(payload, argStr);
+          if (spawn) {
+            subagentSpawns.push({ ...spawn, promptIndex: Math.max(0, promptPos), startedAt: String(event?.timestamp || '') });
+          }
         } else if (payloadType === 'function_call_output' || payloadType === 'local_shell_call_output' || payloadType === 'custom_tool_call_output') {
           const callId = payload.call_id || payload.id || '';
           const out = stringifyCodexToolOutput(payload.output);
@@ -2092,7 +2383,7 @@ export function parseCodexRollout(
               // Same AGENTS.md echo filter as the response_item path.
               const isUser = role === 'user' || role === 'human';
               const cleaned = isUser ? codexUserPromptText(text) : text;
-              if (cleaned) turns.push({ role, content: cleaned });
+              if (cleaned) turns.push({ role, content: cleaned, ...assistantTextParts(role, cleaned) });
               if (isUser && cleaned?.trim()) { promptPos++; promptStarts.push(Date.parse(event?.timestamp ?? '')); }
             }
           }
@@ -2104,7 +2395,7 @@ export function parseCodexRollout(
           const tool = event?.data?.name || event?.data?.command || event?.name || 'tool';
           const args = event?.data?.arguments || event?.data?.args || '';
           const argStr = typeof args === 'string' ? args : JSON.stringify(args);
-          turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(argStr)}` });
+          turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(argStr)}`, ...partsField([replyToolPart(tool)]) });
         }
 
         // Track turns
@@ -2195,8 +2486,9 @@ export function parseCodexRollout(
       model,
       turnCount,
       toolCalls,
-      transcript: turns.length > 0 ? JSON.stringify(withCommandExecutions(turns, lines)) : undefined,
+      transcript: turns.length > 0 ? JSON.stringify(withCodexEvents(withCommandExecutions(turns, lines), lines)) : undefined,
       userPrompts: userPrompts.length > 0 ? userPrompts : undefined,
+      ...(subagentSpawns.length > 0 && { subagentSpawns }),
       ...split,
     };
   } catch (err) {
@@ -2291,6 +2583,9 @@ export function findCodexRolloutByCwd(
   for (const c of candidates.slice(0, 40)) {
     const cwd = readRolloutCwd(c.path);
     if (!cwd || norm(cwd) !== wantedNorm) continue;
+    // A child thread (auto-review, spawned sub-agent) shares the chat's cwd
+    // and is newer: it is the chat's, not a chat of its own.
+    if (codexParentThreadOf(c.path) !== null) continue;
     const idMatch = path.basename(c.path).match(
       /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/,
     );

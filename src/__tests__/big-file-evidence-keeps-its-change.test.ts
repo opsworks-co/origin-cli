@@ -67,6 +67,34 @@ describe('a big file edited through an evidence slot keeps its change', () => {
     expect(e.newStart).toBe(e.oldStart);
   });
 
+  it('splits a file changed near BOTH ends into one anchored edit per region (d403e181 pnpm-lock.yaml)', () => {
+    // Head and tail both change, so the one trimmed region is the whole file
+    // and still over the cap. Before: dropped, and the session's own lines read
+    // only the other file's +1.
+    const after = ['HEAD = "after"', ...FILLER.slice(0, 700), 'VALUE = "before"', ...FILLER.slice(700), 'TAIL = "added"'].join('\n') + '\n';
+    write('big.py', after);
+    const s = state();
+    const changed = recordProbedShellEdits(s, repo, baseline, 0, ['big.py'],
+      { toolLabel: '__shell_probe__', evidence: 'command_probe' });
+    expect(changed).toBe(true);
+    const es = edits(s);
+    expect(es).toHaveLength(2);
+    expect(es.every((e: any) => e.file === 'big.py' && e.op === 'edit' && e.evidence === 'command_probe')).toBe(true);
+    const [head, tail] = es;
+    expect(head.oldStart).toBe(1);
+    expect(head.newStart).toBe(1);
+    expect(head.newContent.split('\n')[0]).toBe('HEAD = "after"');
+    expect(head.oldContent).not.toContain('HEAD');
+    // The tail region sits at the file's real end: 1501 baseline lines (1500
+    // filler + VALUE), three context lines above the insertion.
+    expect(tail.oldStart).toBe(1501 - 3 + 1);
+    expect(tail.newStart).toBe(tail.oldStart + 1);
+    expect(tail.newContent).toContain('TAIL = "added"');
+    expect(tail.oldContent).not.toContain('TAIL');
+    const bytes = es.reduce((n: number, e: any) => n + e.oldContent.length + e.newContent.length, 0);
+    expect(bytes).toBeLessThan(2000);
+  });
+
   it('leaves a small file exactly as before: a whole-file write, no anchor', () => {
     write('small.py', 'a = 2\n');
     const s = state();

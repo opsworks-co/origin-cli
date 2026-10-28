@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, afterAll } from 'vitest';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 const { TEST_HOME, config } = vi.hoisted(() => {
@@ -137,7 +138,7 @@ describe('on the wire', () => {
 
 describe('changes.json on the session branch', () => {
   it('is written with the turn content redacted', () => {
-    const repo = fs.mkdtempSync(path.join(fs.realpathSync(process.env.TMPDIR || '/tmp'), 'origin-redact-repo-'));
+    const repo = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'origin-redact-repo-'));
     try {
       const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf-8' }).trim();
       git('init', '-q', '-b', 'main', '.');

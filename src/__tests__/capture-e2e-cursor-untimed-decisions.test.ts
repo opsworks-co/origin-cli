@@ -20,6 +20,7 @@ import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { gitAsync } from './helpers/git-async.js';
 import { readAllCommitMemory } from '../memory.js';
+import { removeTestTree, stopBackgroundDaemons } from './helpers/background-daemons.js';
 
 const cliRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = process.env.ORIGIN_E2E_BIN || path.join(cliRoot, 'dist', 'index.js');
@@ -139,16 +140,12 @@ describe.skipIf(!haveDist)('cursor: a shell-only turn\'s decision rides on the c
   }, 60_000);
 
   afterAll(async () => {
-    try {
-      const dir = path.join(os.homedir(), '.origin', 'journals');
-      for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.lock'))) {
-        const pid = Number(fs.readFileSync(path.join(dir, f), 'utf-8').trim());
-        if (pid > 0) { try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ } }
-      }
-    } catch { /* no journal */ }
+    // The heartbeat and the journal watcher run with the repo as their cwd;
+    // Windows will not remove it until both have exited.
+    await stopBackgroundDaemons();
     server?.closeAllConnections();
     await new Promise<void>((r) => server.close(() => r()));
-    if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
+    if (tmp) removeTestTree(tmp);
   });
 
   it('the commit record carries the shell turn\'s decision', async () => {

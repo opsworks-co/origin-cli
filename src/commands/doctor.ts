@@ -506,6 +506,48 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
     console.log(chalk.gray(`    Run ${chalk.white('origin login')} to connect to Origin platform`));
   }
 
+  // Git hooks in this repo. Origin's live in the GLOBAL core.hooksPath; a
+  // repo that sets its own wins and git never runs Origin's there — no
+  // capture, no notes or memory pushed, and every other check here still
+  // passes. local-hooks-path.ts.
+  if (repoPath) {
+    console.log(chalk.bold('\n  Git hooks in this repo\n'));
+    try {
+      const { findShadowingHooksPath, chainShadowingHooksPath, undoCommand } = await import('../local-hooks-path.js');
+      const found = findShadowingHooksPath(repoPath);
+      if (!found) {
+        console.log(chalk.green(`  ✓ Origin's git hooks run here`));
+      } else {
+        issues++;
+        const where = found.scope === 'worktree' ? 'config.worktree' : '.git/config';
+        console.log(chalk.red(`  ✗ core.hooksPath = ${found.value} (set in ${where}) replaces Origin's git hooks in this repo`));
+        console.log(chalk.gray(`    No commit here is captured and no notes or memory are pushed from here.`));
+        console.log(chalk.gray(`    Hooks in it: ${found.hooks.length ? found.hooks.join(', ') : 'none'}`));
+        if (opts?.fix) {
+          try {
+            const { upgradeOutdatedGlobalHooks, writeGlobalChainOnlyHook, ORIGIN_GLOBAL_HOOKS } = await import('./enable.js');
+            const { originGlobalHooksDir } = await import('../global-hooks-path.js');
+            // The global hooks must know to run the chained dir before the
+            // repo stops pointing at it.
+            upgradeOutdatedGlobalHooks(originGlobalHooksDir());
+            const { chainOnly } = chainShadowingHooksPath(repoPath, found, writeGlobalChainOnlyHook, ORIGIN_GLOBAL_HOOKS);
+            fixed++;
+            console.log(chalk.green(`    ✓ Unset it; ${found.value} now runs after Origin's hooks`));
+            if (chainOnly.length) console.log(chalk.gray(`    Chained hooks Origin has none of: ${chainOnly.join(', ')}`));
+            console.log(chalk.gray(`    A tool that set it (husky, pre-commit) may set it again — rerun ${chalk.white('origin doctor')} after it does.`));
+            console.log(chalk.gray(`    Undo: ${undoCommand(found)}`));
+          } catch (err: any) {
+            console.log(chalk.red(`    ✗ Could not chain it: ${err?.message || err}`));
+          }
+        } else {
+          console.log(chalk.gray(`    Run ${chalk.white('origin doctor --fix')} to run them after Origin's hooks instead.`));
+        }
+      }
+    } catch (err) {
+      console.log(chalk.gray(`  – Could not check git hooks: ${err instanceof Error ? err.message : String(err)}`));
+    }
+  }
+
   // Agent hook configs. `enable` writes these once and nothing ever revisits
   // them, so a hook SCHEMA fix (or a moved origin binary) leaves every existing
   // install stranded. When an agent rejects its hook config it captures nothing

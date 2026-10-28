@@ -49,15 +49,23 @@ let repo: string;
 let clone: string;
 let home: string;
 const savedHome = process.env.HOME;
+const savedProfile = process.env.USERPROFILE;
+
+/** Point os.homedir() at `dir` — it reads HOME on POSIX and USERPROFILE on Windows. */
+function useHome(dir: string): void {
+  process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+}
 
 beforeEach(() => {
   repo = makeRepo();
   home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-manual-todo-home-')));
-  process.env.HOME = home;
+  useHome(home);
 });
 
 afterEach(() => {
   process.env.HOME = savedHome;
+  process.env.USERPROFILE = savedProfile;
   for (const d of [repo, clone, home]) {
     try { if (d) fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
   }
@@ -72,7 +80,7 @@ describe('a typed TODO travels with the repo', () => {
     clone = cloneWithNotes(repo);
     // A different machine: empty local store, same repo.
     const otherHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-manual-todo-home2-')));
-    process.env.HOME = otherHome;
+    useHome(otherHome);
     expect(loadTodos().items).toEqual([]);
 
     const open = getOpenTodos(clone);
@@ -88,7 +96,7 @@ describe('a typed TODO travels with the repo', () => {
     addManualTodo(TEXT, repo);
     clone = cloneWithNotes(repo);
     const otherHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-manual-todo-home3-')));
-    process.env.HOME = otherHome;
+    useHome(otherHome);
 
     const id = getOpenTodos(clone).find((t) => t.text === TEXT)!.id;
     expect(markTodoDone(id, clone)).toBeTruthy();

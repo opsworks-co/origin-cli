@@ -2,9 +2,11 @@
 //
 // Moved out of commands/hooks.ts mechanically: the text is unchanged, only its
 // home is. Shared helpers still live in hooks.ts and are imported from there.
+import { clearUnpublishedMemory } from '../../memory-publish-queue.js';
 import { livePrompts } from '../../transcript.js';
 import { serverRowForLocalTurn } from '../../turn-index.js';
 import { replayInProgress } from '../../commit-replay.js';
+import { noteTrailerStamp } from '../../fresh-stamp-marker.js';
 import { attributionPgrepChecks, resolveAgentDisplayName, sessionMatchesAgent } from '../../agents/registry.js';
 import { api } from '../../api.js';
 import { getPoliciesCached } from '../../policy-cache.js';
@@ -17,12 +19,14 @@ import { pushSessionBranchTo, sessionBranchPrePushRef } from '../../local-entryp
 import { sessionBranchPushTarget } from '../../prompt-privacy.js';
 import { decidePushBlock } from '../../push-block.js';
 import { isNonSecretAssignmentValue, isSkippedScanPath } from '../../secret-rules.js';
-import { getGitRoot, getWorkingGitRoot, listActiveSessions, saveSessionState } from '../../session-state.js';
+import { getGitCommonDir, getGitRoot, getWorkingGitRoot, listActiveSessions, saveSessionState } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import { sessionRunningTheCommit } from '../../commit-command-in-flight.js';
 import { manuallyEndedSessionForTree } from '../../manual-session-end.js';
+import { pickSessionsByCommitAncestry, type AncestryPick } from '../../process-owner.js';
 import { pickEndedSessionByContent, recentlyEndedSessionsForTree, type EndedSessionOwner } from '../../ended-session-commit-owner.js';
 import { listSnapshots } from '../snapshot.js';
+import { lookupSessionsForGitHook } from './post-commit.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import { fenceJournal } from '../../write-journal-watch.js';
@@ -982,6 +986,38 @@ export function sessionTouchedFiles(state: SessionState, repoPath: string): Set<
   return files;
 }
 
+/**
+ * The live session, homed in another worktree of this repository, whose agent
+ * process is running this commit (pickActiveSessionForCommit). Its home must
+ * share the committing tree's git common dir — the rule post-commit's
+ * keepSessionTheTrailerNames applies before it keeps the session the trailer
+ * names, so both hooks agree. Exported for testing.
+ */
+export function siblingTreeOwner(
+  others: SessionState[],
+  hookCwd: string,
+  ancestry: (sessions: SessionState[]) => AncestryPick<SessionState> = (s) => pickSessionsByCommitAncestry(s),
+): SessionState | null {
+  if (others.length === 0) return null;
+  const byProcess = ancestry(others);
+  if (byProcess.outcome !== 'owner') return null;
+  const owner = byProcess.session;
+  const hookTree = getWorkingGitRoot(hookCwd) || hookCwd;
+  const commonHere = getGitCommonDir(hookTree);
+  const commonHome = owner.repoPath && fs.existsSync(owner.repoPath) ? getGitCommonDir(owner.repoPath) : null;
+  if (!commonHere || !commonHome || !sameDir(commonHere, commonHome)) {
+    debugLog('prepare-commit-msg', 'skip: the agent running this commit is homed in another repository', {
+      session: owner.sessionId.slice(0, 12), home: owner.repoPath, hookTree,
+    });
+    return null;
+  }
+  debugLog('prepare-commit-msg', 'attributed by process ancestry — the session\'s agent is running this commit from a sibling worktree', {
+    session: owner.sessionId.slice(0, 12), depth: byProcess.depth, home: owner.repoPath, hookTree,
+    owner: owner.ownerProcess?.name,
+  });
+  return owner;
+}
+
 export function pickActiveSessionForCommit(
   hookCwd: string,
   opts: {
@@ -1002,8 +1038,50 @@ export function pickActiveSessionForCommit(
   // Worktree-aware lookup: falls back to the main repo's sessions when the
   // hook runs inside a linked worktree (whose own git dir holds no session
   // files), then narrows multiple candidates by last-seen lifecycle cwd.
-  const activeSessions = listSessionsForGitHook(hookCwd, { commitFiles: stagedFiles });
+  const lookup = lookupSessionsForGitHook(hookCwd, { commitFiles: stagedFiles });
+  let activeSessions = lookup.sessions;
   activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+  // The agent whose process is running `git commit` is the one committing. Its
+  // hooks recorded that process (pid + start time) as the session's owner, and
+  // this hook is its descendant: agent → shell tool → git → this hook. That is
+  // not evidence about files or timing, it is the fact those rules estimate,
+  // so it decides before them. A tie (one agent process, several sessions)
+  // narrows the pool to that process's sessions; no owner among our ancestors
+  // (a person's terminal, Windows, an IDE agent) leaves everything below as it
+  // was. The session ended by hand whose turn is still running counts too.
+  {
+    const ended = opts.afterManualEnd ? manuallyEndedSessionForTree(hookCwd) : null;
+    const pool = ended && !activeSessions.some((s) => s.sessionId === ended.sessionId)
+      ? [...activeSessions, ended] : activeSessions;
+    const byProcess = pickSessionsByCommitAncestry(pool);
+    if (byProcess.outcome === 'owner') {
+      debugLog('prepare-commit-msg', 'attributed by process ancestry — the session\'s agent is running this commit', {
+        session: byProcess.session.sessionId.slice(0, 12), depth: byProcess.depth, ofActive: activeSessions.length,
+        owner: byProcess.session.ownerProcess?.name,
+      });
+      return byProcess.session;
+    }
+    // No owner in this tree's pool. The agent may be committing in a SIBLING
+    // worktree of its home (`cd ../other-wt && git commit`), and the tree
+    // narrowing dropped its session as "working in another tree" before this
+    // check could see it. Ask the same question of every live session of this
+    // git common dir. Only a single owner may come from outside the narrowed
+    // pool: a 'shared' answer there is one agent process with several
+    // sessions, none of which this tree knows, and narrows nothing.
+    if (byProcess.outcome === 'none') {
+      const inPool = new Set(pool.map((s) => s.sessionId));
+      const guest = siblingTreeOwner(lookup.live.filter((s) => !inPool.has(s.sessionId)), hookCwd);
+      if (guest) return guest;
+    }
+    if (byProcess.outcome === 'shared') {
+      const ids = new Set(byProcess.sessions.map((s) => s.sessionId));
+      debugLog('prepare-commit-msg', 'process ancestry narrows to one agent process\'s sessions', {
+        sessions: [...ids].map((id) => id.slice(0, 12)), ofActive: activeSessions.length,
+      });
+      // At least one live session stays: a tie needs two, the ended one is one.
+      activeSessions = activeSessions.filter((s) => ids.has(s.sessionId));
+    }
+  }
   // The session ended by hand in this tree whose conversation has not prompted
   // again: the turn that ran `sessions end` is still the one running, and a
   // commit made now is its work (manuallyEndedSessionForTree). It ranks as a
@@ -1198,6 +1276,31 @@ export async function handlePrepareCommitMsg(
   msgFile: string,
   source?: string,
 ): Promise<void> {
+  const stamped = await stampOriginTrailer(msgFile, source);
+  // post-commit keeps a sibling-worktree session its trailer names only for a
+  // freshly made commit, and asks the reflog which it was. On a starved host
+  // that read fails, so leave the answer here while it is known: a marker when
+  // this hook just stamped a fresh commit, and none — the stale one cleared —
+  // for an amend, merge, squash, replay or a commit it did not stamp.
+  // Follow-up to #2392 / 6f67706e; see fresh-stamp-marker.ts.
+  try {
+    let message: string | null = null;
+    if (!stamped) {
+      try { message = fs.readFileSync(msgFile, 'utf-8'); } catch { message = null; }
+    }
+    noteTrailerStamp(process.cwd(), source, stamped, message);
+  } catch { /* best effort */ }
+}
+
+/**
+ * The trailer work of handlePrepareCommitMsg. Returns the 12-char session token
+ * the message now carries for a fresh commit this hook stamped (or found
+ * already stamped for the session it picked), else null. Never throws.
+ */
+async function stampOriginTrailer(
+  msgFile: string,
+  source?: string,
+): Promise<string | null> {
   debugLog('prepare-commit-msg', '=== GIT HOOK INVOKED ===', { msgFile, source });
 
   // Skip cases where we shouldn't be adding trailers:
@@ -1206,20 +1309,20 @@ export async function handlePrepareCommitMsg(
   //   commit  — amend or rebase, existing message already has trailers if applicable
   if (source === 'merge' || source === 'squash' || source === 'commit') {
     debugLog('prepare-commit-msg', 'skip — source excluded', { source });
-    return;
+    return null;
   }
 
   try {
     if (!msgFile || !fs.existsSync(msgFile)) {
       debugLog('prepare-commit-msg', 'skip — msgFile missing', { msgFile });
-      return;
+      return null;
     }
 
     const hookCwd = process.cwd();
     const repoPath = getGitRoot(hookCwd);
     if (!repoPath) {
       debugLog('prepare-commit-msg', 'skip — not a git repo');
-      return;
+      return null;
     }
 
     // Respect commitLinking config
@@ -1227,7 +1330,7 @@ export async function handlePrepareCommitMsg(
     const commitLinkingConfig = config?.commitLinking || 'always';
     if (commitLinkingConfig === 'never') {
       debugLog('prepare-commit-msg', 'skip — commitLinking=never');
-      return;
+      return null;
     }
 
     // A rebase pick or cherry-pick arrives here with source=message, like
@@ -1238,7 +1341,7 @@ export async function handlePrepareCommitMsg(
     const replay = replayInProgress(hookCwd);
     if (replay) {
       debugLog('prepare-commit-msg', 'skip — the commit is a replay', { replay });
-      return;
+      return null;
     }
 
     let state = pickActiveSessionForCommit(hookCwd, { afterManualEnd: true });
@@ -1258,7 +1361,7 @@ export async function handlePrepareCommitMsg(
     }
     if (!state) {
       debugLog('prepare-commit-msg', 'skip — no unambiguous active session');
-      return;
+      return null;
     }
 
     // Check existing message for Origin-Session trailer. If present AND the
@@ -1269,7 +1372,7 @@ export async function handlePrepareCommitMsg(
       existing = fs.readFileSync(msgFile, 'utf-8');
     } catch (readErr: any) {
       debugLog('prepare-commit-msg', 'could not read msg file (non-fatal)', { message: readErr.message });
-      return;
+      return null;
     }
     const shortId = state.sessionId.slice(0, 12);
     // A trailer LINE, not the substring: a message that quotes a trailer in
@@ -1278,7 +1381,7 @@ export async function handlePrepareCommitMsg(
     const trailerLine = new RegExp(`^Origin-Session:\\s*${shortId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'mi');
     if (trailerLine.test(existing)) {
       debugLog('prepare-commit-msg', 'trailer already present for this session');
-      return;
+      return shortId;
     }
 
     // Find latest snapshot for the Origin-Snapshot trailer. Not for an ended
@@ -1338,6 +1441,7 @@ export async function handlePrepareCommitMsg(
         snapshotId: latestSnapshotId,
         trailerCount: trailers.length,
       });
+      return shortId;
     } catch (trailerErr: any) {
       debugLog('prepare-commit-msg', 'interpret-trailers failed (non-fatal)', { message: trailerErr.message });
     }
@@ -1345,6 +1449,7 @@ export async function handlePrepareCommitMsg(
     // Never fail the commit because of Origin's trailer hook.
     debugLog('prepare-commit-msg', 'top-level error (non-fatal)', { message: err.message });
   }
+  return null;
 }
 
 /**
@@ -1519,8 +1624,14 @@ export async function handlePrePush(): Promise<void> {
     return;
   }
   try {
+    const pushStartedMs = Date.now();
     const published = publishPrePushRefs(repoPath, originRemote, { extraRefs, budgetMs: budgetLeft() });
     debugLog('pre-push', 'published Origin refs', { ...published });
+    // Every memory ref on the remote now: nothing written is left unpublished.
+    const landed = (o: unknown) => o === undefined || o === 'pushed' || o === 'up-to-date';
+    if (MEMORY_NOTES_REFS.every(({ local }) => landed(published.outcomes[local]))) {
+      clearUnpublishedMemory(repoPath, pushStartedMs);
+    }
     // The branch push that follows fires a webhook only where the GitHub App
     // (or a GitLab hook) is installed, and never for the notes ref itself.
     // Tell the server directly so the Memory tab reflects this push, not the

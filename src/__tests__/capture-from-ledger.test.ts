@@ -363,6 +363,53 @@ describe('applyLedgerToMappings', () => {
       expect(pm.filesChanged).toEqual(['mine.ts']);
     });
 
+    describe('a merge that STOPPED on a conflict (TODO 1de72a6e)', () => {
+      // HEAD did not move, so there is no fence and no inherited commit: what
+      // the merge left in each file is known only from `leftByGit`.
+      const conflicted = 'a\n<<<<<<< HEAD\nb = 3\n=======\nb = 2 // audit\n>>>>>>> feat/audit\n';
+      const resolvedText = 'a\nb = 2 // audit\nc = 1 // resolved\n';
+      const left = () => new Map([['settings.ts', conflicted], ['audit.ts', 'retention\n']]);
+      const stoppedMerge = () => w('settings.ts', 2, put(conflicted)) + w('audit.ts', 3, put('retention\n'));
+      const start = { readAtRev: (sha: string, file: string) => (sha === A && file === 'settings.ts' ? 'a\nb = 3\n' : null) };
+
+      it('measures the resolving write from the conflicted file, and the file the merge brought in cleanly cancels out', () => {
+        const log = t('T1', 1) + stoppedMerge() + w('settings.ts', 6, put(resolvedText));
+        const pm: Record<string, unknown> = { promptIndex: 0 };
+        expect(applyLedgerToMappings({ ...ledgerState(['T1']), prePromptSha: A }, [pm as never], {
+          ...journal(log), ...start, leftByGit: left,
+        })).toBe(1);
+        expect(pm.filesChanged).toEqual(['settings.ts']);
+        const added = String(pm.diff).split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'));
+        expect(added).toEqual(['+c = 1 // resolved']);
+        expect(pm.diff).toContain('-<<<<<<< HEAD');
+        expect([pm.linesAdded, pm.linesRemoved]).toEqual([1, 4]);
+      });
+
+      it('wins over the inherited answer for the same file, and takes no start dirt', () => {
+        const log = t('T1', 1) + stoppedMerge() + w('settings.ts', 6, put(resolvedText));
+        const pm: Record<string, unknown> = { promptIndex: 0 };
+        const dirtAsked: string[] = [];
+        applyLedgerToMappings({ ...ledgerState(['T1']), prePromptSha: A }, [pm as never], {
+          ...journal(log), ...start, leftByGit: left,
+          inheritedBefore: () => new Map([['settings.ts', 'a\nb = 2 // audit\n']]),
+          startDirt: (_sha, file) => { dirtAsked.push(file); return null; },
+        });
+        expect(pm.filesChanged).toEqual(['settings.ts']);
+        expect(pm.diff).toContain('-<<<<<<< HEAD');
+        expect(dirtAsked).toEqual([]);
+      });
+
+      it('a turn that only merged and stopped claims nothing', () => {
+        const log = t('T1', 1) + stoppedMerge();
+        const pm: Record<string, unknown> = { promptIndex: 0, filesChanged: ['stale.ts'], diff: 'stale' };
+        expect(applyLedgerToMappings({ ...ledgerState(['T1']), prePromptSha: A }, [pm as never], {
+          ...journal(log), ...start, leftByGit: left,
+        })).toBe(1);
+        expect(pm.filesChanged).toEqual([]);
+        expect(pm.diff).toBe('');
+      });
+    });
+
     it('stands down when the checkout cannot be read: a fence without heads and no inherited answer', () => {
       const log = t('T1', 1) + rewrites() + serializeFence(4) + edits();
       const pm: Record<string, unknown> = { promptIndex: 0, filesChanged: ['kept.ts'], diff: 'kept' };
@@ -611,5 +658,103 @@ describe('missed submit boundaries', () => {
       ledgerContended: true, promptShadows: [{ promptIndex: 0, shadowSha: 'base', promptStartedAt: 10 }],
     }, rows, { readEntries: () => parseJournalEntries(w('a.ts', 20, put('mine?\n'))) })).toBe(0);
     expect(rows[0].diff).toBe('legacy');
+  });
+});
+
+// Session 588bb84a, 2026-10-20: two shell writes to codex.ts 25 s apart, and
+// FSEvents delivered only the first. The journal's last copy of the file was a
+// state it merely passed through, and the ledger billed the turn for it
+// (+51/-8 against a commit of +53/-8). A turn that never commits has no commit
+// patch to put that right, so the ledger checks its copy against the turn's end.
+describe('a write the journal missed', () => {
+  const BASE = 'a\nb\nc\n';
+  const FIRST = 'a\nb\nc\nfirst\n';
+  const FINAL = 'a\nB\nc\nfirst\nsecond\n';
+  const SHADOW = 'e'.repeat(40);
+  const BASELINE = 'f'.repeat(40);
+  // The second write happened on disk; the journal only has the first.
+  const missedLog = () => t('T1', 1_000) + w('f.ts', 2_000, put(FIRST));
+  const ledgerState = (extra: Record<string, unknown> = {}) => ({
+    writeJournalPath: '/does/not/matter', writeSnapshotDir: store, promptTurnIds: ['T1'],
+    promptShadows: [{ promptIndex: 0, shadowSha: BASELINE }], ...extra,
+  });
+  const atRev = (byRev: Record<string, Record<string, string>>) => (sha: string, file: string) => byRev[sha]?.[file] ?? null;
+
+  it('an open turn is measured to the file in the working tree', () => {
+    const root = fs.mkdtempSync(path.join(tmp, 'tree-'));
+    fs.writeFileSync(path.join(root, 'f.ts'), FINAL);
+    const pm: Record<string, unknown> = { promptIndex: 0, filesChanged: [], diff: '' };
+    const logged: string[] = [];
+    expect(applyLedgerToMappings(ledgerState(), [pm as never], {
+      readEntries: () => parseJournalEntries(missedLog()),
+      readAtRev: atRev({ [BASELINE]: { 'f.ts': BASE } }),
+      readWorkingFile: (file) => { try { return fs.readFileSync(path.join(root, file), 'utf-8'); } catch { return null; } },
+      log: (event) => logged.push(event),
+    })).toBe(1);
+    expect(pm.diff).toContain('+second');
+    expect(pm.diff).toContain('-b');
+    expect([pm.linesAdded, pm.linesRemoved]).toEqual([3, 1]);
+    expect(logged).toContain('journal missed a write: after-state taken from the turn end');
+  });
+
+  it('a closed turn is measured to its turn-end shadow, not to the tree a later turn left', () => {
+    const pm: Record<string, unknown> = { promptIndex: 0, filesChanged: [], diff: '' };
+    expect(applyLedgerToMappings(ledgerState({
+      turnEndShadows: [{ promptIndex: 0, shadowSha: SHADOW, capturedAt: new Date(3_000).toISOString() }],
+    }), [pm as never], {
+      readEntries: () => parseJournalEntries(missedLog()),
+      readAtRev: atRev({ [BASELINE]: { 'f.ts': BASE }, [SHADOW]: { 'f.ts': FINAL } }),
+      readWorkingFile: () => 'what a later turn left\n',
+    })).toBe(1);
+    expect(pm.diff).toContain('+second');
+    expect(pm.diff).not.toContain('later turn');
+    expect([pm.linesAdded, pm.linesRemoved]).toEqual([3, 1]);
+  });
+
+  it('keeps the journal when it saw a write after the end shadow was cut (a re-opened turn)', () => {
+    const cap = capture(t('T1', 1_000) + w('f.ts', 5_000, put(FINAL)), 'T1', {
+      baselineSha: BASELINE, readAtRev: atRev({ [BASELINE]: { 'f.ts': BASE } }),
+      endState: { read: () => FIRST, at: 3_000 },
+    })!;
+    expect(cap.diff).toContain('+second');
+    expect(cap.missedWrites).toBeUndefined();
+  });
+
+  it('a shadow that differs only in line endings is git normalising, not a write', () => {
+    const crlf = FIRST.replace(/\n/g, '\r\n');
+    const cap = capture(t('T1', 1_000) + w('f.ts', 2_000, put(crlf)), 'T1', {
+      baselineSha: BASELINE, readAtRev: atRev({ [BASELINE]: { 'f.ts': BASE.replace(/\n/g, '\r\n') } }),
+      endState: { read: () => FIRST },
+    })!;
+    expect(cap.missedWrites).toBeUndefined();
+    expect([cap.linesAdded, cap.linesRemoved]).toEqual([1, 0]);
+  });
+
+  it('a missed write followed by a stash is not called discarded: the stash holds bytes the journal never hashed', () => {
+    // Wrote FIRST (journaled), wrote FINAL (missed), then `git stash`: the
+    // tree is back at BASE and the stash holds FINAL. Measured to the end the
+    // file nets to zero, but no recorded hash can find it in the stash.
+    const root = fs.mkdtempSync(path.join(tmp, 'tree-'));
+    fs.writeFileSync(path.join(root, 'f.ts'), BASE);
+    const pm: Record<string, unknown> = { promptIndex: 0, filesChanged: [], diff: '' };
+    expect(applyLedgerToMappings(ledgerState(), [pm as never], {
+      readEntries: () => parseJournalEntries(missedLog()),
+      readAtRev: atRev({ [BASELINE]: { 'f.ts': BASE } }),
+      readWorkingFile: (file) => fs.readFileSync(path.join(root, file), 'utf-8'),
+      authoredFiles: () => new Set(['f.ts']),
+      committedFiles: () => new Set(),
+      stashedFiles: () => new Set(),
+    })).toBe(1);
+    expect(pm.discardedFiles).toEqual([]);
+  });
+
+  it('a file absent at the end keeps the journal copy', () => {
+    const cap = capture(missedLog(), 'T1', {
+      baselineSha: BASELINE, readAtRev: atRev({ [BASELINE]: { 'f.ts': BASE } }),
+      endState: { read: () => null },
+    })!;
+    expect(cap.missedWrites).toBeUndefined();
+    expect(cap.diff).toContain('+first');
+    expectSelfConsistent(cap);
   });
 });

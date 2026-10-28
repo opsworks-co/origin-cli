@@ -12,6 +12,7 @@ import { MAX_PROMPT_DIFF_LEN, captureAgyDiff, createShadowCommit, gitIgnoredFile
 import { extractCommitDiff } from '../../history-backfill.js';
 import { memoryUpdateTrigger, shouldWriteMemoryOnCommit, summarizeFromCommitSubjects, writeCommitMemory, writeSessionMemory } from '../../memory.js';
 import { readMarkerTurns } from '../../origin-markers.js';
+import { linkPendingIssue } from '../../issue-link.js';
 import { commitEvidence, commitTurnDecisions, committedSessionMarkers } from '../../committed-markers.js';
 import type { OriginMarkers } from '../../origin-markers.js';
 import { isInsideRepo as isInsideRepoNormalized, outOfRepoWrites, samePath as samePathNormalized } from '../../paths.js';
@@ -975,6 +976,21 @@ export async function handleAntigravity(event: string, input: Record<string, any
         promptTurnIds: promptTurnIdList,
       });
     } catch { /* non-fatal: the end-of-handler registration still runs */ }
+  }
+
+  // Started by `origin issue start`? agy fires no SessionStart, so the hook
+  // that links every other agent's session to its issue run never runs for
+  // it: the link file sat unclaimed and the run showed no session (prod run
+  // cmve96io9, issue 2c762dea). Claim it here, from the worktree the edits
+  // landed in — the file is in THAT checkout's git dir, and repoPath is the
+  // canonical repo. One-shot (renamed away), so every later fire is a stat.
+  // Not from the watcher: renaming the file is a mutation (#390).
+  if (sessionId && !isWatcherSync && workRoot) {
+    await linkPendingIssue(
+      workRoot, sessionId,
+      (repoId, shortId, sid, runId) => api.linkIssueSession(repoId, shortId, sid, 5000, runId),
+      (msg, data) => debugLog(event, msg, data),
+    );
   }
 
   if (!sessionId) {

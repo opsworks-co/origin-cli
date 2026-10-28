@@ -19,7 +19,7 @@ vi.mock('../api.js', () => ({ api: { importGitNote } }));
 
 const { buildNotePayload, scrubNoteObject, shouldIncludePromptText, writeGitNotes } = await import('../git-notes.js');
 const { scrubNoteBody, verifyScrubbedNote, EDITS_TRUNCATED_MARKER } = await import('../note-scrub.js');
-const { sessionBranchPushTarget } = await import('../prompt-privacy.js');
+const { sessionBranchPushTarget, promptTextDecision, memoryPushDecision } = await import('../prompt-privacy.js');
 const { clearConfigCache } = await import('../config.js');
 const { canonicalPromptHash } = await import('../attribution-record.js');
 const { attributionSourceFromState } = await import('../attribution-note.js');
@@ -166,6 +166,49 @@ describe('shouldIncludePromptText: metadata only unless a literal true opts in',
     }
     setMachine('{ not json');
     expect(shouldIncludePromptText(repo)).toBe(false);
+  });
+
+  // `origin sync` names the file to edit — so the source has to be right in
+  // every branch the decision takes.
+  it('says where the decision came from', () => {
+    expect(promptTextDecision(repo)).toEqual({ include: false, source: 'default' });
+    setMachine({ notesIncludePrompts: false });
+    expect(promptTextDecision(repo)).toEqual({ include: false, source: 'machine' });
+    setMachine({ notesIncludePrompts: true });
+    expect(promptTextDecision(repo)).toEqual({ include: true, source: 'machine' });
+    setRepo({ notesIncludePrompts: false });
+    expect(promptTextDecision(repo)).toEqual({ include: false, source: 'repo' });
+    setRepo({ notesEncryptPrompts: true });
+    expect(promptTextDecision(repo)).toEqual({ include: false, source: 'repo-sealed' });
+    setRepo('{ not json');
+    expect(promptTextDecision(repo)).toEqual({ include: false, source: 'repo-invalid' });
+  });
+
+  // Memory has its own switch, on by default. The older prompt key still
+  // decides where it is set — false was how people kept memory local.
+  it('memory push: on by default, notesPushMemory decides, an explicit prompt key still counts', () => {
+    expect(memoryPushDecision(repo)).toEqual({ push: true, source: 'default' });
+    setMachine({ notesIncludePrompts: false });
+    expect(memoryPushDecision(repo)).toEqual({ push: false, source: 'machine', key: 'notesIncludePrompts' });
+    setMachine({ notesIncludePrompts: false, notesPushMemory: true });
+    expect(memoryPushDecision(repo)).toEqual({ push: true, source: 'machine', key: 'notesPushMemory' });
+    setRepo({ notesIncludePrompts: true });
+    expect(memoryPushDecision(repo)).toEqual({ push: true, source: 'repo', key: 'notesIncludePrompts' });
+    setRepo({ notesIncludePrompts: false, notesPushMemory: true });
+    expect(memoryPushDecision(repo)).toEqual({ push: true, source: 'repo', key: 'notesPushMemory' });
+    setRepo({ notesPushMemory: false });
+    expect(memoryPushDecision(repo)).toEqual({ push: false, source: 'repo', key: 'notesPushMemory' });
+    // A sealing repo with no key of its own pushes memory — prompt-free.
+    setMachine(undefined); setRepo({ notesEncryptPrompts: true });
+    expect(memoryPushDecision(repo).push).toBe(true);
+  });
+
+  it('memory push fails closed on a broken repo config, whatever the machine says', () => {
+    setMachine({ notesPushMemory: true });
+    for (const bad of ['{ not json', '[]', JSON.stringify({ notesPushMemory: 'yes' }), JSON.stringify({ notesIncludePrompts: 1 })]) {
+      setRepo(bad);
+      expect(memoryPushDecision(repo), bad).toEqual({ push: false, source: 'repo-invalid' });
+    }
   });
 
   it('one origin-sessions decision: strategy, trigger and destination', () => {

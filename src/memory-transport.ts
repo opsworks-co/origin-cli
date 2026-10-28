@@ -18,11 +18,12 @@
  * `origin sync`) goes through here so the two steps cannot drift apart.
  * Best-effort throughout: nothing in here may fail a hook.
  */
+import { clearUnpublishedMemory } from './memory-publish-queue.js';
 import { execFileSync } from 'child_process';
 import { api } from './api.js';
 import { isConnectedMode } from './config.js';
 import { debugLog } from './debug-log.js';
-import { pushMemoryNotes, resolvePushRemote, shouldIncludePromptText } from './git-notes.js';
+import { pushMemoryNotes, resolvePushRemote, shouldPushMemory, type MemoryPushReport } from './git-notes.js';
 import { getCanonicalRepoPath } from './session-state.js';
 
 /** Hooks run in front of the user; the server call must never be the slow part. */
@@ -84,6 +85,12 @@ export interface PublishMemoryResult {
   pushed: boolean;
   /** What the server imported afterwards; null when not pushed, standalone, or unreachable. */
   memory: MemoryRefreshSummary | null;
+  /** Why, for `origin sync` to say: `nothing-local` is a clone with no memory
+   *  written (pushed stays true — nothing is left unpublished), `failed` a
+   *  push the remote did not take. */
+  outcome: 'pushed' | 'nothing-local' | 'failed' | 'opted-out' | 'no-remote';
+  /** git's reason, when `failed`. */
+  error?: string;
 }
 
 /**
@@ -95,21 +102,29 @@ export async function publishMemoryNotes(
   source: string,
   opts: { timeoutMs?: number } = {},
 ): Promise<PublishMemoryResult> {
-  if (!shouldIncludePromptText(repoPath)) return { pushed: false, memory: null };
+  // Nothing is meant to leave the machine here (privacy switch off, or no
+  // remote): there is nothing to publish, so nothing is left unpublished.
+  const startedMs = Date.now();
+  if (!shouldPushMemory(repoPath)) { clearUnpublishedMemory(repoPath, startedMs); return { pushed: false, memory: null, outcome: 'opted-out' }; }
   let remote = '';
   try {
     remote = resolvePushRemote(repoPath);
   } catch {
     remote = '';
   }
-  if (!remote) return { pushed: false, memory: null };
+  if (!remote) { clearUnpublishedMemory(repoPath, startedMs); return { pushed: false, memory: null, outcome: 'no-remote' }; }
+  const report: MemoryPushReport = {};
   try {
-    pushMemoryNotes(repoPath, remote);
-    debugLog(source, 'pushed memory notes');
+    if (!pushMemoryNotes(repoPath, remote, report)) {
+      debugLog(source, 'memory notes push failed — kept for the next try', { remote, error: report.error });
+      return { pushed: false, memory: null, outcome: 'failed', error: report.error };
+    }
+    clearUnpublishedMemory(repoPath, startedMs);
+    debugLog(source, 'pushed memory notes', { localRefs: report.localRefs });
   } catch (err: any) {
     debugLog(source, 'memory notes push skipped', { message: err?.message });
-    return { pushed: false, memory: null };
+    return { pushed: false, memory: null, outcome: 'failed', error: err?.message };
   }
   const memory = await notifyRepoMemoryChanged(repoPath, source, { remote, timeoutMs: opts.timeoutMs });
-  return { pushed: true, memory };
+  return { pushed: true, memory, outcome: report.localRefs === 0 ? 'nothing-local' : 'pushed' };
 }

@@ -2,6 +2,7 @@
 //
 // Moved out of commands/hooks.ts mechanically: the text is unchanged, only its
 // home is. Shared helpers still live in hooks.ts and are imported from there.
+import { publishLeftovers } from '../../memory-publish-queue.js';
 import { HISTORY_SEARCH_NOTE, variantAllowsHistorySearchNote, variantAllowsRepoContext } from '../../context-variant.js';
 import { findCodexRolloutByCwd } from '../../agents/codex.js';
 import { getCursorModelFromDb } from '../../agents/cursor.js';
@@ -43,10 +44,13 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { PREAMBLE_VISIBLE_ANCHOR, SESSION_START_RECENT_SHAS, agentRulesTarget, claudeLoadsAgentsMd, buildContextInjectionPayload, buildOriginFrameworkGuidance, conversationAnchorId, cursorSessionReusable, durableUpdate, filterUncommittedDiff, getWorkingTreeSha, hookLookupSessionId, normalizeWorkspaceRoot, recordFullContextInjection, serverRowForLocalTurn, sessionScopedCommittedDiff, spawnMemoryBriefChild, uncommittedExcludeUnion, writeAgentRulesFile } from '../hooks.js';
+import { PREAMBLE_VISIBLE_ANCHOR, SESSION_START_RECENT_SHAS, repoRemoteUrl, agentRulesTarget, claudeLoadsAgentsMd, buildContextInjectionPayload, buildOriginFrameworkGuidance, conversationAnchorId, cursorSessionReusable, durableUpdate, filterUncommittedDiff, getWorkingTreeSha, hookLookupSessionId, normalizeWorkspaceRoot, recordFullContextInjection, serverRowForLocalTurn, sessionScopedCommittedDiff, spawnMemoryBriefChild, uncommittedExcludeUnion, writeAgentRulesFile } from '../hooks.js';
 import { ORIGIN_ONLY_CLAUDE_MD_WARNING, originOnlyClaudeMdHidesAgentsMd } from '../../managed-block-diff.js';
 import { newCaptureStamp } from '../../capture-stamp.js';
+import { linkPendingIssue } from '../../issue-link.js';
 import { budgetRowDiffs, withCutFiles } from '../../budgeted-row-diff.js';
+import { claudeDesktopSpawnedFrom } from '../../claude-desktop-spawn.js';
+import { resolveAgentOwner } from '../../process-owner.js';
 
 
 /**
@@ -722,6 +726,9 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
   // for EVERY agent below. Cursor/Gemini get it from stdin; Codex gets it
   // from a SQLite exact-cwd query once repoPath is finalized.
   let agentSessionId: string = claudeSessionId || stdinSessionId || '';
+  // A Claude desktop subsession: the session that started it. Read only for
+  // Claude Code — Cursor fires the same hooks but never runs in the app.
+  const spawnedFromAgentSessionId = agentSlug === 'claude-code' ? claudeDesktopSpawnedFrom() : undefined;
   let transcriptPath = input.transcript_path || '';
 
   // ── Concurrent session support ─────────────────────────────────────────────
@@ -807,6 +814,8 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
     }
     try {
       syncNotesForSessionStart(repoPath);
+      // Memory written here earlier and still not on the remote: publish it now.
+      try { publishLeftovers(repoPath); } catch { /* the next session start tries again */ }
     } catch {}
     try {
       const attributionCtx = variantAllowsRepoContext() ? buildAttributionContext(repoPath) : null;
@@ -1464,6 +1473,7 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
         sessionTag,
         claudeSessionId,
         agentSessionId: agentSessionId || undefined,
+        spawnedFromAgentSessionId,
         transcriptPath: transcriptPath || undefined,
         model,
         agentSlug: finalAgentSlug,
@@ -1507,6 +1517,7 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
     let enforcementRules: any[] | undefined;
     let verboseCapture = false;
     let apiStartedAt: string | undefined;
+    let apiSessionStartedAt: string | undefined;
 
     if (connected) {
       // ── Connected mode: register session with Origin platform ──
@@ -1527,6 +1538,9 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
           branch: branch || undefined,
           hostname: agentConfig.hostname || undefined,
           additionalRepoPaths: allRepoPaths ? allRepoPaths.filter(p => p !== repoPath) : undefined,
+          additionalRepos: allRepoPaths
+            ? allRepoPaths.filter(p => p !== repoPath).map((p) => ({ repoPath: p, repoUrl: repoRemoteUrl(p) }))
+            : undefined,
           // The provisional id this start reserved (or an earlier failed
           // start's local id it is re-firing for): a commit made under it
           // carries it in its trailer.
@@ -1540,6 +1554,7 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
           // Cursor thread reused session 5bd449fb, accumulating 7 prompts
           // across two distinct conversations on the same row).
           agentSessionId: agentSessionId || undefined,
+          spawnedFromAgentSessionId,
         });
         sessionId = result.sessionId as string;
         agentSystemPrompt = (result.agentSystemPrompt as string) || undefined;
@@ -1549,6 +1564,11 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
         // Use server startedAt if returned (deduped sessions preserve original start time)
         if (result.startedAt) {
           apiStartedAt = result.startedAt as string;
+        }
+        // The reused row's start (any reuse rung, not just the dedup one).
+        // Kept apart from startedAt — see SessionState.sessionStartedAt.
+        if (typeof result.sessionStartedAt === 'string') {
+          apiSessionStartedAt = result.sessionStartedAt;
         }
         // Over-budget sessions are TRACKED with a warning, not refused —
         // the server creates the row (badged on the dashboard) and ships
@@ -1572,6 +1592,16 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
           );
         }
         debugLog('session-start', 'api returned', { sessionId, deduped: !!result.startedAt, verboseCapture, budgetBlocked: !!startBudget?.blocked, budgetWarning: !!startBudget?.warning });
+        // Started by `origin issue start` in this checkout? Link the new
+        // session to that issue (one-shot; see issue-link.ts). A stat when
+        // there is nothing pending.
+        if (repoPath) {
+          await linkPendingIssue(
+            repoPath, sessionId,
+            (repoId, shortId, sid, runId) => api.linkIssueSession(repoId, shortId, sid, 5000, runId),
+            (msg, data) => debugLog('session-start', msg, data),
+          );
+        }
       } catch (apiErr: any) {
         // API failed — fall back to local session instead of aborting entirely.
         // AGENT_DISABLED is the expected response when an admin hasn't
@@ -1678,10 +1708,12 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
       sessionId,
       claudeSessionId,
       agentSessionId: agentSessionId || undefined,
+      spawnedFromAgentSessionId,
       transcriptPath,
       model,
       startedAt: apiStartedAt || new Date().toISOString(),
       prompts: [],
+      ...(apiSessionStartedAt && { sessionStartedAt: apiSessionStartedAt }),
       repoPath,
       canonicalRepoPath,
       lastCwd: hookCwd,
@@ -1968,6 +2000,10 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
         baselineFor(peek.repoPath);
       }
     } catch { /* best-effort — a missed warm-up only costs a second save */ }
+    // The agent process this session runs in, for prepare-commit-msg to find
+    // among a commit's ancestors (process-owner.ts).
+    const owner = resolveAgentOwner(agentSlug);
+    if (owner) state.ownerProcess = owner;
     saveSessionState(state, saveCwd, sessionTag, foldLatestRow);
     // Owed only when the adopter appeared inside the locked fold itself. The
     // second save's fold finds the baseline in the map, so it cannot owe
@@ -2048,6 +2084,8 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
     // first sync until the backoff window elapses; never fatal.
     try {
       syncNotesForSessionStart(repoPath);
+      // Memory written here earlier and still not on the remote: publish it now.
+      try { publishLeftovers(repoPath); } catch { /* the next session start tries again */ }
     } catch {
       // Non-fatal — attribution below still renders whatever notes are local.
     }

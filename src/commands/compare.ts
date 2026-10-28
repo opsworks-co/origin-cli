@@ -235,5 +235,8 @@ function serializeStats(stats: AttributionStats): Record<string, any> {
     humanLinesAdded: stats.humanLinesAdded,
     byTool: Object.fromEntries(stats.byTool),
     byModel: Object.fromEntries(stats.byModel),
+    // The whole object, so `unavailable` (tracking bounds exceeded) is never
+    // mistaken for "no canonical claims in the range".
+    acceptance: { ...stats.acceptance },
   };
 }

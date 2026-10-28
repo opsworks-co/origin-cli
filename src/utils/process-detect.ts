@@ -31,7 +31,7 @@ export function pgrepPattern(pgrepCmd: string): string {
 
 // ─── Windows process snapshot (memoized per invocation) ─────────────────────
 
-interface ProcRow { pid: number; ppid: number; cmd: string }
+export interface ProcRow { pid: number; ppid: number; cmd: string }
 
 let winSnapshot: { at: number; rows: ProcRow[] } | null = null;
 // A hook's standalone sweep checks ~10 patterns back to back; caching the
@@ -39,39 +39,80 @@ let winSnapshot: { at: number; rows: ProcRow[] } | null = null;
 // into a single spawn without ever serving a stale process list across hooks.
 const WIN_SNAPSHOT_TTL_MS = 2_000;
 
-function windowsProcessRows(): ProcRow[] {
+/**
+ * Test-only: a Win32_Process snapshot, as the JSON PowerShell prints, to read
+ * instead of running PowerShell. The capture e2e tests use it to make "exactly
+ * one agent process is running" deterministic on Windows, where a fake binary
+ * first on PATH cannot stand in: spawnSync runs `powershell` without a shell,
+ * so a `powershell.cmd` shim is never resolved.
+ *
+ * Honoured only inside a confirmed Vitest run — the run id our vitest config
+ * sets AND the worker/pool id Vitest sets — so an ordinary CLI or hook process
+ * ignores it entirely, whatever its environment carries.
+ */
+export const TEST_WIN_PROCESS_SNAPSHOT_ENV = 'ORIGIN_TEST_WIN_PROCESS_SNAPSHOT';
+
+/** The test snapshot JSON, or null outside a confirmed Vitest run. */
+export function testWindowsSnapshotOverride(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = env[TEST_WIN_PROCESS_SNAPSHOT_ENV];
+  if (!raw) return null;
+  if (!env.ORIGIN_TEST_RUN_ID) return null;
+  if (!env.VITEST_WORKER_ID && !env.VITEST_POOL_ID) return null;
+  return raw;
+}
+
+/**
+ * Rows of a `Get-CimInstance Win32_Process | … | ConvertTo-Json` dump. One
+ * parser for the real snapshot and the test override, so a test cannot model
+ * a shape PowerShell does not produce.
+ */
+export function parseWindowsProcessRows(stdout: string): ProcRow[] {
+  if (!stdout.trim()) return [];
+  try {
+    const parsed = JSON.parse(stdout);
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    // Keep cmd-less rows (some system processes report no CommandLine) so the
+    // ancestry walk in processInfo can still step through their ppid; the
+    // regex match in windowsMatch naturally skips an empty command line.
+    return arr
+      .map((row: any) => ({
+        pid: Number(row?.ProcessId),
+        ppid: Number(row?.ParentProcessId),
+        cmd: typeof row?.CommandLine === 'string' ? row.CommandLine : '',
+      }))
+      .filter((row: ProcRow) => Number.isInteger(row.pid));
+  } catch {
+    return []; // malformed JSON → no matches
+  }
+}
+
+function windowsProcessRows(fresh = false): ProcRow[] {
   const now = Date.now();
-  if (winSnapshot && now - winSnapshot.at < WIN_SNAPSHOT_TTL_MS) {
+  if (!fresh && winSnapshot && now - winSnapshot.at < WIN_SNAPSHOT_TTL_MS) {
     return winSnapshot.rows;
   }
-  const script =
-    'Get-CimInstance Win32_Process | ' +
-    'Select-Object ProcessId,ParentProcessId,CommandLine | ' +
-    'ConvertTo-Json -Compress';
-  const r = runDetailed(
-    'powershell',
-    ['-NoProfile', '-NonInteractive', '-Command', script],
-    { timeoutMs: 8_000 },
-  );
-  let rows: ProcRow[] = [];
-  if (r.status === 0 && r.stdout.trim()) {
-    try {
-      const parsed = JSON.parse(r.stdout);
-      const arr = Array.isArray(parsed) ? parsed : [parsed];
-      // Keep cmd-less rows (some system processes report no CommandLine) so the
-      // ancestry walk in processInfo can still step through their ppid; the
-      // regex match in windowsMatch naturally skips an empty command line.
-      rows = arr
-        .map((row: any) => ({
-          pid: Number(row?.ProcessId),
-          ppid: Number(row?.ParentProcessId),
-          cmd: typeof row?.CommandLine === 'string' ? row.CommandLine : '',
-        }))
-        .filter((row: ProcRow) => Number.isInteger(row.pid));
-    } catch { /* malformed JSON → no matches */ }
+  let stdout = testWindowsSnapshotOverride();
+  if (stdout === null) {
+    const script =
+      'Get-CimInstance Win32_Process | ' +
+      'Select-Object ProcessId,ParentProcessId,CommandLine | ' +
+      'ConvertTo-Json -Compress';
+    const r = runDetailed(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-Command', script],
+      { timeoutMs: 8_000 },
+    );
+    stdout = r.status === 0 ? r.stdout : '';
   }
+  const rows = parseWindowsProcessRows(stdout);
   winSnapshot = { at: now, rows };
   return rows;
+}
+
+function pidExists(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (err: unknown) {
+    return (err as { code?: string } | null)?.code === 'EPERM';
+  }
 }
 
 /** Test-only: drop the memoized Windows process snapshot. */
@@ -186,7 +227,14 @@ export function hasAncestorProcess(re: RegExp, maxHops = 16): boolean {
 export function processInfo(pid: number): { ppid: number; command: string } | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   if (isWindows()) {
-    const row = windowsProcessRows().find((r) => r.pid === pid);
+    const cached = winSnapshot;
+    let row = windowsProcessRows().find((r) => r.pid === pid);
+    // A process started after the cached snapshot is missing from it, which is
+    // not "gone": read as unreadable, a stranger at a dead daemon's pid counted
+    // as our daemon (isOwnDaemonAlive). A live pid the cache lacks re-takes it.
+    if (!row && cached && cached === winSnapshot && pidExists(pid)) {
+      row = windowsProcessRows(true).find((r) => r.pid === pid);
+    }
     return row ? { ppid: row.ppid, command: row.cmd } : null;
   }
   // -ww: procps honours an exported COLUMNS even into a pipe and cuts the

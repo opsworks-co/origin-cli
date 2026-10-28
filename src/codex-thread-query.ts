@@ -47,5 +47,10 @@ export function buildCodexThreadByCwdQuery(columns: string, repoPath: string): s
   const inList = [...variants]
     .map(v => `'${v.replace(/'/g, "''")}'`)
     .join(', ');
-  return `SELECT ${columns} FROM threads WHERE cwd IN (${inList}) ORDER BY updated_at DESC LIMIT 1;`;
+  // A child thread — an auto-review, or a sub-agent the chat spawned — runs in
+  // the chat's cwd and is written to AFTER it, so newest-first picked the
+  // child over the chat it works for. Its `source` is a JSON object with a
+  // `subagent` key; a user's thread has a plain string (cli, exec, vscode).
+  // instr, not LIKE: this query never pattern-matches (see above).
+  return `SELECT ${columns} FROM threads WHERE cwd IN (${inList}) AND instr(source, '"subagent"') = 0 ORDER BY updated_at DESC LIMIT 1;`;
 }

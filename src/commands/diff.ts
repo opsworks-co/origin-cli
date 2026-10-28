@@ -1,10 +1,9 @@
 import chalk from 'chalk';
 import { gitDetailed } from '../utils/exec.js';
-import { isAiCommit } from '../attribution.js';
+import { resolveLineAttribution, type AttributionConfidence, type LineBlameOptions } from '../attribution.js';
+import { linesOf } from '../attribution-line-reanchor.js';
 import { getGitRoot } from '../session-state.js';
 
-const HEX = /^[a-fA-F0-9]{4,64}$/;
-const SAFE_REF = /^[a-zA-Z0-9_./~^-]+$/;
 const SAFE_RANGE = /^[a-zA-Z0-9_./~^-]+(?:\.\.[a-zA-Z0-9_./~^-]+)?$/;
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -13,6 +12,8 @@ interface AnnotatedDiffLine {
   type: 'header' | 'hunk' | 'addition' | 'deletion' | 'context' | 'meta';
   content: string;
   authorship?: 'ai' | 'human' | 'unknown';
+  /** `line` ([AI]) or `commit` ([AI~]) on an `ai` addition only. */
+  confidence?: AttributionConfidence;
   commitSha?: string;
 }
 
@@ -24,68 +25,33 @@ const gitOpts = (cwd: string) => ({
 });
 
 /**
- * Get commits in a range and classify each as AI or human.
+ * Which file version the new side of the diff is, and so which line view
+ * proves it: a commit's blob for `A..B`, `A...B` or one shown commit, the
+ * working tree for `git diff <ref>` (a ref against the files on disk).
  */
-function getCommitAuthorship(
-  repoPath: string,
-  range: string,
-): Map<string, 'ai' | 'human'> {
-  const map = new Map<string, 'ai' | 'human'>();
-  if (!SAFE_RANGE.test(range)) return map;
-  const r = gitDetailed(['log', '--format=%H', range], gitOpts(repoPath));
-  if (r.status !== 0) return map;
-  const commits = r.stdout.trim().split('\n').filter(Boolean);
-  for (const sha of commits) {
-    if (HEX.test(sha)) {
-      map.set(sha, isAiCommit(repoPath, sha) ? 'ai' : 'human');
-    }
-  }
-  return map;
+type DiffTarget = { view: 'head'; revision: string } | { view: 'worktree' };
+
+function diffTarget(range: string, shownCommit: boolean): DiffTarget {
+  if (shownCommit) return { view: 'head', revision: range };
+  const sep = range.includes('...') ? '...' : range.includes('..') ? '..' : null;
+  if (!sep) return { view: 'worktree' };
+  const right = range.slice(range.indexOf(sep) + sep.length);
+  return { view: 'head', revision: right || 'HEAD' };
 }
 
 /**
- * Run git blame on specific line range of a file at a given ref.
- * Returns a map of lineNumber → commitSha.
- */
-function blameLines(
-  repoPath: string,
-  filePath: string,
-  startLine: number,
-  endLine: number,
-  ref: string,
-): Map<number, string> {
-  const result = new Map<number, string>();
-  if (!SAFE_REF.test(ref) && !HEX.test(ref)) return result;
-  if (!Number.isInteger(startLine) || !Number.isInteger(endLine)) return result;
-  const r = gitDetailed(
-    ['blame', '-L', `${startLine},${endLine}`, '--porcelain', ref, '--', filePath],
-    gitOpts(repoPath),
-  );
-  if (r.status !== 0) return result;
-  const output = r.stdout;
-  let currentSha = '';
-  let currentLine = startLine;
-  for (const line of output.split('\n')) {
-    // Lines starting with a 40-char hex SHA are commit headers
-    const match = line.match(/^([a-f0-9]{40})\s+\d+\s+(\d+)/);
-    if (match) {
-      currentSha = match[1];
-      currentLine = parseInt(match[2], 10);
-      result.set(currentLine, currentSha);
-    }
-  }
-  return result;
-}
-
-/**
- * Parse diff output and annotate each added/deleted line with per-line
- * AI/human attribution using git blame.
+ * Parse diff output and annotate each added line with the attribution of the
+ * new side (resolveLineAttribution, OR-46): `ai` with confidence `line` only on
+ * a canonical claim that reaches that line, `ai` with confidence `commit` when
+ * only the line's commit carries AI evidence (a commit-level record, a legacy
+ * note, a trailer), `human` only under HUMAN_WHEN_NO_AI_EVIDENCE, `unknown`
+ * otherwise. An added line whose text is not the text of that line in the
+ * viewed side is `unknown`; deletions are `unknown`.
  */
 function annotateDiffLines(
   repoPath: string,
   diffOutput: string,
-  commitAuthorship: Map<string, 'ai' | 'human'>,
-  targetRef: string,
+  target: DiffTarget,
 ): AnnotatedDiffLine[] {
   const lines = diffOutput.split('\n');
   const result: AnnotatedDiffLine[] = [];
@@ -98,7 +64,7 @@ function annotateDiffLines(
   interface HunkInfo {
     file: string;
     newStart: number;
-    addedLines: { diffIndex: number; newLine: number }[];
+    addedLines: { diffIndex: number; newLine: number; content: string }[];
   }
 
   const hunks: HunkInfo[] = [];
@@ -122,7 +88,7 @@ function annotateDiffLines(
       hunks.push(currentHunk);
     } else if (line.startsWith('+') && !line.startsWith('+++')) {
       if (currentHunk) {
-        currentHunk.addedLines.push({ diffIndex: i, newLine: newLineNum });
+        currentHunk.addedLines.push({ diffIndex: i, newLine: newLineNum, content: line.slice(1) });
       }
       newLineNum++;
     } else if (line.startsWith('-') && !line.startsWith('---')) {
@@ -133,42 +99,32 @@ function annotateDiffLines(
     }
   }
 
-  // Blame added lines per file (batch by file for efficiency)
-  const lineAuthorship = new Map<number, { authorship: 'ai' | 'human' | 'unknown'; sha: string }>();
+  // One proven line view per file of the new side.
+  const lineAuthorship = new Map<number, { authorship: 'ai' | 'human' | 'unknown'; confidence?: AttributionConfidence; sha?: string }>();
   const fileHunks = new Map<string, HunkInfo[]>();
   for (const h of hunks) {
     if (h.addedLines.length === 0) continue;
     if (!fileHunks.has(h.file)) fileHunks.set(h.file, []);
     fileHunks.get(h.file)!.push(h);
   }
+  const viewOpts: LineBlameOptions = target.view === 'head' ? { view: 'head', revision: target.revision } : {};
 
   for (const [file, fHunks] of fileHunks) {
-    // Collect all added line numbers for this file
-    const allAdded = fHunks.flatMap(h => h.addedLines);
-    if (allAdded.length === 0) continue;
-
-    const minLine = Math.min(...allAdded.map(a => a.newLine));
-    const maxLine = Math.max(...allAdded.map(a => a.newLine));
-
-    // Blame the range
-    const blameMap = blameLines(repoPath, file, minLine, maxLine, targetRef);
-
-    for (const added of allAdded) {
-      const sha = blameMap.get(added.newLine) || '';
-      let authorship: 'ai' | 'human' | 'unknown' = 'unknown';
-      if (sha) {
-        // Check full SHA first, then try prefix match
-        if (commitAuthorship.has(sha)) {
-          authorship = commitAuthorship.get(sha)!;
-        } else {
-          // The blame SHA might not be in the diff range — classify it directly
-          try {
-            authorship = isAiCommit(repoPath, sha) ? 'ai' : 'human';
-            commitAuthorship.set(sha, authorship); // cache it
-          } catch { /* ignore */ }
-        }
+    const resolution = resolveLineAttribution(repoPath, file, viewOpts);
+    const viewLines = resolution ? linesOf(resolution.text) : [];
+    for (const added of fHunks.flatMap(h => h.addedLines)) {
+      const attr = resolution?.lines[added.newLine - 1];
+      // The proof is about the view's line; it holds for this `+` line only
+      // when that line IS this text.
+      if (!attr || viewLines[added.newLine - 1] !== added.content || attr.authorship === 'mixed') {
+        lineAuthorship.set(added.diffIndex, { authorship: 'unknown', sha: attr?.commitSha });
+      } else {
+        lineAuthorship.set(added.diffIndex, {
+          authorship: attr.authorship,
+          ...(attr.authorship === 'ai' ? { confidence: attr.confidence } : {}),
+          sha: attr.commitSha,
+        });
       }
-      lineAuthorship.set(added.diffIndex, { authorship, sha });
     }
   }
 
@@ -188,6 +144,7 @@ function annotateDiffLines(
         type: 'addition',
         content: line,
         authorship: info?.authorship || 'unknown',
+        ...(info?.confidence ? { confidence: info.confidence } : {}),
         commitSha: info?.sha,
       });
     } else if (line.startsWith('-') && !line.startsWith('---')) {
@@ -211,8 +168,9 @@ function annotateDiffLines(
 /**
  * origin diff [range] [--ai-only] [--human-only] [--json]
  *
- * Runs git diff and annotates each added line with [AI] or [HU] tags.
- * Uses git blame to determine per-line authorship.
+ * Runs git diff and annotates each added line with [AI] (line proof), [AI~]
+ * (commit-level evidence, no line proof), [HU] or [??] (see annotateDiffLines);
+ * unknown is never counted as human. --ai-only keeps both AI tiers.
  */
 export async function diffCommand(
   range?: string,
@@ -228,12 +186,7 @@ export async function diffCommand(
   // Default to HEAD~5..HEAD if no range given
   const diffRange = range || 'HEAD~5..HEAD';
 
-  // Figure out the target ref (right side of the range) for blame
-  let targetRef = 'HEAD';
-  const rangeMatch = diffRange.match(/\.\.(.+)/);
-  if (rangeMatch) {
-    targetRef = rangeMatch[1];
-  }
+  let shownCommit = false;
 
   // Get the diff
   if (!SAFE_RANGE.test(diffRange)) {
@@ -242,18 +195,18 @@ export async function diffCommand(
   }
   let diffOutput: string;
   {
-    const r = gitDetailed(['diff', diffRange], gitOpts(repoPath));
+    const r = gitDetailed(['diff', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', diffRange], gitOpts(repoPath));
     if (r.status === 0) {
       diffOutput = r.stdout.trim();
     } else {
       // Maybe it's a single commit ref — try showing it
       const r2 = gitDetailed(
-        ['show', diffRange, '--format=', '--diff-merges=first-parent'],
+        ['show', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', diffRange, '--format=', '--diff-merges=first-parent'],
         gitOpts(repoPath),
       );
       if (r2.status === 0) {
         diffOutput = r2.stdout.trim();
-        targetRef = diffRange;
+        shownCommit = true;
       } else {
         console.error(chalk.red(`Error: Invalid diff range "${diffRange}".`));
         return;
@@ -266,11 +219,8 @@ export async function diffCommand(
     return;
   }
 
-  // Classify commits in range as AI or human
-  const commitAuthorship = getCommitAuthorship(repoPath, diffRange);
-
-  // Annotate diff lines with per-line blame
-  const annotated = annotateDiffLines(repoPath, diffOutput, commitAuthorship, targetRef);
+  // Annotate added lines with the line-level proof of the new side
+  const annotated = annotateDiffLines(repoPath, diffOutput, diffTarget(diffRange, shownCommit));
 
   // Apply filters
   let filtered = annotated;
@@ -292,20 +242,24 @@ export async function diffCommand(
       type: l.type,
       content: l.content,
       authorship: l.authorship || null,
+      confidence: l.confidence || null,
       commitSha: l.commitSha || null,
     }));
     console.log(JSON.stringify(jsonLines, null, 2));
     return;
   }
 
-  // Pretty output with [AI] / [HU] tags
+  // Pretty output with [AI] / [AI~] / [HU] / [??] tags
   let aiAdditions = 0;
+  let commitLevelAdditions = 0;
   let humanAdditions = 0;
-  let aiDeletions = 0;
-  let humanDeletions = 0;
+  let unknownAdditions = 0;
+  let deletions = 0;
 
   const AI_TAG = chalk.cyan.bold('[AI]');
+  const AI_COMMIT_TAG = chalk.cyan('[AI~]');
   const HU_TAG = chalk.green.bold('[HU]');
+  const UNKNOWN_TAG = chalk.gray('[??]');
 
   for (const line of filtered) {
     switch (line.type) {
@@ -319,25 +273,25 @@ export async function diffCommand(
         console.log(chalk.magenta(line.content));
         break;
       case 'addition':
-        if (line.authorship === 'ai') {
+        if (line.authorship === 'ai' && line.confidence === 'line') {
           console.log(`${AI_TAG} ${chalk.cyan(line.content)}`);
           aiAdditions++;
+        } else if (line.authorship === 'ai') {
+          console.log(`${AI_COMMIT_TAG} ${chalk.cyan(line.content)}`);
+          aiAdditions++;
+          commitLevelAdditions++;
         } else if (line.authorship === 'human') {
           console.log(`${HU_TAG} ${chalk.green(line.content)}`);
           humanAdditions++;
         } else {
-          console.log(`     ${chalk.green(line.content)}`);
-          humanAdditions++; // default unknown to human
+          console.log(`${UNKNOWN_TAG} ${chalk.green(line.content)}`);
+          unknownAdditions++; // no proof either way: never counted as human
         }
         break;
       case 'deletion':
-        if (line.authorship === 'ai') {
-          console.log(`${AI_TAG} ${chalk.cyan.dim(line.content)}`);
-          aiDeletions++;
-        } else {
-          console.log(`     ${chalk.red(line.content)}`);
-          humanDeletions++;
-        }
+        // A deleted line has no line-level proof of who wrote it.
+        console.log(`     ${chalk.red(line.content)}`);
+        deletions++;
         break;
       case 'context':
         console.log(`     ${chalk.gray(line.content)}`);
@@ -345,16 +299,18 @@ export async function diffCommand(
     }
   }
 
-  // Summary
-  const total = aiAdditions + humanAdditions;
-  const aiPct = total > 0 ? Math.round((aiAdditions / total) * 100) : 0;
-  const humanPct = total > 0 ? 100 - aiPct : 0;
+  // Summary: shares of added lines; deletions are listed apart, unattributed.
+  const total = aiAdditions + humanAdditions + unknownAdditions;
+  const pct = (n: number) => (total > 0 ? Math.round((n / total) * 100) : 0);
 
   console.log('');
   console.log(chalk.bold('Attribution Summary:'));
   console.log(
-    `  ${chalk.cyan(`AI:    +${aiAdditions} -${aiDeletions}`)}  (${aiPct}%)` +
-    `    ${chalk.green(`Human: +${humanAdditions} -${humanDeletions}`)}  (${humanPct}%)`,
+    `  ${chalk.cyan(`AI: +${aiAdditions}`)} (${pct(aiAdditions)}%)` +
+    chalk.gray(` [AI] line-proven: +${aiAdditions - commitLevelAdditions}, [AI~] commit-level: +${commitLevelAdditions}`) +
+    `    ${chalk.green(`Human: +${humanAdditions}`)} (${pct(humanAdditions)}%)` +
+    `    ${chalk.gray(`Unknown: +${unknownAdditions}`)} (${pct(unknownAdditions)}%)` +
+    `    ${chalk.red(`Deleted: -${deletions}`)} (not attributed)`,
   );
   console.log('');
 }

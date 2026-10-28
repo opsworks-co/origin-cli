@@ -1,3 +1,4 @@
+import { publishLeftovers } from '../memory-publish-queue.js';
 import { withClaudeHookLock } from '../claude-hook-lock.js';
 import { variantAllowsRepoContext } from '../context-variant.js';
 import { loadConfig, saveConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig, isConnectedMode, ensureConfigDir } from '../config.js';
@@ -156,7 +157,7 @@ import { writeHandoff, buildHandoffContext, extractTodosFromPrompts, handoffRepr
 import { assembleRepoContext } from '../context-injection.js';
 import { editSourceForAgent } from '../prompt-capture/types.js';
 import { synthesizeSessionSummary, memorySummaryMode } from '../session-summary.js';
-import { writeSessionMemory, writeCommitMemory, enrichDecisionsForSession, buildMemoryContext, buildMemoryPointerContext, buildStartupCheckContext, buildMemoryEscalationContext, buildPromptScopedMemoryContext, isMemoryReadCommand, isMemoryReadToolName, readRecentMemory, readAllSessionMemory, memoryUpdateTrigger, shouldWriteMemoryOnCommit, shouldWriteMemoryOnSessionEnd, summarizeFromCommitSubjects, isSubstantiveMemory, buildMemoryBriefContext, readMemoryBrief, writeMemoryBrief, memoryBriefSignature, type SessionMemoryEntry } from '../memory.js';
+import { writeSessionMemory, writeCommitMemory, enrichDecisionsForSession, buildMemoryContext, buildMemoryPointerContext, buildStartupCheckContext, buildMemoryEscalationContext, buildPromptScopedMemoryContext, isMemoryReadCommand, isMemoryReadToolName, readRecentMemory, readAllSessionMemory, memoryUpdateTrigger, shouldWriteMemoryOnCommit, shouldWriteMemoryOnSessionEnd, summarizeFromCommitSubjects, isSubstantiveMemory, buildMemoryBriefContext, readMemoryBrief, writeMemoryBrief, memoryBriefSignature, withoutPromptText, type SessionMemoryEntry } from '../memory.js';
 import { buildRepoBriefContext, maybeSpawnBriefGeneration } from '../repo-brief.js';
 import { backfillAcceptanceForSession } from '../acceptance.js';
 import { addTodosFromSession } from '../todo.js';
@@ -184,6 +185,7 @@ import { ORIGIN_MANAGED_MARKER, PREAMBLE_VISIBLE_ANCHOR, stripOriginManagedBlock
 import { normalizeToolHookPayload } from '../hook-payload.js';
 import { manuallyEndedSessionIds, skipManuallyEndedHook } from '../manual-session-end.js';
 import { skipCopilotTitleSessionHook } from '../copilot-title-session.js';
+import { isCopilotSubagentHook } from '../copilot-subagent-hook.js';
 import {
   listMirroredSessionsForTree,
   preferRegisteredSessionId,
@@ -200,6 +202,7 @@ import { isSubagentSpawnTool, detectRenamedSpawner, SUBAGENT_SPAWN_TOOLS } from 
 import { detectContention, contentionAdvice } from '../checkout-contention.js';
 import { filesWrittenDuring, turnIdsInJournal } from '../write-journal.js';
 import { parseSessionLimits, buildDurationBlockMessage, sendDesktopNotification } from '../session-limits.js';
+import { handleAgentNotificationHook } from '../agent-notify.js';
 import {
   BUDGET_BLOCKING_AGENTS,
   writeBudgetLockNotice,
@@ -211,6 +214,8 @@ import { createSnapshot, condenseSnapshot, listSnapshots, condenseAndCleanupSess
 import { execFileSync, spawn } from 'child_process';
 import { toRepoRelative } from '../transcript-watch.js';
 import { inheritedBaseline, inheritedBeforeStates, inheritedFileSources, type InheritedWindowDeps } from '../inherited-window-baseline.js';
+import { gitLeftBlobsForTurn, readBlobContent } from '../git-moved-files.js';
+import { renderFileDiff } from '../write-journal-diff.js';
 import { countDiffLines } from '../transcript-adapters.js';
 import fs from 'fs';
 import path from 'path';
@@ -2497,6 +2502,7 @@ import type { ParsedTranscript, PromptFileMapping } from '../transcript.js';
 import { AGY_CACHE_MAX_AGE_MS, AGY_WATCH_LOCK_FRESH_MS, MAX_PENDING_PROMPT_CHANGES, agyDetectSessionCommit, agyEvaluatePreTool, agyGlobToRegex, agyOpenTurn, agyRulesCachePath, agySessionTag, agyToolPaths, discoverLatestAgyConversation, dropPhantomNestedRepoDeletions, handleAntigravity, mergePendingPromptChanges, pruneAgyRulesCaches, readAgyRulesCache, registerAgySessionState, spawnAgyContextRefresh, spawnAgyWatcher, writeAgyRulesCache } from './hooks/antigravity.js';
 import { newCaptureStamp } from '../capture-stamp.js';
 import { localCommitterEmail, readCommitOwnershipFactsBatch, type CommitOwnershipFacts } from '../commit-ownership-facts.js';
+import { attestCommitsMadeWhileEnded } from '../commits-while-ended.js';
 export { localCommitterEmail, readCommitOwnershipFactsBatch, type CommitOwnershipFacts } from '../commit-ownership-facts.js';
 export { AGY_CACHE_MAX_AGE_MS, AGY_WATCH_LOCK_FRESH_MS, MAX_PENDING_PROMPT_CHANGES, agyDetectSessionCommit, agyEvaluatePreTool, agyGlobToRegex, agyOpenTurn, agyRulesCachePath, agySessionTag, agyToolPaths, discoverLatestAgyConversation, dropPhantomNestedRepoDeletions, handleAntigravity, mergePendingPromptChanges, pruneAgyRulesCaches, readAgyRulesCache, registerAgySessionState, spawnAgyContextRefresh, spawnAgyWatcher, writeAgyRulesCache };
 export type { AgyRulesCache } from './hooks/antigravity.js';
@@ -3095,7 +3101,7 @@ export function buildOriginFrameworkGuidance(): string {
     '',
     'Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.',
     '',
-    '[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.',
+    '[Origin: Closes] is the only marker that looks BACKWARDS — at the open TODOs listed above, which are what earlier sessions left unfinished. Emit it in the turn you finish the item, naming its id. Origin records it at Stop as a claim and confirms it when the change reaches the default branch. If you find it was ALREADY done and change nothing, name what did it on the same line — `[Origin: Closes] <id> — already done in <commit sha or #PR>` — and it closes as soon as that is on the default branch. If the leftover is already on the default branch, also run `origin todo done <id>` so the list updates immediately.',
     '',
     'Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn\'t do. These appear on the PR review surface alongside Origin\'s server-synthesized summary; agent-emitted markers take precedence.',
   ].join('\n');
@@ -3269,11 +3275,16 @@ export function resumeEndedConversationState(
   const endedAt = (state as { endedAt?: string }).endedAt;
   state.status = 'RUNNING';
   delete (state as { endedAt?: string }).endedAt;
+  // Commits its sub-agents made while it was ended carry its trailer and no
+  // turn; give each the turn that wrote its files (commits-while-ended.ts).
+  let attestedWhileEnded = 0;
+  try { attestedWhileEnded = attestCommitsMadeWhileEnded(state, endedAt); } catch { /* resume regardless */ }
   const saveCwd = state.repoPath || repoPath;
   try { saveSessionState(state, saveCwd, state.sessionTag); } catch { /* best effort */ }
   debugLog(scope, 'resuming ended session (same conversation)', {
     sessionId: state.sessionId, tag: state.sessionTag, conversationId, endedAt,
     prompts: state.prompts?.length || 0, activeTurn: (state as { activeTurn?: { index?: number } | null }).activeTurn?.index ?? null,
+    attestedWhileEnded,
   });
   try {
     const config = loadConfig();
@@ -3623,9 +3634,14 @@ export function normalizeWorkspaceRoot(p: unknown): string | null {
 async function maybeRefreshMemoryBrief(repoPath: string, connected: boolean, source: string, recentDiff?: string): Promise<void> {
   if (!connected || memorySummaryMode() !== 'llm') return;
   try {
-    const entries = readAllSessionMemory(repoPath);
+    // With prompt text off the brief is written from prompt-free entries, so
+    // it can travel with the memory (scrubPromptTextFromMemory drops one that
+    // is not).
+    const promptFree = !shouldIncludePromptText(repoPath);
+    const entries = readAllSessionMemory(repoPath).map((e) => (promptFree ? withoutPromptText(e) : e));
     const sig = memoryBriefSignature(entries);
-    if (readMemoryBrief(repoPath)?.signature === sig) return; // unchanged since the last brief
+    const current = readMemoryBrief(repoPath);
+    if (current?.signature === sig && (!promptFree || current.promptFree)) return; // unchanged since the last brief
     const sessionsForBrief = entries.filter(isSubstantiveMemory).slice(-12).map((e) => ({
       summary: e.summary, agentSlug: e.agentSlug, filesChanged: e.filesChanged, openTodos: e.openTodos, decisions: e.decisions, endedAt: e.endedAt,
       intent: e.intent, verify: e.verify,
@@ -3634,8 +3650,11 @@ async function maybeRefreshMemoryBrief(repoPath: string, connected: boolean, sou
     const boundedDiff = recentDiff ? recentDiff.slice(0, 8000) : undefined;
     const res = await api.generateMemoryBrief({ sessions: sessionsForBrief, recentDiff: boundedDiff }) as { brief?: string | null };
     const brief = (res?.brief || '').trim();
+    // Said out loud: a silent null left the origin repo's brief 32 days stale
+    // while the org's Anthropic key answered "credit balance is too low".
+    if (!brief) debugLog(source, 'memory brief: server returned none (no org LLM key, or the provider refused the call)', {});
     if (brief) {
-      writeMemoryBrief(repoPath, { version: 1, brief, signature: sig, generatedAt: new Date().toISOString() });
+      writeMemoryBrief(repoPath, { version: 1, brief, signature: sig, generatedAt: new Date().toISOString(), ...(promptFree ? { promptFree: true } : {}) });
       debugLog(source, 'memory continuation brief refreshed', { len: brief.length });
       // The brief lives in its own notes ref; a fresh one is worthless on this
       // machine alone. Push it and let the dashboard re-read it.
@@ -4165,6 +4184,96 @@ export function inheritedBeforeStatesForTurn(
   } catch {
     return new Map();
   }
+}
+
+/**
+ * Before-states for the files a STOPPED merge, rebase pick, cherry-pick or
+ * revert left in the turn's tree — the bytes git put there, recorded by
+ * endShellProbe (git-moved-files.ts, TODO 1de72a6e).
+ *
+ * The inherited before-states above read a file at the commit that brought
+ * it; a stopped operation has no such commit, and what it left — one side, or
+ * both sides and the markers — is the state the turn's resolving write really
+ * changed. Measured from the turn's start instead, that write billed the turn
+ * the incoming branch's lines it kept (session 8a0a80ae turn 1), and the files
+ * the operation merged cleanly read as the turn's creations.
+ *
+ * A file that ends the turn as it began it is left out: the turn put it back
+ * (an abort by hand) or resolved it to exactly its start, and the usual rules
+ * then find it unchanged. `promptIndex` is LOCAL.
+ */
+export function gitLeftBeforeStatesForTurn(
+  repoPath: string,
+  state: SessionState,
+  baselineSha: string | null | undefined,
+  promptIndex: number,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  try {
+    const blobs = gitLeftBlobsForTurn(state, promptIndex, repoPath);
+    if (blobs.size === 0) return out;
+    const endShadow = (state.turnEndShadows || []).find((s) => s.promptIndex === promptIndex)?.shadowSha;
+    for (const [file, blob] of blobs) {
+      let now: string | null = null;
+      if (endShadow) {
+        now = readFileAtRev(repoPath, endShadow, file);
+      } else {
+        try {
+          const abs = path.join(repoPath, file);
+          now = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : null;
+        } catch { now = null; }
+      }
+      const started = baselineSha ? readFileAtRev(repoPath, baselineSha, file) : null;
+      if (now === started) continue;
+      const left = readBlobContent(repoPath, blob);
+      if (left !== null) out.set(file, left);
+    }
+  } catch {
+    return new Map();
+  }
+  return out;
+}
+
+/**
+ * `diffText` — a baseline..working-tree diff of the turn — with each file a
+ * stopped merge or pick left in the tree re-measured from what git left
+ * (gitLeftBeforeStatesForTurn), full-file context as the shadow diff carries.
+ *
+ * The safety-net row Stop builds when the ledger declines is this diff, and
+ * measured from the turn's start it billed the turn the merge's clean files
+ * and the incoming branch's lines in the file it resolved (TODO 1de72a6e).
+ * A file that ends as git left it drops out; one the turn wrote on top keeps
+ * that write alone. Unchanged when the turn has no such file.
+ */
+export function diffMeasuredFromGitLeft(
+  repoPath: string,
+  state: SessionState,
+  baselineSha: string | null | undefined,
+  promptIndex: number,
+  diffText: string,
+  // Where the diff ends: a closed turn's end shadow, or null for the live
+  // worktree.
+  endSha: string | null = null,
+): string {
+  if (!diffText) return diffText;
+  const left = gitLeftBeforeStatesForTurn(repoPath, state, baselineSha, promptIndex);
+  if (left.size === 0) return diffText;
+  let out = filterUncommittedDiff(diffText, [...left.keys()]);
+  for (const [file, before] of left) {
+    let after: string | null = null;
+    if (endSha) {
+      after = readFileAtRev(repoPath, endSha, file);
+    } else {
+      try {
+        const abs = path.join(repoPath, file);
+        after = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : null;
+      } catch { after = null; }
+    }
+    const section = renderFileDiff({ file, before, after }, Number.MAX_SAFE_INTEGER);
+    if (!section) continue;
+    out = out ? `${out}${out.endsWith('\n') ? '' : '\n'}${section}` : section;
+  }
+  return out;
 }
 
 /**
@@ -4997,15 +5106,24 @@ export function recordShellWindowEdits(
 
     // Every listed file is read at the baseline; read them in one batch.
     const baselineReads = batchedReadAtRev(repoPath);
+    // A file a stopped merge or pick left in the tree is read from what git
+    // left, not from the baseline — the same before-state the probe and the
+    // ledger use for it (TODO 1de72a6e).
+    const leftByGit = gitLeftBeforeStatesForTurn(repoPath, state, baselineSha, promptIndex);
+    if (leftByGit.size > 0) {
+      debugLog('stop', 'shell window reading stopped-operation files from what git left', {
+        promptIndex, files: leftByGit.size,
+      });
+    }
     const { edits, skipped } = shellWindowEdits(
       {
         listChangedFiles: (sha) => {
           const files = filesChangedSinceShadow(repoPath, sha)
             .filter((f) => !absorbed.has(f) && (!shadowChanged || shadowChanged.has(f)));
-          baselineReads.prime(files.map((f) => [sha, f]));
+          baselineReads.prime(files.filter((f) => !leftByGit.has(f)).map((f) => [sha, f]));
           return files;
         },
-        readAtRev: baselineReads.read,
+        readAtRev: (sha, file) => leftByGit.get(file) ?? baselineReads.read(sha, file),
         readWorking: (file) => {
           try {
             const abs = path.join(repoPath, file);
@@ -5349,6 +5467,8 @@ async function runAgyContextRefresh(): Promise<void> {
   if (!repoPath) return;
   try {
     syncNotesForSessionStart(repoPath);
+      // Memory written here earlier and still not on the remote: publish it now.
+      try { publishLeftovers(repoPath); } catch { /* the next session start tries again */ }
   } catch {
     // Non-fatal — the refresh below still writes whatever notes are local.
   }
@@ -5663,6 +5783,22 @@ export async function hooksCommand(event: string, agentSlug?: string): Promise<v
 async function runHookEvent(event: string, agentSlug?: string): Promise<void> {
   debugLog(event, '=== HOOK INVOKED ===', { pid: process.pid, argv: process.argv, cwd: process.cwd() });
 
+  // Claude Code's `Notification` (agent waiting on its human). Handled first
+  // and alone: no sqlite, no Devin sync, no hook lock, no state writes — just
+  // the forward (short timeout) and the opt-in desktop popup (agent-notify.ts).
+  if (event === 'notification') {
+    try {
+      const input = await readHookInput();
+      // Cursor fires the claude-code hooks too; its own hook is the real one.
+      if (!detectForeignHookPayload(agentSlug, input)) {
+        const r = await handleAgentNotificationHook(input);
+        debugLog(event, 'agent notification', r);
+      }
+    } catch { /* never fail the agent */ }
+    debugLog(event, '=== HOOK COMPLETE ===');
+    return;
+  }
+
   // Select the SQLite backend once (sqlite3 CLI on mac/linux, in-process
   // sql.js on native Windows) so the synchronous Cursor/Codex model readers
   // downstream have a backend ready. Cheap + idempotent; a failure just leaves
@@ -5762,6 +5898,13 @@ async function runHookEvent(event: string, agentSlug?: string): Promise<void> {
     // The desktop app's chat-naming side session is not the user's work.
     if (skipCopilotTitleSessionHook(input)) {
       debugLog(event, 'SKIP: copilot chat-naming session', { sessionId: input.session_id });
+      debugLog(event, '=== HOOK COMPLETE ===');
+      return;
+    }
+    // A sub-agent's hooks, re-emitted on the parent: its work is already in
+    // the parent's events.jsonl.
+    if (isCopilotSubagentHook(input)) {
+      debugLog(event, 'SKIP: copilot sub-agent hook', { sessionId: input.session_id, transcript: input.transcript_path || null });
       debugLog(event, '=== HOOK COMPLETE ===');
       return;
     }

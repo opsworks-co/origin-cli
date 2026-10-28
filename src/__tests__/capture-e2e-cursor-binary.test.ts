@@ -335,8 +335,26 @@ describe.skipIf(!haveDist)('cursor capture end to end through the built binary',
     expect(attested, 'post-commit stamped the commit on no turn').toBeTruthy();
     expect(attested.promptIndex).toBe(2);
 
+    // OR-45 3A: afterFileEdit read the helper back from disk, and post-commit
+    // attested the commit to this turn — so the note carries lines.
+    const lineRecord = () => JSON.parse(git(['notes', '--ref=origin', 'show', sha])).attribution_record;
+    expect(lineRecord().attribution_level).toBe('line');
+    expect(lineRecord().contributions[0].agent).toEqual({ id: 'cursor' });
+    // `git add -A` also took turn 1's app.py: the session's line, but not the
+    // attested turn's, so it names no prompt. Turn 2's notes.md record is the
+    // degenerate one a discovering edit leaves (before == after) and proves nothing.
+    // lib/helper.py is a file this non-root commit ADDS with no captured old
+    // side: the path-limited diff cannot rule out a rename, so it stays
+    // unclaimed (OR-45 checkpoint 6.4, `possible_rename`).
+    expect(lineRecord().contributions[0].files).toEqual([
+      { path: 'app.py', ranges: [{ start_line: 2, end_line: 2 }] },
+    ]);
+
     const stop = await run('stop', { status: 'completed' });
     expect(stop.code, stop.stderr).toBe(0);
+    // Stop's later write keeps the lines.
+    expect(lineRecord().attribution_level).toBe('line');
+    expect(lineRecord().contributions[0].files.map((f: any) => f.path)).toEqual(['app.py']);
     const t3 = lastRows().find((r: any) => r.promptIndex === 2);
     expect(t3, 'no row for turn 3').toBeTruthy();
     expect(t3.filesChanged).toEqual(['lib/helper.py']);
