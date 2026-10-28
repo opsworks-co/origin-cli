@@ -1,0 +1,92 @@
+{
+  "origin": {
+    "version": 1,
+    "sessionId": "d64547a1-6ed8-4f21-8253-283ad3371e66",
+    "model": "claude-opus-5-5",
+    "agent": "claude-code",
+    "promptCount": 4,
+    "promptHash": "sha256:591dfe9e9b5f6535aec72b55bb1701f46e3341ae8f54f080cbcac48703887830",
+    "promptSummary": "Yes, all three",
+    "fullPrompt": "Yes, all three",
+    "previousSessionId": "f8c54d61-5f06-45f1-9c99-a6701f6fa5c9",
+    "prompts": [
+      {
+        "index": 0,
+        "text": "it's time to update cli repo https://github.com/opsworks-co/origin-cli",
+        "promptHash": "sha256:09c6b552e930131d54d4bf1b556e6a37ebef8bd5ca9bb18c71f5262c4d74a0c1",
+        "agent": "claude-code",
+        "model": "claude-opus-5-5"
+      },
+      {
+        "index": 1,
+        "text": "do we als need to upgrade readme?",
+        "promptHash": "sha256:2077955803847b1d5ff545188cdfe5221bbd2394138571c130684dd6ebf4d26a",
+        "agent": "claude-code",
+        "model": "claude-opus-5-5"
+      },
+      {
+        "index": 2,
+        "text": "Yes, fix them",
+        "promptHash": "sha256:609f6b73b6b3d532e50b3bc76298142bc7466983c1c5bea654ef3c6932ec324f",
+        "agent": "claude-code",
+        "model": "claude-opus-5-5",
+        "files": [
+          "package.json",
+          "packages/cli/package-lock.json",
+          "packages/cli/package.json",
+          "pnpm-lock.yaml"
+        ],
+        "treeSha": "1e36e38f7913b1edf36ff46130fc6b07af54711d",
+        "commitSha": "d56ef73f63da4499919b52d793a32dedcad26571"
+      },
+      {
+        "index": 3,
+        "text": "Yes, all three",
+        "promptHash": "sha256:591dfe9e9b5f6535aec72b55bb1701f46e3341ae8f54f080cbcac48703887830",
+        "agent": "claude-code",
+        "model": "claude-opus-5-5"
+      }
+    ],
+    "tokensUsed": 24799,
+    "costUsd": 3.3062,
+    "durationMs": 38897595,
+    "linesAdded": 21,
+    "linesRemoved": 21,
+    "originUrl": "https://getorigin.io/sessions/d64547a1-6ed8-4f21-8253-283ad3371e66",
+    "timestamp": "2026-10-28T13:56:19.829Z"
+  },
+  "attribution_record": {
+    "schema_version": "1.0",
+    "revision": {
+      "vcs": "git",
+      "id": "476cdaabf08370d4847e92278933ac374008c6f7"
+    },
+    "attribution_level": "commit",
+    "recorded_at": "2026-10-28T13:56:19.829Z",
+    "producer": {
+      "name": "origin-cli",
+      "version": "0.20261027.2241"
+    },
+    "contributions": [
+      {
+        "evidence": "session_capture",
+        "agent": {
+          "id": "claude-code"
+        },
+        "session": {
+          "id": "d64547a1-6ed8-4f21-8253-283ad3371e66",
+          "reference_uri": "https://getorigin.io/sessions/d64547a1-6ed8-4f21-8253-283ad3371e66",
+          "started_at": "2026-10-28T03:08:02.224Z",
+          "duration_ms": 38897605,
+          "usage": {
+            "cost": {
+              "amount": "3.3062",
+              "currency": "USD",
+              "basis": "estimated"
+            }
+          }
+        }
+      }
+    ]
+  }
+}
