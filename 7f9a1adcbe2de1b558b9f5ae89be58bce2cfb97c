@@ -66,6 +66,21 @@
       "linesRemoved": 0,
       "openTodos": [],
       "promptTextWithheld": true
+    },
+    {
+      "sessionId": "6da2a912-1442-4428-ac12-61b197263cc8",
+      "agentSlug": "claude-code",
+      "model": "claude",
+      "startedAt": "2026-10-29T16:19:59.633Z",
+      "endedAt": "2026-10-29T18:52:14.160Z",
+      "branch": "claude/snapshots-pagination",
+      "summary": "I removed the worktree at `/private/tmp/origin-onboarding-gaps` and deleted `feat/onboarding-connect-gaps` locally and on GitHub. The merged work is still in `main` as `0f6a456`, and nothing from this task is left open.",
+      "filesChanged": [],
+      "promptCount": 5,
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "openTodos": [],
+      "promptTextWithheld": true
     }
   ],
   "commits": [],
