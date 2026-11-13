@@ -518,7 +518,9 @@ export function mergeAbsorbedFiles(cwd: string, sha: string): string[] {
  * capture) don't pay to materialise a whole patch per commit.
  */
 export function commitChangedFiles(cwd: string, sha: string): string[] {
-  const names = gitOrNull(['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha], { cwd });
+  // Unquoted: by default git prints a non-ASCII path as "\303\274…", which
+  // matches no file on disk, so a caller comparing names silently misses it.
+  const names = gitOrNull(['-c', 'core.quotePath=false', 'diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha], { cwd });
   const out = names ? names.trim().split('\n').filter(Boolean) : [];
   // `diff-tree` prints NOTHING for a merge — it has no single parent to diff
   // against — so a merge commit reached the API with `filesChanged: []` while
@@ -529,7 +531,7 @@ export function commitChangedFiles(cwd: string, sha: string): string[] {
   // question, answered by mergeOwnDiff.
   if (out.length > 0) return out;
   const mergeNames = gitOrNull(
-    ['show', sha, '--format=', '--name-only', '--diff-merges=first-parent'], { cwd },
+    ['-c', 'core.quotePath=false', 'show', sha, '--format=', '--name-only', '--diff-merges=first-parent'], { cwd },
   );
   return mergeNames ? mergeNames.trim().split('\n').filter(Boolean) : [];
 }

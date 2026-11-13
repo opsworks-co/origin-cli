@@ -37,7 +37,7 @@ it('never throws on timeout: it saves without the lock and says so', () => {
   expect(log).toContain('saving without the state lock');
 });
 
-// Codex's SessionStart and UserPromptSubmit are installed with `timeout: 10`
+// Codex's SessionStart and UserPromptSubmit are installed with a timeout
 // (commands/enable.ts) and Codex KILLS a hook at its timeout; on Claude,
 // withClaudeHookLock may already have spent 20s before the save. The default
 // has to leave room for both.

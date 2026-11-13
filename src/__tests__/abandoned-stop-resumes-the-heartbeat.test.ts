@@ -5,7 +5,7 @@
 //
 // The heartbeat now resumes such a turn — and ONLY such a turn: a Stop still
 // running, one that sent its row, and one that finished all keep it silent.
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -23,7 +23,10 @@ function repoWithState(state: Record<string, unknown>): { repo: string; statePat
   return { repo, statePath };
 }
 const read = (p: string) => JSON.parse(fs.readFileSync(p, 'utf-8'));
-afterEach(() => { for (const dir of roots.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const dir of roots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
 
 // What the heartbeat asks before sending a turn's in-flight row.
 const heartbeatStaysSilent = (s: any, turn: number, now: number) =>
@@ -73,5 +76,33 @@ describe('a Stop killed between the mark and the send', () => {
     const { repo, statePath } = repoWithState({ sessionId: 's-1', stopSentTurnIndex: 4 });
     expect(markStopSentOnDisk(repo, 'tag-0001', 2)).toBe(true);
     expect(read(statePath).stopSentTurnIndex).toBe(4);
+  });
+
+  it('retries a transient Windows refusal while recording that Stop sent', () => {
+    const { repo, statePath } = repoWithState(open1());
+    const realRename = fs.renameSync.bind(fs);
+    let refusals = 0;
+    vi.spyOn(fs, 'renameSync').mockImplementation(((from: any, to: any) => {
+      if (to === statePath && refusals++ < 2) throw Object.assign(new Error('held by reader'), { code: 'EBUSY' });
+      return realRename(from, to);
+    }) as any);
+
+    expect(markStopSentOnDisk(repo, 'tag-0001', 1)).toBe(true);
+    expect(read(statePath).stopSentTurnIndex).toBe(1);
+    expect(refusals).toBe(3);
+  });
+
+  it('retries a transient Windows refusal while reading before recording that Stop sent', () => {
+    const { repo, statePath } = repoWithState(open1());
+    const realRead = fs.readFileSync.bind(fs);
+    let refusals = 0;
+    vi.spyOn(fs, 'readFileSync').mockImplementation(((file: any, ...args: any[]) => {
+      if (file === statePath && refusals++ < 2) throw Object.assign(new Error('held by reader'), { code: 'EBUSY' });
+      return (realRead as any)(file, ...args);
+    }) as any);
+
+    expect(markStopSentOnDisk(repo, 'tag-0001', 1)).toBe(true);
+    expect(read(statePath).stopSentTurnIndex).toBe(1);
+    expect(refusals).toBe(4);
   });
 });

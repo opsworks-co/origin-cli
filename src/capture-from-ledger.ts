@@ -34,6 +34,8 @@ import { discardedWorkForTurn } from './discarded-work.js';
 import { recoverJournalTurns } from './recover-journal-turns.js';
 import { getSnapshot } from './write-journal-store.js';
 import { localTurnForServerRow } from './turn-index.js';
+import { contentionCoversTurn } from './checkout-contention.js';
+import { InheritedTooLarge } from './inherited-window-baseline.js';
 import { renderFileDiff, type FileDiffInput } from './write-journal-diff.js';
 import { fitDiffToBudget } from './diff-budget.js';
 import { MAX_PROMPT_DIFF_LEN } from './git-capture.js';
@@ -449,6 +451,15 @@ export interface LedgerSessionState {
    * become admissible merely because that peer later exits.
    */
   ledgerContended?: boolean;
+  /**
+   * Rivals this session has seen in its working tree, and when each was first
+   * seen gone — see contentionCoversTurn. `ledgerContended` answers for the
+   * turn in flight only; these answer for every earlier turn.
+   */
+  contendingSessionIds?: string[];
+  contenderGoneAt?: Record<string, number>;
+  /** LOCAL-numbered submit time of each turn (ISO). */
+  promptSubmittedAt?: string[];
 }
 
 /** A per-turn mapping, as each producer builds it before sending. */
@@ -673,6 +684,17 @@ export function applyLedgerToMappings(
         declined(pm, 'turn has no id');
         continue;
       }
+      // `ledgerContended` is judged for the turn in flight. A later Stop, once
+      // the rival is gone, would otherwise rebuild a turn the rival DID cover
+      // from records that hold the rival's writes. Prod 208f153c turn 27: the
+      // rival's test edit and version bump went out as the turn's +110/-23.
+      // Same per-turn rule as the shadow pass (prefer-shadow-range.ts).
+      const submitted = state.promptSubmittedAt?.[local];
+      if (contentionCoversTurn(state, submitted ? Date.parse(submitted) : undefined)) {
+        deps.log?.('ledger declined: another live session shared this working tree during the turn', { promptIndex: pm.promptIndex, turnId });
+        declined(pm, 'another live session shared this working tree during the turn');
+        continue;
+      }
 
       // A per-prompt SHADOW, not HEAD: it reflects the working tree including
       // anything already dirty when the turn began, so a file this turn is the
@@ -706,7 +728,16 @@ export function applyLedgerToMappings(
         try {
           const m = deps.inheritedBefore(baselineSha, local);
           if (m && m.size > 0) beforeOverrides = m;
-        } catch { /* unanswerable: the turn keeps the baseline it always had */ }
+        } catch (err) {
+          // Measured from its own baseline, every unread inherited file would
+          // read as the turn's work. Leave the turn to the other producers.
+          if (err instanceof InheritedTooLarge) {
+            deps.log?.('ledger declined: the turn inherited more files than can be read', { promptIndex: pm.promptIndex, turnId, files: err.files });
+            declined(pm, 'the turn inherited more files than can be read');
+            continue;
+          }
+          /* unanswerable: the turn keeps the baseline it always had */
+        }
       }
       // A checkout inside the turn. The inherited before-states above are the
       // fuller answer where they exist (they also see a pull or a merge, and

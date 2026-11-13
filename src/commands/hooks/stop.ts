@@ -2,6 +2,7 @@
 //
 // Moved out of commands/hooks.ts mechanically: the text is unchanged, only its
 // home is. Shared helpers still live in hooks.ts and are imported from there.
+import { planLimitsForStop } from '../statusline.js';
 import { applySavedRow, nextStopReuseMark, settledRowsToReuse } from '../../stop-reuse.js';
 import { ensureWriteKey } from '../../note-seal.js';
 import { discoverCodexSessionData, findCodexRolloutPath, getCodexPromptsTimeline, type CodexSubagentSpawn } from '../../agents/codex.js';
@@ -18,7 +19,7 @@ import { dropCrossTurnRoundTrips, gitBlobs } from '../../cross-turn-round-trip.j
 import { dropInheritedFilesFromTurns } from '../../drop-inherited-files.js';
 import { filesPutBackAcrossTheGap, recordTurnEndShadow, turnWindowEndShadow } from '../../restored-from-history.js';
 import { absentAtRevFromGit, heldRevsFromGit, markWorkDiscardedByLaterTurns, startBasesFromGit } from '../../discarded-by-later-turn.js';
-import { fileNamedByGitPathspec, filesTurnNamedByGitPathspec } from '../../git-pathspec-names.js';
+import { fileNamedByGitPathspec, filesTurnNamedByGitPathspec, filesTurnNamedByGitRevisionPathspec } from '../../git-pathspec-names.js';
 import { forgetGitLeftFiles, gitLeftContent, gitMovedFilesForTurn } from '../../git-moved-files.js';
 import { commitAuthoredDelta } from '../../history-backfill.js';
 import { recoverCommittedTurnProofs } from '../../rehome-git-only-commit-stamp.js';
@@ -26,6 +27,7 @@ import { backfillCodexPromptMappings } from '../../codex-prompt-mapping.js';
 import { codexNativeCommits, nativeCommitOwners } from '../../codex-native-commits.js';
 import { isConnectedMode, loadAgentConfig, loadConfig } from '../../config.js';
 import { debugLog } from '../../debug-log.js';
+import { attestHookMissedTrailerCommits } from '../../hook-missed-trailer-commits.js';
 import { queueDevinBackfill } from '../../devin-backfill.js';
 import { discoverDevinCliSessionDataByPrompt, retagDevinFromProcess } from '../../devin-cli.js';
 import { readDevinLiveSession } from '../../devin-sessions-db.js';
@@ -36,7 +38,7 @@ import { combineApplyableTurnDiff } from '../../applyable-turn-diff.js';
 import type { CommitDetailWire } from '../../git-capture.js';
 import { writeGitNotes, SESSION_EVENT_NOTE_LOCK_WAIT_MS } from '../../git-notes.js';
 import { attributionSourceFromState } from '../../attribution-note.js';
-import { editCapturesFromEditsJson, lineClaimsForCommits, planStopNoteWrites } from '../../attribution-line-claims.js';
+import { editCapturesFromEditsJson, lineClaimsForCommits, planStopNoteWrites, LINE_CLAIM_LATE_BUDGET_MS } from '../../attribution-line-claims.js';
 import { extractTodosFromPrompts, handoffRepresentsWork, writeHandoff } from '../../handoff.js';
 import { isOriginAutoManagedPath, shouldIgnoreFile } from '../../ignore-patterns.js';
 import { writeSessionFiles } from '../../local-entrypoint.js';
@@ -73,7 +75,7 @@ import path from 'path';
 import { localTurnForServerRow, serverRowForLocalTurn, turnIdForServerRow, turnStartFields } from '../../turn-index.js';
 import { chatOnlyStateFlag } from '../../chat-only-flag.js';
 import { applyRewritePairsToState, finalRewriteOf, firstUnanchoredPrompt, markSkippedPromptBaselines, markStopSentOnDisk, markTurnClosedOnDisk, recordPromptShadow } from '../../session-state.js';
-import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, archiveIsAnotherConversation, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, batchedReadAtRev, diffMeasuredFromGitLeft, inheritedBaselineForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, commitsThisSessionMayNote, gitCommonDirOnce, readCommitOwnershipFactsBatch, type CommitOwnershipFacts, currentSessionWorkTree, cursorSessionReusable, editContentBytes, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts, sessionAbandonedCommits, liveCommitTurns, liveSessionCommitShas, abandonedOnlyFiles, sessionAuthoredNothing } from '../hooks.js';
+import { GIT_READ_OPTS, LIVE_EDIT_CONTENT_MAX, archiveIsAnotherConversation, LIVE_EDIT_MAX_TOTAL_BYTES, STABLE_SESSION_ID_AGENTS, applyAuthoredTotals, applyLedgerCaptures, batchedReadAtRev, diffMeasuredFromGitLeft, inheritedBaselineForTurn, inheritedFileSourcesForTurn, windowInheritsCommitsForTurn, applyLiveLedger, inheritedFilesForTurn, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitBelongsToSession, commitsThisSessionMayNote, gitCommonDirOnce, readCommitOwnershipFactsBatch, type CommitOwnershipFacts, currentSessionWorkTree, cursorSessionReusable, editContentBytes, filesGitBroughtIntoWindow, ensureServerSession, filesLeftByForeignCommits, filesNamedInDiff, filterUncommittedDiff, findStateForHook, findStateForHookInput, hasNativeCodexIdentity, getWorkingTreeSha, isRewriteOf, liveLedgerBytes, localCommitterEmail, mergeFilesRead, mergePromptMappings, nestedRepoWritesForOpenTurn, normalizeWorkspaceRoot, outOfRepoFilesFor, preSessionDirtCommittedUnchanged, recordDiscoveredWorkTreeEdits, recordShellWindowEdits, repoRemoteUrl, resolveAgentSessionName, sessionAuthoredSnapshot, sessionRepoRoots, summarizePromptPayload, turnBaselineForServerRow, turnIdFor, uncommittedExcludeUnion, windowIsRebaseOfEarlierTurns, withDerivedLineCounts, sessionAbandonedCommits, liveCommitTurns, liveSessionCommitShas, abandonedOnlyFiles, sessionAuthoredNothing } from '../hooks.js';
 
 
 // ─── Debug Logger ─────────────────────────────────────────────────────────
@@ -345,6 +347,48 @@ export function ownedRangeCommitShas(repoPath: string, state: SessionState): str
   return list.filter((sha) => commitBelongsToSession(
     repoPath, sha, state, localEmail, facts.get(sha.toLowerCase()), commonDir,
   ));
+}
+
+/**
+ * A no-commit session's uncommitted work, line-level against its session-start
+ * shadow: what changed since the shadow among files still dirty vs HEAD
+ * (captureGitState's shadow-scoped `uncommittedDiff`). Null when the shadow is
+ * unusable, so the caller keeps its file-level filtered diff.
+ *
+ * Not the shadow-to-working-tree diff. That is every change since the shadow,
+ * and once HEAD has moved by a commit post-commit never saw, it holds that
+ * commit too. Session d7c5cad1 ran a clean `git merge origin/main` (git runs
+ * no post-commit for a merge it commits itself), and every Stop after it
+ * stored main's 51 files, +1345/-344, as the header of a session whose turns
+ * wrote nothing. Those files match HEAD, so they are not dirty and drop out.
+ * session-end already reads this field (scopeSessionDiffToStart).
+ */
+export function uncommittedSinceSessionStart(repoPath: string, shadowSha: string): string | null {
+  try {
+    const snap = captureGitState(repoPath, shadowSha, { fullContext: true });
+    if (snap.baselineIsShadow && typeof snap.uncommittedDiff === 'string') return snap.uncommittedDiff;
+  } catch { /* unreadable — the caller keeps its own diff */ }
+  return null;
+}
+
+/**
+ * The commits a `[Origin: Closes]` claim names as the closing work: the
+ * session's own, never every commit in session-start..HEAD. That range takes in
+ * whatever a `git merge origin/main` brought onto the branch, and a closure
+ * confirms as soon as ANY of its shas is on the default branch — so the claim
+ * closed when another PR merged. TODO 25d67628's run named its own commit (PR
+ * #2810, open) plus a merge of #2803's branch and #2814's commit, both on
+ * main: Issues closed it as done by #2803. Post-commit's list first; the owned
+ * range when post-commit recorded none (hooks missing). Never throws.
+ */
+export function closingCommitShas(repoPath: string | null | undefined, state: SessionState): string[] {
+  try {
+    const live = liveSessionCommitShas(repoPath, state);
+    if (live.length > 0 || !repoPath) return live;
+    return ownedRangeCommitShas(repoPath, state);
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -2095,6 +2139,21 @@ function buildTurnMappings({ state, parsed, prompts, promptMappings, gitCapture,
     } catch (error) {
       debugLog('stop', 'native commit recovery unavailable', { error: String(error) });
     }
+    // A commit whose post-commit never ran but whose trailer names this
+    // session and its turn is that turn's, the same as post-commit would have
+    // recorded — the header already counts it through the trailer fallback,
+    // so the turn has to as well (hook-missed-trailer-commits.ts).
+    try {
+      const candidates = ownedRangeCommitShas(state.repoPath, state);
+      const attestedByTrailer = attestHookMissedTrailerCommits(state, candidates);
+      if (attestedByTrailer.length > 0) {
+        debugLog('stop', 'attested hook-missed commits by their trailer', {
+          shas: attestedByTrailer.map((sha) => sha.slice(0, 8)),
+        });
+      }
+    } catch (error) {
+      debugLog('stop', 'trailer commit attestation unavailable', { error: String(error) });
+    }
     const mappedShas = promptMappings
       .map((pm: any) => typeof pm.commitSha === 'string' ? pm.commitSha : '')
       .filter((sha) => !!sha && !state.commitTurns?.some((ct) => sameSha(ct.sha, sha)));
@@ -2326,20 +2385,16 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
           );
           // Line-level dirt exclusion for the no-commit case (the reported
           // bug: a 1-line session read "+16"). When nothing was committed
-          // this session, the working tree vs the session-start shadow IS
-          // exactly this session's uncommitted work — it keeps a file's own
+          // this session, the dirty files' change since the session-start
+          // shadow IS this session's uncommitted work — it keeps a file's own
           // edits while dropping pre-existing dirt LINES (the file-level
           // filter above drops the whole file, which is too coarse when the
           // session edited an already-dirty file). Committed sessions keep
           // the existing path so concurrent-commit scoping isn't disturbed.
           const noCommitsThisSession = !(state.sessionCommitShas && state.sessionCommitShas.length > 0);
           if (state.sessionStartShadowSha && noCommitsThisSession) {
-            try {
-              const shadowSnap = captureGitState(state.repoPath, state.sessionStartShadowSha, { fullContext: true });
-              if (shadowSnap.baselineIsShadow && typeof shadowSnap.workingTreeDiff === 'string') {
-                filteredUncommitted = shadowSnap.workingTreeDiff;
-              }
-            } catch { /* keep the file-level filtered diff */ }
+            const sinceStart = uncommittedSinceSessionStart(state.repoPath, state.sessionStartShadowSha);
+            if (sinceStart !== null) filteredUncommitted = sinceStart;
           }
           // FIX 3 — final session-level pre-existing-dirt guard. The shadow
           // branch above OVERWRITES filteredUncommitted with the raw
@@ -2977,6 +3032,11 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
       // ten-minute `claude -p` turn).
       lastActivityAt: new Date().toISOString(),
       costUsd: costUsd > 0 ? costUsd : undefined,
+      // How much of the user's subscription this agent reports as used. The
+      // server keeps the newest per agent for the plan-value card.
+      planLimits: codexData?.planLimits
+        ? { agent: 'codex', ...codexData.planLimits }
+        : ((agentSlug || state.agentSlug) === 'claude-code' ? planLimitsForStop() : undefined),
       gitCapture: sessionGitCapture,
       // ATTESTATION: which turn each commit landed under, observed rather
       // than inferred. post-commit reads `activeTurn` at the moment the
@@ -3167,6 +3227,7 @@ function writeCommitNotes({ gitCapture, state, model, agentSlug, prompts, prompt
         },
         project: (candidates) => lineClaimsForCommits(
           state.repoPath, agentSlug || state.agentSlug, state, candidates, () => editCapturesFromEditsJson(promptEditsByIndex),
+          { budgetMs: LINE_CLAIM_LATE_BUDGET_MS },
         ),
       });
       if (missingNotes.length > 0) {
@@ -3193,6 +3254,16 @@ function writeCommitNotes({ gitCapture, state, model, agentSlug, prompts, prompt
           }),
         }, { lockWaitMs: SESSION_EVENT_NOTE_LOCK_WAIT_MS });
         debugLog('stop', 'git notes written for missing commits', { count: missingNotes.length });
+        // The note just claimed these commits for this session — its
+        // import-note links them server-side — so the session must own them
+        // locally too, as post-commit would have recorded. Otherwise a later
+        // rebase leaves nothing for the rescue to map: with git hooks off, prod
+        // f0bf6c29 rebased v1..v3 and the server kept both copies of each,
+        // the turns still pointing at the dead originals.
+        state.sessionCommitShas ||= [];
+        for (const sha of missingNotes) {
+          if (!state.sessionCommitShas.some((own) => sameSha(own, sha))) state.sessionCommitShas.push(sha);
+        }
       }
     }
     } catch (notesErr: any) {
@@ -3208,11 +3279,10 @@ function writeCommitNotes({ gitCapture, state, model, agentSlug, prompts, prompt
  * session-end. A claim that fails to record leaves the TODO open.
  */
 function claimTurnCloses({
-  state, parsed, gitCapture, stopHookReply,
+  state, parsed, stopHookReply,
 }: {
   state: SessionState;
   parsed: ParsedTranscript;
-  gitCapture: ReturnType<typeof captureGitState>;
   stopHookReply: string;
 }): void {
   try {
@@ -3228,7 +3298,7 @@ function claimTurnCloses({
       sessionId: state.sessionId,
       closes,
       openTodos: readMemoryTodos(state.repoPath).map((t) => ({ id: t.id, text: t.text })),
-      shas: gitCapture.commitShas,
+      shas: closingCommitShas(state.repoPath, state),
     });
     debugLog('stop', 'todo closures claimed', { claimed: closes.length, recorded });
   } catch {
@@ -4132,7 +4202,7 @@ export async function handleStop(input: Record<string, any>, agentSlug?: string)
     await ensureWriteKey(state.repoPath);
     writeCommitNotes({ gitCapture, state, model, agentSlug, prompts, promptEditsByIndex, parsed, costUsd, durationMs, config });
     // Phase: claimTurnCloses.
-    claimTurnCloses({ state, parsed, gitCapture, stopHookReply });
+    claimTurnCloses({ state, parsed, stopHookReply });
     // Opt-in desktop popup when this turn committed on a feature branch. Read
     // the turn's starting HEAD before advanceTurnBaselines moves it.
     notifyTurnFinishedOnDesktop({
@@ -4444,16 +4514,24 @@ export function journalFilesForTurn(state: SessionState, endedAt?: number, promp
     // ccffdc75, vodka).
     const tree = currentSessionWorkTree(state);
     const ignored = gitIgnoredFiles(tree, files);
-    const kept = ignored.size > 0 ? files.filter((f) => !ignored.has(f)) : files;
+    const unignored = ignored.size > 0 ? files.filter((f) => !ignored.has(f)) : files;
+    // What a merge or someone else's commits put in the window is git's, the
+    // same rule the shell window applies (filesGitBroughtIntoWindow) — the
+    // per-command record below only exists for agents with tool hooks.
+    const baseline = promptIndex == null ? null : baselineShaForTree(state, tree, promptIndex);
+    const brought = baseline ? filesGitBroughtIntoWindow(tree, state, baseline) : new Set<string>();
+    const kept = brought.size > 0 ? unignored.filter((f) => !brought.has(f)) : unignored;
     // Files a tree-moving command of this turn put in place (pull, checkout,
     // merge, …) are git's: the journal saw them land, but the turn did not
     // write them (TODO e87a35d5). A path the command NAMED stays — naming it
-    // is the turn's own act (`git checkout <rev> -- f`).
+    // is the turn's own act (`git checkout HEAD~1 -- f`) — unless its bytes
+    // came from a revision this branch never had (a reviewer's PR checkout).
     if (promptIndex == null) return kept;
     const moved = gitMovedFilesForTurn(state, promptIndex, tree);
     if (moved.size === 0) return kept;
     const named = filesTurnNamedByGitPathspec(state, promptIndex, moved);
-    return kept.filter((f) => !moved.has(f) || named.has(f));
+    const revisionNamed = filesTurnNamedByGitRevisionPathspec(state, promptIndex, moved);
+    return kept.filter((f) => !moved.has(f) || (named.has(f) && !revisionNamed.has(f)));
   } catch {
     return [];
   }

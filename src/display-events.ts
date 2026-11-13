@@ -85,3 +85,29 @@ export function appendTurnEvents(target: { events?: DisplayEvent[]; eventsDroppe
   if (room > 0) target.events = [...have, ...more.slice(0, room)];
   if (more.length > room) target.eventsDropped = (target.eventsDropped || 0) + more.length - room;
 }
+
+/**
+ * Merge steps that ran alongside a turn (a sub-agent's) into its prompt
+ * message by time, keeping each list's own order. Ties keep the turn's steps
+ * first, and a step with no time stays right after the step before it (or with
+ * the first timed step when it leads the sub-agent list, or after the turn's
+ * steps when the sub-agent has no times at all). The same cap as
+ * appendTurnEvents applies to the merged list.
+ */
+export function mergeTurnEventsByTime(target: { events?: DisplayEvent[]; eventsDropped?: number }, more: DisplayEvent[]): void {
+  if (more.length === 0) return;
+  const have = target.events || [];
+  const merged: DisplayEvent[] = [];
+  let i = 0;
+  let j = 0;
+  let keyA = -Infinity;
+  let keyB = more.find((e) => e.ts !== undefined)?.ts ?? Infinity;
+  while (i < have.length || j < more.length) {
+    if (i < have.length && have[i].ts !== undefined) keyA = have[i].ts!;
+    if (j < more.length && more[j].ts !== undefined) keyB = more[j].ts!;
+    if (j >= more.length || (i < have.length && keyA <= keyB)) merged.push(have[i++]);
+    else merged.push(more[j++]);
+  }
+  target.events = merged.slice(0, MAX_EVENTS_PER_TURN);
+  if (merged.length > MAX_EVENTS_PER_TURN) target.eventsDropped = (target.eventsDropped || 0) + merged.length - MAX_EVENTS_PER_TURN;
+}

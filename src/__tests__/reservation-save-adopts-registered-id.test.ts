@@ -8,12 +8,13 @@
 // saveSessionState is the one choke point every hook goes through, so the
 // re-read lives there: a pending reservation is checked against the file
 // before it is written, and a registered id on disk wins.
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
 import { saveSessionState, readStateAtTag, loadSessionState, type SessionState } from '../session-state.js';
+import { TransientFsRetryExhaustedError } from '../transient-fs.js';
 
 const ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
 const TAG = 'f9213cfd-349';
@@ -55,11 +56,27 @@ beforeEach(() => {
   }
 });
 
+afterEach(() => vi.restoreAllMocks());
+
 describe('readStateAtTag', () => {
   it('reads a Cursor row, whose claudeSessionId is empty — loadSessionState does not', () => {
     writeFile(reservation());
     expect(loadSessionState(repo, TAG)).toBeNull();
     expect(readStateAtTag(repo, TAG)?.sessionId).toBe('local-82aaa929-c103-40aa-8231-d9659ca432e7');
+  });
+
+  it('does not report prolonged state-file contention as an absent row', () => {
+    writeFile(reservation());
+    const target = stateFile();
+    const realRead = fs.readFileSync.bind(fs);
+    vi.spyOn(fs, 'readFileSync').mockImplementation(((file: any, ...args: any[]) => {
+      if (file === target) throw Object.assign(new Error('held by Defender'), { code: 'EPERM' });
+      return (realRead as any)(file, ...args);
+    }) as any);
+    let now = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => (now += 600));
+
+    expect(() => readStateAtTag(repo, TAG)).toThrow(TransientFsRetryExhaustedError);
   });
 });
 

@@ -19,10 +19,9 @@ export interface OriginConfig {
   commitLinking?: 'always' | 'prompt' | 'never';
   pushStrategy?: 'auto' | 'prompt' | 'false' | 'always';
   telemetry?: boolean;
-  autoUpdate?: boolean;
+  autoUpdate?: boolean;         // false silences the "Update available" notice (default: on)
   secretRedaction?: boolean;
   secretScan?: boolean;        // Pre-commit secret scanning (default: true)
-  hookChaining?: boolean;
   // Let an agent APPROVE/REJECT/FLAG its own session through the MCP server's
   // review_session tool. Off by default: Origin's record is worth reading
   // because it is derived from git truth rather than the agent's own account

@@ -12,7 +12,7 @@
  * Driven against REAL git and the REAL generated hook script.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -81,6 +81,50 @@ describe('the global post-commit hook script', () => {
 
     expect(await waitForFile(seen, 10_000)).toBe(committed);
   }, 20_000);
+
+  /**
+   * Codex kills what a commit's hooks leave running once its shell command
+   * exits (session 7383ad5a: no Codex commit ever reached the capture). Here
+   * the commit runs in its own process group, killed the moment git returns.
+   */
+  const commitThenKillGroup = (hooks: string) => new Promise<void>((resolve, reject) => {
+    write(`f${Date.now()}.txt`, 'x\n');
+    const child = spawn('sh', ['-c', `git -c core.hooksPath="${hooks}" add -A && git -c core.hooksPath="${hooks}" commit -qm c`], { cwd: repo, detached: true, stdio: 'ignore' });
+    child.on('error', reject);
+    child.on('exit', () => {
+      try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* group already gone */ }
+      resolve();
+    });
+  });
+
+  function fakeOrigin(seen: string): string {
+    const fake = path.join(dir, 'fake-origin');
+    fs.writeFileSync(fake, `#!/bin/sh\nsleep 1\necho "$ORIGIN_COMMIT_SHA" > "${seen}.tmp"\nmv "${seen}.tmp" "${seen}"\n`);
+    fs.chmodSync(fake, '755');
+    return fake;
+  }
+
+  it.skipIf(process.platform === 'win32')('still captures when the agent kills the commit\'s process group', async () => {
+    const hooks = path.join(dir, 'hooks');
+    fs.mkdirSync(hooks);
+    writeGlobalPostCommitHook(hooks);
+    const seen = path.join(dir, 'seen.txt');
+    patchOriginBin(path.join(hooks, 'post-commit'), fakeOrigin(seen));
+
+    await commitThenKillGroup(hooks);
+    expect(await waitForFile(seen, 10_000)).toBe(git('rev-parse', 'HEAD'));
+  }, 20_000);
+
+  it.skipIf(process.platform === 'win32')('the old backgrounded launch is lost to the same kill (the harness bites)', async () => {
+    const hooks = path.join(dir, 'hooks');
+    fs.mkdirSync(hooks);
+    const seen = path.join(dir, 'seen.txt');
+    fs.writeFileSync(path.join(hooks, 'post-commit'), `#!/bin/sh\nORIGIN_COMMIT_SHA="$(git rev-parse HEAD)" "${fakeOrigin(seen)}" >/dev/null 2>&1 &\n`);
+    fs.chmodSync(path.join(hooks, 'post-commit'), '755');
+
+    await commitThenKillGroup(hooks);
+    await expect(waitForFile(seen, 3_000)).rejects.toThrow();
+  }, 20_000);
 });
 
 describe('committedShaForHook', () => {
@@ -110,6 +154,7 @@ describe('hook scripts installed by an older CLI are upgraded', () => {
     expect(upgradePostCommitHookScript(hookPath, 'global')).toBe(true);
     const out = fs.readFileSync(hookPath, 'utf-8');
     expect(out).toContain('ORIGIN_COMMIT_SHA="$_origin_commit_sha"');
+    expect(out).toContain('# origin-detach');
     expect(out.indexOf('_origin_commit_sha="$(git rev-parse HEAD')).toBeLessThan(out.indexOf('hooks git-post-commit'));
     expect(upgradePostCommitHookScript(hookPath, 'global'), 'an up-to-date script is left alone').toBe(false);
   });
@@ -122,6 +167,19 @@ describe('hook scripts installed by an older CLI are upgraded', () => {
     expect(out).toContain('echo user-before');
     expect(out).toContain('echo user-after');
     expect(out).toMatch(/ORIGIN_COMMIT_SHA="\$_origin_commit_sha" .*hooks git-post-commit >\/dev\/null 2>&1 &/);
-    expect(out.match(/hooks git-post-commit/g)?.length).toBe(1);
+    expect(out).toContain('# origin-detach');
+    // The detached launch and its plain-& fallback; the old line is gone.
+    expect(out.match(/hooks git-post-commit/g)?.length).toBe(2);
+    expect(upgradePostCommitHookScript(hookPath, 'local'), 'an up-to-date script is left alone').toBe(false);
+  });
+
+  it('replaces both lines of a local hook that already passed the sha', () => {
+    const hookPath = path.join(dir, 'local-post-commit');
+    fs.writeFileSync(hookPath, '#!/bin/sh\n# origin-post-commit\n_origin_commit_sha="$(git rev-parse HEAD 2>/dev/null)"\nORIGIN_COMMIT_SHA="$_origin_commit_sha" origin hooks git-post-commit >/dev/null 2>&1 &\necho user-after\n');
+    expect(upgradePostCommitHookScript(hookPath, 'local')).toBe(true);
+    const out = fs.readFileSync(hookPath, 'utf-8');
+    expect(out.match(/_origin_commit_sha="\$\(git rev-parse/g)?.length).toBe(1);
+    expect(out.match(/hooks git-post-commit/g)?.length).toBe(2);
+    expect(out).toContain('echo user-after');
   });
 });

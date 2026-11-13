@@ -105,6 +105,21 @@ export interface InheritedWindowDeps {
 }
 
 const DEFAULT_FILE_BUDGET = 300;
+// What inheritedBeforeStates reads when its reads are batched (one cat-file for
+// all of them): a whole merge of main is affordable. Session efd40ad9 merged
+// main in, 363 files; the 300 cap kept the first 300 by name and the other 63
+// read as the turn's own writes (+2853 lines of main), its real change lost.
+const BATCHED_READ_BUDGET = 5000;
+
+/**
+ * The turn inherited more files than can be read. A partial answer would bill
+ * the unread ones to the turn, so the caller must not measure the turn at all.
+ */
+export class InheritedTooLarge extends Error {
+  constructor(readonly files: number) {
+    super(`the turn inherited ${files} files, more than can be read`);
+  }
+}
 const HEX = /^[a-fA-F0-9]{7,40}$/;
 
 /**
@@ -485,12 +500,17 @@ export function inheritedBeforeStates(
   const out = new Map<string, string | null>();
   const upTo = inheritedBaseline(baselineSha, deps);
   if (!upTo || !baselineSha) return out;
+  const budget0 = deps.fileBudget ?? DEFAULT_FILE_BUDGET;
+  const cap = deps.primeReadAtRev ? Math.max(BATCHED_READ_BUDGET, budget0) : budget0;
   // Comparing trees includes files removed by LEAVING the old branch, which
   // a walk of newly reachable commits cannot name.
   if (deps.changedFilesBetween && deps.baselineCommit) {
+    let files: string[];
     try {
-      const files = [...new Set(deps.changedFilesBetween(deps.baselineCommit(baselineSha), upTo))]
-        .slice(0, deps.fileBudget ?? DEFAULT_FILE_BUDGET);
+      files = [...new Set(deps.changedFilesBetween(deps.baselineCommit(baselineSha), upTo))];
+    } catch { return new Map(); }
+    if (files.length > cap) throw new InheritedTooLarge(files.length);
+    try {
       deps.primeReadAtRev?.(files.map((file) => [upTo, file]));
       for (const file of files) {
         out.set(file, deps.readAtRev(upTo, file));
@@ -500,7 +520,7 @@ export function inheritedBeforeStates(
   }
   let window: string[];
   try { window = deps.listWindow(baselineSha); } catch { return out; }
-  let budget = deps.fileBudget ?? DEFAULT_FILE_BUDGET;
+  let budget = cap;
   for (const sha of window) {
     // Only the commits the turn actually inherited: `upTo` and its ancestors.
     if (sha !== upTo) {
@@ -512,8 +532,8 @@ export function inheritedBeforeStates(
     try { files = deps.changedFiles(sha); } catch { files = []; }
     try { deps.primeReadAtRev?.(files.filter((file) => !out.has(file)).map((file) => [upTo, file])); } catch { /* read per file */ }
     for (const file of files) {
-      if (budget-- <= 0) return out;
       if (out.has(file)) continue;
+      if (budget-- <= 0) throw new InheritedTooLarge(out.size + 1);
       // Read at the NEWEST inherited commit, not at the one that named the
       // file: the turn started from the tree all of them left together.
       let at: string | null;

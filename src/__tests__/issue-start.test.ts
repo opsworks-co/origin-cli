@@ -9,7 +9,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import {
-  agentBackgroundArgv, agentLaunchArgv, agentPreflightArgv, branchNamesIssue, buildIssuePrompt, extractAcceptanceCriteria, issueBranchName, parsePreflight,
+  agentBackgroundArgv, agentLaunchArgv, agentPreflightArgv, buildPreflightPrompt, branchNamesIssue, buildIssuePrompt, extractAcceptanceCriteria, issueBranchName, parsePreflight,
   issueStartCommandLine as startCommandText, mentionedPaths, slugify, ISSUE_PROMPT_MAX_CHARS,
 } from '../issue-prompt.js';
 import {
@@ -18,6 +18,7 @@ import {
 } from '../issue-link.js';
 import { pickResume, sessionOnThisComputer } from '../issue-clarify.js';
 import { checkoutIssueBranch, findOnPath, issueStartCommand, issueWorktreePath, listBackgroundRuns, resolveIssue, type IssueStartDeps } from '../commands/issue-start.js';
+import { hydrateWorktreeIgnoredFiles } from '../worktree-hydration.js';
 
 function sh(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -119,6 +120,21 @@ describe('issue prompt (shared with the API)', () => {
     expect(p).not.toContain('[Origin: Closes]');
   });
 
+  it('gives a PR-review fix room for every finding the judge listed', () => {
+    // fix-0694 (2026-10-29): eight findings in 6.8k characters, clipped to the
+    // 8000-char prompt — the pre-start pass asked for "findings 5–12".
+    const findings = Array.from({ length: 8 }, (_, i) => `### ${i + 1}. Finding ${i + 1}\nmedium, confirmed — \`a.ts:${i}\`\n\n${'detail '.repeat(160)}`);
+    const description = `Origin's judge asks for these fixes.\n\n${findings.join('\n\n')}`;
+    expect(description.length).toBeGreaterThan(ISSUE_PROMPT_MAX_CHARS);
+    const fix = buildIssuePrompt({ shortId: 'fix-0694', title: 'Fix 8 review findings', source: 'review', description });
+    expect(fix).toContain('### 8. Finding 8');
+    expect(fix).not.toContain('…');
+    // Any other issue keeps the usual cap.
+    const plain = buildIssuePrompt({ shortId: 'ISS-1', title: 'Fix 8 review findings', description });
+    expect(plain.length).toBeLessThanOrEqual(ISSUE_PROMPT_MAX_CHARS);
+    expect(plain).not.toContain('### 8. Finding 8');
+  });
+
   it('tells the agent which epic the issue is part of, and an epic which issues are under it', () => {
     const story = buildIssuePrompt({
       shortId: 'APP-2', title: 'Add the cart page', type: 'feature',
@@ -189,11 +205,21 @@ describe('issue prompt (shared with the API)', () => {
     expect(x).toEqual(expect.arrayContaining(['-s', 'read-only', '--ephemeral', '--disable', 'hooks', '--output-schema', '/t/s.json', '-o', '/t/o.json']));
     expect(agentPreflightArgv('gemini', 'p', files)).toBeNull();
     // claude --output-format json: the answer is the result text.
-    expect(parsePreflight(JSON.stringify({ type: 'result', result: '{"ready":true,"brief":"b","questions":[]}' }))).toEqual({ ready: true, brief: 'b', questions: [] });
-    expect(parsePreflight(JSON.stringify({ result: 'x', structured_output: { ready: false, brief: '', questions: ['q?'] } }))).toEqual({ ready: false, brief: '', questions: ['q?'] });
-    // ready with questions is not ready; at most 3.
-    expect(parsePreflight('{"ready":true,"brief":"","questions":["a","b","c","d"]}')).toEqual({ ready: false, brief: '', questions: ['a', 'b', 'c'] });
+    expect(parsePreflight(JSON.stringify({ type: 'result', result: '{"ready":true,"brief":"b","questions":[]}' }))).toEqual({ ready: true, brief: 'b', questions: [], suggestions: [] });
+    expect(parsePreflight(JSON.stringify({ result: 'x', structured_output: { ready: false, brief: '', questions: ['q?'] } }))).toEqual({ ready: false, brief: '', questions: ['q?'], suggestions: [''] });
+    // ready with questions is not ready; at most 6 (3 new, plus open ones repeated with a guess).
+    expect(parsePreflight('{"ready":true,"brief":"","questions":["a","b","c","d","e","f","g"]}')).toEqual({ ready: false, brief: '', questions: ['a', 'b', 'c', 'd', 'e', 'f'], suggestions: ['', '', '', '', '', ''] });
+    // Each best guess stays with its question when an empty question is dropped.
+    expect(parsePreflight('{"ready":false,"brief":"","questions":["", "Which?"],"suggestions":["x","The newer one — main uses it"]}'))
+      .toEqual({ ready: false, brief: '', questions: ['Which?'], suggestions: ['The newer one — main uses it'] });
     expect(parsePreflight('not json')).toBeNull();
+  });
+
+  it('the pre-start prompt lists the open questions, to be repeated word for word with a guess', () => {
+    const p = buildPreflightPrompt('Work on issue X', ['Symlink or\n clone?', '  ']);
+    expect(p).toContain('- Symlink or clone?');
+    expect(p).toContain('copied exactly');
+    expect(buildPreflightPrompt('Work on issue X')).not.toContain('already on the issue');
   });
 
   it('finds a Claude session in its project folder, also when a long path\'s folder is cut short with a hash', async () => {
@@ -288,6 +314,18 @@ describe('resolving the issue', () => {
     const it = await resolveIssue('ISS-1', roots(), { api, connected: () => true, openTodos: () => [], error: () => {} });
     expect(seen).toEqual(['repo-1/ISS-1']);
     expect(it).toMatchObject({ shortId: 'ISS-1', origin: 'api', repoId: 'repo-1', memoryTodoId: null });
+  });
+
+  it('reads it from the repo it is told to, without asking where this checkout routes', async () => {
+    const seen: string[] = [];
+    const api = {
+      previewRoute: async () => { seen.push('route'); return { repo: { id: 'routed-repo' } }; },
+      getIssue: async (repoId: string, id: string) => { seen.push(`${repoId}/${id}`); return { shortId: id, title: 'Other workspace', status: 'open', source: null }; },
+      updateIssue: async () => ({}),
+    };
+    const it = await resolveIssue('d8716bef', roots(), { api, connected: () => true, openTodos: () => [], error: () => {} }, {}, 'picked-repo');
+    expect(seen).toEqual(['picked-repo/d8716bef']);
+    expect(it).toMatchObject({ shortId: 'd8716bef', origin: 'api', repoId: 'picked-repo' });
   });
 
   it('a memory issue on the API closes its TODO by the shortId', async () => {
@@ -455,6 +493,27 @@ describe('origin issue start', () => {
     expect(seen).toMatchObject({ shortId: 'ISS-12', repoId: 'repo-1', runId: 'run-7' });
   });
 
+  it('--repo-id reads the issue from that repo and reports the run there', async () => {
+    // 2026-10-29: the orchestrator's run was on another workspace's row of
+    // this repo; the routed lookup said "No issue or open TODO matches".
+    fakeAgent(bin, 'claude', path.join(bin, 'claude.argv.json'));
+    const starts: string[] = [];
+    const updates: any[] = [];
+    const api = {
+      ...apiFor(updates),
+      getIssue: async (repoId: string, id: string) => {
+        if (repoId !== 'other-ws-repo') throw Object.assign(new Error('Issue not found'), { status: 404 });
+        return { shortId: id, title: 'Retry webhook delivery', status: 'open', source: null };
+      },
+      startIssueRun: async (repoId: string) => { starts.push(repoId); return { id: 'run-1' }; },
+      endIssueRun: async () => ({}),
+    };
+    const r = await issueStartCommand('d8716bef', { agent: 'claude', repoId: 'other-ws-repo', publish: false }, deps(repo, { env: { PATH: bin }, connected: () => true, api, run: async () => 0 }));
+    expect(r).not.toBeNull();
+    expect(starts).toEqual(['other-ws-repo']);
+    expect(updates).toEqual([{ repoId: 'other-ws-repo', shortId: 'd8716bef', data: { status: 'in-progress' } }]);
+  });
+
   it('a lookup Origin never answered is not reported as "no issue matches"', async () => {
     const abort = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
     const d = deps(repo, { connected: () => true, api: { ...apiFor([]), previewRoute: async () => { throw abort; } } });
@@ -567,6 +626,79 @@ describe('origin issue start', () => {
       expect(fs.readFileSync(path.join(repo, 'a.txt'), 'utf-8')).toBe('edited, uncommitted\n');
       // The issue link is left for the session that starts in the worktree.
       expect(JSON.parse(fs.readFileSync(pendingIssueLinkPath(wt)!, 'utf-8'))).toMatchObject({ shortId: 'ISS-12' });
+    });
+
+    it('clones node_modules at any depth into the worktree, never symlinked, and leaves other ignored files out', async () => {
+      fs.writeFileSync(path.join(repo, '.gitignore'), '.env\nnode_modules/\npackages/*/node_modules/\n');
+      sh(repo, 'add', '.gitignore');
+      sh(repo, 'commit', '-qm', 'ignore local files');
+      fs.writeFileSync(path.join(repo, '.env'), 'SECRET=test\n');
+      fs.mkdirSync(path.join(repo, 'node_modules', 'pkg'), { recursive: true });
+      fs.writeFileSync(path.join(repo, 'node_modules', 'pkg', 'index.js'), 'root dependency\n');
+      fs.mkdirSync(path.join(repo, 'packages', 'web', 'node_modules', 'nested'), { recursive: true });
+      fs.writeFileSync(path.join(repo, 'packages', 'web', 'node_modules', 'nested', 'index.js'), 'nested dependency\n');
+
+      const r = await issueStartCommand('ISS-12', { agent: 'print', worktree: true }, deps(repo, { connected: () => true, api: apiFor([]) }));
+      const wt = r!.worktree!;
+      cleanup.push(path.dirname(wt));
+      // Secrets and other ignored files never reach a worktree.
+      expect(fs.existsSync(path.join(wt, '.env'))).toBe(false);
+      const rootModules = path.join(wt, 'node_modules');
+      if (!fs.existsSync(rootModules)) {
+        // This filesystem can't copy-on-write: skipped, with an install hint.
+        expect(hydrateWorktreeIgnoredFiles(repo, wt).join('\n')).toMatch(/node_modules: not cloned .*run your package install/);
+        return;
+      }
+      expect(fs.lstatSync(rootModules).isSymbolicLink()).toBe(false);
+      expect(fs.lstatSync(path.join(wt, 'packages', 'web', 'node_modules')).isSymbolicLink()).toBe(false);
+      expect(fs.readFileSync(path.join(rootModules, 'pkg', 'index.js'), 'utf-8')).toBe('root dependency\n');
+      expect(fs.readFileSync(path.join(wt, 'packages', 'web', 'node_modules', 'nested', 'index.js'), 'utf-8')).toBe('nested dependency\n');
+      // A write in the worktree stays there.
+      fs.writeFileSync(path.join(rootModules, 'pkg', 'index.js'), 'worktree install\n');
+      expect(fs.readFileSync(path.join(repo, 'node_modules', 'pkg', 'index.js'), 'utf-8')).toBe('root dependency\n');
+    });
+
+    it('preserves existing hydration targets, including dangling links, and does not touch a reused worktree', async () => {
+      fs.writeFileSync(path.join(repo, '.gitignore'), 'node_modules/\n');
+      sh(repo, 'add', '.gitignore');
+      sh(repo, 'commit', '-qm', 'ignore deps');
+      fs.mkdirSync(path.join(repo, 'node_modules', 'pkg'), { recursive: true });
+      fs.writeFileSync(path.join(repo, 'node_modules', 'pkg', 'index.js'), 'canonical\n');
+
+      const first = await issueStartCommand('ISS-12', { agent: 'print', worktree: true }, deps(repo, { connected: () => true, api: apiFor([]) }));
+      const wt = first!.worktree!;
+      cleanup.push(path.dirname(wt));
+      fs.rmSync(path.join(wt, 'node_modules'), { recursive: true, force: true });
+      fs.mkdirSync(path.join(wt, 'node_modules'));
+      fs.writeFileSync(path.join(wt, 'node_modules', 'mine.js'), 'keep me\n');
+      expect(hydrateWorktreeIgnoredFiles(repo, wt)).toEqual([]);
+      expect(fs.readdirSync(path.join(wt, 'node_modules'))).toEqual(['mine.js']);
+
+      // A dangling link counts as existing: no EEXIST warning, link left alone.
+      fs.rmSync(path.join(wt, 'node_modules'), { recursive: true });
+      fs.symlinkSync(path.join(repo, 'gone'), path.join(wt, 'node_modules'), 'dir');
+      expect(hydrateWorktreeIgnoredFiles(repo, wt)).toEqual([]);
+      expect(fs.lstatSync(path.join(wt, 'node_modules')).isSymbolicLink()).toBe(true);
+
+      const again = await issueStartCommand('ISS-12', { agent: 'print', worktree: true }, deps(repo, { connected: () => true, api: apiFor([]) }));
+      expect(again!.worktree).toBe(wt);
+      expect(fs.lstatSync(path.join(wt, 'node_modules')).isSymbolicLink()).toBe(true);
+    });
+
+    it('skips node_modules the worktree branch does not ignore', async () => {
+      fs.writeFileSync(path.join(repo, '.gitignore'), 'node_modules/\n');
+      sh(repo, 'add', '.gitignore');
+      sh(repo, 'commit', '-qm', 'ignore deps');
+      fs.mkdirSync(path.join(repo, 'node_modules', 'pkg'), { recursive: true });
+      fs.writeFileSync(path.join(repo, 'node_modules', 'pkg', 'index.js'), 'canonical\n');
+      const first = await issueStartCommand('ISS-12', { agent: 'print', worktree: true }, deps(repo, { connected: () => true, api: apiFor([]) }));
+      const wt = first!.worktree!;
+      cleanup.push(path.dirname(wt));
+      fs.rmSync(path.join(wt, 'node_modules'), { recursive: true, force: true });
+      // The branch stops ignoring node_modules, so it must not get canonical's.
+      fs.writeFileSync(path.join(wt, '.gitignore'), '');
+      expect(hydrateWorktreeIgnoredFiles(repo, wt)).toEqual([]);
+      expect(fs.existsSync(path.join(wt, 'node_modules'))).toBe(false);
     });
 
     it('reuses the worktree the branch is already checked out in, and takes a path', async () => {
@@ -721,29 +853,55 @@ describe('origin issue start', () => {
         expect(pfCalls[0]).toMatchObject({ agent: 'claude', bin: exe, cwd: r!.worktree });
         expect(pfCalls[0].prompt).toContain('do not make the change');
         expect(pfCalls[0].prompt).toContain('Work on issue ISS-12: Retry webhook delivery');
-        expect(posted).toEqual([{ questions: [{ question: 'Retry how many times?', answer: '3 times, then give up' }], agent: 'claude' }]);
+        expect(posted).toEqual([{ questions: [{ question: 'Retry how many times?', answer: '3 times, then give up', suggestion: null }], agent: 'claude' }]);
         expect(r!.prompt).toContain('Q: Retry how many times?');
         expect(r!.prompt).toContain('A: 3 times, then give up');
         expect(r!.prompt).toContain('Retries live in apps/api/src/services/webhook.ts.');
         expect(record(r).argv).toEqual([exe, '-p', r!.prompt, '--permission-mode', 'auto']);
       });
 
+      it('shows the pass the questions still open on the issue, so it repeats them with a guess', async () => {
+        writeAgent(bin, 'claude', 'process.exit(0);');
+        const prompts: string[] = [];
+        const api = withQuestions([{ id: 'q1', question: 'Which endpoint?', answer: null, from: 'preflight' }, { id: 'q2', question: 'Done one?', answer: 'yes', from: 'preflight' }],
+          { postIssueQuestions: async () => ({ clarifications: [] }) });
+        const d = deps(repo, {
+          env: { PATH: bin }, connected: () => true, api, runsDir: runsDir(), spawnBackground: () => 1,
+          preflight: async (_a, prompt) => { prompts.push(prompt); return { ready: false, brief: '', questions: ['Which endpoint?'], suggestions: ['/hooks'] }; },
+          ask: async () => null,
+        });
+        await issueStartCommand('ISS-12', { agent: 'claude', background: true }, d);
+        cleanup.push(path.dirname(issueWorktreePath(repo, 'issue/ISS-12-retry-webhook-delivery')));
+        expect(prompts[0]).toContain('already on the issue');
+        expect(prompts[0]).toContain('- Which endpoint?');
+        expect(prompts[0]).not.toContain('- Done one?');
+      });
+
       it('an unanswered question goes on the issue and nothing starts', async () => {
         writeAgent(bin, 'claude', 'process.exit(0);');
         const posted: any[] = [];
         const started: string[] = [];
-        const api = withQuestions([], { postIssueQuestions: async (_r: string, _s: string, data: any) => { posted.push(data); return { clarifications: [] }; } });
+        const runs: any[] = [];
+        const api = withQuestions([], {
+          postIssueQuestions: async (_r: string, _s: string, data: any) => { posted.push(data); return { clarifications: [] }; },
+          startIssueRun: async (repoId: string, shortId: string, data: any) => { runs.push({ repoId, shortId, ...data }); return { id: 'run-1' }; },
+        });
         const d = deps(repo, {
           env: { PATH: bin }, connected: () => true, api, runsDir: runsDir(), spawnBackground: (rec: string) => { started.push(rec); return 1; },
-          preflight: async () => ({ ready: false, brief: '', questions: ['Which endpoint?'] }),
+          preflight: async () => ({ ready: false, brief: '', questions: ['Which endpoint?'], suggestions: ['/hooks/github — the only one that retries'] }),
           ask: async () => null,
         });
         const r = await issueStartCommand('ISS-12', { agent: 'claude', background: true }, d);
         cleanup.push(path.dirname(issueWorktreePath(repo, 'issue/ISS-12-retry-webhook-delivery')));
         expect(r).toBeNull();
         expect(started).toEqual([]);
-        expect(posted[0].questions).toEqual([{ question: 'Which endpoint?', answer: null }]);
+        expect(posted[0].questions).toEqual([{ question: 'Which endpoint?', answer: null, suggestion: '/hooks/github — the only one that retries' }]);
+        expect(d.logs.join('\n')).toContain("Agent's best guess: /hooks/github");
         expect(d.logs.join('\n')).toContain('origin issue answer ISS-12');
+        // The Start dialog hears why nothing started, not "Waiting…" forever.
+        expect(runs).toHaveLength(1);
+        expect(runs[0]).toMatchObject({ repoId: 'repo-1', shortId: 'ISS-12', agent: 'claude', status: 'not_started' });
+        expect(runs[0].detail).toContain('needs an answer before an agent can work on it alone');
       });
 
       it('--no-preflight, an agent that can\'t, and a race arm skip the pass', async () => {
@@ -840,6 +998,32 @@ describe('origin issue start', () => {
       expect(d.logs.join('\n')).toContain('claude is not signed in on this computer');
       expect(runs[1]).toMatchObject({ end: 'run-1', status: 'failed', exitCode: 1 });
       expect(runs[1].detail).toContain('origin agents login claude');
+      expect(runs).toHaveLength(2); // not reported a second time as not started
+    });
+
+    it('a background start that stops before its agent launches says why on the issue', async () => {
+      // 2026-11-02: the lookup timed out during a deploy; the handler log said
+      // so and the Start dialog kept "Waiting for your machine to pick it up…".
+      const abort = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+      const runs: any[] = [];
+      const api = {
+        ...apiFor([]),
+        getIssue: async () => { throw abort; },
+        startIssueRun: async (repoId: string, shortId: string, data: any) => { runs.push({ repoId, shortId, ...data }); return { id: 'run-1' }; },
+      };
+      const d = deps(repo, { env: { PATH: bin }, connected: () => true, api });
+      expect(await issueStartCommand('#694', { agent: 'claude', background: true, repoId: 'repo-9' }, d)).toBeNull();
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ repoId: 'repo-9', shortId: '694', agent: 'claude', background: true, branch: null, status: 'not_started' });
+      expect(runs[0].detail).toContain('Could not look up "694" on Origin: it did not answer in time.');
+      expect(runs[0].detail).not.toMatch(/\x1b\[/);
+      process.exitCode = undefined;
+
+      // In a terminal the person reads the error themselves: nothing reported.
+      runs.length = 0;
+      expect(await issueStartCommand('694', { agent: 'claude', repoId: 'repo-9' }, d)).toBeNull();
+      expect(runs).toEqual([]);
+      process.exitCode = undefined;
     });
   });
 

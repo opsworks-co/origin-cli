@@ -171,6 +171,32 @@ describe('an idle peer is no rival for a turn it sat out', () => {
     expect(peerIdleSinceMs(idlePeer({ lastTurnClosedAt: undefined, lastStopAt: undefined }))).toBeUndefined();
   });
 
+  // TODO 3e34e7d7: a background job the closing turn launched keeps writing
+  // through the shared tree after the Stop, and stamps nothing on the peer.
+  it('peerIdleSinceMs: a background job launched by the closing turn keeps the peer a rival', async () => {
+    const { peerIdleSinceMs } = await import('../checkout-contention.js');
+    expect(peerIdleSinceMs(idlePeer({ backgroundJobs: [{ at: STOP - 10_000, tool: 'Bash' }] }))).toBeUndefined();
+    // No recorded turn start: the job cannot be placed before the closing turn.
+    expect(peerIdleSinceMs(idlePeer({ currentTurnStartedAt: undefined, backgroundJobs: [{ at: STOP - 10 * 60_000, tool: 'Agent' }] }))).toBeUndefined();
+    // A job from a turn before the closing one does not, nor an unreadable stamp.
+    expect(peerIdleSinceMs(idlePeer({ backgroundJobs: [{ at: STOP - 60_000, tool: 'Bash' }] }))).toBe(STOP);
+    expect(peerIdleSinceMs(idlePeer({ backgroundJobs: [null, { at: 'nope' }] }))).toBe(STOP);
+  });
+
+  it('noteBackgroundJob records only run_in_background launches, capped', async () => {
+    const { noteBackgroundJob, BACKGROUND_JOBS_MAX } = await import('../commands/hooks/tool-use.js');
+    const state: any = {};
+    expect(noteBackgroundJob(state, { tool_name: 'Bash', tool_input: { command: 'ls' } })).toBe(false);
+    expect(noteBackgroundJob(state, { tool_name: 'Bash', tool_input: { command: 'x', run_in_background: 'true' } })).toBe(false);
+    expect(state.backgroundJobs).toBeUndefined();
+    expect(noteBackgroundJob(state, { tool_name: 'Bash', tool_input: { command: 'x', run_in_background: true } }, 5)).toBe(true);
+    expect(noteBackgroundJob(state, { tool_name: 'Agent', tool_input: { prompt: 'y', run_in_background: true } }, 6)).toBe(true);
+    expect(state.backgroundJobs).toEqual([{ at: 5, tool: 'Bash' }, { at: 6, tool: 'Agent' }]);
+    for (let i = 0; i < BACKGROUND_JOBS_MAX + 3; i++) noteBackgroundJob(state, { tool_name: 'Bash', tool_input: { run_in_background: true } }, 100 + i);
+    expect(state.backgroundJobs).toHaveLength(BACKGROUND_JOBS_MAX);
+    expect(state.backgroundJobs.at(-1).at).toBe(100 + BACKGROUND_JOBS_MAX + 2);
+  });
+
   it('detectContention skips a peer idle through the turn, and only with a turn start', async () => {
     const { detectContention } = await import('../checkout-contention.js');
     const peer = { sessionId: '9c1b8c40', repoPath: '/wt', status: 'RUNNING', lastSeenMs: STOP + 38_000, idleSinceMs: STOP };
@@ -204,6 +230,60 @@ describe('an idle peer is no rival for a turn it sat out', () => {
       noteCheckoutContention(state);
       expect(state.contendingSessionIds || []).toEqual([]);
       expect(stateLedgerIsContended(state, repo)).toBe(false);
+    });
+
+    it('GUARD: a peer whose last turn launched a background job is recorded, and the ledger declines', async () => {
+      const { noteCheckoutContention } = await import('../commands/hooks/user-prompt-submit.js');
+      const now = Date.now();
+      writePeer(idlePeer({
+        currentTurnStartedAt: now - 7 * 60_000, lastTurnClosedAt: now - 6 * 60_000, lastStopAt: undefined, promptSubmittedAt: [],
+        backgroundJobs: [{ at: now - 6.5 * 60_000, tool: 'Bash' }],
+      }));
+      const state: any = { sessionId: 'self', sessionTag: 'self', repoPath: repo, currentTurnStartedAt: now, writeJournalPath: path.join(repo, 'j.jsonl') };
+      noteCheckoutContention(state);
+      expect(state.contendingSessionIds).toEqual(['9c1b8c40']);
+      expect(stateLedgerIsContended(state, repo)).toBe(true);
+    });
+
+    // Live 2026-10-30 (TODO 69568e47): session 5fe66a3c's rival 13961ea1 closed
+    // its last turn at 15:26:11Z having launched a background Bash job, 38 s
+    // before turn 0 began. The job keeps it "never idle", and the prompt hook's
+    // live set was the idle test alone, so the rival stayed live at every
+    // prompt until it ENDED; it was stamped gone only at 17:48:37Z. Every Stop
+    // in between declined the ledger and turn 0 went out as 1 file of its 7.
+    it('a background-job rival silent past PEER_ACTIVE_WINDOW_MS is stamped gone at the next turn', async () => {
+      const { noteCheckoutContention } = await import('../commands/hooks/user-prompt-submit.js');
+      const { PEER_ACTIVE_WINDOW_MS } = await import('../checkout-contention.js');
+      const now = Date.now();
+      const closed = now - PEER_ACTIVE_WINDOW_MS - 14 * 60_000; // 24 min silent
+      writePeer(idlePeer({
+        currentTurnStartedAt: closed - 30 * 60_000, lastTurnClosedAt: closed, lastStopAt: undefined, promptSubmittedAt: [],
+        backgroundJobs: [{ at: closed - 3 * 60_000, tool: 'Bash' }],
+      }));
+      const turn0Start = closed + 38_000;
+      const state: any = {
+        sessionId: 'self', sessionTag: 'self', repoPath: repo, writeJournalPath: path.join(repo, 'j.jsonl'),
+        contendingSessionIds: ['9c1b8c40'], currentTurnStartedAt: now,
+      };
+      noteCheckoutContention(state);
+      expect(state.contenderGoneAt).toEqual({ '9c1b8c40': now });
+      // This turn, and every Stop that closes it, may use the ledger again...
+      expect(stateLedgerIsContended(state, repo)).toBe(false);
+      // ...while the turn that ran inside the rival's window stays covered.
+      expect(contentionCoversTurn(state, turn0Start)).toBe(true);
+    });
+
+    it('GUARD: a background-job rival still inside PEER_ACTIVE_WINDOW_MS stays live', async () => {
+      const { noteCheckoutContention } = await import('../commands/hooks/user-prompt-submit.js');
+      const now = Date.now();
+      writePeer(idlePeer({
+        currentTurnStartedAt: now - 9 * 60_000, lastTurnClosedAt: now - 5 * 60_000, lastStopAt: undefined, promptSubmittedAt: [],
+        backgroundJobs: [{ at: now - 8 * 60_000, tool: 'Bash' }],
+      }));
+      const state: any = { sessionId: 'self', repoPath: repo, contendingSessionIds: ['9c1b8c40'], currentTurnStartedAt: now };
+      noteCheckoutContention(state);
+      expect(state.contenderGoneAt?.['9c1b8c40']).toBeUndefined();
+      expect(contentionCoversTurn(state, now)).toBe(true);
     });
 
     it('GUARD: a peer with a turn open is recorded, and the ledger declines', async () => {

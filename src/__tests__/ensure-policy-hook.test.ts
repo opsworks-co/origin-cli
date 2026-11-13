@@ -21,7 +21,7 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { ensurePolicyHookInstalled } from '../commands/enable.js';
+import { ensurePolicyHookInstalled, KEYCHAIN_GUARD_MARKER } from '../commands/enable.js';
 
 function makeTmpRepo(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-ensure-hook-'));
@@ -101,6 +101,22 @@ describe('ensurePolicyHookInstalled', () => {
     expect(readHook(repo)).toBe(firstContent);
     // And exactly one marker line.
     expect((firstContent!.match(/# origin-pre-commit/g) || []).length).toBe(1);
+  });
+
+  it('upgrades an already-marked hook written before the Keychain guard', () => {
+    const repo = makeTmpRepo();
+    repos.push(repo);
+    const hookPath = path.join(repo, '.git', 'hooks', 'pre-commit');
+    fs.writeFileSync(hookPath, '#!/bin/sh\n# origin-pre-commit\norigin hooks git-pre-commit\n', { mode: 0o755 });
+
+    const result = ensurePolicyHookInstalled(repo);
+    const upgraded = readHook(repo)!;
+
+    expect(result).toEqual({ installed: false, reason: 'already-installed' });
+    expect((upgraded.match(new RegExp(KEYCHAIN_GUARD_MARKER, 'g')) || []).length).toBe(1);
+    expect(upgraded).toContain('origin hooks git-pre-commit');
+    ensurePolicyHookInstalled(repo);
+    expect(readHook(repo)).toBe(upgraded);
   });
 
   it('appends to an existing user-authored hook without clobbering it', () => {

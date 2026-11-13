@@ -26,6 +26,7 @@ import { buildHandoffContext } from '../../handoff.js';
 import { hasFreshFailedAttempt, listRecentShas, shouldSyncStandalone } from '../../history-backfill.js';
 import { matchIgnoredRepo } from '../../ignore-repos.js';
 import { buildMemoryBriefContext, buildMemoryContext, buildMemoryPointerContext, buildStartupCheckContext, isSubstantiveMemory, readAllSessionMemory, readMemoryBrief, readRecentMemory } from '../../memory.js';
+import { buildOpenTodosContext } from '../../todo.js';
 import { buildRepoBriefContext, maybeSpawnBriefGeneration } from '../../repo-brief.js';
 import { carryForwardTurnState, findDuplicateStateForSession, findSameTagStateForResume } from '../../session-dedup.js';
 import { pickWorktreeBootstrap, restampWorktreeBootstrap, type SessionStartBaseline } from '../../worktree-bootstrap.js';
@@ -50,7 +51,7 @@ import { newCaptureStamp } from '../../capture-stamp.js';
 import { linkPendingIssue } from '../../issue-link.js';
 import { budgetRowDiffs, withCutFiles } from '../../budgeted-row-diff.js';
 import { claudeDesktopSpawnedFrom } from '../../claude-desktop-spawn.js';
-import { resolveAgentOwner } from '../../process-owner.js';
+import { ownerProcessRunning, resolveAgentOwner } from '../../process-owner.js';
 
 
 /**
@@ -635,6 +636,13 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
       const { repairInstalledPostRewriteHooks } = await import('../../post-rewrite-hook-stdin.js');
       const repaired = await repairInstalledPostRewriteHooks(canonicalRepoPath);
       if (repaired.length > 0) debugLog('session-start', 'repaired post-rewrite hooks that never read their stdin', { repaired });
+    } catch { /* non-fatal */ }
+    // The same for a repo's own post-checkout, whose launch can die with the
+    // agent's process group until it is rewritten.
+    try {
+      const { repairInstalledLocalPostCheckoutHook } = await import('../../history-preservation.js');
+      const repaired = repairInstalledLocalPostCheckoutHook(canonicalRepoPath);
+      if (repaired.length > 0) debugLog('session-start', 'repaired a repo-local post-checkout launch', { repaired });
     } catch { /* non-fatal */ }
     // Heal missing local history from session start too (see
     // maybeSpawnHistorySync). Canonical path names the repo (and keys the
@@ -2114,6 +2122,7 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
         // lives so it can PULL detail instead of assuming the digest is all
         // there is — or, worse, that there is no memory at all.
         memoryPointer: safeCtx(() => buildMemoryPointerContext(repoPath)),
+        todos: safeCtx(() => buildOpenTodosContext(repoPath)),
         handoff: safeCtx(() => buildHandoffContext(repoPath)),
         // The directive that turns the digest above from something the agent
         // MAY consult into something it is told to consult first.
@@ -2300,7 +2309,8 @@ export async function handleSessionStart(input: Record<string, any>, agentSlug?:
 export async function expireStaleSessionsOnServer(repoPath: string): Promise<void> {
   try {
     for (const s of listActiveSessions(repoPath)) {
-      if (isSessionAlive(s)) continue;
+      // An agent still running is idle, not a zombie — see listSessionsForGitHook.
+      if (isSessionAlive(s) || ownerProcessRunning(s.ownerProcess)) continue;
       if (markSessionEnded(s)) {
         try { await api.endSessionById(s.sessionId); } catch { /* unknown id / offline — local mark still applied */ }
       }

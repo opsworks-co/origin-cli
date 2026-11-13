@@ -10,10 +10,18 @@ import { execFileSync } from 'child_process';
 /** Environment variables one agent session sets for the processes it starts. */
 export const AGENT_SESSION_ENV = /^(ORIGIN_HEADLESS_RUN|CLAUDECODE|CLAUDE_CODE_[A-Z0-9_]*|CLAUDE_AGENT_SDK_[A-Z0-9_]*|CLAUDE_PID|CLAUDE_EFFORT|CLAUDE_PREVIEW_[A-Z0-9_]*|CODEX_THREAD_ID|CODEX_SANDBOX[A-Z0-9_]*|CODEX_MANAGED_BY_[A-Z0-9_]*)$/;
 
+/**
+ * Named like a marker, but it is how a run signs in: the token from `claude
+ * setup-token`, the documented login on a server with no browser. Kept apart
+ * from the pattern above because the launch script feeds that to `grep -E`,
+ * which has no lookahead.
+ */
+export const CLAUDE_TOKEN_ENV = 'CLAUDE_CODE_OAUTH_TOKEN';
+
 /** `env` without another agent session's markers. */
 export function freshAgentEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(env)) if (!AGENT_SESSION_ENV.test(k)) out[k] = v;
+  for (const [k, v] of Object.entries(env)) if (k === CLAUDE_TOKEN_ENV || !AGENT_SESSION_ENV.test(k)) out[k] = v;
   return out;
 }
 
@@ -90,4 +98,4 @@ export function isClaudeOneShotRun(
  * login shell after it reads them.
  */
 export const UNSET_AGENT_SESSION_ENV_SH =
-  `for v in $(env | sed -n 's/^\\([A-Z0-9_]*\\)=.*/\\1/p' | grep -E '${AGENT_SESSION_ENV.source}'); do unset "$v"; done`;
+  `for v in $(env | sed -n 's/^\\([A-Z0-9_]*\\)=.*/\\1/p' | grep -E '${AGENT_SESSION_ENV.source}' | grep -vx '${CLAUDE_TOKEN_ENV}'); do unset "$v"; done`;

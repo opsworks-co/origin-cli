@@ -6,7 +6,7 @@ import { isOriginAutoManagedPath, shouldIgnoreFile } from './ignore-patterns.js'
 import { isShellTool, shellCommandText, commandWritesFiles } from './shell-write-capture.js';
 import { isInsideRepo, toRepoRelativePath , abbreviateHome, MAX_OUT_OF_REPO_FILES } from './paths.js';
 import { partsField, replyTextPart, replyToolPart, type DisplayPart } from './display-parts.js';
-import { eventTime, eventTokens, inputPreview, appendTurnEvents, spanMs, type DisplayEvent } from './display-events.js';
+import { eventTime, eventTokens, inputPreview, appendTurnEvents, mergeTurnEventsByTime, spanMs, type DisplayEvent } from './display-events.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -295,6 +295,8 @@ export function convertCopilotEventsToClaude(raw: string): string | null {
   // (every Stop) input did too. Summed here: inputTokens includes the cached
   // part, which the Claude shape keeps separate.
   let recordTotals: Usage | null = null;
+  const recordsByModel = new Map<string, Usage>();
+  const lastAssistantByModel = new Map<string, Record<string, any>>();
   let messageOutput = 0;
   // `/fork` (Copilot ≥1.0.88) starts the new session's events.jsonl with its
   // own `session.start`, then a COPY of the parent's history up to the fork,
@@ -368,6 +370,7 @@ export function convertCopilotEventsToClaude(raw: string): string | null {
       };
       out.push(entry);
       lastAssistant = entry;
+      if (typeof d.model === 'string' && d.model) lastAssistantByModel.set(d.model, entry);
     } else if (ev?.type === 'session.usage_record') {
       const u = d.usage;
       if (u && typeof u === 'object') {
@@ -380,6 +383,14 @@ export function convertCopilotEventsToClaude(raw: string): string | null {
         t.cache_read_input_tokens! += cacheRead;
         t.cache_creation_input_tokens! += cacheWrite;
         recordTotals = t;
+        // The same, per model: a session that switches models (or runs a
+        // `task` sub-agent on another) is priced at each call's own model.
+        const model = typeof u.model === 'string' ? u.model : '';
+        const m = recordsByModel.get(model) ?? { input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+        m.input_tokens! += Math.max(0, num(u.inputTokens) - cacheRead - cacheWrite);
+        m.cache_read_input_tokens! += cacheRead;
+        m.cache_creation_input_tokens! += cacheWrite;
+        recordsByModel.set(model, m);
       }
     } else if (ev?.type === 'session.shutdown') {
       // Prefer the aggregate tokenDetails; the last shutdown wins (resume writes
@@ -395,14 +406,29 @@ export function convertCopilotEventsToClaude(raw: string): string | null {
     }
   }
 
-  const inputTotals = shutdownTotals ?? recordTotals;
-  if (lastAssistant && inputTotals) {
-    // Attach input/cache totals to a single message so the parser (which sums
-    // per-message usage) counts them exactly once. Output stays per-message.
+  // Input and cache are attached to one message per model so the parser
+  // (which sums per-message usage) counts them exactly once, at that model's
+  // rate. Output stays per-message. The usage records win over a shutdown
+  // summary: after a resume the last shutdown is the PREVIOUS lifecycle's and
+  // misses every call made since.
+  if (lastAssistant && recordTotals) {
+    const targets = new Set<Record<string, any>>();
+    for (const [model, t] of recordsByModel) {
+      const target = lastAssistantByModel.get(model) ?? lastAssistant;
+      const usage = target.message.usage;
+      if (!targets.has(target)) {
+        Object.assign(usage, { input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 });
+        targets.add(target);
+      }
+      usage.input_tokens += t.input_tokens ?? 0;
+      usage.cache_read_input_tokens += t.cache_read_input_tokens ?? 0;
+      usage.cache_creation_input_tokens += t.cache_creation_input_tokens ?? 0;
+    }
+  } else if (lastAssistant && shutdownTotals) {
     Object.assign(lastAssistant.message.usage, {
-      input_tokens: inputTotals.input_tokens ?? 0,
-      cache_read_input_tokens: inputTotals.cache_read_input_tokens ?? 0,
-      cache_creation_input_tokens: inputTotals.cache_creation_input_tokens ?? 0,
+      input_tokens: shutdownTotals.input_tokens ?? 0,
+      cache_read_input_tokens: shutdownTotals.cache_read_input_tokens ?? 0,
+      cache_creation_input_tokens: shutdownTotals.cache_creation_input_tokens ?? 0,
     });
   }
   // Output from the usage records only when no message carried its own, so
@@ -642,6 +668,96 @@ function realModelName(model: unknown): string {
 const MAX_SUBAGENT_FILES = 2000;
 const MAX_SUBAGENT_FILE_BYTES = 256 * 1024 * 1024;
 
+interface SubagentFile {
+  entries: TranscriptLine[];
+  toolUseId?: string;
+}
+
+interface CachedSubagentFile {
+  mtimeMs: number;
+  ctimeMs: number;
+  size: number;
+  toolUseId?: string;
+  file: SubagentFile;
+}
+
+let cachedSubagentsDir = '';
+const subagentFileCache = new Map<string, CachedSubagentFile>();
+
+/** Read and parse the bounded set of Claude Code sub-agent logs shared by usage and display parsing. */
+function readSubagentFiles(transcriptPath: string): SubagentFile[] {
+  if (!transcriptPath.endsWith('.jsonl')) return [];
+  const dir = path.join(transcriptPath.slice(0, -'.jsonl'.length), 'subagents');
+  if (dir !== cachedSubagentsDir) { // path-compare-ok — cache key built from the same transcript path; a miss only clears the cache
+    subagentFileCache.clear();
+    cachedSubagentsDir = dir;
+  }
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir).filter((n) => n.startsWith('agent-') && n.endsWith('.jsonl')).sort();
+  } catch {
+    subagentFileCache.clear();
+    return [];
+  }
+  if (names.length > MAX_SUBAGENT_FILES) {
+    const mtime = (n: string): number => { try { return fs.statSync(path.join(dir, n)).mtimeMs; } catch { return Infinity; } };
+    const byAge = names.map((n) => ({ n, t: mtime(n) })).sort((a, b) => a.t - b.t || (a.n < b.n ? -1 : 1));
+    debugLog('transcript', 'sub-agent file cap reached — usage and steps of the newest files are not counted', {
+      dir, files: names.length, cap: MAX_SUBAGENT_FILES,
+    });
+    names = byAge.slice(0, MAX_SUBAGENT_FILES).map((x) => x.n);
+  }
+  const files: SubagentFile[] = [];
+  for (const name of names) {
+    const filePath = path.join(dir, name);
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(filePath);
+    } catch {
+      continue;
+    }
+    if (stat.size > MAX_SUBAGENT_FILE_BYTES) {
+      debugLog('transcript', 'sub-agent file over the size cap — its usage and steps are not counted', { file: filePath, size: stat.size, cap: MAX_SUBAGENT_FILE_BYTES });
+      continue;
+    }
+    let toolUseId: string | undefined;
+    try {
+      const meta = JSON.parse(fs.readFileSync(path.join(dir, name.replace(/\.jsonl$/, '.meta.json')), 'utf-8'));
+      if (typeof meta?.toolUseId === 'string' && meta.toolUseId) toolUseId = meta.toolUseId;
+    } catch { /* older builds write no meta */ }
+    const cached = subagentFileCache.get(name);
+    if (
+      cached &&
+      cached.mtimeMs === stat.mtimeMs &&
+      cached.ctimeMs === stat.ctimeMs &&
+      cached.size === stat.size &&
+      cached.toolUseId === toolUseId
+    ) {
+      files.push(cached.file);
+      continue;
+    }
+    let raw: string;
+    try {
+      raw = fs.readFileSync(filePath, 'utf-8');
+    } catch {
+      continue;
+    }
+    const entries: TranscriptLine[] = [];
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        entries.push(JSON.parse(line));
+      } catch {
+        continue;
+      }
+    }
+    const parsed: SubagentFile = { entries, ...(toolUseId ? { toolUseId } : {}) };
+    subagentFileCache.set(name, { mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, size: stat.size, toolUseId, file: parsed });
+    files.push(parsed);
+  }
+  return files;
+}
+
 /**
  * The prompt (position) a moment belongs to: the last one sent at or before
  * it. Before the first prompt, or with no times recorded, the first prompt.
@@ -672,49 +788,8 @@ function readSubagentRecords(
   const out: Array<{ id: string; model: string; usage: MessageUsage; ts: number; toolUseId?: string }> = [];
   const edits: Array<{ file: string; ts: number; toolUseId?: string }> = [];
   const result = { usage: out, edits };
-  if (!transcriptPath.endsWith('.jsonl')) return result;
-  const dir = path.join(transcriptPath.slice(0, -'.jsonl'.length), 'subagents');
-  let names: string[];
-  try {
-    names = fs.readdirSync(dir).filter((n) => n.startsWith('agent-') && n.endsWith('.jsonl')).sort();
-  } catch {
-    return result; // no sub-agents — the common case
-  }
-  if (names.length > MAX_SUBAGENT_FILES) {
-    const mtime = (n: string): number => { try { return fs.statSync(path.join(dir, n)).mtimeMs; } catch { return Infinity; } };
-    const byAge = names.map((n) => ({ n, t: mtime(n) })).sort((a, b) => a.t - b.t || (a.n < b.n ? -1 : 1));
-    debugLog('transcript', 'sub-agent file cap reached — usage of the newest files is not counted', {
-      dir, files: names.length, cap: MAX_SUBAGENT_FILES,
-    });
-    names = byAge.slice(0, MAX_SUBAGENT_FILES).map((x) => x.n);
-  }
-  for (const name of names) {
-    let raw: string;
-    try {
-      const file = path.join(dir, name);
-      const size = fs.statSync(file).size;
-      if (size > MAX_SUBAGENT_FILE_BYTES) {
-        debugLog('transcript', 'sub-agent file over the size cap — its usage is not counted', { file, size, cap: MAX_SUBAGENT_FILE_BYTES });
-        continue;
-      }
-      raw = fs.readFileSync(file, 'utf-8');
-    } catch {
-      continue;
-    }
-    // `agent-<id>.meta.json` names the Task call that spawned this agent, so
-    // its edits belong to exactly one spawn — no time-window guess, which
-    // gave two reviewers running side by side each other's files.
-    let toolUseId: string | undefined;
-    try {
-      const meta = JSON.parse(fs.readFileSync(path.join(dir, name.replace(/\.jsonl$/, '.meta.json')), 'utf-8'));
-      if (typeof meta?.toolUseId === 'string' && meta.toolUseId) toolUseId = meta.toolUseId;
-    } catch { /* older builds write no meta — the time window still applies */ }
-    for (const line of raw.split('\n')) {
-      // Most lines are tool results; only a usage-bearing one (which is also
-      // where a tool_use lives) is worth parsing.
-      if (!line.includes('"usage"')) continue;
-      let entry: any;
-      try { entry = JSON.parse(line); } catch { continue; }
+  for (const { entries, toolUseId } of readSubagentFiles(transcriptPath)) {
+    for (const entry of entries as any[]) {
       const t = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
       if (sinceMs > 0 && Number.isFinite(t) && t < sinceMs) continue;
       // Files this sub-agent edited, for buildSubagentSummary. They used to
@@ -1405,6 +1480,16 @@ export function geminiUserPromptText(msg: any): string | null {
  */
 const CODEX_MULTI_AGENT_ENVELOPE = /<(multi_agent_mode|multi_agent_role|subagent_notification)\b[^>]*>[\s\S]*?(?:<\/\1>|$)/g;
 
+/**
+ * Content the Codex harness adds to a turn as its own user-role message, e.g.
+ * `<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>`
+ * (`content_item_kinds: ["additional_content.codex_apps_open_page"]`, provenance
+ * "harness"). Captured as a session's first prompt, it became that session's
+ * memory intent (rc-demo session 16be27f4). The whole `external_codex_*`
+ * family, unclosed-tolerant for a 1000-char clip.
+ */
+const CODEX_HARNESS_CONTENT = /<(external_codex_[a-z0-9_]+)\b[^>]*>[\s\S]*?(?:<\/\1>|$)/g;
+
 export function codexUserPromptText(text: string): string | null {
   if (!text) return null;
   if (text.includes('<!-- origin-managed -->') || /^#\s+AGENTS\.md instructions for /m.test(text)) {
@@ -1418,6 +1503,7 @@ export function codexUserPromptText(text: string): string | null {
     // ahead of the first prompt; it was captured as the session's prompt 1.
     .replace(/<recommended_plugins>[\s\S]*?<\/recommended_plugins>/g, '')
     .replace(CODEX_MULTI_AGENT_ENVELOPE, '')
+    .replace(CODEX_HARNESS_CONTENT, '')
     .trim();
   return cleaned || null;
 }
@@ -1625,6 +1711,7 @@ export function cleanPrompt(text: string): string | null {
     .replace(/<side-sessions-event\b[^>]*>[\s\S]*?(?:<\/side-sessions-event>|$)/g, '')
     .replace(/<ci-monitor-event\b[^>]*>[\s\S]*?(?:<\/ci-monitor-event>|$)/g, '')
     .replace(CODEX_MULTI_AGENT_ENVELOPE, '')
+    .replace(CODEX_HARNESS_CONTENT, '')
     // Strip internal agent tags that leak when prompts overlap with active execution.
     // A background-task notification is the whole user entry. Unclosed-tolerant
     // for a stored 1000-char clip, but only when `<task-id>` follows, so prose
@@ -2848,13 +2935,13 @@ export function formatTranscriptForDisplay(
       if (singleObj.messages || singleObj.history) {
         messages = formatGeminiMessages(raw, verbose);
       } else {
-        messages = formatJSONLMessages(raw, verbose);
+        messages = formatJSONLMessages(raw, verbose, transcriptPath);
       }
     } catch {
-      messages = formatJSONLMessages(raw, verbose);
+      messages = formatJSONLMessages(raw, verbose, transcriptPath);
     }
   } else {
-    messages = formatJSONLMessages(raw, verbose);
+    messages = formatJSONLMessages(raw, verbose, transcriptPath);
   }
 
   if (messages.length === 0) return '';
@@ -2912,7 +2999,7 @@ function serializeToolResult(content: any): string {
   try { return JSON.stringify(content, null, 2); } catch { return ''; }
 }
 
-function formatJSONLMessages(raw: string, verbose: boolean): DisplayMessage[] {
+function formatJSONLMessages(raw: string, verbose: boolean, transcriptPath?: string): DisplayMessage[] {
   const lines = raw.split('\n').filter((line) => line.trim());
   const messages: DisplayMessage[] = [];
   const truncate = makeTruncator(verbose);
@@ -3015,7 +3102,61 @@ function formatJSONLMessages(raw: string, verbose: boolean): DisplayMessage[] {
   }
 
   steps.flushInto(messages);
+  if (transcriptPath) appendSubagentSteps(transcriptPath, lines, messages);
   return messages;
+}
+
+/** Add separate Claude sub-agent calls to the parent prompt that spawned them. */
+function appendSubagentSteps(transcriptPath: string, parentLines: string[], messages: DisplayMessage[]): void {
+  const prompts = messages.filter((message) => message.role === 'user');
+  if (prompts.length === 0) return;
+  const subagentFiles = readSubagentFiles(transcriptPath);
+  if (subagentFiles.length === 0) return;
+  const promptAt = prompts.map((prompt) => prompt.ts);
+  const promptByTaskId = new Map<string, DisplayMessage>();
+  let promptIndex = -1;
+  let lastKeptPrompt: string | undefined;
+  let cursorTranscript = false;
+  for (const line of parentLines) {
+    let entry: TranscriptLine;
+    try { entry = midTurnPromptAsUserEntry(JSON.parse(line)); } catch { continue; }
+    const type = entry.type || (entry as any).role || entry.message?.role;
+    if (type === 'user') {
+      if (isCursorTranscriptUserEntry(entry)) cursorTranscript = true;
+      const prompt = transcriptPromptIfNew(entry, lastKeptPrompt, cursorTranscript);
+      if (prompt) {
+        lastKeptPrompt = prompt;
+        promptIndex++;
+      }
+    }
+    if (type !== 'assistant' || entry.isSidechain) continue;
+    const content = entry.message?.content;
+    if (!Array.isArray(content)) continue;
+    const prompt = prompts[Math.min(Math.max(0, promptIndex), prompts.length - 1)];
+    for (const block of content as any[]) {
+      if (block?.type === 'tool_use' && typeof block.id === 'string') {
+        promptByTaskId.set(block.id, prompt);
+      }
+    }
+  }
+  for (const file of subagentFiles) {
+    const subSteps = new ClaudeTurnSteps(true);
+    let firstAt: number | undefined;
+    for (const entry of file.entries) {
+      const at = eventTime(entry.timestamp);
+      if (firstAt === undefined && at !== undefined) firstAt = at;
+      const type = entry.type || (entry as any).role || entry.message?.role;
+      subSteps.read(entry, type);
+    }
+    const events = subSteps.takeEvents();
+    if (events.length === 0) continue;
+    // Metadata is authoritative when its tool call is in the parent transcript;
+    // otherwise (legacy logs without a sidecar, or a truncated/rotated parent)
+    // fall back to the timestamp heuristic, matching readSubagentRecords.
+    const target = (file.toolUseId ? promptByTaskId.get(file.toolUseId) : undefined)
+      ?? prompts[promptAtTime(promptAt, firstAt || 0)];
+    if (target) mergeTurnEventsByTime(target, events);
+  }
 }
 
 /**
@@ -3040,8 +3181,10 @@ class ClaudeTurnSteps {
   private models = new Map<string, { ev: DisplayEvent; start?: number; thought: boolean }>();
   private tools = new Map<string, DisplayEvent>();
 
+  constructor(private readonly includeSidechain = false) {}
+
   read(entry: TranscriptLine, type: unknown): void {
-    if (entry.isSidechain) return;
+    if (entry.isSidechain && !this.includeSidechain) return;
     const at = eventTime(entry.timestamp);
     const content: unknown = entry.message?.content;
     if (type === 'user') {
@@ -3117,6 +3260,13 @@ class ClaudeTurnSteps {
     if (target) appendTurnEvents(target, this.events);
     this.events = [];
     this.models.clear();
+  }
+
+  takeEvents(): DisplayEvent[] {
+    const events = this.events;
+    this.events = [];
+    this.models.clear();
+    return events;
   }
 }
 
@@ -3412,6 +3562,7 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   'claude':    { input: 5,    output: 25 },  // bare brand → current Opus default
   'sonnet':    { input: 3,    output: 15 },  // Sonnet 4.x (also the unknown-model fallback)
   'sonnet-5':  { input: 2,    output: 10 },  // Sonnet 5 — longer key wins over 'sonnet'
+  'sonnet-5-5': { input: 2, output: 10, cachedInput: 0.10 },  // Sonnet 5.5 — cache reads 0.05×
   'opus':      { input: 5,    output: 25 },  // Opus 4.5+
   // Opus 5.5 is CHEAPER than Opus 5: $4/$20, cache reads $0.20/M (0.05×, not
   // the 0.10 default — hence cachedInput). Without this row "claude-opus-5-5"
@@ -3426,50 +3577,86 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   // Fable 5.1: same $10/$50, cache reads $0.25/M (0.025×) — see the API table.
   'fable-5-1': { input: 10,   output: 50, cachedInput: 0.25 },
   'mythos':    { input: 10,   output: 50 },  // Mythos 5 / 5.1 — Fable's rate; cache rate unconfirmed
+  'mythos-5-1': { input: 10, output: 50, cachedInput: 0.25 },  // Mythos 5.1 — cache reads $0.25/M like Fable 5.1
+  'fable-5-2':  { input: 8, output: 40, cachedInput: 0.20 },  // Fable 5.2 — cheaper than 5.1, see the API table
+  'mythos-5-2': { input: 8, output: 40, cachedInput: 0.20 },  // Mythos 5.2 — same as Fable 5.2
   'haiku':     { input: 0.80, output: 4  },  // legacy Haiku 3.5 / 4.0
   'haiku-4-5': { input: 1.00, output: 5  },  // Haiku 4.5
+  'haiku-5-5': { input: 0.10, output: 0.50, cachedInput: 0.01 },  // Haiku 5.5 (≤100k prompt; long-context tier not modelled)
   // Google — pricing per 1M tokens (≤200K context tier where two tiers exist)
   'gemini-2.5-pro': { input: 1.25, output: 10 },
   'gemini-2.5-flash': { input: 0.30, output: 2.50 },      // was 0.15/3.50 — wrong
   'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
-  'gemini-3-pro': { input: 1.25, output: 10 },
-  'gemini-3-flash': { input: 0.15, output: 0.60 },
+  'gemini-3-pro': { input: 2.00, output: 12.00, cachedInput: 0.20 },
+  'gemini-3-flash': { input: 0.50, output: 3.00, cachedInput: 0.05 },
   // gemini-3.1 generation — same tier rates as 3 / 3.5. Needs explicit keys:
   // the longest-substring matcher can't reach 'gemini-3-pro' from "gemini-3.1-pro"
   // (the ".1" breaks the contiguous substring), so without these a real
   // gemini-3.1-pro session priced to $0 in `origin stats`.
-  'gemini-3.1-pro': { input: 1.25, output: 10 },
+  'gemini-3.1-pro': { input: 2.00, output: 12.00, cachedInput: 0.20 },
   'gemini-3.1-flash': { input: 0.15, output: 0.60 },
+  'gemini-3.1-flash-lite': { input: 0.25, output: 1.50, cachedInput: 0.025 },
   'gemini-3.5-pro': { input: 1.25, output: 10 },    // Antigravity flagship
-  'gemini-3.5-flash': { input: 0.15, output: 0.60 }, // Antigravity default
+  'gemini-3.5-flash': { input: 1.50, output: 9.00, cachedInput: 0.15 }, // Antigravity default
+  'gemini-3.5-flash-lite': { input: 0.30, output: 2.50, cachedInput: 0.03 },
+  'gemini-3.6-flash': { input: 0.75, output: 3.75, cachedInput: 0.075 },
+  'gemini-3.7-flash': { input: 0.75, output: 3.75, cachedInput: 0.075 },
+  'gemini-3.8-flash': { input: 0.75, output: 3.75, cachedInput: 0.075 },
+  'gemini-4': { input: 2.00, output: 10.00, cachedInput: 0.10 },  // Gemini 4 (Argon); doubles 2026-12-01
   'gemini-2.0-flash': { input: 0.10, output: 0.40 },
   'gemini-2.0': { input: 0.10, output: 0.40 },
   // Bare brand stamped when the Gemini chat names no model. Was in
   // BARE_BRAND_KEYS with no row → Sonnet default at Anthropic cache rates.
-  'gemini': { input: 1.25, output: 10 },
+  'gemini': { input: 2.00, output: 12.00, cachedInput: 0.20 },
+  // Bare brand "antigravity" — stamped when the transcript names no model.
+  // Priced as its default, Gemini 3.5 Flash, not the Sonnet fallback.
+  'antigravity': { input: 1.50, output: 9.00, cachedInput: 0.15 },
   // OpenAI (for Cursor users)
   'gpt-4o': { input: 2.50, output: 10 },
   'gpt-4o-mini': { input: 0.15, output: 0.60 },
   'o1': { input: 15, output: 60 },
-  'o3': { input: 10, output: 40 },
+  'o3': { input: 2.00, output: 8.00, cachedInput: 0.50 },
   'o3-mini': { input: 1.10, output: 4.40 },
   'o4-mini': { input: 1.10, output: 4.40 },
+  'gpt-4.1': { input: 2.00, output: 8.00, cachedInput: 0.50 },
+  'gpt-4.1-mini': { input: 0.40, output: 1.60, cachedInput: 0.10 },
+  'gpt-4.1-nano': { input: 0.10, output: 0.40, cachedInput: 0.025 },
   // OpenAI GPT-5 / Codex. gpt-5.5 has an explicit cachedInput rate
   // because its 90% cache discount doesn't match the OpenAI family
   // default of 50% (see estimateCost). Mirrors apps/api/src/utils/pricing.ts.
-  'gpt-5':       { input: 2.00,  output: 8.00 },
-  'gpt-5.3':     { input: 2.00,  output: 8.00 },
-  'gpt-5.4':     { input: 3.00,  output: 12.00 },
+  'gpt-5':       { input: 1.25, output: 10.00, cachedInput: 0.125 },
+  'gpt-5-mini': { input: 0.25, output: 2.00, cachedInput: 0.025 },
+  'gpt-5-nano': { input: 0.05, output: 0.40, cachedInput: 0.005 },
+  'gpt-5-codex': { input: 1.25, output: 10.00, cachedInput: 0.125 },
+  'gpt-5-pro': { input: 15.00, output: 120.00, cachedInput: 15.00 },  // no cache discount
+  'gpt-5.1': { input: 1.25, output: 10.00, cachedInput: 0.125 },
+  'gpt-5.1-codex': { input: 1.25, output: 10.00, cachedInput: 0.125 },
+  'gpt-5.1-codex-mini': { input: 0.25, output: 2.00, cachedInput: 0.025 },
+  'gpt-5.2': { input: 1.75, output: 14.00, cachedInput: 0.175 },
+  'gpt-5.2-pro': { input: 21.00, output: 168.00, cachedInput: 21.00 },  // no cache discount
+  'gpt-5.3':     { input: 1.75, output: 14.00, cachedInput: 0.175 },
+  'gpt-5.3-codex': { input: 1.75, output: 14.00, cachedInput: 0.175 },
+  'gpt-5.4':     { input: 2.50, output: 15.00, cachedInput: 0.25 },
+  'gpt-5.4-mini': { input: 0.75, output: 4.50, cachedInput: 0.075 },
+  'gpt-5.4-nano': { input: 0.20, output: 1.25, cachedInput: 0.02 },
+  'gpt-5.4-pro': { input: 30.00, output: 180.00, cachedInput: 30.00 },  // no cache discount
   'gpt-5.5':     { input: 5.00,  output: 30.00, cachedInput: 0.50 },
   'gpt-5.5-pro': { input: 30.00, output: 180.00, cachedInput: 30.00 }, // no cache discount
   //   gpt-5.6 (GA 2026-07-09) — 3 tiers Sol/Terra/Luna, 90%-off cached input.
-  //   Plain "gpt-5.6" = Sol (flagship), same rates as 5.5, per the
-  //   plain-key = flagship convention (Codex's default). The tier keys win the
+  //   Plain "gpt-5.6" = Sol (flagship), per the plain-key = flagship
+  //   convention; Codex stamps "gpt-5.6-sol", which matches it. The tier keys win the
   //   longest-substring match for "gpt-5.6-terra" / "gpt-5.6-luna".
-  'gpt-5.6':       { input: 5.00,  output: 30.00,  cachedInput: 0.50 },
-  'gpt-5.6-terra': { input: 2.50,  output: 15.00,  cachedInput: 0.25 },
-  'gpt-5.6-luna':  { input: 1.00,  output: 6.00,   cachedInput: 0.10 },
-  'codex':       { input: 2.00,  output: 8.00 },
+  'gpt-5.6':       { input: 4.00, output: 20.00, cachedInput: 0.40 },
+  'gpt-5.6-terra': { input: 2.00, output: 12.00, cachedInput: 0.20 },
+  'gpt-5.6-luna':  { input: 0.20, output: 1.20, cachedInput: 0.02 },
+  'gpt-6': { input: 2.00, output: 10.00, cachedInput: 0.20 },  // gpt-6 Sol; plain key = flagship
+  'gpt-6-sol': { input: 2.00, output: 10.00, cachedInput: 0.20 },
+  'gpt-6-luna': { input: 0.10, output: 0.50, cachedInput: 0.01 },
+  'gpt-6-astra': { input: 10.00, output: 50.00, cachedInput: 1.00 },
+  'gpt-6.1': { input: 2.00, output: 10.00, cachedInput: 0.10 },  // gpt-6.1 Sol — Codex's default
+  'gpt-6.1-sol': { input: 2.00, output: 10.00, cachedInput: 0.10 },
+  'gpt-6.1-terra': { input: 1.00, output: 5.00, cachedInput: 0.05 },
+  'codex':       { input: 2.00, output: 10.00, cachedInput: 0.10 },
   // Cursor first-party — NA list prices (cursor.com/docs/models-and-pricing,
   // 2026-09). Fast is a speed tier, not a contiguous "grok-4.6-fast"
   // substring of IDs like "cursor-grok-4.6-high-fast", so
@@ -3568,7 +3755,15 @@ function normalizeModelKey(model: string): string {
   return (model || '')
     .toLowerCase()
     .replace(/-\d{4}-\d{2}-\d{2}$/, '')   // OpenAI: gpt-4o-mini-2024-07-18
-    .replace(/-\d{8}$/, '');               // Anthropic: claude-sonnet-4-5-20250929
+    .replace(/-\d{8}$/, '')               // Anthropic: claude-sonnet-4-5-20250929
+    // Anthropic rows use dashed versions ("haiku-4-5"), but Copilot sends
+    // "claude-haiku-4.5" and Cursor "claude-4.5-haiku": both fell to the bare
+    // family row (Haiku 5.5 billed ~8× its rate, Opus 4.1 ~3× under). Only
+    // Claude ids — gpt and gemini keys keep their dots. The reorder is for
+    // version 4+ only, so "claude-3-opus" still reaches its '3-opus' row.
+    .replace(/claude[\w.-]*/, (id) => id
+      .replace(/(\d)\.(\d)/g, '$1-$2')
+      .replace(/^claude-([4-9](?:-\d+)?)-(opus|sonnet|haiku|fable|mythos)\b/, 'claude-$2-$1'));
 }
 
 // Bare-brand keys lose to specific family keys during substring search so
@@ -3620,14 +3815,17 @@ export function resolveModelPricing(
 
 // Cache discount/premium varies by provider:
 //   • Anthropic   — read 0.10×, write 1.25× (5-minute) / 2.00× (1-hour)
-//   • Google      — read 0.25×, no write surcharge
-//   • OpenAI      — read 0.50×, no write surcharge
+//   • Google      — read 0.10×, no write surcharge
+//   • OpenAI      — read 0.10× (gpt-5.x / 6.x), 0.25× (gpt-4.1 / o3 / o4-mini),
+//                   0.50× (gpt-4o / o1 / o3-mini); gpt-5.6 / 6.x writes 1.25×
 // Mirrors cacheMultipliersFor() in apps/api/src/utils/pricing.ts.
 function cacheMultipliersFor(modelKey: string): { read: number; write: number; write1h: number } {
-  if (modelKey.startsWith('gemini')) return { read: 0.25, write: 1.00, write1h: 1.00 };
+  if (modelKey.startsWith('gemini') || modelKey === 'antigravity') return { read: 0.10, write: 1.00, write1h: 1.00 };
+  if (modelKey.startsWith('gpt-5.6') || modelKey.startsWith('gpt-6') || modelKey === 'codex') return { read: 0.10, write: 1.25, write1h: 1.25 };
+  if (modelKey.startsWith('gpt-5')) return { read: 0.10, write: 1.00, write1h: 1.00 };
+  if (modelKey.startsWith('gpt-4.1') || modelKey === 'o3' || modelKey.startsWith('o4')) return { read: 0.25, write: 1.00, write1h: 1.00 };
   if (modelKey.startsWith('gpt-') || modelKey.startsWith('o1') ||
-      modelKey.startsWith('o3') || modelKey.startsWith('o4') ||
-      modelKey === 'codex') return { read: 0.50, write: 1.00, write1h: 1.00 };
+      modelKey.startsWith('o3')) return { read: 0.50, write: 1.00, write1h: 1.00 };
   if (modelKey.startsWith('grok') || modelKey.startsWith('composer') ||
       modelKey === 'cursor' || modelKey === 'auto') return { read: 0.25, write: 1.00, write1h: 1.00 };
   return { read: 0.10, write: 1.25, write1h: 2.00 };

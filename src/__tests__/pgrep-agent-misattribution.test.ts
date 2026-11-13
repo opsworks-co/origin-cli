@@ -62,6 +62,48 @@ describe('copilot process pattern', () => {
   });
 });
 
+// The ChatGPT for Chrome extension installs its native messaging host under
+// ~/.codex/plugins, and Chrome keeps it running. The bare `codex` pattern
+// matched it, so human commits made with no live session were credited to Codex.
+describe('codex process pattern', () => {
+  const CHROME_EXTENSION_HOST =
+    '/Users/someone/.codex/plugins/cache/openai-bundled/chrome/latest/extension-host/macos/arm64/' +
+    'ChatGPT for Chrome chrome-extension://hehggadaopoacecdllhhajmbjkdcmajg/';
+
+  const patterns = () => {
+    const standalone = standalonePgrepChecks().find((c) => c.model === 'codex');
+    const attribution = attributionPgrepChecks().find((c) => c.slug === 'codex');
+    if (!standalone || !attribution) throw new Error('codex checks missing');
+    return [
+      ['standalone', new RegExp(pgrepPattern(standalone.cmd))],
+      ['attribution', new RegExp(pgrepPattern(attribution.cmd))],
+    ] as const;
+  };
+
+  it.each([
+    ['the ChatGPT for Chrome host under ~/.codex/plugins', CHROME_EXTENSION_HOST],
+    ['any other file under ~/.codex', 'node /Users/someone/.codex/tools/helper.js'],
+    ['a checkout whose name only contains codex', 'node /Users/someone/projects/codex-notes/build.js'],
+  ])('does NOT match %s', (_label, cmdline) => {
+    for (const [sweep, re] of patterns()) expect(re.test(cmdline), sweep).toBe(false);
+  });
+
+  it.each([
+    ['bare codex', 'codex'],
+    ['codex exec', 'codex exec --full-auto "fix the tests"'],
+    ['the npm shim run by node', 'node /opt/homebrew/bin/codex'],
+    ['the npm package entry point', 'node /usr/local/lib/node_modules/@openai/codex/bin/codex.js'],
+    [
+      'the native binary inside the npm package',
+      '/usr/local/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex --model gpt-5',
+    ],
+    ['the Windows binary', 'C:\\Users\\someone\\AppData\\Roaming\\npm\\codex.exe exec'],
+    ['the Windows npm entry point', 'node C:\\npm\\node_modules\\@openai\\codex\\bin\\codex.js'],
+  ])('matches %s', (_label, cmdline) => {
+    for (const [sweep, re] of patterns()) expect(re.test(cmdline), sweep).toBe(true);
+  });
+});
+
 describe('uniqueMatchingId — abstain instead of taking the first match', () => {
   const CHECKS = [
     { cmd: 'pgrep -f "copilot"', id: 'copilot' },

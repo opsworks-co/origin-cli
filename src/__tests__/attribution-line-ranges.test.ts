@@ -6,8 +6,27 @@
 // dropped with a reason, and the writer stays commit-level. These tests pin
 // both halves — what gets claimed, and every way a claim is refused.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'child_process';
+
+// The whole-commit rename check of an added path (OR-38 B1): every git call
+// goes to real git; the rename check can be counted, made to fail, or made to
+// run out the projection's deadline.
+const renameCheck = vi.hoisted(() => ({ calls: 0, fail: false, onCall: () => {} }));
+vi.mock('../utils/exec.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../utils/exec.js')>();
+  return {
+    ...real,
+    git: (args: string[], opts?: Parameters<typeof real.git>[1]) => {
+      if (args.includes('--diff-filter=R')) {
+        renameCheck.calls++;
+        renameCheck.onCall();
+        if (renameCheck.fail) throw Object.assign(new Error('spawnSync git ETIMEDOUT'), { code: 'ETIMEDOUT' });
+      }
+      return real.git(args, opts);
+    },
+  };
+});
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -60,6 +79,7 @@ describe('projectCommitLineClaims', () => {
   ) => projectCommitLineClaims({ repoPath: dir, commitSha: sha, turns, binding, soleSessionFiles });
 
   beforeEach(() => {
+    Object.assign(renameCheck, { calls: 0, fail: false, onCall: () => {} });
     dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-line-ranges-')));
     git(dir, 'init', '-q');
     git(dir, 'config', 'user.email', 't@t.co');
@@ -198,17 +218,70 @@ describe('projectCommitLineClaims', () => {
         }
       });
 
-      it('a file a non-root commit adds degrades: it may be a rename nobody captured', () => {
-        // The diff is limited to the edited path, so Git cannot say whether
-        // this "new" file was moved here; replaying it from empty could claim
-        // every moved line. A root commit is the one place a file is surely new.
+      it('a file a non-root commit adds is claimed when the whole commit has no rename onto it', () => {
+        // The commit's patch is limited to the edited path; one rename check
+        // over the whole commit says the file is really new here (OR-38 B1).
         write('fresh.ts', 'one\ntwo\n');
         const sha = commit('new file');
         for (const oldContent of [undefined, '']) {
           const out = project(sha, [turn(0, [toolWrite('fresh.ts', 'one\ntwo\n', { oldContent })])]);
-          expect(out.files).toEqual([]);
-          expect(out.diagnostics).toEqual([{ reason: 'possible_rename', path: 'fresh.ts' }]);
+          expect(out.files).toEqual([{ path: 'fresh.ts', ranges: [{ start_line: 1, end_line: 2, iteration_index: 0 }] }]);
+          expect(out.diagnostics).toEqual([]);
         }
+      });
+
+      it('one rename check per commit, however many files it adds, and none without an add', () => {
+        write('x.ts', 'x\n');
+        write('y.ts', 'y\n');
+        const sha = commit('two new files');
+        const out = project(sha, [turn(0, [toolWrite('x.ts', 'x\n', { oldContent: '' }), toolWrite('y.ts', 'y\n', { oldContent: '' })])]);
+        expect(out.files.map((f) => f.path)).toEqual(['x.ts', 'y.ts']);
+        expect(renameCheck.calls).toBe(1);
+
+        renameCheck.calls = 0;
+        write('a.ts', rows(1, 10).replace('Row 4\n', 'Row four\n'));
+        const edit = commit('edit only');
+        expect(project(edit, [turn(0, [toolEdit('a.ts', 'Row 4', 'Row four')])]).files).toHaveLength(1);
+        expect(renameCheck.calls).toBe(0);
+      });
+
+      it('a real rename from a path nobody captured still degrades', () => {
+        const moved = rows(1, 30);
+        write('lib/old-name.ts', moved);
+        commit('a file to move');
+        git(dir, 'mv', 'lib/old-name.ts', 'lib/new-name.ts');
+        write('lib/new-name.ts', moved + 'Row added\n');
+        const sha = commit('move it and add a line');
+        // The agent's capture names only the destination, as a whole-file write.
+        const out = project(sha, [turn(0, [toolWrite('lib/new-name.ts', moved + 'Row added\n', { oldContent: '' })])]);
+        expect(out.files).toEqual([]);
+        expect(out.diagnostics).toEqual([{ reason: 'possible_rename', path: 'lib/new-name.ts' }]);
+      });
+
+      it('a rename check that fails or times out on its own degrades the add', () => {
+        write('fresh.ts', 'one\ntwo\n');
+        const sha = commit('new file');
+        renameCheck.fail = true;
+        const out = project(sha, [turn(0, [toolWrite('fresh.ts', 'one\ntwo\n', { oldContent: '' })])]);
+        expect(renameCheck.calls).toBe(1);
+        expect(out.files).toEqual([]);
+        expect(out.diagnostics).toEqual([{ reason: 'possible_rename', path: 'fresh.ts' }]);
+      });
+
+      it('a rename check that runs out the projection deadline drops the whole commit, as any timeout does', () => {
+        write('a.ts', rows(1, 10).replace('Row 4\n', 'Row four\n'));
+        write('fresh.ts', 'one\ntwo\n');
+        const sha = commit('edit and new file');
+        let clock = 0;
+        renameCheck.fail = true;
+        renameCheck.onCall = () => { clock = 10_000; };
+        const out = projectCommitLineClaims({
+          repoPath: dir, commitSha: sha, binding: 'post-commit',
+          turns: [turn(0, [toolEdit('a.ts', 'Row 4', 'Row four'), toolWrite('fresh.ts', 'one\ntwo\n', { oldContent: '' })])],
+          deadline: { at: 5_000, now: () => clock },
+        });
+        expect(out.files).toEqual([]);
+        expect(out.diagnostics).toEqual([{ reason: 'timeout' }]);
       });
 
       it('a Write after the turn\'s own Edit is proven against the replayed state', () => {
@@ -602,6 +675,20 @@ describe('projectCommitLineClaims', () => {
       const out = project(mergeSha, [turn(0, [patchEdit])]);
       expect(out.files).toEqual([]);
       expect(out.diagnostics).toContainEqual({ reason: 'merge_commit', path: 'side.ts' });
+    });
+
+    it('a file the merge adds keeps degrading, with no rename check', () => {
+      git(dir, 'checkout', '-q', '-b', 'side3', `${mergeSha}^1`);
+      write('side3.ts', 'side3\n');
+      commit('side3 work');
+      git(dir, 'checkout', '-q', '-');
+      git(dir, 'merge', '-q', '--no-ff', '--no-commit', 'side3');
+      write('merge-new.ts', 'written during the merge\n');
+      const sha = commit('merge side3 with a new file');
+      const out = project(sha, [turn(0, [toolWrite('merge-new.ts', 'written during the merge\n', { op: 'create', oldContent: '' })])]);
+      expect(out.files).toEqual([]);
+      expect(out.diagnostics).toContainEqual({ reason: 'possible_rename', path: 'merge-new.ts' });
+      expect(renameCheck.calls).toBe(0);
     });
 
     it('keeps tool-call lines a first-parent replay proves', () => {

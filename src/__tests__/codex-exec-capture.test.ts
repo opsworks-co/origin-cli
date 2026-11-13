@@ -23,6 +23,15 @@ describe('codex exec capture', () => {
     expect(codexUserPromptText('<recommended_plugins>x</recommended_plugins>\nfix the bug')).toBe('fix the bug');
   });
 
+  it('the apps page the Codex app adds to a turn is not a prompt either', () => {
+    // A whole user-role message from the harness. Taken as prompt 1, it became
+    // the session's memory intent (rc-demo session 16be27f4).
+    expect(codexUserPromptText('<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>')).toBeNull();
+    expect(codexUserPromptText('<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>\nadd an --exclude flag')).toBe('add an --exclude flag');
+    // Clipped at 1000 chars, the closing tag may be gone.
+    expect(codexUserPromptText('<external_codex_apps_open_page>{"page_id":"abc"')).toBeNull();
+  });
+
   it('both rollout parsers see one prompt and the run\'s tokens', () => {
     const stop = parseCodexRollout(FIXTURE_DIR, FIXTURE, '')!;
     const live = parseCodexRolloutLive(path.join(FIXTURE_DIR, FIXTURE))!;

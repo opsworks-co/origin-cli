@@ -105,6 +105,37 @@ export function readSubjectThatCreated(repoPath: string, sha: string): string | 
 }
 
 /**
+ * Every commit HEAD's reflog says a replay CREATED (its oldest entry is a
+ * rebase step, a cherry-pick or `git am`), with its author time in seconds.
+ * One git process for the whole window. Null when the reflog is unreadable.
+ *
+ * The author time survives the replay, so it says when the work was first
+ * committed — for a pick of a commit made before the running turn began,
+ * earlier than the turn. Used where no `post-rewrite` pair names the original
+ * (git hooks not installed): prod f0bf6c29 turn 11 rebased the session's own
+ * v1..v3 onto main and, every copy unattributed, was billed the whole branch.
+ */
+export function replayCreatedCommits(repoPath: string): Map<string, number> | null {
+  if (!repoPath) return null;
+  let out: string;
+  try {
+    out = execFileSync('git', ['reflog', 'show', `-n${REFLOG_WINDOW}`, '--format=%H%x00%at%x00%gs', 'HEAD', '--'], { ...READ, cwd: repoPath });
+  } catch { return null; }
+  // Newest first, so the last entry seen for a sha is the one that created it.
+  const created = new Map<string, { at: number; subject: string }>();
+  for (const line of out.split('\n')) {
+    const [sha = '', at = '', subject = ''] = line.split('\0');
+    if (!/^[a-f0-9]{40,64}$/.test(sha)) continue;
+    created.set(sha, { at: Number(at), subject });
+  }
+  const replays = new Map<string, number>();
+  for (const [sha, { at, subject }] of created) {
+    if (kindOfReflogSubject(subject) && Number.isFinite(at)) replays.set(sha, at);
+  }
+  return replays;
+}
+
+/**
  * A rebase, cherry-pick or `git am` is in progress in this worktree — the
  * commit being prepared right now is one of its replays. For
  * prepare-commit-msg, which runs in the foreground while the markers exist.

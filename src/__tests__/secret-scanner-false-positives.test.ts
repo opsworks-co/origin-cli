@@ -14,7 +14,7 @@
  * pattern is filtered at all.
  */
 import { describe, it, expect } from 'vitest';
-import { isNonSecretAssignmentValue, GENERIC_ASSIGNMENT_RULES, PRE_COMMIT_PATTERNS } from '../commands/hooks.js';
+import { isNonSecretAssignmentValue, isNonSecretAssignmentFinding, GENERIC_ASSIGNMENT_RULES, PRE_COMMIT_PATTERNS } from '../commands/hooks.js';
 
 // Assembled from fragments so no literal secret-shaped string sits in source.
 const mk = (...p: string[]) => p.join('');
@@ -78,9 +78,9 @@ describe('generic assignment rules: still catches real secrets', () => {
 });
 
 describe('the filter is scoped to the generic rules only', () => {
-  it('covers exactly the four name-based assignment rules', () => {
+  it('covers exactly the name-based assignment rules', () => {
     expect([...GENERIC_ASSIGNMENT_RULES].sort()).toEqual([
-      'Key Assignment', 'Password Assignment', 'Secret Assignment', 'Token Assignment',
+      'Hardcoded Password', 'Key Assignment', 'Password Assignment', 'Secret Assignment', 'Token Assignment',
     ]);
   });
 
@@ -96,5 +96,51 @@ describe('the filter is scoped to the generic rules only', () => {
     for (const name of ['AWS Access Key', 'GitHub Token', 'Anthropic Key', 'OpenAI Key', 'Private Key', 'GCP API Key']) {
       expect(GENERIC_ASSIGNMENT_RULES.has(name), name).toBe(false);
     }
+  });
+});
+
+/** What the pre-commit scanner decides for one added line, as handlePreCommit does it. */
+function blocks(file: string, line: string): string[] {
+  const hits: string[] = [];
+  for (const p of PRE_COMMIT_PATTERNS) {
+    const m = p.regex.exec(line);
+    if (!m) continue;
+    if (GENERIC_ASSIGNMENT_RULES.has(p.name) && isNonSecretAssignmentFinding(file, p.name, m)) continue;
+    hits.push(p.name);
+  }
+  return hits;
+}
+
+describe('Hardcoded Password: a variable or property read in code is not a secret', () => {
+  // The exact lines that blocked a real commit (2026-11-08, #2998) and forced --no-verify.
+  it('skips unquoted references in source files', () => {
+    for (const [file, line] of [
+      ['src/read-credential.ts', '    if (a?.password) return { login: a.username, password: a.password };'],
+      ['src/rhodecode-notes.ts', '    password = cred.password;'],
+      ['src/rhodecode-notes.ts', '    password = conn.token;'],
+      ['src/x.test.ts', '      password: opts.password === undefined ? null : opts.password,'],
+      ['src/x.test.ts', '      pendingPassword: opts.pendingPassword ?? null,'],
+      ['src/x.test.ts', '    expect(cred).toEqual({ login: good.username, password: good.password });'],
+      ['app/settings.py', '    password = settings.DB_PASSWORD'],
+      ['src/a.ts', '  const password = process.env.DB_PASS;'],
+    ] as const) {
+      expect(blocks(file, line), line).toEqual([]);
+    }
+  });
+
+  it('still blocks a quoted literal in code', () => {
+    expect(blocks('src/a.ts', `const password = '${mk('hunter2', 'hunter2')}';`)).toContain('Hardcoded Password');
+    expect(blocks('src/a.ts', `login({ password: "${mk('abc.def', 'ghij')}" })`)).toContain('Hardcoded Password');
+  });
+
+  it('still blocks an unquoted value in a config file — there it IS the literal', () => {
+    for (const file of ['.env', 'config/app.yml', 'deploy/settings.ini', 'scripts/run.sh']) {
+      expect(blocks(file, `password=${mk('hunter2', 'hunter2')}`), file).toContain('Hardcoded Password');
+      expect(blocks(file, `password: ${mk('my.pass', '.word')}`), file).toContain('Hardcoded Password');
+    }
+  });
+
+  it('a value that is not an identifier chain still blocks in code', () => {
+    expect(blocks('src/a.ts', `password = ${mk('Xk9', '#pq2!', 'zz')}`)).toContain('Hardcoded Password');
   });
 });

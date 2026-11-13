@@ -27,6 +27,21 @@ describe('a fresh agent environment', () => {
     expect(out).toContain('KEEP_ME=yes');
     for (const k of Object.keys(inherited)) expect(out).not.toContain(`${k}=`);
   });
+
+  // A server has no browser to log in with: `claude setup-token` gives a token
+  // for the environment, and it is how the run signs in, not a session marker.
+  it('keeps the sign-in token from `claude setup-token`', () => {
+    const env = freshAgentEnv({ ...inherited, CLAUDE_CODE_OAUTH_TOKEN: 'tok' });
+    expect(env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: 'tok' });
+  });
+
+  it.skipIf(process.platform === 'win32')('the launch script line keeps that token in a real shell', () => {
+    const out = execFileSync('/bin/sh', ['-c', `${UNSET_AGENT_SESSION_ENV_SH}; env`], {
+      encoding: 'utf-8', env: { ...inherited, PATH: process.env.PATH, CLAUDE_CODE_OAUTH_TOKEN: 'tok' },
+    });
+    expect(out).toContain('CLAUDE_CODE_OAUTH_TOKEN=tok');
+    expect(out).not.toContain('CLAUDE_CODE_CHILD_SESSION=');
+  });
 });
 
 describe('a headless run', () => {
@@ -35,6 +50,10 @@ describe('a headless run', () => {
     expect(isHeadlessRun(env)).toBe(true);
     expect(env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS).toBe(String(HEADLESS_SESSION_END_BUDGET_MS));
     expect(env.CLAUDE_CODE_CHILD_SESSION).toBeUndefined();
+  });
+
+  it('keeps the sign-in token, so a runner on a server can use a subscription', () => {
+    expect(headlessAgentEnv({ CLAUDE_CODE_OAUTH_TOKEN: 'tok' }).CLAUDE_CODE_OAUTH_TOKEN).toBe('tok');
   });
 
   it('its marker does not leak into a run started from inside it', () => {

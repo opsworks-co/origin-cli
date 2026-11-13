@@ -189,6 +189,20 @@ describe('mapCommitsToPromptsFromRollout — turn-scoped commit attribution', ()
     expect(m.get('abc1234')).toBe(0);
   });
 
+  it('does not count the harness\'s injected messages as turns — the apps page, plugins, multi-agent mode', () => {
+    // Capture skips these (codexUserPromptText); counting them here put every
+    // later commit one turn too late.
+    const rollout = [
+      userMsg('<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>'),
+      userMsg('<recommended_plugins>x</recommended_plugins>'),
+      userMsg('<multi_agent_mode>on</multi_agent_mode>'),
+      userMsg('real user prompt'),
+      shellOutput('[main abc1234] commit'),
+    ].join('\n');
+
+    expect(mapCommitsToPromptsFromRollout(rollout).get('abc1234')).toBe(0);
+  });
+
   it('skips outputs that appear before any user message (avoids -1 promptIndex)', () => {
     const rollout = [
       shellOutput('[main abc1234] commit before any prompt'),

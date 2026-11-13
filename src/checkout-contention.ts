@@ -97,6 +97,14 @@ export function neverRanATurn(state: {
  * Anything not provably that shape — an open `activeTurn`, a prompt newer than
  * the close, a session whose hooks record no close — returns undefined and the
  * peer still counts.
+ *
+ * Nor is a Stop proof of quiet when the closing turn launched a background job
+ * (`run_in_background`): the job keeps writing through the shared tree after
+ * the Stop, and nothing it writes is stamped on the peer. No hook reports the
+ * job's end, so a peer whose last turn launched one is never idle — it stays a
+ * rival until PEER_ACTIVE_WINDOW_MS after its last own activity, like any peer
+ * with a turn open. A job launched in an EARLIER turn and still writing after a
+ * later turn's Stop is not seen; neither is a job that outlives that window.
  */
 export function peerIdleSinceMs(state: Record<string, unknown>): number | undefined {
   if (state.activeTurn) return undefined;
@@ -108,6 +116,13 @@ export function peerIdleSinceMs(state: Record<string, unknown>): number | undefi
   if (closed === undefined) return undefined;
   const opened = ms(state.currentTurnStartedAt);
   if (opened !== undefined && opened > closed) return undefined;
+  if (Array.isArray(state.backgroundJobs)) {
+    for (const j of state.backgroundJobs) {
+      const t = ms((j as { at?: unknown } | null)?.at);
+      // Launched by the closing turn — or by a turn whose start went unrecorded.
+      if (t !== undefined && (opened === undefined || t >= opened)) return undefined;
+    }
+  }
   if (Array.isArray(state.promptSubmittedAt)) {
     for (const p of state.promptSubmittedAt) {
       const t = ms(p);

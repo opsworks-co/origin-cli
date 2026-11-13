@@ -459,6 +459,9 @@ export interface VerifiableTurn {
    * again instead of silently excused.
    */
   fileSetOnly?: boolean;
+  /** `diff` is a commit patch; with more than one `patchCommits` it is one section per branch, joined. */
+  commitPatch?: boolean;
+  patchCommits?: string[] | null;
   /**
    * Files the turn's OWN hook-attested tool calls changed — a Claude Code /
    * Cursor Edit or Write the post-tool-use hook saw succeed, with content that
@@ -517,7 +520,13 @@ export function verifyTurn(turn: VerifiableTurn): CaptureViolation[] {
   const committed = parseUnifiedDiff(turn.diff);
   const working = parseUnifiedDiff(turn.uncommittedDiff);
 
-  const dupes = [...committed.duplicateFiles, ...working.duplicateFiles];
+  // A commit patch made of several commits joins each branch's own diff
+  // (commit-patch-for-committed-turn.ts), so a file two branches both changed
+  // appears once per branch by design — normalizeTurnDiff's `commitPieces`
+  // keeps them, and the row's counts sum them. Session 3b9133fb turn 9 bumped
+  // packages/cli/package.json on two PR branches and read as a suspect here.
+  const commitPieces = turn.commitPatch === true && (turn.patchCommits?.length ?? 0) > 1;
+  const dupes = [...(commitPieces ? [] : committed.duplicateFiles), ...working.duplicateFiles];
   if (dupes.length > 0) {
     add('duplicate_file_section', 'suspect',
       `${dupes.length} file(s) carry more than one section in one stored diff — `

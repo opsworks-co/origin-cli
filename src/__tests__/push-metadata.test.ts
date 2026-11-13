@@ -563,6 +563,7 @@ describe('publish runner: outcomes and the identity probe', () => {
     const r = runner();
     expect(publishAttributionNotes(local, 'upstream', { now: r.now, exec: r.exec }).status).toBe('pushed');
     expect(r.verbs()).not.toContain('var GIT_COMMITTER_IDENT');
-    expect(r.ran).toHaveLength(3); // rev-parse, remote get-url, push
+    // rev-parse, remote get-url, push, then rev-parse --git-common-dir: is there a refusal to forget (none here)?
+    expect(r.ran).toHaveLength(4);
   });
 });

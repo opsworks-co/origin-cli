@@ -72,8 +72,8 @@ describe('Anthropic Fable 5 pricing — $10/$50, not the bare-claude fallback', 
 
   it('bare "gemini" and gpt-5.5-pro cache reads price at their own rows', () => {
     // 'gemini' had no row and fell to the Sonnet default with Anthropic cache rates.
-    expect(estimateCost('gemini', ONE_MILLION, ONE_MILLION)).toBeCloseTo(11.25, 4);
-    expect(estimateCost('gemini', 0, 0, ONE_MILLION, 0)).toBeCloseTo(0.3125, 4);
+    expect(estimateCost('gemini', ONE_MILLION, ONE_MILLION)).toBeCloseTo(14, 4);
+    expect(estimateCost('gemini', 0, 0, ONE_MILLION, 0)).toBeCloseTo(0.2, 4);
     // gpt-5.5-pro has no cache discount — cached input is the full $30/M.
     expect(estimateCost('gpt-5.5-pro', 0, 0, ONE_MILLION, 0)).toBeCloseTo(30, 4);
   });
@@ -177,9 +177,9 @@ describe('Google Gemini pricing', () => {
     expect(lite).toBeCloseTo(0.10, 4);
   });
 
-  it('uses Gemini cache discount (0.25×) not Anthropic (0.10×)', () => {
-    // 1M cache-read on Gemini 2.5 Pro → 0.25 × $1.25 = $0.3125
-    expect(estimateCost('gemini-2.5-pro', 0, 0, ONE_MILLION, 0)).toBeCloseTo(0.3125, 4);
+  it('uses the Gemini cache discount (0.10×, re-checked 2026-10-28)', () => {
+    // 1M cache-read on Gemini 2.5 Pro → 0.10 × $1.25 = $0.125
+    expect(estimateCost('gemini-2.5-pro', 0, 0, ONE_MILLION, 0)).toBeCloseTo(0.125, 4);
   });
 
   it('does NOT surcharge cache writes on Gemini', () => {
@@ -189,19 +189,19 @@ describe('Google Gemini pricing', () => {
 });
 
 describe('OpenAI GPT-5 / Codex pricing', () => {
-  it('GPT-5 charges $2 input / $8 output per 1M', () => {
-    expect(estimateCost('gpt-5', ONE_MILLION, 0)).toBeCloseTo(2, 4);
-    expect(estimateCost('gpt-5', 0, ONE_MILLION)).toBeCloseTo(8, 4);
+  it('GPT-5 charges $1.25 input / $10 output per 1M', () => {
+    expect(estimateCost('gpt-5', ONE_MILLION, 0)).toBeCloseTo(1.25, 4);
+    expect(estimateCost('gpt-5', 0, ONE_MILLION)).toBeCloseTo(10, 4);
   });
 
-  it('GPT-5.4 charges $3 input / $12 output per 1M', () => {
-    expect(estimateCost('gpt-5.4', ONE_MILLION, 0)).toBeCloseTo(3, 4);
-    expect(estimateCost('gpt-5.4', 0, ONE_MILLION)).toBeCloseTo(12, 4);
+  it('GPT-5.4 charges $2.50 input / $15 output per 1M', () => {
+    expect(estimateCost('gpt-5.4', ONE_MILLION, 0)).toBeCloseTo(2.5, 4);
+    expect(estimateCost('gpt-5.4', 0, ONE_MILLION)).toBeCloseTo(15, 4);
   });
 
-  it('Codex prices identically to GPT-5', () => {
+  it('bare "codex" prices as its current default, gpt-6.1 Sol ($2/$10)', () => {
     expect(estimateCost('codex', ONE_MILLION, 0)).toBeCloseTo(2, 4);
-    expect(estimateCost('codex', 0, ONE_MILLION)).toBeCloseTo(8, 4);
+    expect(estimateCost('codex', 0, ONE_MILLION)).toBeCloseTo(10, 4);
   });
 
   it('GPT-4o-mini matches longer key before GPT-4o', () => {
@@ -214,9 +214,9 @@ describe('OpenAI GPT-5 / Codex pricing', () => {
     expect(estimateCost('gpt-4o-2024-08-06', ONE_MILLION, 0)).toBeCloseTo(2.50, 4);
   });
 
-  it('uses OpenAI cache discount (0.50×) not Anthropic (0.10×)', () => {
-    // 1M cache-read on GPT-5 → 0.50 × $2 = $1.00 (not $0.20 if Anthropic rate)
-    expect(estimateCost('gpt-5', 0, 0, ONE_MILLION, 0)).toBeCloseTo(1.0, 4);
+  it('uses the OpenAI cache discount for the family (gpt-5.x: 0.10×)', () => {
+    // 1M cache-read on GPT-5 → $0.125
+    expect(estimateCost('gpt-5', 0, 0, ONE_MILLION, 0)).toBeCloseTo(0.125, 4);
   });
 });
 
@@ -246,6 +246,6 @@ describe('Cursor NA first-party pricing', () => {
 
   it('Claude/GPT/Gemini used inside Cursor stay on provider API rates', () => {
     expect(estimateCost('cursor-claude-sonnet-4-5', ONE_MILLION, 0)).toBeCloseTo(3, 4);
-    expect(estimateCost('cursor-gpt-5', ONE_MILLION, 0)).toBeCloseTo(2, 4);
+    expect(estimateCost('cursor-gpt-5', ONE_MILLION, 0)).toBeCloseTo(1.25, 4);
   });
 });

@@ -564,8 +564,11 @@ export interface ProjectCommitLineClaimsInput {
  * same commit costs nothing. Git applies a pathspec BEFORE rename detection, so
  * a rename is seen only when the capture names both sides (`oldPath`). Any
  * other path the commit adds may be the far side of a rename nobody captured:
- * its lines could be moved ones, so outside a root commit it degrades with
- * `possible_rename` instead of replaying from an empty file.
+ * its lines could be moved ones. A root commit adds for certain; an ordinary
+ * commit is asked once more over the whole commit (renameTargetsOf), and only
+ * a path that is not a rename target there replays from an empty file. A
+ * rename target, an unreadable answer and every add in a merge degrade with
+ * `possible_rename`.
  */
 export function projectCommitLineClaims(input: ProjectCommitLineClaimsInput): CommitLineProjection {
   const diagnostics: ProjectionDiagnostic[] = [];
@@ -626,6 +629,9 @@ export function projectCommitLineClaims(input: ProjectCommitLineClaimsInput): Co
       return empty();
     }
     const parentRev = parents[0] ?? null;
+    // Rename targets of the whole commit, read at most once and only when an
+    // added path needs them (see renameTargetsOf). undefined: not read yet.
+    let renameTargets: Set<string> | null | undefined;
 
     const files: ProjectedLineFile[] = [];
     for (const fd of parseCommitPatch(patch)) {
@@ -639,8 +645,14 @@ export function projectCommitLineClaims(input: ProjectCommitLineClaimsInput): Co
       if (fd.path === null) continue; // deleted: no new-side lines, nothing to claim
       if (!isCanonicalRepoPath(fd.path)) { drop('unsafe_path', fd.path); continue; }
       // Added here, paired with no captured old side: possibly a rename the
-      // limited diff cannot see. Only a root commit adds for certain.
-      if (fd.oldPath === null && parents.length > 0) { drop('possible_rename', fd.path); continue; }
+      // limited diff cannot see. A root commit adds for certain; an ordinary
+      // commit adds for certain when the whole commit's rename detection does
+      // not pair the path with anything. A merge keeps the old rule.
+      if (fd.oldPath === null && parents.length > 0) {
+        if (parents.length > 1) { drop('possible_rename', fd.path); continue; }
+        if (renameTargets === undefined) renameTargets = renameTargetsOf(repoPath, parents[0], commitSha, deadline);
+        if (renameTargets === null || renameTargets.has(fd.path)) { drop('possible_rename', fd.path); continue; }
+      }
       if (fd.path.toLowerCase().endsWith('.ipynb')) { drop('notebook', fd.path); continue; }
       if (fd.nonText) { drop('binary_or_unreadable', fd.path); continue; }
       if (fd.addedLines.size === 0) { drop('not_new_side', fd.path); continue; }
@@ -658,6 +670,44 @@ export function projectCommitLineClaims(input: ProjectCommitLineClaimsInput): Co
     drop(err instanceof ProjectionTimeout ? 'timeout' : 'commit_unreadable');
     return { files: [], diagnostics };
   }
+}
+
+/**
+ * The paths a non-merge commit gets by renaming another path, over the WHOLE
+ * commit: the commit's own patch is limited to the captured paths, so it
+ * cannot see a rename whose source nobody captured. Same `-M` threshold as
+ * that patch; `-l0` makes the detection exhaustive, so git never silently
+ * skips it on a large commit and reports a rename as an add. Bounded by the
+ * deadline like every other git call here.
+ *
+ * null when it cannot be said — git failed, printed something unexpected, or
+ * hit its own timeout: every add then stays `possible_rename` (fail closed).
+ * Out of the whole budget is a ProjectionTimeout, as everywhere else.
+ */
+function renameTargetsOf(
+  repoPath: string,
+  parent: string,
+  commitSha: string,
+  deadline: ProjectionDeadline | undefined,
+): Set<string> | null {
+  let out: string;
+  try {
+    out = git(['diff-tree', '-r', '-M', '-l0', '--diff-filter=R', '--name-status', '-z', '--no-ext-diff', parent, commitSha],
+      { cwd: repoPath, timeoutMs: gitTimeoutMs(deadline, 15_000), maxBuffer: 32 * 1024 * 1024 });
+  } catch (err) {
+    if (err instanceof ProjectionTimeout) throw err;
+    checkDeadline(deadline);
+    return null;
+  }
+  // -z --name-status: "R<score>\0<old>\0<new>\0" per rename.
+  const fields = out.split('\0');
+  if (fields[fields.length - 1] === '') fields.pop();
+  const targets = new Set<string>();
+  for (let i = 0; i < fields.length; i += 3) {
+    if (!/^R\d*$/.test(fields[i]) || i + 2 >= fields.length) return null;
+    targets.add(fields[i + 2]);
+  }
+  return targets;
 }
 
 /** A path git must match exactly: no glob, no `:(magic)`, whatever it starts with. */

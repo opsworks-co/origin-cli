@@ -39,6 +39,8 @@ const SECRET_PATTERNS: SecretPattern[] = [
   { name: 'DB Connection', regex: /\b((?:postgres|mysql|mongodb|redis):\/\/[^\s'"]+)\b/g },
   // Generic high-entropy secrets
   { name: 'Bearer Token', regex: /\b(Bearer\s+[A-Za-z0-9_\-.]{20,})\b/g },
+  // Git password Origin generates for hosted repos: ogp_ + 43 base64url characters.
+  { name: 'Origin Git Password', regex: /(?<![A-Za-z0-9_-])(ogp_[A-Za-z0-9_-]{43})(?![A-Za-z0-9_-])/g },
   // npm tokens
   { name: 'npm Token', regex: /\b(npm_[A-Za-z0-9]{36,})\b/g },
   // Heroku: only match UUIDs on lines with Heroku context

@@ -34,13 +34,36 @@ function isDistinctiveLine(c: string): boolean {
   return c.replace(/[^A-Za-z0-9_]/g, '').length >= 4;
 }
 
-function collect(patch: string, marker: '+' | '-'): Set<string> {
-  const head = marker === '+' ? '+++' : '---';
-  const out = new Set<string>();
+// The lines a patch adds (or removes), per file. A recorded line only counts
+// against the same file: OR-23 v1 (3265d18a3) was stamped with another
+// repository's session on generic test and import lines from other files.
+const WORKTREE_PREFIX = /^\.claude\/worktrees\/[^/]+\//;
+
+function collect(patch: string, marker: '+' | '-', headerless: string | null = null): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  // Lines before any file header belong to `headerless`, when the caller knows it.
+  let file: string | null = headerless;
+  let inHunk = false;
   for (const ln of (patch || '').split('\n')) {
-    if (!ln.startsWith(marker) || ln.startsWith(head)) continue;
+    if (ln.startsWith('@@')) { inHunk = true; continue; }
+    // Inside a hunk `--- x` is a removed `-- x`, unless it names a file.
+    const header = /^(?:\+\+\+|---) /.test(ln) && (!inHunk || /^(?:\+\+\+|---) (?:[ab]\/|\/dev\/null)/.test(ln));
+    if (header) {
+      inHunk = false;
+      // The file is the post-image path; a deletion names it on the `---` side.
+      const p = ln.slice(4).trim();
+      if (p !== '/dev/null' && (ln.startsWith('+++ ') || file === null)) {
+        file = p.replace(/^[ab]\//, '').replace(WORKTREE_PREFIX, '');
+      }
+      continue;
+    }
+    if (ln.startsWith('diff --git ')) { file = null; inHunk = false; continue; }
+    if (!ln.startsWith(marker) || file === null) continue;
     const c = ln.slice(1).trim();
-    if (isDistinctiveLine(c)) out.add(c);
+    if (!isDistinctiveLine(c)) continue;
+    let set = out.get(file);
+    if (!set) out.set(file, set = new Set());
+    set.add(c);
   }
   return out;
 }
@@ -59,6 +82,25 @@ export function recentlyEndedSessionsForTree(
   opts: { now?: number; mirrorDir?: string } = {},
 ): SessionState[] {
   if (!tree) return [];
+  return endedSessionsWhere((st) => [
+    st.repoPath, (st as any).lastCwd, (st as any).canonicalRepoPath,
+    ...((st.discoveredWorkTrees || []).map((w) => w?.path)),
+  ].some((c) => typeof c === 'string' && c.length > 0 && samePath(c, tree)), opts);
+}
+
+/** Sessions homed in another repository that ENDED after reaching this tree (foreign-trees.ts). */
+export function recentlyEndedSessionsReachingTree(
+  tree: string,
+  opts: { now?: number; mirrorDir?: string } = {},
+): SessionState[] {
+  if (!tree) return [];
+  return endedSessionsWhere((st) => (st.foreignTrees || []).some((e) => samePath(e.path, tree)), opts);
+}
+
+function endedSessionsWhere(
+  accept: (st: SessionState) => boolean,
+  opts: { now?: number; mirrorDir?: string },
+): SessionState[] {
   const now = opts.now ?? Date.now();
   const dir = opts.mirrorDir ?? path.join(os.homedir(), '.origin', 'sessions');
   let entries: string[];
@@ -76,12 +118,7 @@ export function recentlyEndedSessionsForTree(
     const endedAt = st.endedAt ? Date.parse(st.endedAt) : NaN;
     if (!((st as any).status === 'ENDED' || st.endedAt) || !Number.isFinite(endedAt)) continue;
     if (now - endedAt > ENDED_SESSION_LOOKBACK_MS || endedAt > now) continue;
-    const claims = [
-      st.repoPath, (st as any).lastCwd, (st as any).canonicalRepoPath,
-      ...((st.discoveredWorkTrees || []).map((w) => w?.path)),
-    ].filter((p): p is string => typeof p === 'string' && p.length > 0);
-    if (!claims.some((c) => samePath(c, tree))) continue;
-    out.push(st);
+    if (accept(st)) out.push(st);
   }
   return out;
 }
@@ -98,17 +135,21 @@ export interface EndedSessionOwner {
  * The ended session whose recorded lines the staged patch adds — or null when
  * none did, or two did equally (a coin flip is not evidence).
  *
- * A line counts when the patch adds it (or a line containing it) and does not
- * also remove it: a line on both sides existed before, so matching it is
- * observation, not authorship.
+ * A line counts when the patch adds it (or a line containing it) IN THE SAME
+ * FILE the session recorded it in, and does not also remove it there: a line
+ * on both sides existed before, so matching it is observation, not authorship.
+ * The session must hold more than half of the patch's added lines.
  */
 export function pickEndedSessionByContent(
   candidates: SessionState[],
   stagedPatch: string,
 ): EndedSessionOwner | null {
   const added = collect(stagedPatch, '+');
-  if (added.size === 0) return null;
   const removed = collect(stagedPatch, '-');
+  let total = 0;
+  for (const lines of added.values()) total += lines.size;
+  if (total === 0) return null;
+  const none = new Set<string>();
   const scored: EndedSessionOwner[] = [];
   for (const state of candidates) {
     const lines = new Set<string>();
@@ -116,12 +157,22 @@ export function pickEndedSessionByContent(
     for (const pm of state.completedPromptMappings || []) {
       if (!Number.isInteger(pm?.promptIndex)) continue;
       let hit = false;
-      for (const l of collect(`${pm.uncommittedDiff || ''}\n${pm.diff || ''}`, '+')) {
-        if (holdsLine(added, l) && !holdsLine(removed, l)) { lines.add(l); hit = true; }
+      // A diff recorded without file headers can only be placed by a turn that
+      // changed one file.
+      const files = (pm.filesChanged || []).filter((f) => typeof f === 'string' && f.length > 0);
+      const lone = files.length === 1 ? files[0].replace(WORKTREE_PREFIX, '') : null;
+      for (const [file, recorded] of collect(`${pm.uncommittedDiff || ''}\n${pm.diff || ''}`, '+', lone)) {
+        const staged = added.get(file);
+        if (!staged) continue;
+        for (const l of recorded) {
+          if (holdsLine(staged, l) && !holdsLine(removed.get(file) || none, l)) { lines.add(`${file}\0${l}`); hit = true; }
+        }
       }
       if (hit) promptIndexes.push(pm.promptIndex);
     }
-    if (lines.size > 0) scored.push({ state, promptIndexes: [...new Set(promptIndexes)].sort((a, b) => a - b), matchedLines: lines.size });
+    // The trailer names ONE session for the whole commit, so that session must
+    // hold most of it. OR-23 v1: 8 lines of 116 were enough to stamp it.
+    if (lines.size * 2 > total) scored.push({ state, promptIndexes: [...new Set(promptIndexes)].sort((a, b) => a - b), matchedLines: lines.size });
   }
   if (scored.length === 0) return null;
   scored.sort((a, b) => b.matchedLines - a.matchedLines);

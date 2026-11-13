@@ -94,7 +94,43 @@ describe.skipIf(process.platform === 'win32')('Codex Stop hook timeout', () => {
     expect(repaired).toMatch(/^hooks = false$/m);
     // The hooks that did not change keep the trust they had.
     const start = originStart(JSON.parse(fs.readFileSync(hooksPath(), 'utf-8')));
-    expect(repaired).toContain(trustLine('session_start', trustedHash('session_start', start.command, 10)));
+    expect(repaired).toContain(trustLine('session_start', trustedHash('session_start', start.command, 120)));
+  });
+
+  // SessionStart registers the session. At 10s Codex killed it in about half
+  // the starts on a busy machine (median 9.4s), and the run then worked with
+  // no session: origin 195f4834 carried no Origin-Session stamp and was later
+  // credited to another session. Both prompt-time hooks now get 120s.
+  it('installs SessionStart and UserPromptSubmit with room to register, and trusts exactly that', () => {
+    installCodexHooks(home);
+    const doc = JSON.parse(fs.readFileSync(hooksPath(), 'utf-8'));
+    const start = originStart(doc);
+    const submit = (doc.hooks.UserPromptSubmit as any[]).flatMap((g) => g.hooks).find((h: any) => String(h.command).includes('hooks codex user-prompt-submit'));
+    expect(start.timeout).toBe(120);
+    expect(submit.timeout).toBe(120);
+    const toml = fs.readFileSync(tomlPath(), 'utf-8');
+    expect(toml).toContain(trustLine('session_start', trustedHash('session_start', start.command, 120)));
+    expect(toml).toContain(trustLine('user_prompt_submit', trustedHash('user_prompt_submit', submit.command, 120)));
+  });
+
+  it('a drift repair of a 10s SessionStart install rewrites it to 120s and re-trusts it', () => {
+    installCodexHooks(home);
+    const doc = JSON.parse(fs.readFileSync(hooksPath(), 'utf-8'));
+    const start = originStart(doc);
+    start.timeout = 10;
+    fs.writeFileSync(hooksPath(), JSON.stringify(doc, null, 2) + '\n');
+    const oldHash = trustedHash('session_start', start.command, 10);
+    const newHash = trustedHash('session_start', start.command, 120);
+    fs.writeFileSync(tomlPath(), fs.readFileSync(tomlPath(), 'utf-8').replace(newHash, oldHash));
+
+    const report = checkHookConfigs(home).find((r) => r.agent === 'codex');
+    expect(report?.state).toBe('stale');
+    repairHookConfig(report!);
+
+    expect(originStart(JSON.parse(fs.readFileSync(hooksPath(), 'utf-8'))).timeout).toBe(120);
+    const repaired = fs.readFileSync(tomlPath(), 'utf-8');
+    expect(repaired).toContain(trustLine('session_start', newHash));
+    expect(repaired).not.toContain(oldHash);
   });
 });
 

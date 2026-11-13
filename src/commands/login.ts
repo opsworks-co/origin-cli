@@ -8,6 +8,7 @@ import { clearReloginLock } from '../api.js';
 import { ownerFromConfig, stampUnstampedQueuedSessions, listForeignQueuedSessions, currentOwner } from '../session-owner.js';
 import { processPendingForeignAction } from './sessions.js';
 import chalk from 'chalk';
+import { setupGitCredentialHelper } from './git-credential.js';
 
 // Clear ephemeral heartbeat files. These are transient, account-agnostic
 // liveness records — stale ones from a previous account are useless and
@@ -236,6 +237,7 @@ export async function loginCommand(opts: { key?: string; token?: string; url?: s
       console.log(chalk.gray(`  Config saved to ~/.origin/config.json`));
       await processPendingForeignAction();
       printForeignSessionHint();
+      await setupGitCredentialHelper();
       process.exit(0);
     } catch (err: any) {
       console.log(chalk.yellow(`\n⚠ Browser login didn't complete: ${err.message}`));
@@ -366,6 +368,7 @@ export async function loginCommand(opts: { key?: string; token?: string; url?: s
     console.log(chalk.gray(`  Config saved to ~/.origin/config.json`));
     await processPendingForeignAction();
     printForeignSessionHint();
+    await setupGitCredentialHelper();
   } catch (err: any) {
     console.log(chalk.red(`✗ Failed to connect: ${err.message}`));
     process.exit(1);

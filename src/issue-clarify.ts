@@ -121,7 +121,8 @@ export async function sessionOnThisComputer(agent: IssueAgent, agentSessionId: s
 /** How much of a long project folder name Claude Code keeps before its hash suffix (it keeps 200; match on less). */
 const CLAUDE_SLUG_PREFIX = 180;
 
-export interface PreflightResult { ready: boolean; brief: string; questions: string[] }
+/** `suggestions[i]`: the agent's best answer to `questions[i]` ('' when it had none). */
+export interface PreflightResult { ready: boolean; brief: string; questions: string[]; suggestions?: string[] }
 
 /** How long the pre-start pass may take before the run starts without it. */
 export const PREFLIGHT_TIMEOUT_MS = 4 * 60_000;

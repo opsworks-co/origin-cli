@@ -6,7 +6,7 @@
 // recorded pid is dead.
 
 import { describe, it, expect } from 'vitest';
-import { parentLooksDead, heartbeatSuperseded, isServerTerminalDefinitive, turnInProgress, OPEN_TURN_MAX_MS } from '../heartbeat-liveness.js';
+import { parentLooksDead, heartbeatSuperseded, isServerTerminalDefinitive, turnInProgress, OPEN_TURN_MAX_MS, branchToReport } from '../heartbeat-liveness.js';
 
 // A healthy terminal agent: recorded pid alive.
 const ALIVE = {
@@ -258,5 +258,37 @@ describe('stateFileTakenOver', () => {
     expect(orphan).toBeGreaterThan(-1);
     const next = src.indexOf('async function endSession', orphan);
     expect(src.slice(orphan, next)).not.toContain('stateData');
+  });
+});
+
+// Prod 9c1f8b8d: the session sat idle (last turn closed 16:09) while chat
+// 6531b13f took over the same worktree at 17:05 and checked out its own
+// branch; this session's ping reported that HEAD, and the server overwrote its
+// branch with one none of its work was on.
+describe('branchToReport', () => {
+  const NOW = 1_000_000_000_000;
+
+  it('THE BUG: an idle session does not report the HEAD another session checked out', () => {
+    const idle = { currentTurnStartedAt: NOW - 60 * 60_000, lastTurnClosedAt: NOW - 55 * 60_000 };
+    expect(branchToReport(idle, 'claude/repo-full-name-display-a3bc9e', NOW)).toBeNull();
+  });
+
+  it('reports the branch while its own turn is open — the agent switched it', () => {
+    const working = { currentTurnStartedAt: NOW - 5 * 60_000, lastTurnClosedAt: NOW - 30 * 60_000 };
+    expect(branchToReport(working, 'feature/x', NOW)).toBe('feature/x');
+  });
+
+  it('a turn that died without a Stop stops reporting once the open-turn cap lapses', () => {
+    const dead = { currentTurnStartedAt: NOW - OPEN_TURN_MAX_MS - 1 };
+    expect(branchToReport(dead, 'feature/x', NOW)).toBeNull();
+  });
+
+  it('an agent whose hooks never stamp a turn keeps the plain backstop', () => {
+    expect(branchToReport({}, 'feature/x', NOW)).toBe('feature/x');
+    expect(branchToReport(null, 'feature/x', NOW)).toBe('feature/x');
+  });
+
+  it('no HEAD branch → nothing to report', () => {
+    expect(branchToReport({}, null, NOW)).toBeNull();
   });
 });

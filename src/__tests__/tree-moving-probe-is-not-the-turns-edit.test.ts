@@ -20,7 +20,8 @@
  * The journal channel already treated every touched file of a tree-moving
  * command as git's (`moved` includes `touched`); the probe recorded the same
  * files as the turn's. One rule now: a file a tree-moving command moved is
- * the turn's only when the command NAMED it.
+ * the turn's only when the command NAMED it — unless the command copied it
+ * from a revision this branch never had (a reviewer's PR checkout, 16ec04f9).
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'child_process';
@@ -119,6 +120,24 @@ describe('a rebase the turn ran is not the turn\'s edit', () => {
       git('checkout', '-q', 'main');
     });
     expect(probeEdits(state).map((e: any) => e.file)).toEqual(['notes.md']);
+  });
+
+  it('paths explicitly checked out from a revision are git\'s even though the command names them', () => {
+    const state = stateAtTurnStart();
+    run(state, 'review', 'git checkout feat/audit -- settings.ts scheduler.ts audit.ts', () => {
+      git('checkout', 'feat/audit', '--', 'settings.ts', 'scheduler.ts', 'audit.ts');
+    });
+
+    expect(probeEdits(state)).toEqual([]);
+    expect([...gitMovedFilesForTurn(state, 0, repo)].sort()).toEqual(['audit.ts', 'scheduler.ts', 'settings.ts']);
+  });
+
+  it('a path checked out from the branch\'s own history stays the turn\'s', () => {
+    const state = stateAtTurnStart();
+    // main~1 is `base`, an ancestor of feat/trackers: the turn reverting a file.
+    run(state, 'revert', 'git checkout main~1 -- settings.ts', () => git('checkout', 'main~1', '--', 'settings.ts'));
+
+    expect(probeEdits(state).map((e: any) => e.file)).toEqual(['settings.ts']);
   });
 
   it('an earlier command\'s real edit survives a later rebase that moves the same file', () => {

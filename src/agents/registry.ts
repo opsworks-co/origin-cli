@@ -69,7 +69,13 @@ export const AGENTS: AgentDefinition[] = [
   { slug: 'opencode', displayName: 'Opencode',    modelPattern: /opencode/i,                     attributionPgrep: 'pgrep -f "opencode"',                    standalonePgrep: 'pgrep -f "opencode"' },
   { slug: 'aider',    displayName: 'Aider',       modelPattern: /aider/i,                        attributionPgrep: 'pgrep -f "aider"',                       standalonePgrep: 'pgrep -f "bin/aider|aider.*--model"', hooks: 'repo-only' },
   { slug: 'devin',    displayName: 'Devin',       modelPattern: /devin|windsurf|codeium|cascade|swe-?\d/i, attributionPgrep: 'pgrep -f "devin"', legacyToolIds: ['windsurf'], hooks: 'global' },
-  { slug: 'codex',    displayName: 'Codex',       modelPattern: /codex/i,                        attributionPgrep: 'pgrep -f "codex"',                       standalonePgrep: 'pgrep -f "codex"', hooks: 'global' },
+  // `codex` must be a command-line TOKEN too (same trap as Copilot above). The
+  // bare `codex` substring matched `~/.codex/plugins/…/ChatGPT for Chrome`, the
+  // browser extension's native host, which runs whenever Chrome is open — so
+  // every human commit with no live session was tagged `detected-codex-*`.
+  // A dot before `codex` (the `~/.codex` dir) is not a token boundary; `\` and
+  // `.exe` cover the Windows snapshot (`C:\…\codex.exe exec`).
+  { slug: 'codex',    displayName: 'Codex',       modelPattern: /codex/i,                        attributionPgrep: 'pgrep -f "(^|[ /\\\\])codex(\\.exe)?( |$)|@openai[/\\\\]codex"', standalonePgrep: 'pgrep -f "(^|[ /\\\\])codex(\\.exe)?( |$)|@openai[/\\\\]codex"', hooks: 'global' },
   { slug: 'gemini',   displayName: 'Gemini CLI',  modelPattern: /gemini|google/i,                attributionPgrep: 'pgrep -f "gemini.*cli|/gemini "',        standalonePgrep: 'pgrep -f "gemini.*cli|bin/gemini"', hooks: 'global' },
   { slug: 'antigravity', displayName: 'Antigravity', hooks: 'global' },
   { slug: 'claude',   displayName: 'Claude Code', modelPattern: /claude|anthropic|sonnet|opus|haiku/i, attributionPgrep: 'pgrep -f "claude.*stream-json"',    standalonePgrep: 'pgrep -f "claude.*stream-json"', toolId: 'claude-code', hooks: 'global' },

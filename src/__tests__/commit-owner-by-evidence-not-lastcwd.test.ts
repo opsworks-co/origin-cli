@@ -77,11 +77,17 @@ describe('post-commit: lastCwd is a tie-break after the file evidence', () => {
     const r = pickSessionForCommit([root, sub] as any[], { commitFiles: ['packages/cli/src/a.ts'], hookCwd: '/repo' });
     expect([r.session?.sessionId, r.reason]).toEqual(['sub', 'file-overlap']);
   });
-  it('with no overlap, the exact cwd decides', () => {
+  it('with no overlap, the exact cwd decides between sessions that may own it', () => {
+    const root = { ...mk('root', '/repo', ['README.md']), activeTurn: { index: 1 } };
+    const sub = { ...mk('sub', '/repo/packages/cli', ['other.ts']), activeTurn: { index: 2 } };
+    const r = pickSessionForCommit([root, sub] as any[], { commitFiles: ['new.md'], hookCwd: '/repo' });
+    expect([r.session?.sessionId, r.reason]).toEqual(['root', 'cwd']);
+  });
+  it('the cwd does not hand a commit to an idle session whose turns never touched it (test2 2694a61b)', () => {
     const root = mk('root', '/repo', ['README.md']);
     const sub = mk('sub', '/repo/packages/cli', ['other.ts']);
     const r = pickSessionForCommit([root, sub] as any[], { commitFiles: ['new.md'], hookCwd: '/repo' });
-    expect([r.session?.sessionId, r.reason]).toEqual(['root', 'cwd']);
+    expect([r.session, r.reason]).toEqual([null, 'no-evidence']);
   });
   it('two sessions at the cwd is still ambiguous', () => {
     const a = mk('a', '/repo', []); const b = mk('b', '/repo', []);

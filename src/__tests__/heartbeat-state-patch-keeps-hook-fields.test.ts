@@ -3,11 +3,12 @@
 // Its three writers (budget flags, policy rules, Codex prompt mirror) now go
 // through patchSessionStateFile: read inside the hooks' lock, change only
 // their own fields, rename into place.
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { patchSessionStateFile, withSessionStateLock } from '../session-state-lock.js';
+import { TransientFsRetryExhaustedError } from '../transient-fs.js';
 
 let dir: string;
 let file: string;
@@ -22,6 +23,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   process.env.HOME = home;
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -54,6 +56,55 @@ describe('patchSessionStateFile', () => {
     patchSessionStateFile(file, (s) => { s.x = 'y'.repeat(10_000); return true; });
     expect(read().x.length).toBe(10_000);
     expect(fs.readdirSync(dir).filter((f) => f.includes('.tmp.'))).toEqual([]);
+  });
+
+  it('retries a transient Windows refusal while replacing the state file', () => {
+    const realRename = fs.renameSync.bind(fs);
+    let refusals = 0;
+    vi.spyOn(fs, 'renameSync').mockImplementation(((from: any, to: any) => {
+      if (to === file && refusals++ < 2) throw Object.assign(new Error('held by reader'), { code: 'EPERM' });
+      return realRename(from, to);
+    }) as any);
+
+    expect(patchSessionStateFile(file, (s) => { s.patched = true; return true; })).toBe(true);
+    expect(read().patched).toBe(true);
+    expect(refusals).toBe(3);
+  });
+
+  it('retries a transient Windows refusal while reading the state file', () => {
+    const realRead = fs.readFileSync.bind(fs);
+    let attempts = 0;
+    vi.spyOn(fs, 'readFileSync').mockImplementation(((target: any, ...args: any[]) => {
+      if (target === file && attempts++ < 2) throw Object.assign(new Error('held by reader'), { code: 'EBUSY' });
+      return (realRead as any)(target, ...args);
+    }) as any);
+
+    expect(patchSessionStateFile(file, (s) => { s.patched = true; return true; })).toBe(true);
+    expect(attempts).toBe(3);
+  });
+
+  it('propagates read contention that outlasts the retry budget', () => {
+    const realRead = fs.readFileSync.bind(fs);
+    vi.spyOn(fs, 'readFileSync').mockImplementation(((target: any, ...args: any[]) => {
+      if (target === file) throw Object.assign(new Error('file remains held'), { code: 'EACCES' });
+      return (realRead as any)(target, ...args);
+    }) as any);
+    let now = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => (now += 600));
+
+    expect(() => patchSessionStateFile(file, () => true)).toThrow(TransientFsRetryExhaustedError);
+  });
+
+  it('removes its temp file when replacement contention outlasts the retry budget', () => {
+    vi.spyOn(fs, 'renameSync').mockImplementation(() => {
+      throw Object.assign(new Error('target remains held'), { code: 'EPERM' });
+    });
+    let now = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => (now += 600));
+
+    expect(() => patchSessionStateFile(file, (s) => { s.patched = true; return true; }))
+      .toThrow(TransientFsRetryExhaustedError);
+    expect(fs.existsSync(`${file}.tmp.${process.pid}`)).toBe(false);
   });
 
   it('runs inside the same lock the hooks take', () => {

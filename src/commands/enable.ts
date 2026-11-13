@@ -1,12 +1,14 @@
 import crypto from 'crypto';
 import { syncNotesFromRemote } from '../git-notes.js';
-import { CAPTURE_REWRITES, backgroundedWithRewrites, withRewritesOnStdin } from '../post-rewrite-hook-stdin.js';
+import { CAPTURE_REWRITES, detachedWithRewrites, withRewritesOnStdin } from '../post-rewrite-hook-stdin.js';
+import { DETACH_MARKER, detachedLaunch, hasUnsyncedDetach, indentFragment, syncDetach } from '../hook-detach.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { throughLiveInstall } from '../live-install-path.js';
 import chalk from 'chalk';
+import { setupGitCredentialHelper } from './git-credential.js';
 import { execSync, execFileSync } from 'child_process';
 import { run, runDetailed, findExecutable } from '../utils/exec.js';
 import { isWindows } from '../utils/platform.js';
@@ -16,6 +18,7 @@ import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
 import { mcpAgentsForEnable, installMcpForAgent, mcpServerCommand, mcpCapable } from '../mcp/install.js';
 import { recordEnabledRepo } from '../enabled-repos.js';
+import { ensureStatusLine } from './statusline.js';
 import { hookToolIds, recognizedHookToolIds } from '../agents/registry.js';
 import { CHAINED_HOOKS_PATH_SETTING, PREVIOUS_HOOKS_PATH_FILE, rememberPreviousHooksPath } from '../global-hooks-path.js';
 
@@ -208,7 +211,7 @@ function resolveWindowsShortPath(p: string): string | null {
   }
 }
 
-function originCmd(cmd: string): string {
+export function originCmd(cmd: string): string {
   if (isWindows()) {
     // The POSIX `PATH=dir:$PATH origin …` shim is invalid under cmd/PowerShell,
     // which is what agents run their hooks-json `command`/`bash` field through
@@ -273,11 +276,34 @@ export function posixPathShim(binDir: string, cmd: string): string {
 // platform. Pass `agent` to scope to one agent's entries; omit to match any.
 // The agent list comes from the registry (hook agents + legacy ids like
 // `windsurf`), so a new hook agent is recognized without editing this regex.
-export const ORIGIN_HOOK_COMMAND_TAIL = new RegExp(`\\bhooks (${recognizedHookToolIds().join('|')})\\b`);
+//
+// `hooks <agent>` alone is not enough: any other tool's `<tool> hooks
+// claude-code stop` matched, and enable/disable then deleted that tool's hook
+// as Origin's. So the tail must follow Origin's own launcher token, checked by
+// a lookbehind so the match still STARTS at `hooks` (stripLauncherPaths slices
+// from there):
+//   - `origin`, `origin.cmd`, `origin.exe` as a whole token — at the start, or
+//     after a space, `/`, `\` or a quote (bare, PATH shim, absolute path,
+//     PowerShell `& '…\origin'`). `my-origin` is not a token boundary.
+//   - a `.js` script path (Windows `node.exe <entry>` and PowerShell
+//     `& '<node>' '<entry>'` forms). Any script name, not just
+//     `dist/index.js`: resolveCliEntry trusts whatever real .js argv[1] the
+//     CLI ran from, so that is what enable may have written.
+// An optional closing quote (`"`, `'`, or `\"` in raw JSON text, which the
+// health check scans) may sit between the launcher and the whitespace.
+const ORIGIN_LAUNCHER_BEFORE_HOOKS =
+  String.raw`(?<=(?:(?:^|[\s/\\"'])origin(?:\.cmd|\.exe)?|[/\\][^\s"'/\\]+\.js)(?:\\?["'])?\s+)`;
+
+export const ORIGIN_HOOK_COMMAND_TAIL = new RegExp(
+  `${ORIGIN_LAUNCHER_BEFORE_HOOKS}hooks (${recognizedHookToolIds().join('|')})\\b`,
+);
 
 export function isOriginHookCommand(cmd: unknown, agent?: string): boolean {
   if (typeof cmd !== 'string') return false;
-  if (agent) return cmd.includes(`hooks ${agent} `) || cmd.endsWith(`hooks ${agent}`);
+  if (agent) {
+    const id = agent.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`${ORIGIN_LAUNCHER_BEFORE_HOOKS}hooks ${id}(?: |$)`).test(cmd);
+  }
   return ORIGIN_HOOK_COMMAND_TAIL.test(cmd);
 }
 
@@ -463,10 +489,20 @@ function cascadeHookEvents(): Record<string, any[]> {
 // re-runs and rewrites both the entry and its trusted_hash.
 export const CODEX_STOP_HOOK_TIMEOUT_SEC = 600;
 
+// SessionStart and UserPromptSubmit had 10s, and Codex kills them the same way.
+// SessionStart registers the session; on this machine it ran 9.4s at the median
+// and over 10s in 11 of 23 starts (2026-10-28, max 20s). A killed start leaves
+// Codex working with no session: its commits get no Origin-Session stamp, and
+// 195f4834 (an `origin issue start` Codex run, `hook: SessionStart Failed`) was
+// later credited to another session. UserPromptSubmit spikes to 27-55s on this
+// repo (see the shadow capture). 120s covers both with room and still bounds a
+// hang — Claude Code gives the same hooks its 60s default.
+export const CODEX_PROMPT_HOOK_TIMEOUT_SEC = 120;
+
 function codexHookEvents(): Record<string, any[]> {
   return {
-    SessionStart: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex session-start'), timeout: 10 }] }],
-    UserPromptSubmit: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex user-prompt-submit'), timeout: 10 }] }],
+    SessionStart: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex session-start'), timeout: CODEX_PROMPT_HOOK_TIMEOUT_SEC }] }],
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex user-prompt-submit'), timeout: CODEX_PROMPT_HOOK_TIMEOUT_SEC }] }],
     Stop: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex stop'), timeout: CODEX_STOP_HOOK_TIMEOUT_SEC }] }],
   };
 }
@@ -637,6 +673,19 @@ export function agentDisplayName(agent: AgentType): string {
 }
 
 /** Re-run an agent's full installer (hooks plus everything else `enable` wires). */
+/**
+ * Claude Code shows plan limits only to its status line, so Origin becomes the
+ * status line (the user's own still runs and shows). Global, whichever repo
+ * was enabled: the status line is a per-user setting. Never fails enable.
+ */
+export function enableClaudeStatusLine(): void {
+  try {
+    if (ensureStatusLine(originCmd('origin statusline'))) {
+      console.log(chalk.gray('    • Plan limits — 5-hour and weekly use, via the status line (origin statusline --uninstall to stop)'));
+    }
+  } catch { /* plan limits are a nicety; capture is what enable is for */ }
+}
+
 export function reinstallAgentHooks(agent: AgentType, basePath: string): void {
   AGENTS[agent].installHooks(basePath);
 }
@@ -1746,6 +1795,7 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
     console.log(chalk.gray('    • Session start/end — lifecycle tracking'));
     console.log(chalk.gray('    • Prompt capture — real user prompts'));
     console.log(chalk.gray('    • Turn end — files, tokens, tool calls'));
+    if (agentType === 'claude-code') enableClaudeStatusLine();
   }
 
   // Remember this repo so a later `origin upgrade` can reach its hook files.
@@ -1948,6 +1998,7 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
   }
 
   console.log(chalk.green(`\n✓ Origin session tracking enabled${isGlobal ? ' globally' : ''}.\n`));
+  if (connected) await setupGitCredentialHelper();
 
   // Loud, explicit heads-up when enabling WITHOUT being logged in. In this
   // state Origin runs standalone: it captures sessions to local state but
@@ -2021,7 +2072,7 @@ export function originBinCandidates(bin: string = resolveOriginBin()): string[] 
  * precedence, so nothing changes on macOS/Linux — the Windows candidates are
  * only consulted after both have missed.
  */
-function hookShimPreamble(): string {
+export function hookShimPreamble(): string {
   const candidates = originBinCandidates();
   const embedded = candidates.length
     ? candidates.map((c) => `  "${shDoubleQuoteEscape(c)}" \\\n`).join('').replace(/ \\\n$/, '')
@@ -2075,6 +2126,28 @@ if [ "$NODE_USE_SYSTEM_CA" = "1" ] && [ "$(uname -s 2>/dev/null)" = "Darwin" ] &
   NODE_USE_SYSTEM_CA=0; export NODE_USE_SYSTEM_CA
   ORIGIN_KEYCHAIN_SKIPPED=1
 fi`;
+
+/** Add the shared hook preamble to an Origin-marked local hook written before it existed. */
+export function upgradeLocalHookPreamble(hookPath: string, originMarker: string): boolean {
+  if (!fs.existsSync(hookPath)) return false;
+  const existing = fs.readFileSync(hookPath, 'utf-8');
+  if (existing.includes(KEYCHAIN_GUARD_MARKER)) return false;
+  // Origin's marker is a whole line of its own, written once. A user's line
+  // that merely contains it (`# origin-post-checkout TODO`) is not it, and
+  // Origin's block comes after the user's when it was appended: take the last.
+  const lines = existing.split('\n');
+  let at = -1;
+  lines.forEach((line, i) => { if (line.trimEnd() === originMarker) at = i; });
+  if (at < 0) return false;
+  lines.splice(at, 0, hookShimPreamble());
+  fs.writeFileSync(hookPath, lines.join('\n'));
+  fs.chmodSync(hookPath, '755');
+  return true;
+}
+
+function localHookBlock(originMarker: string, body: string): string {
+  return `${hookShimPreamble()}\n${originMarker}\n${body}`;
+}
 
 /**
  * Run a hook that can block the git command, then exit with its code if it
@@ -2266,9 +2339,10 @@ if [ "$3" != "1" ]; then exit 0; fi
 
 ${hookShimPreamble()}
 
-# Backgrounded: a slow network must never hold up someone's clone.
+# Detached: a slow network must never hold up someone's clone, and an agent
+# that kills what git left running must not take the fetch with it.
 if [ -n "$ORIGIN_BIN" ]; then
-  "$ORIGIN_BIN" hooks git-post-checkout "$1" "$2" "$3" >/dev/null 2>&1 &
+  ${indentFragment(detachedLaunch('"$ORIGIN_BIN" hooks git-post-checkout "$1" "$2" "$3"'), '  ')}
 fi
 
 ${chainUserHooks('post-checkout')}
@@ -2293,10 +2367,10 @@ if [ -n "$ORIGIN_BIN" ]; then
   # Resolve the commit NOW, before backgrounding: the agent can move HEAD
   # (\`git checkout -B\`, a reset) before a backgrounded \`rev-parse HEAD\` runs.
   _origin_commit_sha="\$(git rev-parse HEAD 2>/dev/null)"
-  # Redirect stdout/stderr to /dev/null so the backgrounded child doesn't
+  # Redirect stdout/stderr to /dev/null so the detached child doesn't
   # inherit git's stdout fd. Otherwise it holds the write-end of a
   # \`git commit | tee\` pipe open and tee stalls until origin exits.
-  ORIGIN_COMMIT_SHA="$_origin_commit_sha" "$ORIGIN_BIN" hooks git-post-commit >/dev/null 2>&1 &
+  ${indentFragment(detachedLaunch('ORIGIN_COMMIT_SHA="$_origin_commit_sha" "$ORIGIN_BIN" hooks git-post-commit'), '  ')}
 fi
 
 ${chainUserHooks('post-commit')}
@@ -2322,9 +2396,8 @@ ${hookShimPreamble()}
 ${CAPTURE_REWRITES}
 
 if [ -n "$ORIGIN_BIN" ]; then
-  # Redirect so the backgrounded child doesn't hold git's stdout fd open
-  # (same \`git commit | tee\` / pipe-stall reason as post-commit).
-  ${backgroundedWithRewrites('"$ORIGIN_BIN" hooks git-post-rewrite "$@"')}
+  # Detached, with git's pairs handed over in a file — see detachedWithRewrites.
+  ${indentFragment(detachedWithRewrites('"$ORIGIN_BIN" hooks git-post-rewrite "$@"'), '  ')}
 fi
 
 ${chainUserHooks('post-rewrite', { feed: withRewritesOnStdin })}
@@ -2357,11 +2430,11 @@ export function writeGlobalPostMergeHook(globalHooksDir: string): void {
 
 ${hookShimPreamble()}
 
-# Backgrounded with stdout/stderr closed: the child must not inherit git's
+# Detached with stdout/stderr closed: the child must not inherit git's
 # stdout fd, or a \`git pull | tee\` stalls until origin exits (same trap the
 # post-commit hook documents).
 if [ -n "$ORIGIN_BIN" ]; then
-  "$ORIGIN_BIN" hooks git-post-merge >/dev/null 2>&1 &
+  ${indentFragment(detachedLaunch('"$ORIGIN_BIN" hooks git-post-merge'), '  ')}
 fi
 
 ${chainUserHooks('post-merge')}
@@ -2431,26 +2504,66 @@ ${chainUserHooks(hook, { gate: true, feed: withPrePushStdin })}
 }
 
 /**
- * Rewrite each Origin-written global hook that predates KEYCHAIN_GUARD or the
- * repo chain (REPO_CHAIN_MARKER). Only files carrying their own
+ * Rewrite each Origin-written global hook that predates KEYCHAIN_GUARD, the
+ * repo chain (REPO_CHAIN_MARKER) or, for a hook that starts the CLI, the
+ * detached launch (DETACH_MARKER). Only files carrying their own
  * `# origin-global-<hook>` header are touched — a user's script in the same dir
  * is left alone. Returns the hooks rewritten.
  */
+/** Global hooks that start the CLI detached (hook-detach.ts). */
+const DETACHED_HOOKS = new Set(['post-commit', 'post-checkout', 'post-merge', 'post-rewrite']);
+
 export function upgradeOutdatedGlobalHooks(globalHooksDir: string): string[] {
   const upgraded: string[] = [];
   for (const [hook, write] of Object.entries(GLOBAL_HOOK_WRITERS)) {
     try {
       const content = fs.readFileSync(path.join(globalHooksDir, hook), 'utf-8');
-      if (!content.includes(`# origin-global-${hook}\n`)) continue;
-      if (content.includes(KEYCHAIN_GUARD_MARKER) && content.includes(REPO_CHAIN_MARKER)) continue;
-      write(globalHooksDir);
-      upgraded.push(hook);
+      if (content.includes(`# origin-global-${hook}\n`)) {
+        if (!isOutdatedGlobalHook(hook, content)) continue;
+        write(globalHooksDir);
+        upgraded.push(hook);
+        continue;
+      }
+      for (const name of movedGlobalHooks(globalHooksDir, hook, content)) {
+        if (!isOutdatedGlobalHook(hook, fs.readFileSync(path.join(globalHooksDir, name), 'utf-8'))) continue;
+        rewriteMovedGlobalHook(path.join(globalHooksDir, name), hook, write);
+        upgraded.push(name);
+      }
     } catch { /* missing or unreadable — the install paths above own that */ }
   }
   return upgraded;
 }
 
-function installGlobalGitHooks(): void {
+function isOutdatedGlobalHook(hook: string, content: string): boolean {
+  return !content.includes(KEYCHAIN_GUARD_MARKER) || !content.includes(REPO_CHAIN_MARKER)
+    || (DETACHED_HOOKS.has(hook) && (!content.includes(DETACH_MARKER) || hasUnsyncedDetach(content)));
+}
+
+/**
+ * Origin's script after another tool took its place: Entire renames post-commit
+ * to post-commit.pre-entire and runs that from its own post-commit, so only the
+ * renamed file still starts the capture. A sibling counts only when the hook in
+ * place names it and it carries Origin's header, which leaves backups alone.
+ */
+function movedGlobalHooks(globalHooksDir: string, hook: string, hookInPlace: string): string[] {
+  return fs.readdirSync(globalHooksDir).filter((name) => {
+    if (!name.startsWith(`${hook}.`) || !hookInPlace.includes(name)) return false;
+    return fs.readFileSync(path.join(globalHooksDir, name), 'utf-8').includes(`# origin-global-${hook}\n`);
+  });
+}
+
+/** The writers only know a hook's own name, so the new script is written aside first. */
+function rewriteMovedGlobalHook(target: string, hook: string, write: (dir: string) => void): void {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-hook-'));
+  try {
+    write(scratch);
+    fs.writeFileSync(target, fs.readFileSync(path.join(scratch, hook)));
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+export function installGlobalGitHooks(): void {
   const globalHooksDir = path.join(os.homedir(), '.origin', 'git-hooks');
 
   // Create global hooks directory
@@ -2610,6 +2723,7 @@ export function ensurePolicyHookInstalled(gitRoot: string): { installed: boolean
       try {
         const existing = fs.readFileSync(hookPath, 'utf-8');
         if (existing.includes(ORIGIN_MARKER)) {
+          upgradeLocalHookPreamble(hookPath, ORIGIN_MARKER);
           return { installed: false, reason: 'already-installed' };
         }
       } catch { /* unreadable — fall through and try to install */ }
@@ -2626,10 +2740,10 @@ export function ensurePolicyHookInstalled(gitRoot: string): { installed: boolean
       backupExistingHooks(hookPath);
       // After the shebang, not appended: a user hook ending in `exit 0` never
       // reached an appended line. `|| exit $?` keeps a failed scan blocking.
-      const block = `${ORIGIN_MARKER}\n${hookScript} || exit $?\n`;
+      const block = localHookBlock(ORIGIN_MARKER, `${hookScript} || exit $?\n`);
       fs.writeFileSync(hookPath, insertHookBlockAfterShebang(fs.readFileSync(hookPath, 'utf-8'), block));
     } else {
-      const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript}\n`;
+      const content = `#!/bin/sh\n${localHookBlock(ORIGIN_MARKER, `${hookScript}\n`)}`;
       fs.writeFileSync(hookPath, content);
     }
     fs.chmodSync(hookPath, '755');
@@ -2658,6 +2772,7 @@ export function installGitPreCommitHook(gitRoot: string): void {
   if (fs.existsSync(hookPath)) {
     const existing = fs.readFileSync(hookPath, 'utf-8');
     if (existing.includes(ORIGIN_MARKER)) {
+      upgradeLocalHookPreamble(hookPath, ORIGIN_MARKER);
       console.log(chalk.gray('  ✓ Git pre-commit hook already installed'));
       return;
     }
@@ -2665,10 +2780,10 @@ export function installGitPreCommitHook(gitRoot: string): void {
     // Pre-commit must run synchronously (not &) — exit code blocks commit.
     // Inserted after the shebang (a user hook ending in `exit 0` never reaches
     // an appended line), so `|| exit $?` carries a failed scan out.
-    const block = `${ORIGIN_MARKER}\n${hookScript} || exit $?\n`;
+    const block = localHookBlock(ORIGIN_MARKER, `${hookScript} || exit $?\n`);
     fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing, block));
   } else {
-    const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript}\n`;
+    const content = `#!/bin/sh\n${localHookBlock(ORIGIN_MARKER, `${hookScript}\n`)}`;
     fs.writeFileSync(hookPath, content);
   }
 
@@ -2681,8 +2796,8 @@ export function installGitPreCommitHook(gitRoot: string): void {
 // git hands commit-msg the NEW message as $1 — pre-commit runs before it is
 // written. Synchronous: a non-zero exit blocks the commit.
 
-/** Install (or leave) Origin's lines in `<hooksDir>/commit-msg`. True when written. */
-function ensureLocalCommitMsgHook(hooksDir: string): boolean {
+/** Install (or leave) Origin's lines in `<hooksDir>/commit-msg`. False when already current. */
+function ensureLocalCommitMsgHook(hooksDir: string): 'installed' | 'upgraded' | false {
   const hookPath = path.join(hooksDir, 'commit-msg');
   const ORIGIN_MARKER = '# origin-commit-msg';
   const hookScript = originCmd(`origin hooks git-commit-msg "$1"`);
@@ -2692,20 +2807,25 @@ function ensureLocalCommitMsgHook(hooksDir: string): boolean {
   }
   if (fs.existsSync(hookPath)) {
     const existing = fs.readFileSync(hookPath, 'utf-8');
-    if (existing.includes(ORIGIN_MARKER)) return false;
+    if (existing.includes(ORIGIN_MARKER)) {
+      return upgradeLocalHookPreamble(hookPath, ORIGIN_MARKER) ? 'upgraded' : false;
+    }
     backupExistingHooks(hookPath);
     // After the shebang (a user hook ending in `exit 0` never reaches an
     // appended line); `|| exit $?` keeps a violation blocking.
-    fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing, `${ORIGIN_MARKER}\n${hookScript} || exit $?\n`));
+    fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing,
+      localHookBlock(ORIGIN_MARKER, `${hookScript} || exit $?\n`)));
   } else {
-    fs.writeFileSync(hookPath, `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript}\n`);
+    fs.writeFileSync(hookPath, `#!/bin/sh\n${localHookBlock(ORIGIN_MARKER, `${hookScript}\n`)}`);
   }
   fs.chmodSync(hookPath, '755');
-  return true;
+  return 'installed';
 }
 
 export function installGitCommitMsgHook(gitRoot: string): void {
-  if (ensureLocalCommitMsgHook(path.join(gitRoot, '.git', 'hooks'))) {
+  // An upgrade only adds the shared preamble — still "already installed",
+  // like the other hooks.
+  if (ensureLocalCommitMsgHook(path.join(gitRoot, '.git', 'hooks')) === 'installed') {
     console.log(chalk.green('  ✓ Git commit-msg hook installed (commit message policies)'));
   } else {
     console.log(chalk.gray('  ✓ Git commit-msg hook already installed'));
@@ -2735,13 +2855,15 @@ export function installGitPrepareCommitMsgHook(gitRoot: string): void {
   if (fs.existsSync(hookPath)) {
     const existing = fs.readFileSync(hookPath, 'utf-8');
     if (existing.includes(ORIGIN_MARKER)) {
+      upgradeLocalHookPreamble(hookPath, ORIGIN_MARKER);
       console.log(chalk.gray('  ✓ Git prepare-commit-msg hook already installed'));
       return;
     }
     // After the shebang: a user hook ending in `exit 0` never reaches an appended line.
-    fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing, `${ORIGIN_MARKER}\n${hookScript}\n`));
+    fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing,
+      localHookBlock(ORIGIN_MARKER, `${hookScript}\n`)));
   } else {
-    const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript}\n`;
+    const content = `#!/bin/sh\n${localHookBlock(ORIGIN_MARKER, `${hookScript}\n`)}`;
     fs.writeFileSync(hookPath, content);
   }
 
@@ -2749,12 +2871,11 @@ export function installGitPrepareCommitMsgHook(gitRoot: string): void {
   console.log(chalk.green('  ✓ Git prepare-commit-msg hook installed (session trailer)'));
 }
 
-/** Marker of a post-commit hook script that hands the committed sha to the capture. */
-export const POST_COMMIT_SHA_MARKER = 'ORIGIN_COMMIT_SHA=';
+export { DETACH_MARKER, detachedLaunch } from '../hook-detach.js';
 
-/** The local post-commit hook's Origin lines: resolve the sha synchronously, then background. */
+/** The local post-commit hook's Origin lines: resolve the sha synchronously, then detach. */
 export function localPostCommitLines(hookScript: string): string {
-  return `_origin_commit_sha="$(git rev-parse HEAD 2>/dev/null)"\nORIGIN_COMMIT_SHA="$_origin_commit_sha" ${hookScript} >/dev/null 2>&1 &\n`;
+  return `_origin_commit_sha="$(git rev-parse HEAD 2>/dev/null)"\n${detachedLaunch(`ORIGIN_COMMIT_SHA="$_origin_commit_sha" ${hookScript}`)}\n`;
 }
 
 /**
@@ -2768,7 +2889,11 @@ export function upgradePostCommitHookScript(hookPath: string, kind: 'global' | '
   try {
     if (!fs.existsSync(hookPath)) return false;
     const existing = fs.readFileSync(hookPath, 'utf-8');
-    if (existing.includes(POST_COMMIT_SHA_MARKER)) return false;
+    if (hasUnsyncedDetach(existing)) {
+      fs.writeFileSync(hookPath, syncDetach(existing));
+      return true;
+    }
+    if (existing.includes(DETACH_MARKER)) return false;
     if (kind === 'global') {
       if (!existing.includes('# origin-global-post-commit')) return false;
       writeGlobalPostCommitHook(path.dirname(hookPath));
@@ -2779,12 +2904,16 @@ export function upgradePostCommitHookScript(hookPath: string, kind: 'global' | '
     if (at < 0) return false;
     const lineStart = existing.indexOf('\n', at);
     if (lineStart < 0) return false;
-    const lineEnd = existing.indexOf('\n', lineStart + 1);
-    const oldLine = existing.slice(lineStart + 1, lineEnd < 0 ? undefined : lineEnd);
-    if (!/hooks git-post-commit/.test(oldLine)) return false;
+    // Origin's lines after the marker: the launch alone (before the sha was
+    // passed in), or the sha line and the backgrounded launch.
+    const lines = existing.slice(lineStart + 1).split('\n');
+    let taken = 0;
+    if (/^_origin_commit_sha=/.test(lines[taken] ?? '')) taken++;
+    if (!/hooks git-post-commit/.test(lines[taken] ?? '')) return false;
+    taken++;
+    const rest = lines.slice(taken).join('\n');
     const hookScript = originCmd(`origin hooks git-post-commit`);
-    const updated = existing.slice(0, lineStart + 1) + localPostCommitLines(hookScript)
-      + (lineEnd < 0 ? '' : existing.slice(lineEnd + 1));
+    const updated = existing.slice(0, lineStart + 1) + localPostCommitLines(hookScript) + rest;
     fs.writeFileSync(hookPath, updated);
     fs.chmodSync(hookPath, '755');
     return true;
@@ -2807,7 +2936,8 @@ export function installGitPostCommitHook(gitRoot: string): void {
   if (fs.existsSync(hookPath)) {
     const existing = fs.readFileSync(hookPath, 'utf-8');
     if (existing.includes(ORIGIN_MARKER)) {
-      if (upgradePostCommitHookScript(hookPath, 'local')) {
+      const preambleUpgraded = upgradeLocalHookPreamble(hookPath, ORIGIN_MARKER);
+      if (upgradePostCommitHookScript(hookPath, 'local') || preambleUpgraded) {
         console.log(chalk.green('  ✓ Git post-commit hook upgraded (passes the committed sha)'));
       } else {
         console.log(chalk.gray('  ✓ Git post-commit hook already installed'));
@@ -2819,11 +2949,11 @@ export function installGitPostCommitHook(gitRoot: string): void {
     // uncaptured. Redirect the backgrounded child so it doesn't inherit git's
     // stdout fd and stall a `git commit | tee` pipe (same fix as the global
     // post-commit hook).
-    const block = `${ORIGIN_MARKER}\n${localPostCommitLines(hookScript)}`;
+    const block = localHookBlock(ORIGIN_MARKER, localPostCommitLines(hookScript));
     fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing, block));
   } else {
     // Create new hook file
-    const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${localPostCommitLines(hookScript)}`;
+    const content = `#!/bin/sh\n${localHookBlock(ORIGIN_MARKER, localPostCommitLines(hookScript))}`;
     fs.writeFileSync(hookPath, content);
   }
 
@@ -2850,17 +2980,18 @@ export function installGitPrePushHook(gitRoot: string): void {
   if (fs.existsSync(hookPath)) {
     const existing = fs.readFileSync(hookPath, 'utf-8');
     if (existing.includes(ORIGIN_MARKER)) {
+      upgradeLocalHookPreamble(hookPath, ORIGIN_MARKER);
       console.log(chalk.gray('  ✓ Git pre-push hook already installed'));
       return;
     }
     // Backup, then insert after the shebang: a user hook ending in `exit 0`
     // never reaches an appended line. `|| exit $?` keeps a push block blocking.
     backupExistingHooks(hookPath);
-    const block = `${ORIGIN_MARKER}\n${hookScript} || exit $?\n`;
+    const block = localHookBlock(ORIGIN_MARKER, `${hookScript} || exit $?\n`);
     fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing, block));
   } else {
     // Create new hook file
-    const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript}\n`;
+    const content = `#!/bin/sh\n${localHookBlock(ORIGIN_MARKER, `${hookScript}\n`)}`;
     fs.writeFileSync(hookPath, content);
   }
 
@@ -2884,7 +3015,7 @@ export function installGitPrePushHook(gitRoot: string): void {
 // authoritative for commits it annotated itself — installs the persistent
 // refspec, fetches once so existing attribution lands now, and strips the legacy
 // clobbering refspec if an older release left one behind.
-function configureNotesRefspecAndFetch(repoPath: string): void {
+export function configureNotesRefspecAndFetch(repoPath: string): void {
   try {
     const remotesRaw = runDetailed('git', ['remote'], { cwd: repoPath, timeoutMs: 3000 });
     const remote = (remotesRaw.stdout || '').trim().split('\n')[0].trim();

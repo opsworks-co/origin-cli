@@ -13,6 +13,7 @@ import {
   installGitPrepareCommitMsgHook,
   installGitPostCommitHook,
   installGitPrePushHook,
+  KEYCHAIN_GUARD_MARKER,
 } from '../commands/enable.js';
 import { installRewriteHooks } from '../history-preservation.js';
 import { insertHookBlockAfterShebang } from '../utils/hook-insert.js';
@@ -24,6 +25,11 @@ const HOOKS = [
   { file: 'post-commit', marker: '# origin-post-commit', install: installGitPostCommitHook },
   { file: 'pre-push', marker: '# origin-pre-push', install: installGitPrePushHook },
   { file: 'post-checkout', marker: '# origin-post-checkout', install: installRewriteHooks },
+];
+
+const HISTORY_HOOKS = [
+  { file: 'post-rewrite', marker: '# origin-post-rewrite' },
+  { file: 'post-checkout', marker: '# origin-post-checkout' },
 ];
 
 const USER_HOOK = '#!/bin/sh\n# USER_LOGIC\necho "user ran" >> "$USER_EVIDENCE"\nexit 0\n';
@@ -61,10 +67,45 @@ describe('repo-local hooks: an existing user hook ending in `exit 0`', () => {
     install(repo); // re-running enable must not duplicate the block
 
     const final = fs.readFileSync(hookPath(file), 'utf-8');
-    expect(final.startsWith(`#!/bin/sh\n${marker}\n`)).toBe(true);
+    expect(final.startsWith('#!/bin/sh\n')).toBe(true);
+    expect(final.indexOf(marker)).toBeLessThan(final.indexOf('# USER_LOGIC'));
     expect(final.split(marker).length - 1).toBe(1);
+    expect(final.split(KEYCHAIN_GUARD_MARKER).length - 1).toBe(1);
     // The user's script is intact, in order, after Origin's block.
     expect(final.endsWith(USER_HOOK.slice('#!/bin/sh\n'.length))).toBe(true);
+  });
+
+  it('both history-preservation hooks contain one guard after reinstalls', () => {
+    installRewriteHooks(repo);
+    installRewriteHooks(repo);
+    for (const { file, marker } of HISTORY_HOOKS) {
+      const final = fs.readFileSync(hookPath(file), 'utf-8');
+      expect(final.split(marker).length - 1).toBe(1);
+      expect(final.split(KEYCHAIN_GUARD_MARKER).length - 1).toBe(1);
+    }
+  });
+
+  it.each(HISTORY_HOOKS)('$file: an already-marked pre-guard history hook is upgraded once', ({ file, marker }) => {
+    fs.writeFileSync(hookPath(file), `#!/bin/sh\n${marker}\necho old-origin-line\n# USER_LOGIC\n`, { mode: 0o755 });
+    installRewriteHooks(repo);
+    installRewriteHooks(repo);
+    const final = fs.readFileSync(hookPath(file), 'utf-8');
+    expect(final.split(marker).length - 1).toBe(1);
+    expect(final.split(KEYCHAIN_GUARD_MARKER).length - 1).toBe(1);
+    expect(final).toContain('# USER_LOGIC');
+  });
+
+  it.each(HOOKS)('$file: an already-marked pre-guard hook is upgraded once', ({ file, marker, install }) => {
+    const old = `#!/bin/sh\n${marker}\necho old-origin-line\n# USER_LOGIC\n`;
+    fs.writeFileSync(hookPath(file), old, { mode: 0o755 });
+
+    install(repo);
+    install(repo);
+
+    const final = fs.readFileSync(hookPath(file), 'utf-8');
+    expect(final.split(marker).length - 1).toBe(1);
+    expect(final.split(KEYCHAIN_GUARD_MARKER).length - 1).toBe(1);
+    expect(final).toContain('# USER_LOGIC');
   });
 
   // Run the hook for real with Origin's command pointed at a stub: Origin's
@@ -78,7 +119,14 @@ describe('repo-local hooks: an existing user hook ending in `exit 0`', () => {
     const stub = path.join(repo, 'origin-stub');
     fs.writeFileSync(stub, `#!/bin/sh\necho "$@" >> "${fired}"\n`, { mode: 0o755 });
     const hp = hookPath(file);
-    fs.writeFileSync(hp, fs.readFileSync(hp, 'utf-8').replace(/\borigin hooks /g, `${stub} hooks `));
+    let script = fs.readFileSync(hp, 'utf-8').replace(/\borigin hooks /g, `${stub} hooks `);
+    // post-checkout launches the preamble's "$ORIGIN_BIN": resolve it to the stub.
+    const start = script.indexOf('ORIGIN_BIN=""');
+    if (start >= 0) {
+      const end = script.indexOf('\nfi\n', start);
+      script = script.slice(0, start) + `ORIGIN_BIN="${stub}"` + script.slice(end + '\nfi'.length);
+    }
+    fs.writeFileSync(hp, script);
 
     const evidence = path.join(repo, 'user-evidence');
     const r = spawnSync('sh', [hp, 'a', 'b', '1'], {

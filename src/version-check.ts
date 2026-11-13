@@ -35,6 +35,10 @@ export async function checkForUpdate(): Promise<UpdateCheckResult | null> {
     const current = getCurrentVersion();
     if (!current) return null;
 
+    // `origin config set autoUpdate false` turns the notice off — and the
+    // network call behind it, which is the part a locked-down machine minds.
+    if (loadConfig()?.autoUpdate === false) return null;
+
     // Check cache first
     const cached = readCache();
     if (cached) {

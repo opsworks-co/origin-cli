@@ -23,6 +23,7 @@ import * as fs from 'fs';
 import { gitOrNull, git as gitExec } from './utils/exec.js';
 import * as fzstd from 'fzstd';
 import { budgetRowDiffs } from './budgeted-row-diff.js';
+import { codexUserPromptText } from './transcript.js';
 
 const HEX = /^[0-9a-f]{4,64}$/i;
 
@@ -315,17 +316,12 @@ function stringifyOutput(out: any, depth = 0): string {
   return '';
 }
 
+// The same test capture counts prompts with (agents/codex.ts), so prompt N
+// here is prompt N there. Its own copy missed the harness's injected
+// messages (recommended plugins, multi-agent mode, apps page) and counted
+// each as a prompt, shifting every later commit onto the wrong turn.
 function isRealUserText(text: string): boolean {
-  if (!text || !text.trim()) return false;
-  if (text.includes('<!-- origin-managed -->')) return false;
-  if (/^#\s+AGENTS\.md instructions for /m.test(text)) return false;
-  // Strip the envelope tags. If the remainder is empty, it was a wrapper-only blob.
-  const stripped = text
-    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
-    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
-    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
-    .trim();
-  return stripped.length > 0;
+  return !!text && codexUserPromptText(text) !== null;
 }
 
 /**

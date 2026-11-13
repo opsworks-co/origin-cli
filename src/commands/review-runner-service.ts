@@ -28,7 +28,7 @@ export interface ServiceSpec {
   /** The node binary and the CLI entry (bin link), as `selfCommand` gives them. */
   node: string;
   entry: string;
-  /** The CLI arguments after the entry: `review runner [--repo …] [--interval n]`. */
+  /** The CLI arguments after the entry: `review runner [--repo …] [--interval n] [--parallel n] [--no-local-ci | --local-ci-only] [--scope s]`. */
   args: string[];
   /** Where the daemon runs: its cwd's repo is one of the checkouts it watches. */
   cwd: string;
@@ -53,10 +53,14 @@ export function serviceFile(platform: NodeJS.Platform = process.platform, home: 
  * The daemon's arguments for the service: `--repo` paths made absolute (the
  * service's cwd is not the shell's) and the interval passed through. Pure.
  */
-export function runnerServiceArgs(opts: { repo?: string[]; interval?: string }, cwd: string): string[] {
+export function runnerServiceArgs(opts: { repo?: string[]; interval?: string; parallel?: string; localCi?: boolean; localCiOnly?: boolean; scope?: string }, cwd: string): string[] {
   const args = ['review', 'runner'];
   if (opts.repo && opts.repo.length > 0) args.push('--repo', ...opts.repo.map((p) => path.resolve(cwd, p)));
   if (opts.interval) args.push('--interval', String(opts.interval));
+  if (opts.parallel) args.push('--parallel', String(opts.parallel));
+  if (opts.localCi === false) args.push('--no-local-ci');
+  if (opts.localCiOnly) args.push('--local-ci-only');
+  if (opts.scope === 'mine' || opts.scope === 'workspace') args.push('--scope', opts.scope);
   return args;
 }
 
@@ -170,7 +174,7 @@ export function reviewRunnerServiceStatus(platform: NodeJS.Platform = process.pl
 }
 
 /** The spec for this install: this CLI, these args, the shell's PATH, `~/.origin/review-runner.log`. */
-export function serviceSpec(opts: { repo?: string[]; interval?: string }, cwd: string = process.cwd()): ServiceSpec {
+export function serviceSpec(opts: { repo?: string[]; interval?: string; parallel?: string; localCi?: boolean; localCiOnly?: boolean; scope?: string }, cwd: string = process.cwd()): ServiceSpec {
   const [node, entry] = selfCommand();
   return { node, entry, args: runnerServiceArgs(opts, cwd), cwd, logFile: serviceLogFile(), pathEnv: process.env.PATH || null };
 }

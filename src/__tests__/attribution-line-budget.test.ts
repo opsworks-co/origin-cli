@@ -9,7 +9,8 @@
 //     leading `:` or a glob character in a name is matched exactly, and an
 //     unrelated added, deleted or large file is never scanned. A rename is
 //     followed only when the capture names both sides; a path the commit adds
-//     with no captured counterpart degrades (`possible_rename`).
+//     with no captured counterpart is checked once, by name, over the whole
+//     commit, and degrades (`possible_rename`) when it is a rename target.
 //
 // Time is an injected clock: nothing here sleeps.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -150,11 +151,19 @@ describe('literal pathspecs: only the edited paths are diffed', () => {
       expect(pathspecsOfEveryDiffTree()).toEqual([[':(literal)new name.ts', ':(literal)old name.ts']]);
     });
 
-    it('with no captured old side, degrades: the commit is not scanned for the counterpart', () => {
+    it('with no captured old side, degrades: one whole-commit rename check finds the counterpart', () => {
       const out = project([toolEdit('new name.ts', 'Row 6', 'Row six')]);
       expect(out.files).toEqual([]);
       expect(out.diagnostics).toContainEqual({ reason: 'possible_rename', path: 'new name.ts' });
-      expect(pathspecsOfEveryDiffTree()).toEqual([[':(literal)new name.ts']]);
+      // The patch stays limited to the captured path (OR-38 B1): the added path
+      // is checked once, over the whole commit, for being a rename target —
+      // names only (--name-status), never file content.
+      const [patch, ...rest] = diffTrees();
+      expect(patch.args.slice(patch.args.indexOf('--') + 1)).toEqual([':(literal)new name.ts']);
+      expect(rest).toHaveLength(1);
+      expect(rest[0].args).toEqual(expect.arrayContaining(['-M', '-l0', '--diff-filter=R', '--name-status', '-z']));
+      expect(rest[0].args).not.toContain('-p');
+      expect(rest[0].args).not.toContain('--');
     });
 
     it('a human git mv followed by an agent Write with no pre-image claims none of the moved lines', () => {

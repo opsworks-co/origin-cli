@@ -26,11 +26,20 @@ export const ISSUE_PROMPT_MAX_CHARS = 8000;
 /** A prompt a person edited on the issue page may run to this many characters. */
 export const ISSUE_PROMPT_EDIT_MAX_CHARS = 20000;
 
+/**
+ * A fix asked for in a PR review (source "review") gets this much: its findings
+ * ARE the task. Clipped to 8000, a judge's eight findings lost the last four and
+ * the pre-start pass asked for "the complete text of findings 5–12" (fix-0694).
+ */
+export const REVIEW_FIX_PROMPT_MAX_CHARS = ISSUE_PROMPT_EDIT_MAX_CHARS;
+
 export interface IssuePromptInput {
   shortId: string;
   title: string;
   description?: string | null;
   type?: string | null;
+  /** Where the issue came from ("review" for a fix asked for in a PR review, "memory", …). */
+  source?: string | null;
   /** The branch the agent works on; omitted when it stays on the current one. */
   branch?: string | null;
   /**
@@ -119,6 +128,7 @@ function closingText(input: IssuePromptInput): string {
   closing.push('  [Origin: Outcome] review — <what to check> (you changed code for a person to review)');
   closing.push('  [Origin: Outcome] done — <why> (nothing needed changing: already fixed, not reproducible, or not needed)');
   closing.push('  [Origin: Outcome] blocked — <your question, or what you need> (you could not finish: a decision, access, or information is missing)');
+  closing.push('  On a blocked line, end with your best answer from what you found, so the person can confirm or correct it instead of working it out: [Origin: Outcome] blocked — <question> | Best guess: <your answer, and why in a few words>');
   return closing.join('\n');
 }
 
@@ -218,6 +228,9 @@ export function agentLaunchArgv(agent: IssueAgent, prompt: string): string[] | n
 /** Agents whose headless mode can go on with an earlier session: `claude -p --resume`, `codex exec resume`. */
 export const RESUMABLE_AGENTS = ['claude', 'codex'] as const;
 
+/** New questions plus the open ones repeated with a guess (buildPreflightPrompt). */
+export const PREFLIGHT_MAX_QUESTIONS = 6;
+
 /**
  * The pre-start pass's answer: either the issue is clear enough (with a
  * brief of where the work is), or the questions a person must answer first.
@@ -227,9 +240,10 @@ export const PREFLIGHT_SCHEMA = {
   properties: {
     ready: { type: 'boolean' },
     brief: { type: 'string' },
-    questions: { type: 'array', items: { type: 'string' }, maxItems: 3 },
+    questions: { type: 'array', items: { type: 'string' }, maxItems: PREFLIGHT_MAX_QUESTIONS },
+    suggestions: { type: 'array', items: { type: 'string' }, maxItems: PREFLIGHT_MAX_QUESTIONS },
   },
-  required: ['ready', 'brief', 'questions'],
+  required: ['ready', 'brief', 'questions', 'suggestions'],
   additionalProperties: false,
 } as const;
 
@@ -239,15 +253,27 @@ export const PREFLIGHT_AGENTS = ['claude', 'codex'] as const;
 /**
  * The pre-start pass's prompt: read the issue against the code, then say what
  * the work is or ask what only a person can answer. Changes nothing.
+ *
+ * `openQuestions`: asked on the issue earlier and still unanswered. Without
+ * them the pass asked the same thing again in new words, so questions piled
+ * up and the old ones never got a best guess. Repeated word for word, the
+ * server matches one to the question already there and fills in its guess.
  */
-export function buildPreflightPrompt(issuePrompt: string): string {
+export function buildPreflightPrompt(issuePrompt: string, openQuestions: string[] = []): string {
+  const open = openQuestions.map((q) => q.replace(/\s+/g, ' ').trim()).filter(Boolean);
   return [
     'Before an agent works on the task below unattended, check that it can. Read the code it touches; do not make the change and do not edit anything — the agent that follows can edit, run commands and commit.',
     '',
     'Answer with JSON matching the schema:',
     '- ready: true when a capable engineer could do the work without asking anyone. Guess-able details are not questions.',
     '- brief: up to 15 lines for whoever does the work — the files and functions involved, how the code works there, and the approach. Name real paths.',
-    '- questions: when not ready, at most 3 short questions only a person can answer (a product choice, a missing requirement, which of two behaviours is wanted). Never ask for access or permission. Empty when ready.',
+    '- questions: when not ready, at most 3 new short questions only a person can answer (a product choice, a missing requirement, which of two behaviours is wanted). Never ask for access or permission. Empty when ready.',
+    '- suggestions: one per question, in the same order — your best answer from what you read (the code, the issue, the repo\'s conventions) and why in a few words. The person sees it pre-filled and confirms or corrects it, so make it a real answer, not a restated question. "" only when you have no basis at all.',
+    ...(open.length > 0 ? [
+      '',
+      'These questions are already on the issue, unanswered. Do not ask them again in other words. For each one a person still has to settle, put it in questions copied exactly, character for character, with your best guess in suggestions. Leave out any the code or the issue already answers, or that no longer matters.',
+      ...open.map((q) => `- ${q}`),
+    ] : []),
     '',
     '--- The task ---',
     issuePrompt,
@@ -275,15 +301,22 @@ export function agentPreflightArgv(agent: IssueAgent, prompt: string, files: { s
 }
 
 /** The pass's answer from what the agent printed (claude) or wrote (codex). Null when it can't be read. */
-export function parsePreflight(raw: string | null | undefined): { ready: boolean; brief: string; questions: string[] } | null {
+export function parsePreflight(raw: string | null | undefined): { ready: boolean; brief: string; questions: string[]; suggestions: string[] } | null {
   if (!raw || !raw.trim()) return null;
-  const tryObj = (v: any): { ready: boolean; brief: string; questions: string[] } | null => {
+  const tryObj = (v: any): { ready: boolean; brief: string; questions: string[]; suggestions: string[] } | null => {
     if (!v || typeof v !== 'object') return null;
     if (v.structured_output && typeof v.structured_output === 'object') return tryObj(v.structured_output);
     if (typeof v.result === 'string' && typeof v.ready !== 'boolean') return parsePreflight(v.result);
     if (typeof v.ready !== 'boolean') return null;
-    const questions = Array.isArray(v.questions) ? v.questions.filter((q: unknown) => typeof q === 'string' && q.trim()).map((q: string) => q.trim()).slice(0, 3) : [];
-    return { ready: v.ready && questions.length === 0, brief: typeof v.brief === 'string' ? v.brief.trim() : '', questions };
+    // Paired before empty questions are dropped, so each suggestion stays with its question.
+    const sugg: unknown[] = Array.isArray(v.suggestions) ? v.suggestions : [];
+    const pairs = (Array.isArray(v.questions) ? v.questions : [])
+      .map((q: unknown, i: number) => ({ q, s: sugg[i] }))
+      .filter((p: { q: unknown }) => typeof p.q === 'string' && p.q.trim())
+      .slice(0, PREFLIGHT_MAX_QUESTIONS);
+    const questions: string[] = pairs.map((p: { q: unknown }) => (p.q as string).trim());
+    const suggestions: string[] = pairs.map((p: { s: unknown }) => typeof p.s === 'string' ? p.s.trim() : '');
+    return { ready: v.ready && questions.length === 0, brief: typeof v.brief === 'string' ? v.brief.trim() : '', questions, suggestions };
   };
   const text = raw.trim();
   try { return tryObj(JSON.parse(text)); } catch { /* maybe fenced or with prose */ }
@@ -389,7 +422,7 @@ export function parseIssueLaunchUrl(url: string): IssueLaunchRequest | null {
 }
 
 /**
- * A cloud run started from this machine: `getorigin://issue/cloud?repo=<repoId>&issue=<shortId>&runner=codex&env=<env>[&name=<owner/repo>]`.
+ * A cloud run started from this machine: `getorigin://issue/cloud?repo=<repoId>&issue=<shortId>&runner=codex[&env=<env>][&name=<owner/repo>]`.
  * Codex cloud has no public API, so the server can't start it: the CLI runs
  * `origin issue cloud`, which submits the task with the person's own
  * `codex cloud exec` login and follows it to its end (commands/issue-cloud.ts).
@@ -401,7 +434,7 @@ export type CloudRunner = typeof CLOUD_RUNNERS[number];
 /** A Codex cloud environment: its id, or the label `codex cloud` shows. Reaches a command line as one argument. */
 export const CLOUD_ENV = /^[A-Za-z0-9][A-Za-z0-9 ._:/-]{0,199}$/;
 
-/** The link without `env`: the web adds the environment the person picked. */
+/** The link without `env`: the web adds the environment the person typed, if any; without one the CLI finds the repo's. */
 export function issueCloudUrl(repoId: string, shortId: string, runner: CloudRunner, repoName?: string | null): string {
   const q = [`repo=${encodeURIComponent(repoId)}`, `issue=${encodeURIComponent(shortId)}`, `runner=${runner}`];
   if (repoName) q.push(`name=${encodeURIComponent(repoName)}`);
@@ -412,7 +445,8 @@ export interface IssueCloudRequest {
   repoId: string;
   shortId: string;
   runner: CloudRunner;
-  env: string;
+  /** Null: the CLI finds the repo's own environment (issue-cloud.ts findCodexEnv). */
+  env: string | null;
   repoName: string | null;
 }
 
@@ -430,9 +464,9 @@ export function parseIssueCloudUrl(url: string): IssueCloudRequest | null {
   if (!repo || !/^[A-Za-z0-9_-]{1,64}$/.test(repo)) return null;
   if (!issue || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(issue)) return null;
   if (!(CLOUD_RUNNERS as readonly string[]).includes(runner)) return null;
-  if (!env || !CLOUD_ENV.test(env.trim())) return null;
+  if (env?.trim() && !CLOUD_ENV.test(env.trim())) return null;
   const repoName = name && /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(name) && name.length <= 200 ? name : null;
-  return { repoId: repo, shortId: issue, runner: runner as CloudRunner, env: env.trim(), repoName };
+  return { repoId: repo, shortId: issue, runner: runner as CloudRunner, env: env?.trim() || null, repoName };
 }
 
 /**
@@ -672,7 +706,7 @@ function clip(s: string, max: number): string {
  * the closing instruction, and memory fills what is left, line by line.
  */
 export function buildIssuePrompt(input: IssuePromptInput): string {
-  const max = Math.max(500, input.maxChars ?? ISSUE_PROMPT_MAX_CHARS);
+  const max = Math.max(500, input.maxChars ?? (input.source === 'review' ? REVIEW_FIX_PROMPT_MAX_CHARS : ISSUE_PROMPT_MAX_CHARS));
   const { body, criteria } = extractAcceptanceCriteria(input.description);
   const title = clip((input.title || '').replace(/\s+/g, ' ').trim(), 300);
   const kind = input.type && input.type !== 'task' ? ` (${input.type})` : '';

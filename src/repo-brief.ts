@@ -16,7 +16,7 @@ import { spawn } from 'child_process';
 import { git, gitOrNull, gitIdentityEnv } from './utils/exec.js';
 import { loadConfig } from './config.js';
 import { isRepoIgnored } from './ignore-repos.js';
-import { isBakeoffRepo, memoryReadBlocked } from './memory.js';
+import { isBakeoffRepo, memoryReadBlocked, notesRootCommit } from './memory.js';
 import { callLLM, getAnthropicKey } from './llm.js';
 import { resolveAgentKeys } from './agent-keys.js';
 
@@ -177,11 +177,7 @@ export async function generateRepoBrief(repoPath: string): Promise<RepoBrief | n
 
 // ── Cache (shared git note on the root commit — travels with the repo) ────────
 
-function rootCommit(repoPath: string): string | null {
-  const raw = gitOrNull(['rev-list', '--max-parents=0', 'HEAD'], { cwd: repoPath, timeoutMs: 10_000 });
-  const c = raw ? raw.split('\n')[0] : null;
-  return c && /^[a-fA-F0-9]+$/.test(c) ? c : null;
-}
+const rootCommit = notesRootCommit;
 
 export function writeRepoBrief(repoPath: string, brief: RepoBrief): void {
   try {

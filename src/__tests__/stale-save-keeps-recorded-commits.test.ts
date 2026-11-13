@@ -11,7 +11,7 @@
  *
  * Driven through the real saveSessionState and state files.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -19,6 +19,7 @@ import path from 'path';
 import {
   applyRewritePairsToState, getStatePath, keepCommitRecordsSavedMeanwhile, saveSessionState, type SessionState,
 } from '../session-state.js';
+import { TransientFsRetryExhaustedError } from '../transient-fs.js';
 
 const TAG = 'b3a0005f-93e';
 const SESSION = '6c21a6d8-ba93-479e-87d7-40e5cd4257b4';
@@ -41,7 +42,10 @@ beforeEach(() => {
   } as unknown as SessionState, repo, TAG);
 });
 
-afterEach(() => { fs.rmSync(repo, { recursive: true, force: true }); });
+afterEach(() => {
+  vi.restoreAllMocks();
+  fs.rmSync(repo, { recursive: true, force: true });
+});
 
 /** What post-commit does: record the sha, attest the running turn, save. */
 function postCommitRecords(sha: string) {
@@ -65,6 +69,20 @@ describe('a tool hook that read the state before post-commit saved', () => {
     expect((after as any).lastToolCall, 'the tool hook\'s own write still lands').toBe('toolu_018ghyAscdVkcrdSM6QhcsiC');
   });
 
+  // local-ci 2026-11-11 (#3061), capture-e2e-commit-in-another-repo: the
+  // commit's own PATCH carried it with the other repo's id, and then
+  // `crossRepoCommits` was empty — the agent's tool hook had written back a
+  // copy read before post-commit (in that repo, in the background) saved.
+  it('keeps a commit the session made in another repository', () => {
+    const toolHook = copy();
+    const s = copy();
+    s.crossRepoCommits = [{ sha: A, repoPath: '/elsewhere/b', at: new Date().toISOString(), turnId: 't_1' }];
+    saveSessionState(s, repo, TAG);
+    saveSessionState(toolHook, repo, TAG);
+    expect(read().crossRepoCommits?.map((c) => [c.sha, c.turnId])).toEqual([[A, 't_1']]);
+    expect(read().sessionCommitShas, 'kept apart from the session\'s own commits').toEqual([]);
+  });
+
   it('keeps every commit across a run of commits and stale saves', () => {
     for (const sha of [A, B]) {
       const toolHook = copy();
@@ -73,6 +91,24 @@ describe('a tool hook that read the state before post-commit saved', () => {
     }
     expect(read().sessionCommitShas).toEqual([A, B]);
     expect(read().commitTurns).toHaveLength(2);
+  });
+
+  it('aborts instead of erasing peer records when a transient read refusal persists', () => {
+    const toolHook = copy();
+    postCommitRecords(A);
+    const statePath = getStatePath(repo, TAG);
+    const realRead = fs.readFileSync.bind(fs);
+    vi.spyOn(fs, 'readFileSync').mockImplementation(((target: any, ...args: any[]) => {
+      if (target === statePath) throw Object.assign(new Error('held by Defender'), { code: 'EPERM' });
+      return (realRead as any)(target, ...args);
+    }) as any);
+    let now = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => (now += 600));
+
+    expect(() => saveSessionState(toolHook, repo, TAG)).toThrow(TransientFsRetryExhaustedError);
+
+    vi.restoreAllMocks();
+    expect(read().sessionCommitShas).toEqual([A]);
   });
 
   it('does not bring back a commit the other process folded onto its rewrite', () => {

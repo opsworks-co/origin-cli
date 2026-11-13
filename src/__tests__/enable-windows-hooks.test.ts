@@ -126,6 +126,10 @@ describe('enable hook generation on native Windows (isWindows → true)', () => 
   });
 });
 
+// What an older Windows install wrote for Codex: node + the CLI entry script.
+const WIN_CODEX_HOOK =
+  'C:\\PROGRA~1\\nodejs\\node.exe C:\\Users\\jsmith\\AppData\\Roaming\\npm\\node_modules\\@origin\\cli\\dist\\index.js hooks codex session-start';
+
 // FIX 3 — Windows is WATCHER-ONLY: `origin enable` must NOT install any Codex
 // lifecycle hooks there. Codex's Windows sandbox blocks the hooks (they can't
 // inject context or capture) yet still surfaces them as red "hook (failed)"
@@ -181,7 +185,7 @@ describe('Codex hooks: Windows is watcher-only (no lifecycle hooks installed)', 
     fs.mkdirSync(codexDir, { recursive: true });
     fs.writeFileSync(path.join(codexDir, 'hooks.json'), JSON.stringify({
       hooks: {
-        SessionStart: [{ hooks: [{ type: 'command', command: 'node x hooks codex session-start', timeout: 10 }] }],
+        SessionStart: [{ hooks: [{ type: 'command', command: WIN_CODEX_HOOK, timeout: 10 }] }],
       },
     }, null, 2));
     installCodexHooks(home);
@@ -194,7 +198,7 @@ describe('Codex hooks: Windows is watcher-only (no lifecycle hooks installed)', 
     fs.writeFileSync(path.join(codexDir, 'hooks.json'), JSON.stringify({
       hooks: {
         SessionStart: [
-          { hooks: [{ type: 'command', command: 'node x hooks codex session-start', timeout: 10 }] },
+          { hooks: [{ type: 'command', command: WIN_CODEX_HOOK, timeout: 10 }] },
           { hooks: [{ type: 'command', command: 'my-own-tool run', timeout: 5 }] },
         ],
       },

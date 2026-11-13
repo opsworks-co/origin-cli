@@ -6,6 +6,11 @@ import { getGitRoot, clearSessionState } from '../session-state.js';
 import { MCP_SUPPORTED_AGENTS, uninstallMcpForAgent } from '../mcp/install.js';
 import { forgetEnabledRepo } from '../enabled-repos.js';
 import { restorePreviousHooksPath } from '../global-hooks-path.js';
+// Same matcher enable uses to find its own entries: it keys off `hooks <agent>`,
+// so the `PATH="<binDir>:$PATH" origin hooks …` form enable writes is caught —
+// a literal `startsWith('origin hooks')` missed it and disable removed nothing.
+import { isOriginHookCommand } from './enable.js';
+import { removeOriginStatusLine } from './statusline.js';
 
 function removeOriginHooksFromFile(
   filePath: string,
@@ -39,7 +44,7 @@ function filterClaudeOrGeminiHooks(settings: Record<string, any>): Record<string
       if (!entry.hooks) return true;
       // Filter out Origin hooks inside the hooks array
       entry.hooks = entry.hooks.filter(
-        (h: any) => !(h.command && typeof h.command === 'string' && h.command.startsWith('origin hooks'))
+        (h: any) => !isOriginHookCommand(h?.command)
       );
       return entry.hooks.length > 0;
     });
@@ -61,7 +66,7 @@ function filterCursorHooks(config: Record<string, any>): Record<string, any> {
 
   for (const eventType of Object.keys(config.hooks)) {
     config.hooks[eventType] = config.hooks[eventType].filter(
-      (h: any) => !(h.command && typeof h.command === 'string' && h.command.startsWith('origin hooks'))
+      (h: any) => !isOriginHookCommand(h?.command)
     );
 
     if (config.hooks[eventType].length === 0) {
@@ -85,7 +90,7 @@ function filterDevinHooks(config: Record<string, any>): Record<string, any> {
     config[eventType] = config[eventType].filter((entry: any) => {
       if (!entry?.hooks) return true;
       entry.hooks = entry.hooks.filter(
-        (h: any) => !(h.command && typeof h.command === 'string' && h.command.startsWith('origin hooks')),
+        (h: any) => !isOriginHookCommand(h?.command),
       );
       return entry.hooks.length > 0;
     });
@@ -219,6 +224,19 @@ export async function disableCommand(opts?: { global?: boolean }): Promise<void>
       if (r.status === 'updated') {
         removedCount++;
         console.log(chalk.gray(`  ✓ MCP server removed from ${r.file.replace(os.homedir(), '~')}`));
+      }
+    } catch { /* best effort — never block disable */ }
+  }
+
+  // Claude Code's status line is a per-user setting that enable points at
+  // `origin statusline`; machine-wide disable takes it back off (restoring the
+  // user's own, if Origin chained one). A status line that isn't Origin's stays.
+  if (isGlobal) {
+    try {
+      const r = removeOriginStatusLine();
+      if (r !== 'none') {
+        removedCount++;
+        console.log(chalk.green(`  ✓ Removed Origin's status line from ~/.claude/settings.json${r === 'restored' ? ' (your previous one is back)' : ''}`));
       }
     } catch { /* best effort — never block disable */ }
   }

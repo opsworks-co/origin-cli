@@ -12,14 +12,14 @@
 // before. Every test that covered rewrite folding used its own hook script,
 // never the one we install.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { execFileSync, spawnSync } from 'child_process';
+import { execFileSync, spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { writeGlobalPostRewriteHook } from '../commands/enable.js';
 import {
-  needsStdinRepair, repairInstalledPostRewriteHooks, repairLocalPostRewriteScript,
+  CAPTURE_REWRITES, needsStdinRepair, repairInstalledPostRewriteHooks, repairLocalPostRewriteScript,
 } from '../post-rewrite-hook-stdin.js';
 
 const isWindows = process.platform === 'win32';
@@ -185,10 +185,62 @@ describe.skipIf(isWindows)('the installed post-rewrite hook delivers git\'s pair
     const preRedirect = '#!/bin/sh\n# origin-post-rewrite\norigin hooks git-post-rewrite "$@" &\n';
     const fixed = repairLocalPostRewriteScript(preRedirect)!;
     expect(fixed).toContain(`| origin hooks git-post-rewrite "$@"; } >/dev/null 2>&1 &`);
-    expect(fixed.match(/>\/dev\/null 2>&1/g)).toHaveLength(1);
+    expect(fixed).toContain('# origin-detach');
+    // The bare launch is gone; every launch left is redirected.
+    expect(fixed).not.toMatch(/^origin hooks git-post-rewrite "\$@" &$/m);
     expect(fixed).toContain('ORIGIN_REWRITES="$(cat)"');
     expect(repairLocalPostRewriteScript(fixed)).toBeNull();
   });
+
+  it('repairs the piped block (#703) into the detached one, keeping its capture', () => {
+    const piped = `#!/bin/sh\necho mine\n# origin-post-rewrite\n${CAPTURE_REWRITES}\n{ printf '%s\\n' "$ORIGIN_REWRITES" | origin hooks git-post-rewrite "$@"; } >/dev/null 2>&1 &\n`;
+    expect(needsStdinRepair(piped)).toBe(true);
+    const fixed = repairLocalPostRewriteScript(piped)!;
+    expect(fixed).toContain('echo mine');
+    expect(fixed).toContain('# origin-detach');
+    expect(fixed.match(/\$\(cat\)/g)).toHaveLength(1);
+    expect(fixed.indexOf('ORIGIN_REWRITES="$(cat)"')).toBeLessThan(fixed.indexOf('_origin_rw='));
+    expect(repairLocalPostRewriteScript(fixed)).toBeNull();
+  });
+
+  /**
+   * Codex kills what a git command's hooks leave running once its shell
+   * command exits. Here the amend runs in its own process group, killed the
+   * moment git returns; the pairs must still reach the CLI.
+   */
+  it.skipIf(process.platform === 'win32')('delivers the pairs when the agent kills the amend\'s process group', async () => {
+    const hooks = path.join(dir, 'killed');
+    fs.mkdirSync(hooks);
+    const out = path.join(dir, 'got-killed');
+    const bin = path.join(dir, 'late-origin');
+    fs.writeFileSync(bin, `#!/bin/sh\nsleep 1\ncat > "${out}.tmp"\nmv "${out}.tmp" "${out}"\n`);
+    fs.chmodSync(bin, '755');
+    writeGlobalPostRewriteHook(hooks);
+    patchOriginBin(path.join(hooks, 'post-rewrite'), bin);
+    const repo = path.join(dir, 'killed-repo');
+    fs.mkdirSync(repo);
+    const env = {
+      ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null',
+      GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com',
+    };
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, env, encoding: 'utf-8' }).trim();
+    git('init', '-q');
+    git('config', 'core.hooksPath', hooks);
+    fs.writeFileSync(path.join(repo, 'k.txt'), 'k\n');
+    git('add', 'k.txt');
+    git('commit', '-q', '-m', 'k');
+    const before = git('rev-parse', 'HEAD');
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('sh', ['-c', 'git commit -q --amend -m "k, reworded"'], { cwd: repo, env, detached: true, stdio: 'ignore' });
+      child.on('error', reject);
+      child.on('exit', () => {
+        try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* group already gone */ }
+        resolve();
+      });
+    });
+    const after = git('rev-parse', 'HEAD');
+    expect((await received(out)).trim()).toBe(`${before} ${after}`);
+  }, 20_000);
 
   // Every shell a user's /bin/sh might be. dash matters most: it is /bin/sh on
   // Debian and Ubuntu, and it parks the original fd 2 at fd 10 when a builtin

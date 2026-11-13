@@ -18,7 +18,7 @@ import { applyCrossRepoCommits } from '../../foreign-trees.js';
 import { preferShadowRangeForTurns } from '../../prefer-shadow-range.js';
 import { dropInheritedFilesFromTurns } from '../../drop-inherited-files.js';
 import { filesPutBackAcrossTheGap } from '../../restored-from-history.js';
-import { authoredFilesForTurn, backfillCodexRollout, dropForeignCommitsFromCapture, normalizeTurnDiff, watchedOnlyEditFiles } from './stop.js';
+import { authoredFilesForTurn, backfillCodexRollout, closingCommitShas, dropForeignCommitsFromCapture, normalizeTurnDiff, watchedOnlyEditFiles } from './stop.js';
 import { discoverCodexSessionData } from '../../agents/codex.js';
 import { commitAuthoredDelta } from '../../history-backfill.js';
 import { filesHeldInStashes } from '../../stashed-work.js';
@@ -39,7 +39,7 @@ import { publishMemoryNotes } from '../../memory-transport.js';
 import type { PromptNoteEntry } from '../../git-notes.js';
 import { shouldIncludePromptText } from '../../prompt-privacy.js';
 import { attributionSourceFromState } from '../../attribution-note.js';
-import { editCapturesFromEditsJson, lineClaimsForCommits } from '../../attribution-line-claims.js';
+import { editCapturesFromEditsJson, lineClaimsForCommits, LINE_CLAIM_LATE_BUDGET_MS } from '../../attribution-line-claims.js';
 import { extractTodosFromPrompts, handoffRepresentsWork, writeHandoff } from '../../handoff.js';
 import { isRepoIgnored } from '../../ignore-repos.js';
 import { pushSessionBranch, writeSessionFiles } from '../../local-entrypoint.js';
@@ -60,7 +60,7 @@ import { adoptRegisteredReservation, clearSessionState, rememberLocalSessionId, 
 import type { SessionState } from '../../session-state.js';
 import { memorySummaryMode, synthesizeSessionSummary } from '../../session-summary.js';
 import { samePath, sessionWorkTree, shellWindowTarget } from '../../session-worktree.js';
-import { addTodosFromSession, readMemoryTodos } from '../../todo.js';
+import { addTodosFromSession, closedBySameSession, readMemoryTodos } from '../../todo.js';
 import { claimSessionCloses } from '../../todo-sweep.js';
 import { estimateSessionCost, extractPromptFileMappings, formatTranscriptForDisplay, parseSessionTranscript, parseTranscript } from '../../transcript.js';
 import type { ParsedTranscript, PromptFileMapping } from '../../transcript.js';
@@ -1683,7 +1683,7 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
           originUrl: `${apiUrl}/sessions/${state.sessionId}`,
           attribution: attributionSourceFromState(state, {
             agentSlug, model, costUsd, connected: isConnectedMode(), apiUrl,
-            lineClaims: lineClaimsForCommits(state.repoPath, agentSlug || state.agentSlug, state, noteShas, () => editCapturesFromEditsJson(promptEditsByIndex)),
+            lineClaims: lineClaimsForCommits(state.repoPath, agentSlug || state.agentSlug, state, noteShas, () => editCapturesFromEditsJson(promptEditsByIndex), { budgetMs: LINE_CLAIM_LATE_BUDGET_MS }),
           }),
         }, { lockWaitMs: SESSION_EVENT_NOTE_LOCK_WAIT_MS });
         debugLog('session-end', 'git notes written', { commitCount: noteShas.length, declined: gitCapture.commitShas.length - noteShas.length });
@@ -1914,7 +1914,7 @@ export async function handleSessionEnd(input: Record<string, any>, agentSlug?: s
           sessionId: state.sessionId,
           closes,
           openTodos: readMemoryTodos(state.repoPath).map((t) => ({ id: t.id, text: t.text })),
-          shas: gitCapture.commitShas,
+          shas: closingCommitShas(state.repoPath, state),
         });
         debugLog('session-end', 'todo closures claimed', { claimed: closes.length, recorded });
       }
@@ -2021,24 +2021,8 @@ export function describePromptImages(
   });
 }
 
-/**
- * Did this session itself say it closed `item` with `[Origin: Closes]`?
- *
- * The marker was meant for an EARLIER session's leftover, but a session closes
- * its own too: it writes an Open, finishes the work two turns later and says
- * so. The entry then listed both — the item as open and the claim that it was
- * done. Matched by text, or by the id `origin todo` shows for it
- * (todoDisplayId of the text and this session).
- */
-export function closedBySameSession(item: string, sessionId: string, closes: readonly string[] | undefined): boolean {
-  if (!closes || closes.length === 0) return false;
-  const key = todoClosureKey(item);
-  const id = todoDisplayId(item, sessionId).toLowerCase();
-  return closes.some((c) => {
-    const ck = todoClosureKey(c);
-    return ck === key || new RegExp(`(^|[^0-9a-f])${id}([^0-9a-f]|$)`).test(ck);
-  });
-}
+// closedBySameSession lives in todo.ts: the prompt hook needs it too.
+export { closedBySameSession } from '../../todo.js';
 
 export function buildMemoryEntry(
   state: { sessionId: string; startedAt: string; prompts?: string[]; branch?: string | null; agentSlug?: string; promptIndexBase?: number; promptImageDescriptions?: Record<string, string> },

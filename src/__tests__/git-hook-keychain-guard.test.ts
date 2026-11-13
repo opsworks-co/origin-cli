@@ -15,17 +15,24 @@
  * `origin` that segfaults (kill -SEGV) when NODE_USE_SYSTEM_CA=1 and the
  * "Keychain" is denied, and a fake `security` / `uname` for the probe.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import {
   KEYCHAIN_GUARD_MARKER,
+  installGitCommitMsgHook,
+  installGitPostCommitHook,
+  installGitPreCommitHook,
+  installGitPrepareCommitMsgHook,
+  installGitPrePushHook,
+  upgradeLocalHookPreamble,
   upgradeOutdatedGlobalHooks,
   writeGlobalCommitMsgHook,
   writeGlobalPreCommitHook,
 } from '../commands/enable.js';
+import { installRewriteHooks } from '../history-preservation.js';
 
 const posixOnly = process.platform === 'win32' ? describe.skip : describe;
 
@@ -155,5 +162,96 @@ exit ${opts.exitCode ?? 0}
     expect(fs.readFileSync(path.join(hooks, 'post-merge'), 'utf-8')).toBe(users);
     // Idempotent.
     expect(upgradeOutdatedGlobalHooks(hooks)).toEqual([]);
+  });
+});
+
+posixOnly('repo-local git hooks survive a Keychain-less sandbox', () => {
+  let root: string;
+  let bin: string;
+  let log: string;
+  let savedPath: string | undefined;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'origin-local-keychain-'));
+    bin = path.join(root, 'bin');
+    log = path.join(root, 'calls.log');
+    fs.mkdirSync(bin);
+    spawnSync('git', ['init', '-q'], { cwd: root });
+    fs.writeFileSync(path.join(bin, 'security'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'uname'), '#!/bin/sh\necho Darwin\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'origin'), `#!/bin/sh
+echo "CA=$NODE_USE_SYSTEM_CA args=$*" >> "${log}"
+if [ "$NODE_USE_SYSTEM_CA" = "1" ]; then kill -SEGV $$; fi
+`, { mode: 0o755 });
+    savedPath = process.env.PATH;
+    process.env.PATH = `${bin}:${savedPath}`;
+  });
+
+  afterEach(() => {
+    process.env.PATH = savedPath;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const hooks = [
+    { name: 'pre-commit', install: installGitPreCommitHook, args: [] },
+    { name: 'commit-msg', install: installGitCommitMsgHook, args: ['MSG'] },
+    { name: 'prepare-commit-msg', install: installGitPrepareCommitMsgHook, args: ['MSG', 'message', ''] },
+    { name: 'post-commit', install: installGitPostCommitHook, args: [] },
+    { name: 'pre-push', install: installGitPrePushHook, args: [] },
+    { name: 'post-rewrite', install: installRewriteHooks, args: [] },
+    { name: 'post-checkout', install: installRewriteHooks, args: ['old', 'new', '1'] },
+  ];
+
+  it.each(hooks)('$name runs Origin with bundled CAs when Keychain access is denied', async ({ name, install, args }) => {
+    install(root);
+    const hook = path.join(root, '.git', 'hooks', name);
+    const r = spawnSync('/bin/sh', [hook, ...args], {
+      cwd: root,
+      input: name === 'post-rewrite' ? 'old new\n' : '',
+      encoding: 'utf-8',
+      env: { HOME: root, PATH: `${bin}:/usr/bin:/bin`, NODE_USE_SYSTEM_CA: '1' },
+    });
+    expect(r.status).toBe(0);
+    const deadline = Date.now() + 5000;
+    while (!fs.existsSync(log) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(fs.readFileSync(log, 'utf-8')).toContain('CA=0 args=hooks');
+    expect(r.stderr).not.toContain('SecItemCopyMatching');
+  });
+
+  it('a commit-msg hook that only gets the preamble logs "already installed", not "installed"', () => {
+    const hook = path.join(root, '.git', 'hooks', 'commit-msg');
+    fs.mkdirSync(path.dirname(hook), { recursive: true });
+    fs.writeFileSync(hook, '#!/bin/sh\n# origin-commit-msg\norigin hooks git-commit-msg "$1"\n');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      installGitCommitMsgHook(root);
+      expect(log.mock.calls.flat().join('\n')).toContain('already installed');
+      expect(log.mock.calls.flat().join('\n')).not.toMatch(/hook installed \(commit message policies\)/);
+    } finally {
+      log.mockRestore();
+    }
+    expect(fs.readFileSync(hook, 'utf-8')).toContain(KEYCHAIN_GUARD_MARKER);
+  });
+
+  it('the upgrade puts the preamble before Origin\'s own marker line, not a user comment that contains it', () => {
+    const hook = path.join(root, 'post-checkout');
+    fs.writeFileSync(hook, '#!/bin/sh\n# origin-post-checkout TODO: integrate\necho mine\n\n# origin-post-checkout\norigin hooks git-post-checkout "$@"\n');
+    expect(upgradeLocalHookPreamble(hook, '# origin-post-checkout')).toBe(true);
+    const lines = fs.readFileSync(hook, 'utf-8').split('\n');
+    const guard = lines.findIndex((l) => l.includes(KEYCHAIN_GUARD_MARKER));
+    expect(guard).toBeGreaterThan(lines.indexOf('echo mine'));
+    expect(guard).toBeLessThan(lines.indexOf('# origin-post-checkout'));
+    // A file with only the look-alike comment is not Origin's: left alone.
+    const users = '#!/bin/sh\n# origin-post-checkout TODO: integrate\n';
+    fs.writeFileSync(hook, users);
+    expect(upgradeLocalHookPreamble(hook, '# origin-post-checkout')).toBe(false);
+    expect(fs.readFileSync(hook, 'utf-8')).toBe(users);
+  });
+
+  it.each(['post-rewrite', 'post-checkout'])('a fresh %s puts the preamble before the marker, like every other path', (name) => {
+    installRewriteHooks(root);
+    const script = fs.readFileSync(path.join(root, '.git', 'hooks', name), 'utf-8');
+    expect(script.indexOf(KEYCHAIN_GUARD_MARKER)).toBeGreaterThan(0);
+    expect(script.indexOf(KEYCHAIN_GUARD_MARKER)).toBeLessThan(script.indexOf(`# origin-${name}\n`));
   });
 });

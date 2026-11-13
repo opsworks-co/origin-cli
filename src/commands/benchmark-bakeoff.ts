@@ -6,6 +6,8 @@
 // See docs/notes/AGENT_BENCHMARKING_SPEC.md P3.
 
 import chalk from 'chalk';
+import { hydrateWorktreeIgnoredFiles } from '../worktree-hydration.js';
+import { getCanonicalRepoPath } from '../session-state.js';
 import fs from 'fs';
 import { runDetailed } from '../utils/exec.js';
 import { api } from '../api.js';
@@ -39,7 +41,9 @@ export async function benchmarkBakeoffCreateCommand(opts: { prompt?: string; age
 
   const rootRes = runDetailed('git', ['rev-parse', '--show-toplevel'], { cwd: process.cwd(), timeoutMs: 5_000 });
   if (rootRes.status !== 0 || !rootRes.stdout.trim()) { console.log(chalk.red('Not inside a git repository.')); return; }
-  const repoPath = rootRes.stdout.trim();
+  // Canonical, not --show-toplevel: run from a linked worktree, arms still sit
+  // beside (and hydrate from) the main checkout.
+  const repoPath = getCanonicalRepoPath(rootRes.stdout.trim());
   const remoteRes = runDetailed('git', ['remote', 'get-url', 'origin'], { cwd: repoPath, timeoutMs: 5_000 });
   const fullName = remoteRes.status === 0 ? deriveRepoFullName(remoteRes.stdout) : null;
   if (!fullName) { console.log(chalk.red('Could not determine the repo (no `origin` remote with an owner/name URL).')); return; }
@@ -75,6 +79,7 @@ export async function benchmarkBakeoffCreateCommand(opts: { prompt?: string; age
     const wt = `${parentDir}/${base}-bakeoff-${created.shortId}-${arm.agentSlug}`;
     const add = runDetailed('git', ['worktree', 'add', '-b', arm.branch, wt, 'HEAD'], { cwd: repoPath, timeoutMs: 20_000 });
     if (add.status === 0) {
+      for (const warning of hydrateWorktreeIgnoredFiles(repoPath, wt, (relative) => console.log(chalk.gray(`  ${arm.agentSlug}: cloning ${relative}…`)))) console.log(chalk.yellow(`  ⚠ ${arm.agentSlug}: could not hydrate ${warning}`));
       try { fs.writeFileSync(`${wt}/${promptFile}`, `# Bake-off prompt\n\n${effectivePrompt}\n`); } catch { /* ignore */ }
       ready.push({ agentSlug: arm.agentSlug, worktree: wt });
       console.log(chalk.green(`  ✓ ${arm.agentSlug}`) + chalk.gray(`  ${wt}  (branch ${arm.branch})`));

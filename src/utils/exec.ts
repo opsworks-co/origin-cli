@@ -111,12 +111,15 @@ export function runDetailed(
     windowsHide: true, // see buildOptions — no console window per child on Windows
   };
   const r = spawnSync(file, args, spawnOpts);
+  const failure = (r.error as NodeJS.ErrnoException | undefined)?.code;
   const out = {
     stdout: typeof r.stdout === 'string' ? r.stdout : (r.stdout?.toString?.() ?? ''),
     stderr: typeof r.stderr === 'string' ? r.stderr : (r.stderr?.toString?.() ?? ''),
-    status: r.status ?? -1,
+    // Output past maxBuffer is a failure however the child ended: one that has
+    // already exited reports status 0 beside ENOBUFS, and stdout may be cut short.
+    status: (failure === 'ENOBUFS' && !r.status) ? -1 : (r.status ?? -1),
   };
-  return (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ? { ...out, timedOut: true } : out;
+  return failure === 'ETIMEDOUT' ? { ...out, timedOut: true } : out;
 }
 
 // ─── Executable lookup (cross-platform) ─────────────────────────────────────

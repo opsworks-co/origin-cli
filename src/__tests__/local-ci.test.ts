@@ -8,7 +8,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import {
-  localCheckEnv, localCheckWorktreePath, runLocalCheck, runShellCommand, TailBuffer,
+  localCheckEnv, localCheckWorktreePath, runLocalCheck, runnerHostFromEnv, runShellCommand, TailBuffer,
   type ClaimedLocalCheck, type LocalCheckDeps, type LocalCheckReport,
 } from '../commands/local-ci.js';
 import { reviewRunnerCycle, type ReviewRunnerDeps, type WatchedCheckout } from '../commands/review-runner.js';
@@ -71,7 +71,30 @@ describe('runLocalCheck', () => {
     expect(reports[0].id).toBe('chk00001-aaaa');
     expect(reports[0].data.logTail).toContain('from the PR');
     expect(fs.existsSync(localCheckWorktreePath(checkout, 7, 'chk00001-aaaa'))).toBe(false);
-    expect(g(checkout, 'worktree', 'list')).not.toContain('local-ci-7');
+    expect(g(checkout, 'worktree', 'list')).not.toContain('local-ci-7-');
+  });
+
+  it("runs the command with the checkout's node_modules cloned in, not installed", async () => {
+    const exclude = path.join(checkout, '.git', 'info', 'exclude');
+    const before = fs.readFileSync(exclude, 'utf-8');
+    fs.appendFileSync(exclude, 'node_modules/\n');
+    fs.mkdirSync(path.join(checkout, 'node_modules', 'pkg'), { recursive: true });
+    fs.writeFileSync(path.join(checkout, 'node_modules', 'pkg', 'index.js'), 'module.exports = "dependency here";\n');
+    try {
+      const { d, reports, lines } = deps();
+      const cmd = `${node} -e "process.stdout.write(require('./node_modules/pkg'))"`;
+      await runLocalCheck(check({ id: 'chk00002-bbbb', command: cmd }), checkout, d);
+      if (lines.some((l) => l.includes('could not hydrate'))) {
+        // This filesystem can't copy-on-write: skipped, with an install hint.
+        expect(lines.join('\n')).toMatch(/node_modules: not cloned .*run your package install/);
+        return;
+      }
+      expect(reports[0].data).toMatchObject({ exitCode: 0 });
+      expect(reports[0].data.logTail).toContain('dependency here');
+    } finally {
+      fs.writeFileSync(exclude, before);
+      fs.rmSync(path.join(checkout, 'node_modules'), { recursive: true, force: true });
+    }
   });
 
   it('a passing command reports exit 0', async () => {
@@ -140,5 +163,19 @@ describe('the runner cycle', () => {
     const old = base({ claimLocal: async () => { throw new Error('404 Not Found'); }, runLocal: vi.fn() });
     expect(await reviewRunnerCycle(watched, old)).toBe('idle');
     expect(old.claim).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('runnerHostFromEnv', () => {
+  it('names Jenkins and its build when the runner runs inside one', () => {
+    expect(runnerHostFromEnv({ JENKINS_URL: 'https://ci.example.com/', BUILD_URL: 'https://ci.example.com/job/x/7/' }))
+      .toEqual({ label: 'Jenkins', url: 'https://ci.example.com/job/x/7/' });
+  });
+  it('still names Jenkins when it has no public URL configured', () => {
+    expect(runnerHostFromEnv({ JENKINS_HOME: '/var/lib/jenkins' })).toEqual({ label: 'Jenkins' });
+  });
+  it('is nothing on an ordinary machine, even one with a stray BUILD_URL', () => {
+    expect(runnerHostFromEnv({ BUILD_URL: 'https://x.example.com/' })).toBeUndefined();
+    expect(runnerHostFromEnv({})).toBeUndefined();
   });
 });

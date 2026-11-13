@@ -2,13 +2,13 @@
 // transcript's prompt message: Claude Code's JSONL formatter and both Codex
 // rollout parsers fill them from what the log records, and leave out what it
 // does not.
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { formatTranscriptForDisplay } from '../transcript.js';
+import { formatTranscriptForDisplay, parseTranscript } from '../transcript.js';
 import { parseCodexRollout, parseCodexRolloutLive } from '../agents/codex.js';
-import { MAX_EVENTS_PER_TURN, appendTurnEvents, inputPreview, type DisplayEvent } from '../display-events.js';
+import { MAX_EVENTS_PER_TURN, appendTurnEvents, inputPreview, mergeTurnEventsByTime, type DisplayEvent } from '../display-events.js';
 
 const dirs: string[] = [];
 function writeJsonl(rows: unknown[]): string {
@@ -17,6 +17,12 @@ function writeJsonl(rows: unknown[]): string {
   const file = path.join(dir, 't.jsonl');
   fs.writeFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
   return file;
+}
+function writeSubagent(parent: string, name: string, rows: unknown[], toolUseId?: string): void {
+  const dir = path.join(parent.slice(0, -'.jsonl'.length), 'subagents');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${name}.jsonl`), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  if (toolUseId) fs.writeFileSync(path.join(dir, `${name}.meta.json`), JSON.stringify({ toolUseId }));
 }
 afterEach(() => { for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true }); });
 
@@ -65,6 +71,83 @@ describe('Claude Code transcript events', () => {
     const [p] = prompts(t);
     expect(p.ts).toBeUndefined();
     expect(p.events).toEqual([{ kind: 'model' }, { kind: 'tool', tool: 'Edit', input: 'file: a.ts' }]);
+  });
+
+  it('attaches separate sub-agent steps to the Task prompt from metadata', () => {
+    const file = writeJsonl([
+      { type: 'user', timestamp: T(0), message: { role: 'user', content: 'first' } },
+      { type: 'assistant', timestamp: T(1), message: { id: 'parent_1', model: 'claude-opus-5-5', usage, content: [{ type: 'tool_use', id: 'task_1', name: 'Task', input: { prompt: 'inspect' } }] } },
+      { type: 'user', timestamp: T(20), message: { role: 'user', content: 'second' } },
+      { type: 'assistant', timestamp: T(21), message: { id: 'parent_2', model: 'claude-opus-5-5', usage, content: [{ type: 'tool_use', id: 'task_2', name: 'Task', input: { prompt: 'test' } }] } },
+    ]);
+    writeSubagent(file, 'agent-a', [
+      { type: 'user', isSidechain: true, timestamp: T(2), message: { role: 'user', content: 'synthetic delegated prompt' } },
+      { type: 'assistant', isSidechain: true, timestamp: T(5), message: { id: 'sub_msg', model: 'claude-haiku-5-5', usage: { input_tokens: 7, output_tokens: 11 }, content: [{ type: 'thinking', thinking: 'hmm' }, { type: 'tool_use', id: 'sub_tool', name: 'Bash', input: { command: 'false' } }] } },
+      // A streamed repeat updates the same model event instead of adding one.
+      { type: 'assistant', isSidechain: true, timestamp: T(6), message: { id: 'sub_msg', model: 'claude-haiku-5-5', usage: { input_tokens: 7, output_tokens: 13 }, content: [{ type: 'text', text: 'working' }] } },
+      { type: 'user', isSidechain: true, timestamp: T(9), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'sub_tool', is_error: true, content: 'failed' }] } },
+    ], 'task_1');
+
+    const [first, second] = prompts(formatTranscriptForDisplay(file));
+    expect(first.events.filter((e: DisplayEvent) => e.model === 'claude-haiku-5-5')).toEqual([
+      { kind: 'model', ts: ms(2), model: 'claude-haiku-5-5', durationMs: 4000, tokens: { input: 7, output: 13, cacheRead: 0, cacheWrite: 0 } },
+    ]);
+    expect(first.events).toContainEqual({ kind: 'thinking', ts: ms(2), durationMs: 3000 });
+    expect(first.events).toContainEqual({ kind: 'tool', tool: 'Bash', ts: ms(5), input: 'false', durationMs: 4000, error: true });
+    expect(second.events.some((e: DisplayEvent) => e.model === 'claude-haiku-5-5')).toBe(false);
+    expect(JSON.parse(formatTranscriptForDisplay(file)).some((m: any) => m.content === 'synthetic delegated prompt')).toBe(false);
+  });
+
+  it('merges sub-agent steps into the parent turn by time, before the parent\'s follow-up', () => {
+    const file = writeJsonl([
+      { type: 'user', timestamp: T(0), message: { role: 'user', content: 'first' } },
+      { type: 'assistant', timestamp: T(1), message: { id: 'parent_1', model: 'claude-opus-5-5', usage, content: [{ type: 'tool_use', id: 'task_1', name: 'Task', input: { prompt: 'inspect' } }] } },
+      { type: 'user', timestamp: T(10), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'task_1', content: 'found it' }] } },
+      { type: 'assistant', timestamp: T(12), message: { id: 'parent_2', model: 'claude-opus-5-5', usage: { input_tokens: 1, output_tokens: 9 }, content: [{ type: 'text', text: 'Done.' }] } },
+    ]);
+    writeSubagent(file, 'agent-a', [
+      { type: 'user', isSidechain: true, timestamp: T(3), message: { role: 'user', content: 'delegated' } },
+      { type: 'assistant', isSidechain: true, timestamp: T(5), message: { id: 'sub_msg', model: 'claude-haiku-5-5', usage: { input_tokens: 7, output_tokens: 11 }, content: [{ type: 'tool_use', id: 'sub_tool', name: 'Bash', input: { command: 'ls' } }] } },
+      { type: 'user', isSidechain: true, timestamp: T(8), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'sub_tool', content: 'a.ts' }] } },
+    ], 'task_1');
+
+    const [first] = prompts(formatTranscriptForDisplay(file));
+    const ts = first.events.map((e: DisplayEvent) => e.ts);
+    expect(ts).toEqual([...ts].sort((a, b) => a - b));
+    expect(first.events.map((e: DisplayEvent) => e.tool || e.model)).toEqual([
+      'claude-opus-5-5', 'Task', 'claude-haiku-5-5', 'Bash', 'claude-opus-5-5',
+    ]);
+  });
+
+  it('uses the sub-agent timestamp for legacy files without metadata or when toolUseId is missing from parent', () => {
+    const file = writeJsonl([
+      { type: 'user', timestamp: T(0), message: { role: 'user', content: 'first' } },
+      { type: 'user', timestamp: T(20), message: { role: 'user', content: 'second' } },
+    ]);
+    writeSubagent(file, 'agent-legacy', [
+      { type: 'user', isSidechain: true, timestamp: T(22), message: { role: 'user', content: 'delegated' } },
+      { type: 'assistant', isSidechain: true, timestamp: T(25), message: { id: 'legacy_msg', model: 'claude-sonnet-5-5', usage: { input_tokens: 2, output_tokens: 4 }, content: [{ type: 'text', text: 'done' }] } },
+    ]);
+    writeSubagent(file, 'agent-orphan-meta', [
+      { type: 'user', isSidechain: true, timestamp: T(26), message: { role: 'user', content: 'delegated' } },
+      { type: 'assistant', isSidechain: true, timestamp: T(28), message: { id: 'orphan_msg', model: 'claude-haiku-5-5', usage: { input_tokens: 3, output_tokens: 5 }, content: [{ type: 'text', text: 'also done' }] } },
+    ], 'missing_task_id');
+
+    const spy = vi.spyOn(fs, 'readFileSync');
+    parseTranscript(file);
+    const [first, second] = prompts(formatTranscriptForDisplay(file));
+    const subReads = spy.mock.calls.filter(([p]) => String(p).endsWith('agent-legacy.jsonl'));
+    spy.mockRestore();
+    expect(subReads).toHaveLength(1);
+
+    expect(first.events).toBeUndefined();
+    expect(second.events).toContainEqual({ kind: 'model', ts: ms(22), model: 'claude-sonnet-5-5', durationMs: 3000, tokens: { input: 2, output: 4, cacheRead: 0, cacheWrite: 0 } });
+    expect(second.events).toContainEqual({ kind: 'model', ts: ms(26), model: 'claude-haiku-5-5', durationMs: 2000, tokens: { input: 3, output: 5, cacheRead: 0, cacheWrite: 0 } });
+
+    // A path where `subagents` cannot be read is still a normal parent-only transcript.
+    fs.rmSync(path.dirname(path.join(file.slice(0, -'.jsonl'.length), 'subagents', 'x')), { recursive: true, force: true });
+    fs.writeFileSync(path.join(file.slice(0, -'.jsonl'.length), 'subagents'), 'not a directory');
+    expect(prompts(formatTranscriptForDisplay(file))).toHaveLength(2);
   });
 });
 
@@ -147,6 +230,22 @@ describe('event helpers', () => {
     expect(p).not.toContain('second line');
     expect(inputPreview('x'.repeat(500))!.length).toBe(160);
     expect(inputPreview('   \n  ')).toBeUndefined();
+  });
+
+  it('a time merge keeps each list\'s order, untimed steps with their neighbour, ties parent-first', () => {
+    const ev = (tool: string, ts?: number): DisplayEvent => (ts === undefined ? { kind: 'tool', tool } : { kind: 'tool', tool, ts });
+    const target = { events: [ev('p1', 1), ev('p2'), ev('p3', 5), ev('p4', 9)] };
+    mergeTurnEventsByTime(target, [ev('s0'), ev('s1', 2), ev('s2'), ev('s3', 5), ev('s4', 12)]);
+    expect(target.events.map((e) => e.tool)).toEqual(['p1', 'p2', 's0', 's1', 's2', 'p3', 's3', 'p4', 's4']);
+
+    const untimedSub = { events: [ev('p1', 1), ev('p2', 5)] };
+    mergeTurnEventsByTime(untimedSub, [ev('s1'), ev('s2')]);
+    expect(untimedSub.events.map((e) => e.tool)).toEqual(['p1', 'p2', 's1', 's2']);
+
+    const full: { events?: DisplayEvent[]; eventsDropped?: number } = { events: Array(MAX_EVENTS_PER_TURN).fill(ev('p', 1)) };
+    mergeTurnEventsByTime(full, [ev('s', 0), ev('s', 0)]);
+    expect(full.events).toHaveLength(MAX_EVENTS_PER_TURN);
+    expect(full.eventsDropped).toBe(2);
   });
 
   it('a turn keeps at most MAX_EVENTS_PER_TURN steps and counts the rest', () => {

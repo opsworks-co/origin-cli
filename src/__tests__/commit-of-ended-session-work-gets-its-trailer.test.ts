@@ -153,3 +153,43 @@ describe('pickEndedSessionByContent', () => {
     expect(owner?.matchedLines).toBe(2);
   });
 });
+
+// OR-23 v1 (3265d18a3) was stamped with RCCE-434's session: an older session,
+// from another repository's task, whose recorded lines matched 8 lines of a
+// 116-line commit — generic test and import lines, in other files. A handful of
+// shared lines anywhere is coincidence, not authorship.
+describe('pickEndedSessionByContent — OR-23 v1', () => {
+  const sessionIn = (id: string, file: string, plus: string[]) => ({
+    sessionId: id, startedAt: '', prompts: [],
+    completedPromptMappings: [{ promptIndex: 0, promptText: '', filesChanged: [file], diff: '', uncommittedDiff: patchOf(file, [], plus) }],
+  }) as any;
+  const generic = [
+    'from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple',
+    'self.assertEqual(result.status_code, 200)',
+    'self.assertIsNone(payload.get("prompt"))',
+  ];
+
+  it('does not count a line the session recorded in a different file', () => {
+    expect(pickEndedSessionByContent(
+      [sessionIn(ENDED, 'rhodecode/tests/test_pull_requests.py', generic)],
+      patchOf('integrations/rhodecode/tests/test_annotate.py', [], generic),
+    )).toBeNull();
+  });
+
+  it('does not stamp a session that holds only a small part of the commit', () => {
+    const own = Array.from({ length: 20 }, (_, i) => `assert card["field_${i}"] == expected_field_${i}`);
+    expect(pickEndedSessionByContent(
+      [sessionIn(ENDED, 'tests/test_annotate.py', generic)],
+      patchOf('tests/test_annotate.py', [], [...generic, ...own]),
+    )).toBeNull();
+  });
+
+  it('still stamps a session that holds most of the commit, in the same file', () => {
+    const owner = pickEndedSessionByContent(
+      [sessionIn(ENDED, 'tests/test_annotate.py', generic)],
+      patchOf('tests/test_annotate.py', [], [...generic, 'assert card["agent"] == "codex"']),
+    );
+    expect(owner?.state.sessionId).toBe(ENDED);
+    expect(owner?.matchedLines).toBe(3);
+  });
+});

@@ -11,6 +11,8 @@
 // Run it once (--once, drains one job then exits — used by cron/CI) or leave it
 // polling (default). One daemon covers one repo; run several for several repos.
 import chalk from 'chalk';
+import { hydrateWorktreeIgnoredFiles } from '../worktree-hydration.js';
+import { getCanonicalRepoPath } from '../session-state.js';
 import fs from 'fs';
 import os from 'os';
 import { runDetailed } from '../utils/exec.js';
@@ -53,6 +55,7 @@ export function executeClaimedBakeOff(
         console.log(chalk.yellow(`  ⚠ ${arm.agentSlug}: worktree add failed — ${(add.stderr || '').trim().split('\n')[0] || 'unknown'}`));
         continue;
       }
+      for (const warning of hydrateWorktreeIgnoredFiles(repoPath, wt, (relative) => console.log(chalk.gray(`  ${arm.agentSlug}: cloning ${relative}…`)))) console.log(chalk.yellow(`  ⚠ ${arm.agentSlug}: could not hydrate ${warning}`));
     }
     try { fs.writeFileSync(`${wt}/BAKEOFF_PROMPT.md`, `# Bake-off prompt\n\n${claimed.prompt}\n`); } catch { /* ignore */ }
     ready.push({ agentSlug: arm.agentSlug, worktree: wt });
@@ -102,7 +105,9 @@ export async function pollForBakeOff(
 export async function benchmarkRunnerCommand(opts: { once?: boolean; interval?: string }): Promise<void> {
   const rootRes = runDetailed('git', ['rev-parse', '--show-toplevel'], { cwd: process.cwd(), timeoutMs: 5_000 });
   if (rootRes.status !== 0 || !rootRes.stdout.trim()) { console.log(chalk.red('Not inside a git repository.')); return; }
-  const repoPath = rootRes.stdout.trim();
+  // Canonical, not --show-toplevel: run from a linked worktree, arms still sit
+  // beside (and hydrate from) the main checkout.
+  const repoPath = getCanonicalRepoPath(rootRes.stdout.trim());
   const remoteRes = runDetailed('git', ['remote', 'get-url', 'origin'], { cwd: repoPath, timeoutMs: 5_000 });
   const fullName = remoteRes.status === 0 ? deriveRepoFullName(remoteRes.stdout) : null;
   if (!fullName) { console.log(chalk.red('Could not determine the repo (no `origin` remote with an owner/name URL).')); return; }

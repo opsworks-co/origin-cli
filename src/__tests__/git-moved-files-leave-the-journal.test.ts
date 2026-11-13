@@ -95,6 +95,40 @@ describe('a turn that pulls is not billed what came down', () => {
     expect(journalFilesForTurn(state, undefined, 0)).toEqual(['mine.py']);
   });
 
+  // An agent with no tool hooks (Codex) has no probe around the command, so
+  // nothing records what it moved. Codex session efd40ad9 ran `git merge
+  // --no-edit origin/main` and its one turn read +2853/-80 against a header of
+  // +396/-150: the journal claimed every file the merge landed. The journal
+  // now asks the window the shell window asks: what did git bring in?
+  it('with no probe (Codex), a merge of main is not billed to the turn — its own write is', () => {
+    fs.writeFileSync(path.join(mine, 'bump.json'), '{"v":1}\n');
+    git(mine, 'add', '-A');
+    git(mine, 'commit', '-q', '-m', 'dependabot bump');
+    teammatePushes();
+    git(mine, 'fetch', '-q');
+    const t0 = Date.now();
+    const state = {
+      ...stateFor(t0 - 10_000),
+      startedAt: new Date(t0 + 1000).toISOString(),
+      prePromptSha: git(mine, 'rev-parse', 'HEAD').trim(),
+    };
+
+    git(mine, 'merge', '-q', '--no-edit', 'origin/main');
+    fs.writeFileSync(path.join(mine, 'bump.json'), '{"v":2}\n'); // the turn's own fix
+
+    fs.writeFileSync(journal, [
+      rec('shared.txt', t0 - 9_000),
+      rec('new-dir/deep/added.ts', t0 - 9_000),
+      rec('new-name.txt', t0 - 9_000),
+      rec('old-name.txt', t0 - 9_000),
+      rec('ünïcode file.md', t0 - 9_000),
+      rec('bump.json', t0 - 8_000),
+    ].join('\n') + '\n');
+
+    expect(gitMovedFilesForTurn(state, 0, mine).size, 'no probe ran').toBe(0);
+    expect(journalFilesForTurn(state, undefined, 0)).toEqual(['bump.json']);
+  });
+
   it('pulled files are CLEAN afterwards — the dirty-file probe alone could not see them', () => {
     teammatePushes();
     git(mine, 'pull', '-q', '--ff-only');
@@ -115,13 +149,25 @@ describe('a turn that pulls is not billed what came down', () => {
     expect(moved.has('local.txt'), 'our own committed file is not git\'s').toBe(false);
   });
 
-  it('a path the command NAMED stays the turn\'s (git checkout <rev> -- f)', () => {
+  it('a path checked out from a revision is git\'s even though the command names it', () => {
     teammatePushes();
     git(mine, 'fetch', '-q');
     const t0 = Date.now() - 10_000;
     const state = stateFor(t0);
 
     runThroughProbe(state, 'git checkout origin/main -- shared.txt', () => git(mine, 'checkout', 'origin/main', '--', 'shared.txt'));
+    fs.writeFileSync(journal, rec('shared.txt', t0 + 100) + '\n');
+
+    expect(journalFilesForTurn(state, undefined, 0)).toEqual([]);
+  });
+
+  it('a path checked out from the branch\'s own history stays the turn\'s (git checkout HEAD~1 -- f, #1812)', () => {
+    fs.writeFileSync(path.join(mine, 'shared.txt'), 'one\nmine\n');
+    git(mine, 'commit', '-q', '-am', 'local edit');
+    const t0 = Date.now() - 10_000;
+    const state = stateFor(t0);
+
+    runThroughProbe(state, 'git checkout HEAD~1 -- shared.txt', () => git(mine, 'checkout', 'HEAD~1', '--', 'shared.txt'));
     fs.writeFileSync(journal, rec('shared.txt', t0 + 100) + '\n');
 
     expect(journalFilesForTurn(state, undefined, 0)).toEqual(['shared.txt']);
@@ -143,6 +189,23 @@ describe('a turn that pulls is not billed what came down', () => {
     state.currentTurnStartedAt = t1;
     fs.writeFileSync(journal, rec('shared.txt', t1 + 100) + '\n');
     expect(journalFilesForTurn(state, undefined, 1)).toEqual(['shared.txt']);
+  });
+});
+
+describe('a reviewer checkout of paths from a PR ref', () => {
+  it('leaves the journal empty even though every path is explicit', () => {
+    teammatePushes();
+    git(mine, 'fetch', '-q', 'origin');
+    const t0 = Date.now() - 10_000;
+    const state = stateFor(t0);
+    const paths = ['shared.txt', 'new-dir/deep/added.ts', 'new-name.txt'];
+
+    runThroughProbe(state, `git checkout origin/main -- ${paths.map((p) => JSON.stringify(p)).join(' ')}`, () => {
+      git(mine, 'checkout', 'origin/main', '--', ...paths);
+    });
+    fs.writeFileSync(journal, paths.map((f) => rec(f, t0 + 100)).join('\n') + '\n');
+
+    expect(journalFilesForTurn(state, undefined, 0)).toEqual([]);
   });
 });
 

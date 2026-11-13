@@ -6,7 +6,7 @@
 import chalk from 'chalk';
 import { runDetailed } from '../utils/exec.js';
 import { api } from '../api.js';
-import { computeSessionSurvival } from '../benchmark-survival.js';
+import { anyShaReachable, computeSessionSurvival } from '../benchmark-survival.js';
 
 /** owner/name from the origin remote (github.com/owner/name(.git), git@…:owner/name). */
 export function deriveRepoFullName(remoteUrl: string): string | null {
@@ -40,10 +40,19 @@ export async function benchmarkSyncCommand(): Promise<void> {
     return;
   }
 
+  // A shallow clone cuts history off: blame cannot reach any commit past the
+  // cut, so every session reads as squashed away and is reported UNKNOWN —
+  // 320 rows of it from one checkout on 2026-10-29. Measure nothing instead.
+  const shallowRes = runDetailed('git', ['rev-parse', '--is-shallow-repository'], { cwd: repoPath, timeoutMs: 5_000 });
+  if (shallowRes.status === 0 && shallowRes.stdout.trim() === 'true') {
+    console.log(chalk.yellow('This clone is shallow, so survival cannot be measured here. Run `git fetch --unshallow`, then sync again.'));
+    return;
+  }
+
   console.log(chalk.bold(`\nOrigin benchmark sync — ${fullName}\n`));
   let targetsRes: { repoId: string | null; targets: SurvivalTarget[] };
   try {
-    targetsRes = await api.getSurvivalTargets(fullName) as any;
+    targetsRes = await api.getSurvivalTargets(fullName, { repoPath, repoUrl: remoteRes.stdout.trim() }) as any;
   } catch (err: any) {
     console.log(chalk.red(`Failed to fetch targets: ${err?.message || err}`));
     return;
@@ -60,9 +69,15 @@ export async function benchmarkSyncCommand(): Promise<void> {
 
   console.log(chalk.gray(`  Measuring survival for ${targets.length} session(s)…`));
   const results = [];
-  let resolved = 0, unknown = 0;
+  let resolved = 0, unknown = 0, notHere = 0;
   for (const t of targets) {
-    const sv = computeSessionSurvival(repoPath, t.commitShas, t.files, t.landedShas || []);
+    // A landing commit is on the base branch by definition. When this HEAD
+    // cannot reach it, the checkout is behind or on another branch — not a
+    // squash that lost the lines — so the session is left for a later sync
+    // rather than stored UNKNOWN, which the server does not offer again.
+    const landed = t.landedShas || [];
+    if (landed.length > 0 && !anyShaReachable(repoPath, [...t.commitShas, ...landed])) { notHere++; continue; }
+    const sv = computeSessionSurvival(repoPath, t.commitShas, t.files, landed);
     if (sv.resolvable) resolved++; else unknown++;
     // A landing commit carries every line of the PR, which can exceed what
     // THIS session authored when several sessions shared the PR; survival is
@@ -78,8 +93,24 @@ export async function benchmarkSyncCommand(): Promise<void> {
     });
   }
 
+  if (notHere > 0) {
+    console.log(chalk.yellow(`  ${notHere} session(s) skipped — their PRs landed on commits this checkout's HEAD does not contain. Pull the base branch and sync again.`));
+  }
+  if (results.length === 0) return;
+  const body = { repoId: targetsRes.repoId, results, repoPath, repoUrl: remoteRes.stdout.trim() };
   try {
-    const post = await api.postSurvival({ repoId: targetsRes.repoId, results }) as any;
+    let post: any;
+    try {
+      post = await api.postSurvival(body);
+    } catch (err: any) {
+      // Blaming a few hundred sessions takes minutes, and the keep-alive
+      // socket the targets read opened is dead by then: the first send fails
+      // with a bare "fetch failed" (opsworks-co/origin, 211 sessions, ~10 min,
+      // three runs in a row). A second send gets a fresh connection. An HTTP
+      // error is the server's answer, not a dead socket, so it is not retried.
+      if (err?.message !== 'fetch failed') throw err;
+      post = await api.postSurvival(body);
+    }
     console.log(chalk.green(`\n  ✓ Reported ${post?.upserted ?? results.length} measurement(s) — ${resolved} resolved, ${unknown} unknown (squashed/rebased).\n`));
   } catch (err: any) {
     console.log(chalk.red(`\n  Failed to report survival: ${err?.message || err}\n`));

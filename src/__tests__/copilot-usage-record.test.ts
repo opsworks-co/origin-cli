@@ -42,4 +42,20 @@ describe('Copilot usage records', () => {
     const older = ev('assistant.message', { messageId: 'm1', model: 'm', content: 'Ready.', toolRequests: [], outputTokens: 91 });
     expect(usageOf([START, USER, RECORD, older, SHUTDOWN])[0].output_tokens).toBe(91);
   });
+
+  it('price each call at its own model: input and cache go to that model\'s reply', () => {
+    const opusRecord = ev('session.usage_record', { usage: { model: 'claude-opus-4.5', inputTokens: 5_000_100, outputTokens: 10, cacheReadTokens: 5_000_000, cacheWriteTokens: 0 } });
+    const opusReply = ev('assistant.message', { messageId: 'm0', model: 'claude-opus-4.5', content: 'Planning.', toolRequests: [] });
+    const [opus, sonnet] = usageOf([START, USER, opusRecord, opusReply, RECORD, REPLY]);
+    expect(opus).toMatchObject({ input_tokens: 100, cache_read_input_tokens: 5_000_000 });
+    expect(sonnet).toMatchObject({ input_tokens: 4, cache_read_input_tokens: 23086 });
+  });
+
+  it('after a resume, the new calls count — the old lifecycle\'s shutdown does not override them', () => {
+    const later = ev('session.usage_record', { usage: { model: 'claude-sonnet-5.5', inputTokens: 3_000_000, outputTokens: 5, cacheReadTokens: 3_000_000, cacheWriteTokens: 0 } });
+    const reply2 = ev('assistant.message', { messageId: 'm2', model: 'claude-sonnet-5.5', content: 'Done.', toolRequests: [] });
+    const rows = usageOf([START, USER, RECORD, REPLY, SHUTDOWN, USER, later, reply2]);
+    expect(rows[rows.length - 1]).toMatchObject({ cache_read_input_tokens: 3_023_086 });
+  });
 });
+

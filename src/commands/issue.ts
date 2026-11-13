@@ -6,7 +6,7 @@ import { getGitRoot } from '../session-state.js';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-interface Issue {
+export interface Issue {
   id: string;
   title: string;
   description?: string;
@@ -137,14 +137,60 @@ export async function issueCreateCommand(
   };
 
   saveIssue(root, issue);
+  const origin = await publishIssue(root, issue);
 
   if (opts?.json) {
-    console.log(JSON.stringify(issue, null, 2));
+    console.log(JSON.stringify({ ...issue, onOrigin: origin.ok }, null, 2));
     return;
   }
 
   console.log(chalk.green(`✓ Created issue ${chalk.bold(issue.id)}: ${title}`));
   console.log(`  ${priorityLabel(issue.priority)}  ${chalk.gray(issue.type)}${issue.labels.length ? '  ' + issue.labels.map(l => chalk.cyan(`#${l}`)).join(' ') : ''}`);
+  console.log(origin.ok
+    ? chalk.gray('  Also on Origin, where the Issues page, Start and the orchestrator see it.')
+    : chalk.gray(`  Only in .origin/issues: ${origin.reason}`));
+}
+
+export interface PublishIssueDeps {
+  connected: () => boolean;
+  remoteUrl: (root: string) => string | null;
+  previewRoute: (data: { repoPath: string; repoUrl?: string }) => Promise<any>;
+  createIssue: (repoId: string, data: { shortId: string; title: string; description?: string; type: string; priority: number; labels: string[]; deps: string[] }) => Promise<any>;
+}
+
+async function defaultPublishDeps(): Promise<PublishIssueDeps> {
+  const [{ api }, { isConnectedMode }, { execFileSync }] = await Promise.all([import('../api.js'), import('../config.js'), import('child_process')]);
+  return {
+    connected: isConnectedMode,
+    remoteUrl: (root) => {
+      try { return execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { return null; }
+    },
+    previewRoute: api.previewRoute,
+    createIssue: api.createIssue,
+  };
+}
+
+/**
+ * The new issue on Origin too, in the repo this checkout's sessions go to —
+ * the issue list, Start and the orchestrator read Origin, not .origin/issues.
+ * Never fails the create: offline or not signed in, the local file stands.
+ */
+export async function publishIssue(root: string, issue: Issue, injected?: PublishIssueDeps): Promise<{ ok: true; repoId: string } | { ok: false; reason: string }> {
+  const deps = injected ?? await defaultPublishDeps();
+  if (!deps.connected()) return { ok: false, reason: 'not signed in to Origin (`origin login`)' };
+  try {
+    const remote = deps.remoteUrl(root);
+    const route = await deps.previewRoute({ repoPath: root, ...(remote ? { repoUrl: remote } : {}) });
+    const repoId = route?.repo?.id;
+    if (!repoId) return { ok: false, reason: 'this repo is not on Origin yet' };
+    await deps.createIssue(repoId, {
+      shortId: issue.id, title: issue.title, ...(issue.description ? { description: issue.description } : {}),
+      type: issue.type, priority: issue.priority, labels: issue.labels, deps: issue.deps,
+    });
+    return { ok: true, repoId };
+  } catch (err: any) {
+    return { ok: false, reason: `could not reach Origin (${String(err?.message ?? err).slice(0, 120)})` };
+  }
 }
 
 /**

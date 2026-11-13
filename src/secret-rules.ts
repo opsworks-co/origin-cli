@@ -88,6 +88,29 @@ export function isNonSecretAssignmentValue(value: string, isPasswordRule = false
   return false;
 }
 
+/** Source files, where an unquoted value after `password:` / `= ` is code, not text. */
+const CODE_FILE_RE = /\.(?:[cm]?[jt]sx?|py|go|rb|java|kts?|scala|rs|swift|php|cs|dart|exs?)$/i;
+
+/**
+ * Is this UNQUOTED value in a source file a variable or property read?
+ *
+ *   password: cred.password,      token: opts.pendingPassword ?? null
+ *
+ * In code a string literal needs quotes, so an unquoted identifier or
+ * `a.b.c` chain is a reference to a value held elsewhere — the same reason
+ * `process.env.X` is skipped. The rules that allow an unquoted value (the
+ * pre-commit `Hardcoded Password` rule) flagged every such line, and eight of
+ * them on one commit forced a --no-verify.
+ *
+ * Not applied to config files (.env, YAML, INI, shell): there an unquoted
+ * value IS the literal, and `DB_PASSWORD=hunter2hunter` must stay a finding.
+ * A quoted value is never skipped here.
+ */
+export function isCodeReferenceValue(filePath: string, value: string, quoted: boolean): boolean {
+  if (quoted || !CODE_FILE_RE.test(filePath || '')) return false;
+  return /^[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*[;,)]*$/.test((value || '').trim());
+}
+
 /**
  * Is this email address nobody's personal data?
  *

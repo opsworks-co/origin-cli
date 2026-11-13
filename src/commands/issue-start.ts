@@ -1,7 +1,8 @@
 // `origin issue start <id>` — hand an issue to an agent.
 //
 //   1. Resolve the issue: the API (by shortId, in the org this repo's captures
-//      go to), else this repo's `.origin/issues`, else an open repo-memory TODO.
+//      go to, or the repo `--repo-id` names), else this repo's `.origin/issues`,
+//      else an open repo-memory TODO.
 //   2. Check out `issue/<shortId>-<slug>` from the default branch — refused on
 //      a dirty tree, never stashed (`--no-branch` stays where you are).
 //   3. Build the prompt (issue-prompt.ts, shared with the API's /prompt route)
@@ -27,6 +28,7 @@ import { writePendingIssueLink } from '../issue-link.js';
 import { describePublish, publishIssueBranch, type PublishInput } from '../issue-publish.js';
 import { launchTarget } from '../windows-shim.js';
 import { askInTerminal, pickResume, questionsOf, runPreflight, sessionOnThisComputer, type IssueQuestion, type PreflightResult } from '../issue-clarify.js';
+import { hydrateWorktreeIgnoredFiles } from '../worktree-hydration.js';
 
 export interface ResolvedIssue {
   shortId: string;
@@ -34,6 +36,8 @@ export interface ResolvedIssue {
   description?: string | null;
   type?: string | null;
   status?: string | null;
+  /** Where the API says it came from ("review" for a PR-review fix). */
+  source?: string | null;
   /** Where it was found. */
   origin: 'api' | 'local' | 'memory-todo';
   /** API repo id, when the issue lives on the API. */
@@ -76,6 +80,12 @@ export interface IssueStartOptions {
   resume?: boolean;
   /** commander: --no-preflight sets false. A background run first checks the issue against the code, and asks what it can't settle. */
   preflight?: boolean;
+  /**
+   * Read the issue from this Origin repo, not the one this checkout routes to.
+   * The orchestrator passes it: the same repo can be a row in two workspaces,
+   * and its run may be on the one captures here don't go to.
+   */
+  repoId?: string;
   /** One arm of `origin issue race`: work on `<issue branch>-<suffix>` (not a CLI flag). */
   branchSuffix?: string;
   json?: boolean;
@@ -94,10 +104,10 @@ export interface IssueStartDeps {
     getIssue: (repoId: string, shortId: string) => Promise<any>;
     updateIssue: (repoId: string, shortId: string, data: Record<string, unknown>) => Promise<any>;
     /** Optional: reports the run to the issue's Start dialog. */
-    startIssueRun?: (repoId: string, shortId: string, data: { agent: string; branch: string | null; background: boolean; hostname: string }) => Promise<any>;
+    startIssueRun?: (repoId: string, shortId: string, data: { agent: string; branch: string | null; background: boolean; hostname: string; status?: 'not_started'; detail?: string }) => Promise<any>;
     endIssueRun?: (repoId: string, shortId: string, runId: string, data: { status: 'done' | 'failed' | 'timed_out'; exitCode: number; detail: string | null }) => Promise<any>;
     /** Optional: puts the pre-start pass's questions (answered or not) on the issue. */
-    postIssueQuestions?: (repoId: string, shortId: string, data: { questions: Array<{ question: string; answer: string | null }>; agent: string }) => Promise<any>;
+    postIssueQuestions?: (repoId: string, shortId: string, data: { questions: Array<{ question: string; answer: string | null; suggestion?: string | null }>; agent: string }) => Promise<any>;
   } | null;
   memoryLines: (repoPath: string, issue: ResolvedIssue) => string[];
   openTodos: (repoPath: string) => Array<{ id: string; text: string }>;
@@ -174,6 +184,7 @@ function hostIssueOf(it: any): ResolvedIssue['hostIssue'] {
 function apiIssue(it: any, repoId: string): ResolvedIssue {
   return {
     shortId: it.shortId, title: it.title, description: it.description, type: it.type, status: it.status,
+    source: typeof it.source === 'string' ? it.source : null,
     origin: 'api', repoId,
     // A review fix: the PR it updates, and that PR's branch.
     workBranch: typeof it.workBranch === 'string' ? it.workBranch : null,
@@ -210,6 +221,7 @@ export async function resolveIssue(
   roots: { work: string; canonical: string },
   deps: Pick<IssueStartDeps, 'api' | 'connected' | 'openTodos' | 'error'>,
   lookup: IssueLookup = {},
+  pinnedRepoId: string | null = null,
 ): Promise<ResolvedIssue | null> {
   let todos: Array<{ id: string; text: string }> | null = null;
   const loadTodos = () => {
@@ -218,10 +230,11 @@ export async function resolveIssue(
     return todos;
   };
 
-  // 1. The API, in the org this repo's captures go to.
-  let repoId: string | null = null;
+  // 1. The API, in the org this repo's captures go to — or the repo the
+  //    caller named.
+  let repoId: string | null = pinnedRepoId;
   if (deps.api && deps.connected()) {
-    try {
+    if (!repoId) try {
       let remote = '';
       try { remote = git(['remote', 'get-url', 'origin'], roots.canonical); } catch { /* no remote */ }
       const route = await deps.api.previewRoute({ repoPath: roots.canonical, ...(remote ? { repoUrl: remote } : {}) });
@@ -376,7 +389,7 @@ export function worktreeOfBranch(cwd: string, branch: string): string | null {
  * local branch, the remote one (a PR's branch, tracked), or a new branch from
  * the default branch.
  */
-export function worktreeForIssueBranch(canonical: string, branch: string, at?: string | null): { path: string; created: boolean; base: string | null; reused: boolean } {
+export function worktreeForIssueBranch(canonical: string, branch: string, at?: string | null, onClone?: (relative: string) => void): { path: string; created: boolean; base: string | null; reused: boolean; hydrationWarnings: string[] } {
   if (!gitOk(['check-ref-format', '--branch', branch], canonical)) {
     throw new Error(`"${branch}" is not a valid branch name.`);
   }
@@ -384,7 +397,7 @@ export function worktreeForIssueBranch(canonical: string, branch: string, at?: s
   // be "reused" at a path that is gone, and block adding one for the branch.
   gitOk(['worktree', 'prune'], canonical);
   const existing = worktreeOfBranch(canonical, branch);
-  if (existing) return { path: existing, created: false, base: null, reused: true };
+  if (existing) return { path: existing, created: false, base: null, reused: true, hydrationWarnings: [] };
 
   const target = path.resolve(at || issueWorktreePath(canonical, branch));
   let entries: string[] = [];
@@ -394,7 +407,7 @@ export function worktreeForIssueBranch(canonical: string, branch: string, at?: s
 
   if (gitOk(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], canonical)) {
     git(['worktree', 'add', target, branch], canonical);
-    return { path: target, created: false, base: null, reused: false };
+    return { path: target, created: false, base: null, reused: false, hydrationWarnings: hydrateWorktreeIgnoredFiles(canonical, target, onClone) };
   }
   // A pull request's branch that exists only on the remote: track it.
   gitOk(['fetch', '--quiet', 'origin', `refs/heads/${branch}:refs/remotes/origin/${branch}`], canonical);
@@ -402,11 +415,11 @@ export function worktreeForIssueBranch(canonical: string, branch: string, at?: s
     git(['worktree', 'add', '--no-track', '-b', branch, target, `origin/${branch}`], canonical);
     git(['config', `branch.${branch}.remote`, 'origin'], canonical);
     git(['config', `branch.${branch}.merge`, `refs/heads/${branch}`], canonical);
-    return { path: target, created: false, base: `origin/${branch}`, reused: false };
+    return { path: target, created: false, base: `origin/${branch}`, reused: false, hydrationWarnings: hydrateWorktreeIgnoredFiles(canonical, target, onClone) };
   }
   const base = defaultBaseRef(canonical);
   git(['worktree', 'add', '--no-track', '-b', branch, target, base], canonical);
-  return { path: target, created: true, base, reused: false };
+  return { path: target, created: true, base, reused: false, hydrationWarnings: hydrateWorktreeIgnoredFiles(canonical, target, onClone) };
 }
 
 // ── Launch ──────────────────────────────────────────────────────────────────
@@ -576,12 +589,51 @@ export interface IssueStartResult {
   exitCode: number;
 }
 
+/** What a background start that launched no agent tells the issue (reportNotStarted). */
+interface LaunchReport {
+  repoId: string | null;
+  shortId: string;
+  /** A run is on the issue already: one was started, or the stop was reported where it happened. */
+  reported: boolean;
+  /** Why it stopped, when that was said with deps.log rather than deps.error. */
+  reason: string | null;
+}
+
 export async function issueStartCommand(
   id: string,
   opts: IssueStartOptions = {},
   injected?: Partial<IssueStartDeps>,
 ): Promise<IssueStartResult | null> {
-  const deps: IssueStartDeps = { ...(await defaultDeps()), ...(injected || {}) };
+  const base: IssueStartDeps = { ...(await defaultDeps()), ...(injected || {}) };
+  const said: string[] = [];
+  const deps: IssueStartDeps = { ...base, error: (m: string) => { said.push(m); base.error(m); } };
+  const launch: LaunchReport = { repoId: opts.repoId?.trim() || null, shortId: id.replace(/^#(?=\d+$)/, ''), reported: false, reason: null };
+  const result = await startIssue(id, opts, deps, launch);
+  if (!result && opts.background && !launch.reported) await reportNotStarted(deps, launch, (opts.agent || 'claude').toLowerCase(), launch.reason ?? said.join('\n'));
+  return result;
+}
+
+/**
+ * A background start (the web's Start, the orchestrator) that stopped before
+ * its agent launched: nobody watches its output, so put the reason on the
+ * issue as a run that did not start. Before this the Start dialog
+ * kept "Waiting for your machine to pick it up…" while the handler log said
+ * why (2026-11-02: the issue lookup timed out during a deploy).
+ */
+async function reportNotStarted(deps: IssueStartDeps, launch: LaunchReport, agent: string, reason: string): Promise<void> {
+  if (!launch.repoId || !deps.api?.startIssueRun) return;
+  const detail = reason.replace(/\x1b\[[0-9;]*m/g, '').trim() || 'It stopped before the agent started.';
+  try {
+    await deps.api.startIssueRun(launch.repoId, launch.shortId, { agent, branch: null, background: true, hostname: os.hostname(), status: 'not_started', detail });
+  } catch { /* the handler log still has it */ }
+}
+
+async function startIssue(
+  id: string,
+  opts: IssueStartOptions,
+  deps: IssueStartDeps,
+  launch: LaunchReport,
+): Promise<IssueStartResult | null> {
   const agent = (opts.agent || 'claude').toLowerCase();
   if (!isIssueAgent(agent)) {
     deps.error(chalk.red(`Unknown agent "${opts.agent}". Use one of: ${ISSUE_AGENTS.join(', ')}.`));
@@ -600,7 +652,7 @@ export async function issueStartCommand(
   // `#123` names a GitHub / GitLab issue by its number, which is its shortId.
   id = id.replace(/^#(?=\d+$)/, '');
   const lookup: IssueLookup = {};
-  const issue = await resolveIssue(id, roots, deps, lookup);
+  const issue = await resolveIssue(id, roots, deps, lookup, opts.repoId?.trim() || null);
   if (!issue) {
     if (lookup.originUnreachable) {
       // Not "no such issue": Origin was never really asked (2026-10-13: a cold
@@ -613,6 +665,8 @@ export async function issueStartCommand(
     process.exitCode = 1;
     return null;
   }
+  launch.repoId = issue.repoId ?? null;
+  launch.shortId = issue.shortId;
   // Someone is already on it: two agents on one issue duplicate the work and
   // fight over its branch. The web's Start dialog warns and passes --force
   // when the person starts anyway; a terminal start says who and stops.
@@ -657,6 +711,7 @@ export async function issueStartCommand(
       try {
         const r = await deps.api.startIssueRun(issue.repoId, issue.shortId, { agent, branch: null, background: true, hostname: os.hostname() });
         if (typeof r?.id === 'string') await deps.api.endIssueRun(issue.repoId, issue.shortId, r.id, { status: 'failed', exitCode: 1, detail: msg });
+        launch.reported = true;
       } catch { /* the terminal line above still says it */ }
     }
     process.exitCode = 1;
@@ -685,12 +740,14 @@ export async function issueStartCommand(
   }
   if (branch && wantWorktree) {
     try {
-      const r = worktreeForIssueBranch(roots.canonical, branch, typeof opts.worktree === 'string' && opts.worktree.trim() ? opts.worktree.trim() : null);
+      const r = worktreeForIssueBranch(roots.canonical, branch, typeof opts.worktree === 'string' && opts.worktree.trim() ? opts.worktree.trim() : null,
+        (relative) => deps.log(chalk.gray(`  cloning ${relative} into the worktree…`)));
       worktree = r.path;
       work = r.path;
       deps.log(r.reused
         ? chalk.green(`✓ ${chalk.bold(branch)} is already checked out in ${r.path} — working there`)
         : chalk.green(`✓ Worktree ${chalk.bold(r.path)} on ${r.created ? `new branch ${chalk.bold(branch)} from ${r.base}` : r.base ? `${chalk.bold(branch)}, tracking ${r.base}` : chalk.bold(branch)}`));
+      for (const warning of r.hydrationWarnings) deps.error(chalk.yellow(`Could not hydrate ignored worktree entry ${warning}`));
     } catch (err: any) {
       deps.error(chalk.red(err?.message || String(err)));
       process.exitCode = 1;
@@ -722,7 +779,7 @@ export async function issueStartCommand(
   const publishPr = branch && branch === issue.workBranch ? issue.pullRequest ?? null : null;
   let questions = issue.questions ?? [];
   const promptInput = (extra: { brief?: string | null } = {}) => ({
-    shortId: issue.shortId, title: issue.title, description: issue.description, type: issue.type,
+    shortId: issue.shortId, title: issue.title, description: issue.description, type: issue.type, source: issue.source ?? null,
     branch, memoryTodoId: issue.memoryTodoId, memory, hostIssue: issue.hostIssue ?? null,
     parent: issue.parent ?? null, children: issue.children ?? [],
     // Push to the PR only when the agent is on that PR's branch.
@@ -752,15 +809,17 @@ export async function issueStartCommand(
       : null;
     if (pfBin && deps.preflight) {
       deps.log(chalk.gray(`Checking ${issue.shortId} against the code before starting (read-only; --no-preflight skips)…`));
-      const pf = await deps.preflight(agent, buildPreflightPrompt(prompt), work, pfBin);
+      const pf = await deps.preflight(agent, buildPreflightPrompt(prompt, questions.filter((q) => !q.answer).map((q) => q.question)), work, pfBin);
       if (!pf) {
         deps.log(chalk.gray('  The check did not answer — starting without it.'));
       } else {
-        const asked: Array<{ question: string; answer: string | null }> = [];
-        for (const q of pf.questions) {
+        const asked: Array<{ question: string; answer: string | null; suggestion: string | null }> = [];
+        for (const [i, q] of pf.questions.entries()) {
+          const suggestion = pf.suggestions?.[i]?.trim() || null;
           deps.log(chalk.cyan(`? ${q}`));
+          if (suggestion) deps.log(chalk.gray(`  Agent's best guess: ${suggestion}`));
           const answer = deps.ask ? await deps.ask('  Your answer (empty = answer later on the issue):') : null;
-          asked.push({ question: q, answer });
+          asked.push({ question: q, answer, suggestion });
         }
         if (asked.length > 0) {
           let kept = false;
@@ -775,6 +834,7 @@ export async function issueStartCommand(
           }
           const open = asked.filter((a) => !a.answer);
           if (open.length > 0) {
+            launch.reason = `${issue.shortId} needs ${open.length === 1 ? 'an answer' : `${open.length} answers`} before an agent can work on it alone, so no agent started. Answer on this issue, then Start again.`;
             deps.log(chalk.yellow(`${issue.shortId} needs ${open.length === 1 ? 'an answer' : `${open.length} answers`} before an agent can work on it alone — not starting.`));
             deps.log(chalk.gray(issue.repoId
               ? `  Answer on the issue in Origin, or: origin issue answer ${issue.shortId} "<answer>" — then start again.`
@@ -815,6 +875,7 @@ export async function issueStartCommand(
     try {
       const r = await deps.api.startIssueRun(issue.repoId, issue.shortId, { agent, branch, background, hostname: os.hostname() });
       const id = typeof r?.id === 'string' ? r.id : null;
+      if (id) launch.reported = true;
       // The agent is not launched yet: its session-start reads the link with
       // this run in it, and the server records the session on the run.
       if (id && linkFile) writeLink(id);

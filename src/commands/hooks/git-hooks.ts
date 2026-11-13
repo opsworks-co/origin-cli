@@ -18,13 +18,14 @@ import { notifyRepoMemoryChanged } from '../../memory-transport.js';
 import { pushSessionBranchTo, sessionBranchPrePushRef } from '../../local-entrypoint.js';
 import { sessionBranchPushTarget } from '../../prompt-privacy.js';
 import { decidePushBlock } from '../../push-block.js';
-import { isNonSecretAssignmentValue, isSkippedScanPath } from '../../secret-rules.js';
-import { getGitCommonDir, getGitRoot, getWorkingGitRoot, listActiveSessions, saveSessionState } from '../../session-state.js';
+import { isCodeReferenceValue, isNonSecretAssignmentValue, isSkippedScanPath } from '../../secret-rules.js';
+import { getBranch, getGitCommonDir, getGitRoot, getWorkingGitRoot, listActiveSessions, saveSessionState } from '../../session-state.js';
 import type { SessionState } from '../../session-state.js';
 import { sessionRunningTheCommit } from '../../commit-command-in-flight.js';
 import { manuallyEndedSessionForTree } from '../../manual-session-end.js';
 import { pickSessionsByCommitAncestry, type AncestryPick } from '../../process-owner.js';
-import { pickEndedSessionByContent, recentlyEndedSessionsForTree, type EndedSessionOwner } from '../../ended-session-commit-owner.js';
+import { pickEndedSessionByContent, recentlyEndedSessionsForTree, recentlyEndedSessionsReachingTree, type EndedSessionOwner } from '../../ended-session-commit-owner.js';
+import { pickEndedForeignSessionByFiles } from '../../foreign-trees.js';
 import { listSnapshots } from '../snapshot.js';
 import { lookupSessionsForGitHook } from './post-commit.js';
 import { execFileSync } from 'child_process';
@@ -403,9 +404,8 @@ export async function handlePreCommit(): Promise<void> {
         const match = pattern.regex.exec(entry.content);
         if (match) {
           const matchedValue = match[1] || match[0];
-          // Generic name-based rules only — see isNonSecretAssignmentValue.
-          if (GENERIC_ASSIGNMENT_RULES.has(pattern.name)
-              && isNonSecretAssignmentValue(matchedValue, pattern.name === 'Password Assignment')) continue;
+          // Name-based rules only — see isNonSecretAssignmentValue and isCodeReferenceValue.
+          if (GENERIC_ASSIGNMENT_RULES.has(pattern.name) && isNonSecretAssignmentFinding(entry.file, pattern.name, match)) continue;
           const key = `${entry.file}:${entry.line}:${matchedValue}`;
           if (seen.has(key)) continue;
           seen.add(key);
@@ -698,7 +698,7 @@ export async function handleCommitMsg(msgFile: string): Promise<void> {
 }
 
 export function mapFindingSeverity(name: string): string {
-  const critical = ['AWS Access Key', 'AWS Secret Key', 'Private Key', 'GitHub Token', 'GitHub PAT', 'Connection String'];
+  const critical = ['AWS Access Key', 'AWS Secret Key', 'Private Key', 'GitHub Token', 'GitHub PAT', 'Origin Git Password', 'Connection String'];
   const high = ['OpenAI Key', 'Anthropic Key', 'Stripe Key', 'Slack Token', 'JWT Token', 'API Key', 'Hardcoded Password'];
   if (critical.includes(name)) return 'critical';
   if (high.includes(name)) return 'high';
@@ -712,7 +712,25 @@ export function mapFindingSeverity(name: string): string {
 // is a generated copy rather than a shared package.
 export const GENERIC_ASSIGNMENT_RULES = new Set([
   'Token Assignment', 'Secret Assignment', 'Key Assignment', 'Password Assignment',
+  // Not `*_PASSWORD` but just as name-based, and its quotes are optional, so
+  // `password: cred.password` matched until it was filtered too.
+  'Hardcoded Password',
 ]);
+
+/**
+ * True when a name-based rule's match is plainly not a secret: a reference or
+ * placeholder (isNonSecretAssignmentValue), or an unquoted variable/property
+ * read in a source file (isCodeReferenceValue).
+ */
+export function isNonSecretAssignmentFinding(filePath: string, ruleName: string, match: RegExpExecArray | RegExpMatchArray): boolean {
+  const value = match[1] || match[0];
+  const isPassword = ruleName === 'Password Assignment' || ruleName === 'Hardcoded Password';
+  if (isNonSecretAssignmentValue(value, isPassword)) return true;
+  // Quoted when the character just before the captured value is a quote.
+  const at = match[1] ? match[0].lastIndexOf(match[1]) : -1;
+  const quoted = at > 0 && /['"`]/.test(match[0][at - 1]);
+  return isCodeReferenceValue(filePath, value, quoted);
+}
 
 // Patterns for pre-commit scanning (non-global flags for single match per line)
 // Patterns are exported as a named const so the test file can iterate them and
@@ -724,6 +742,7 @@ export const PRE_COMMIT_PATTERNS = [
   { name: 'Private Key', regex: /-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----/ },
   { name: 'GitHub Token', regex: /(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}/ },
   { name: 'GitHub PAT', regex: /github_pat_[A-Za-z0-9_]{50,}/ },
+  { name: 'Origin Git Password', regex: /(?<![A-Za-z0-9_-])ogp_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/ },
   { name: 'OpenAI Key', regex: /sk-[A-Za-z0-9]{32,}/ },
   { name: 'Anthropic Key', regex: /sk-ant-[A-Za-z0-9-]{32,}/ },
   { name: 'Stripe Key', regex: /sk_(?:live|test)_[A-Za-z0-9]{24,}/ },
@@ -1109,7 +1128,7 @@ export function pickActiveSessionForCommit(
   }
   if (activeSessions.length === 1) {
     const only = activeSessions[0];
-    const verdict = loneSessionMayOwnCommit(only, stagedFiles);
+    const verdict = loneSessionMayOwnCommit(only, stagedFiles, getWorkingGitRoot(hookCwd) || hookCwd);
     // A turn open or a write in flight: the live session is at work now.
     if (verdict.ok && (verdict.why === 'turn open' || verdict.why === 'in-flight edit')) return only;
     // Its own shell announced this commit: that IS the evidence, even when the
@@ -1461,7 +1480,9 @@ export function endedSessionOwningStagedWork(hookCwd: string, repoPath: string):
   const seen = new Set<string>();
   const candidates = [...recentlyEndedSessionsForTree(hookCwd), ...recentlyEndedSessionsForTree(repoPath)]
     .filter((s) => !seen.has(s.sessionId) && seen.add(s.sessionId));
-  if (candidates.length === 0) return null;
+  const hookTree = getWorkingGitRoot(hookCwd) || hookCwd;
+  const fromElsewhere = recentlyEndedSessionsReachingTree(hookTree).filter((s) => !seen.has(s.sessionId));
+  if (candidates.length === 0 && fromElsewhere.length === 0) return null;
   // A live session that touched any staged file may be the author — the rules
   // above declined to pick between such sessions, and an ended one must not
   // settle it for them.
@@ -1474,11 +1495,12 @@ export function endedSessionOwningStagedWork(hookCwd: string, repoPath: string):
   }
   let patch = '';
   try {
-    patch = execFileSync('git', ['diff', '--cached', '--no-color', '--no-ext-diff', '-U0'], {
+    patch = execFileSync('git', ['diff', '--cached', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '-U0'], {
       windowsHide: true, cwd: hookCwd, encoding: 'utf-8', timeout: 10_000, maxBuffer: 64 * 1024 * 1024,
     });
   } catch { return null; }
-  return pickEndedSessionByContent(candidates, patch);
+  return pickEndedSessionByContent(candidates, patch)
+    ?? pickEndedForeignSessionByFiles(fromElsewhere, hookTree, getBranch(hookCwd), [...staged]);
 }
 
 /**

@@ -87,14 +87,34 @@ export function publishIssueBranch(input: PublishInput, exec: Exec = defaultExec
     const log = git(['log', '--format=%s (%h)', `origin/${baseName}..HEAD`]);
     const commits = log.ok && log.stdout ? log.stdout.split('\n').filter(Boolean) : [];
     if (commits.length === 0) return { kind: 'skipped', reason: `no commits on ${input.branch} beyond ${baseName}` };
+    // An agent that found the work already done may still commit, empty, to
+    // say so ("chore: close TODO 701d099a"): five such PRs changed no file on
+    // 2026-10-29. The issue closes from the session either way.
+    const changed = git(['diff', '--name-only', `origin/${baseName}...HEAD`]);
+    if (changed.ok && !changed.stdout) return { kind: 'skipped', reason: `the commits on ${input.branch} change no files` };
+
+    const repo = githubRepoOf(remote.stdout);
+    const gh = (args: string[]) => exec('gh', args, input.cwd);
+
+    // The branch's pull request may already be merged: the agent's own
+    // release script merged #2855 a minute into the run, and when the run
+    // ended a squash merge left its commit "beyond main", so a second PR
+    // (#2856) reopened the same commit (2026-11-01). Nothing past the merged
+    // head means nothing to publish — and no push to revive a deleted branch.
+    if (repo && !input.pullRequest) {
+      const merged = gh(['pr', 'list', '--repo', repo, '--head', input.branch, '--state', 'merged', '--json', 'headRefOid', '--jq', '.[].headRefOid']);
+      const headSha = git(['rev-parse', 'HEAD']).stdout;
+      const oids = merged.ok ? merged.stdout.split('\n').map((l) => l.trim()).filter(Boolean) : [];
+      if (oids.some((oid) => oid === headSha || git(['merge-base', '--is-ancestor', 'HEAD', oid]).ok)) {
+        return { kind: 'skipped', reason: `${input.branch} has nothing beyond its merged pull request` };
+      }
+    }
 
     const push = git(['push', '-u', 'origin', input.branch], 120_000);
     if (!push.ok) return { kind: 'skipped', reason: `git push failed: ${lastLine(push.stderr)}` };
 
     if (input.pullRequest) return { kind: 'pushed', note: `pushed ${input.branch}; pull request #${input.pullRequest} updates` };
-    const repo = githubRepoOf(remote.stdout);
     if (!repo) return { kind: 'pushed', note: `pushed ${input.branch}; not a GitHub repo, so open its pull request by hand` };
-    const gh = (args: string[]) => exec('gh', args, input.cwd);
 
     const open = gh(['pr', 'list', '--repo', repo, '--head', input.branch, '--state', 'open', '--json', 'url', '--jq', '.[0].url // empty']);
     if (!open.ok) return { kind: 'pushed', note: `pushed ${input.branch}; gh is missing or not signed in, so open its pull request by hand` };

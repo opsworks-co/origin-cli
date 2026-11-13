@@ -1191,8 +1191,20 @@ export function preferCommitPatchForCommittedTurns(
     // conflicted file. The prompt shadow may be missing or stale, but the
     // resolution is in Git. Multiple-commit turns keep their range so edits
     // before the merge survive.
-    const merge = existing.length === 1 && existing[0] === last
+    let merge = existing.length === 1 && existing[0] === last
       ? mergeOwnDiff(repoPath, last) : null;
+    // A resolved file the turn already started with is not the turn's
+    // resolution: its bytes at the merge are its bytes in the turn's start
+    // shadow. Session 8cf9e6b1 started mid-merge with the earlier launch's
+    // resolution of three files already in the tree, and committed it as is;
+    // the turn was billed that resolution, +10/-15, beside a header that (the
+    // same files being pre-session dirt) credits none of it. With nothing
+    // left the merge reads as clean, and the clean-merge branch below clears
+    // the row.
+    if (merge && merge.filesChanged.length > 0 && shadow && HEX.test(shadow)) {
+      const kept = merge.filesChanged.filter((f) => !git(repoPath, ['diff', '--quiet', shadow, last, '--', f]).ok);
+      if (kept.length < merge.filesChanged.length) merge = { ...merge, filesChanged: kept };
+    }
     const mergeParent = merge
       ? merge.baseline || git(repoPath, ['rev-parse', `${last}^1`]).out.trim() : null;
     if (!merge && (!shadow || !HEX.test(shadow))) { declined(deps, pm, 'the turn has no baseline shadow'); continue; }

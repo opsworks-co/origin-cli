@@ -338,23 +338,37 @@ describe.skipIf(!haveDist)('cursor capture end to end through the built binary',
     // OR-45 3A: afterFileEdit read the helper back from disk, and post-commit
     // attested the commit to this turn — so the note carries lines.
     const lineRecord = () => JSON.parse(git(['notes', '--ref=origin', 'show', sha])).attribution_record;
-    expect(lineRecord().attribution_level).toBe('line');
+    // Line claims are best effort inside post-commit: one 500 ms wall-clock
+    // budget (LINE_CLAIM_BUDGET_MS) for every git call they make. On a
+    // saturated box (Jenkins 11-03, 973b287a) the budget runs out and the hook
+    // writes the honest commit-level note instead — degraded on purpose, with
+    // the reason logged. Stop then projects again and upgrades the note; that
+    // upgrade, asserted after Stop below, is the line record this turn owes.
+    // Anything else short of 'line' here is a real loss.
+    const postCommitTimedOut = () => fs.readFileSync(path.join(os.homedir(), '.origin', 'hooks.log'), 'utf-8').split('\n')
+      .some((l) => l.includes('[line-claims] projection dropped claims') && l.includes(sha.slice(0, 8)) && l.includes('"timeout"'));
+    if (lineRecord().attribution_level !== 'line') {
+      expect(postCommitTimedOut(), `post-commit wrote a ${lineRecord().attribution_level}-level note without running out of budget`).toBe(true);
+    }
     expect(lineRecord().contributions[0].agent).toEqual({ id: 'cursor' });
     // `git add -A` also took turn 1's app.py: the session's line, but not the
     // attested turn's, so it names no prompt. Turn 2's notes.md record is the
     // degenerate one a discovering edit leaves (before == after) and proves nothing.
     // lib/helper.py is a file this non-root commit ADDS with no captured old
-    // side: the path-limited diff cannot rule out a rename, so it stays
-    // unclaimed (OR-45 checkpoint 6.4, `possible_rename`).
-    expect(lineRecord().contributions[0].files).toEqual([
+    // side. The whole commit's rename check pairs it with nothing, so it is
+    // new and the turn's own lines (OR-38 B1; it was `possible_rename` before).
+    const appLine = [
       { path: 'app.py', ranges: [{ start_line: 2, end_line: 2 }] },
-    ]);
+      { path: 'lib/helper.py', ranges: [{ start_line: 1, end_line: 2, iteration_index: 2 }] },
+    ];
+    if (lineRecord().attribution_level === 'line') expect(lineRecord().contributions[0].files).toEqual(appLine);
 
     const stop = await run('stop', { status: 'completed' });
     expect(stop.code, stop.stderr).toBe(0);
-    // Stop's later write keeps the lines.
+    // Stop's later write keeps the lines — or, after a post-commit that ran
+    // out of budget, is the write that lands them.
     expect(lineRecord().attribution_level).toBe('line');
-    expect(lineRecord().contributions[0].files.map((f: any) => f.path)).toEqual(['app.py']);
+    expect(lineRecord().contributions[0].files).toEqual(appLine);
     const t3 = lastRows().find((r: any) => r.promptIndex === 2);
     expect(t3, 'no row for turn 3').toBeTruthy();
     expect(t3.filesChanged).toEqual(['lib/helper.py']);

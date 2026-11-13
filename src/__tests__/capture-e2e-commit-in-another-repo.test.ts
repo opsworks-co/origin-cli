@@ -21,6 +21,7 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { createHarness, haveDist, BIN, commitFiles, sleep } from './helpers/stop-next-prompt-harness.js';
 import type { Harness } from './helpers/stop-next-prompt-harness.js';
@@ -139,7 +140,15 @@ async function withOnlyCodexRunning<T>(root: string, fn: () => Promise<T>): Prom
   } else {
     const bin = path.join(root, 'fake-pgrep-bin');
     fs.mkdirSync(bin, { recursive: true });
-    fs.writeFileSync(path.join(bin, 'pgrep'), '#!/bin/sh\n[ "$1" = "-f" ] && [ "$2" = "codex" ] && { echo 424242; exit 0; }\nexit 1\n', { mode: 0o755 });
+    // Behaves like `pgrep -f <ERE>` on a machine whose only process is `codex exec`: the pattern the
+    // registry passes is matched as an ERE against that command line, so only Codex's pattern finds it.
+    fs.writeFileSync(
+      path.join(bin, 'pgrep'),
+      '#!/bin/sh\n'
+        + '[ "$1" = "-f" ] && printf \'%s\\n\' \'codex exec\' | grep -Eq -- "$2" && { echo 424242; exit 0; }\n'
+        + 'exit 1\n',
+      { mode: 0o755 },
+    );
     process.env.PATH = `${bin}${path.delimiter}${savedPath}`;
   }
   try {
@@ -390,6 +399,235 @@ describe.skipIf(!haveDist)('a commit a session makes in another repository', () 
       const carried = h.hits.filter((x) => x.method === 'PATCH'
         && JSON.stringify(x.body?.gitCapture || {}).includes(sha));
       expect(carried).toEqual([]);
+    } finally {
+      await h.close();
+    }
+  }, T);
+
+  // Prod 08705ba (PR #3076, 2026-11-03): a Claude Code session homed in `origin`
+  // wrote a patch in the sibling RhodeCode checkout, its turn closed, and an hour
+  // later a person committed that work from PyCharm on the same branch name. The
+  // lookup wanted the turn still running, answered `none`, and the process
+  // fallback wrote a `detected-codex-*` note: PR #3076 had no session.
+  it('a commit a person makes later, of work the session wrote there, is the session\'s', async () => {
+    const SID = 'e2e-xrepo-later-0001';
+    const SRV = 'e2e-xrepo-srv-later-0001';
+    const attaches: any[] = [];
+    const h = await createHarness(SID, SRV, {
+      respond: (method, url, body) => {
+        if (method === 'POST' && url === `/api/mcp/session/${SRV}/attach-repo`) {
+          attaches.push(body);
+          return { ok: true, attached: true, repoId: B_REPO_ID };
+        }
+        return undefined;
+      },
+    });
+    try {
+      commitFiles(h, { 'README.md': '# A\n' }, 'base');
+      const b = makeRepoB(h);
+      git(h.repo, ['checkout', '-q', '-b', 'OR-27-isolate']);
+      git(b.wt, ['checkout', '-q', '-b', 'OR-27-isolate']);
+      await h.startSession('isolate the core patch');
+      await h.agentWrites('tu-patch', path.relative(h.repo, path.join(b.wt, 'FORK_PATCH.md')), 'the patch\n');
+      h.reply('Wrote the patch. Commit it yourself.');
+      await h.stop();
+      await sleep(200);
+      // A later turn about something else: the commit is not its work.
+      await h.submit('now the release notes');
+      await h.agentWrites('tu-notes', 'notes.md', 'Release notes.\n');
+      h.reply('Wrote the notes.');
+      await h.stop();
+      await sleep(200);
+
+      // hooks.log is shared by every test in this worker: read only this commit's part.
+      const logStart = h.hooksLog().length;
+      const sha = await withOnlyCodexRunning(path.dirname(h.repo), () =>
+        commitByHand(b.wt, 'FORK_PATCH.md', 'the patch, checked by a person\n', 'OR-27 isolate the core patch'));
+
+      const log = h.hooksLog().slice(logStart);
+      expect(log).not.toMatch(/no active session but detected AI process/);
+      expect(git(b.wt, ['log', '-1', '--format=%B', sha])).toMatch(new RegExp(`^Origin-Session: ${SRV.slice(0, 12)}`, 'm'));
+      expect(noteOf(b.wt, sha)).toContain(SRV);
+      expect(attaches.length).toBeGreaterThan(0);
+      const carriers = h.hits.filter((x) => x.method === 'PATCH' && x.url === `/api/mcp/session/${SRV}`
+        && (x.body?.gitCapture?.commitShas || []).includes(sha));
+      expect(carriers.length, 'no session PATCH carried the commit').toBeGreaterThan(0);
+      for (const c of carriers) expect(c.body.gitCapture.repoId).toBe(B_REPO_ID);
+
+      // It lands on the turn that wrote the file, and leaves the later turn alone.
+      const sent = carriers.flatMap((c) => c.body.promptChanges || []).filter((pc: any) => pc.commitSha === sha);
+      expect(sent.map((pc: any) => pc.promptIndex)).toEqual([0]);
+      const rows = h.rows();
+      expect(rows.find((r: any) => r.promptIndex === 0)?.commitSha).toBe(sha);
+      expect(rows.find((r: any) => r.promptIndex === 1)?.commitSha ?? null).toBeNull();
+      expect(rows.find((r: any) => r.promptIndex === 1)?.filesChanged).toEqual(['notes.md']);
+      const st = JSON.parse(fs.readFileSync(path.join(h.repo, '.git', `origin-session-${SID.slice(0, 12)}.json`), 'utf-8'));
+      const turn0Id = st.completedPromptMappings?.find((m: any) => m.promptIndex === 0)?.turnId;
+      const recorded = (st.crossRepoCommits || []).find((c: any) => c.sha === sha);
+      if (turn0Id) expect(recorded?.turnId).toBe(turn0Id);
+
+      // A file the session never touched, same branch, stays nobody's.
+      const other = await withOnlyCodexRunning(path.dirname(h.repo), () =>
+        commitByHand(b.wt, 'by-hand.py', 'typed by a person\n', 'by hand'));
+      expect(git(b.wt, ['log', '-1', '--format=%B', other])).not.toContain('Origin-Session:');
+      expect(noteOf(b.wt, other)).not.toContain(SRV);
+    } finally {
+      await h.close();
+    }
+  }, T);
+
+  // Prod fe9fc5ad (OR-61): the session stayed on main in its own repository and
+  // switched branch only in the other one, wrote there, and the person committed.
+  it('a later commit by hand is the session\'s when only the other checkout switched branch', async () => {
+    const SID = 'e2e-xrepo-switch-0001';
+    const SRV = 'e2e-xrepo-srv-switch-0001';
+    const h = await createHarness(SID, SRV, {
+      respond: (method, url) => (method === 'POST' && url.endsWith('/attach-repo') ? { ok: true, attached: true, repoId: B_REPO_ID } : undefined),
+    });
+    try {
+      commitFiles(h, { 'README.md': '# A\n' }, 'base');
+      const b = makeRepoB(h);
+      await h.startSession('narrow the skip in the other repository');
+      await h.agentRuns('tu-switch', `cd ${b.wt} && git switch -c OR-61-narrow`, () => { git(b.wt, ['switch', '-q', '-c', 'OR-61-narrow']); });
+      await h.agentWrites('tu-fix', path.relative(h.repo, path.join(b.wt, 'test_repository.py')), 'the fix\n');
+      h.reply('Fixed. Commit it yourself.');
+      await h.stop();
+      await sleep(200);
+
+      const logStart = h.hooksLog().length;
+      const sha = await withOnlyCodexRunning(path.dirname(h.repo), () =>
+        commitByHand(b.wt, 'test_repository.py', 'the fix, checked by a person\n', 'OR-61 narrow the skip'));
+
+      expect(h.hooksLog().slice(logStart)).not.toMatch(/no active session but detected AI process/);
+      expect(git(b.wt, ['log', '-1', '--format=%B', sha])).toMatch(new RegExp(`^Origin-Session: ${SRV.slice(0, 12)}`, 'm'));
+      expect(noteOf(b.wt, sha)).toContain(SRV);
+    } finally {
+      await h.close();
+    }
+  }, T);
+
+  /** A session that switched B to OR-53, then wrote `files` there through the shell only. */
+  async function sessionWritesThroughShell(h: Harness, b: { wt: string }, files: string[]): Promise<void> {
+    await h.startSession('add the bot user');
+    await h.agentRuns('tu-switch', `cd ${b.wt} && git switch -c OR-53-bot`, () => { git(b.wt, ['switch', '-q', '-c', 'OR-53-bot']); });
+    await h.agentRuns('tu-py', `cd ${b.wt} && python3 - <<'EOF'\nopen('x','w')\nEOF`, () => {
+      for (const f of files) fs.writeFileSync(path.join(b.wt, f), `${f} written by the session\n`);
+    }, {});
+    h.reply('Done. Commit it yourself.');
+    await h.stop();
+    await sleep(200);
+  }
+
+  /** Commit what is in the tree, by hand: no file written here, unlike commitByHand. */
+  async function commitTreeByHand(wt: string, subject: string): Promise<string> {
+    git(wt, ['add', '-A']);
+    const msgFile = path.join(git(wt, ['rev-parse', '--absolute-git-dir']), 'COMMIT_EDITMSG');
+    fs.writeFileSync(msgFile, `${subject}\n`);
+    const r = await personGitHook(wt, 'git-prepare-commit-msg', [msgFile, 'message']);
+    expect(r.code, r.stderr).toBe(0);
+    git(wt, ['commit', '-q', '--no-verify', '-F', msgFile]);
+    const pc = await gitHook(wt, 'git-post-commit');
+    expect(pc.code, pc.stderr).toBe(0);
+    return git(wt, ['rev-parse', 'HEAD']);
+  }
+
+  /** End it as the daemon does (Claude's SessionEnd hook is only a Stop); returns the ended state. */
+  function endSession(h: Harness, sid: string, srv: string): any {
+    const mirrorDir = path.join(os.homedir(), '.origin', 'sessions');
+    const live = path.join(h.repo, '.git', `origin-session-${sid.slice(0, 12)}.json`);
+    const ended = { ...JSON.parse(fs.readFileSync(live, 'utf-8')), status: 'ENDED', endedAt: new Date().toISOString() };
+    fs.writeFileSync(live, JSON.stringify(ended));
+    const mirrors = fs.readdirSync(mirrorDir).filter((f) => f.endsWith('.json') && fs.readFileSync(path.join(mirrorDir, f), 'utf-8').includes(srv));
+    expect(mirrors.length).toBeGreaterThan(0);
+    for (const m of mirrors) fs.writeFileSync(path.join(mirrorDir, m), JSON.stringify(ended));
+    return ended;
+  }
+
+  const attachOk = (method: string, url: string) => (method === 'POST' && url.endsWith('/attach-repo') ? { ok: true, attached: true, repoId: B_REPO_ID } : undefined);
+
+  // Prod 2419a3eb: 53 Bash calls and 2 Writes in the sibling checkout. A shell
+  // write leaves no file record, so the commit had no evidence to match.
+  it('a later commit by hand of files the session wrote through the shell is the session\'s', async () => {
+    // (and one that is mostly a person's is not: see below)
+    const SID = 'e2e-xrepo-shell-0001';
+    const SRV = 'e2e-xrepo-srv-shell-0001';
+    const h = await createHarness(SID, SRV, { respond: attachOk });
+    try {
+      commitFiles(h, { 'README.md': '# A\n' }, 'base');
+      const b = makeRepoB(h);
+      await sessionWritesThroughShell(h, b, ['user_avatar.py', 'test_user_avatar.py']);
+
+      const sha = await withOnlyCodexRunning(path.dirname(h.repo), () => commitTreeByHand(b.wt, 'OR-53 add the bot user'));
+
+      expect(git(b.wt, ['log', '-1', '--format=%B', sha])).toMatch(new RegExp(`^Origin-Session: ${SRV.slice(0, 12)}`, 'm'));
+      expect(noteOf(b.wt, sha)).toContain(SRV);
+
+      // Mostly a person's files: the trailer names one session for the whole commit.
+      for (const f of ['p1.py', 'p2.py']) fs.writeFileSync(path.join(b.wt, f), 'typed by a person\n');
+      fs.writeFileSync(path.join(b.wt, 'user_avatar.py'), 'touched again\n');
+      const mostly = await withOnlyCodexRunning(path.dirname(h.repo), () => commitTreeByHand(b.wt, 'mostly by hand'));
+      expect(git(b.wt, ['log', '-1', '--format=%B', mostly])).not.toContain('Origin-Session:');
+    } finally {
+      await h.close();
+    }
+  }, T);
+
+  // Prod fa5c0f8b: the session ended at 16:54 and the person committed at 18:44.
+  it('a commit by hand after the session ended carries its trailer, and no process guess', async () => {
+    const SID = 'e2e-xrepo-ended-0001';
+    const SRV = 'e2e-xrepo-srv-ended-0001';
+    const h = await createHarness(SID, SRV, { respond: attachOk });
+    try {
+      commitFiles(h, { 'README.md': '# A\n' }, 'base');
+      const b = makeRepoB(h);
+      await sessionWritesThroughShell(h, b, ['user_avatar.py', 'test_user_avatar.py']);
+      const ended = endSession(h, SID, SRV);
+      expect(ended.foreignTrees[0].files.map((f: any) => f.file).sort()).toEqual(['test_user_avatar.py', 'user_avatar.py']);
+
+      const logStart = h.hooksLog().length;
+      const sha = await withOnlyCodexRunning(path.dirname(h.repo), () => commitTreeByHand(b.wt, 'OR-53 add the bot user'));
+
+      expect(git(b.wt, ['log', '-1', '--format=%B', sha]), h.hooksLog().slice(logStart)).toMatch(new RegExp(`^Origin-Session: ${SRV.slice(0, 12)}`, 'm'));
+      expect(h.hooksLog().slice(logStart)).toMatch(/attributed to an ended session/);
+      expect(h.hooksLog().slice(logStart)).not.toMatch(/no active session but detected AI process/);
+      expect(noteOf(b.wt, sha)).not.toContain('detected-');
+
+      // Mostly a person's files: the trailer names one session for the whole
+      // commit, so it must hold most of it.
+      for (const f of ['p1.py', 'p2.py']) fs.writeFileSync(path.join(b.wt, f), 'typed by a person\n');
+      fs.writeFileSync(path.join(b.wt, 'user_avatar.py'), 'touched again\n');
+      const mostly = await commitTreeByHand(b.wt, 'mostly by hand');
+      expect(git(b.wt, ['log', '-1', '--format=%B', mostly]), h.hooksLog().slice(logStart)).not.toContain('Origin-Session:');
+    } finally {
+      await h.close();
+    }
+  }, T);
+
+  // main and master are on every clone, so the session having seen one is no
+  // evidence, and a wrong trailer stays in git history.
+  it('a commit by hand on master is not an ended session\'s, even of files it wrote', async () => {
+    const SID = 'e2e-xrepo-master-0001';
+    const SRV = 'e2e-xrepo-srv-master-0001';
+    const h = await createHarness(SID, SRV, { respond: attachOk });
+    try {
+      commitFiles(h, { 'README.md': '# A\n' }, 'base');
+      const b = makeRepoB(h);
+      await h.startSession('edit the blog');
+      await h.agentRuns('tu-py', `cd ${b.prod} && python3 - <<'EOF'\nopen('x','w')\nEOF`, () => {
+        fs.writeFileSync(path.join(b.prod, 'post.py'), 'written by the session\n');
+      }, {});
+      h.reply('Done. Commit it yourself.');
+      await h.stop();
+      await sleep(200);
+      const ended = endSession(h, SID, SRV);
+      expect(ended.foreignTrees[0].branches).toContain('master');
+      expect(ended.foreignTrees[0].files.map((f: any) => f.file)).toEqual(['post.py']);
+
+      const logStart = h.hooksLog().length;
+      const sha = await commitTreeByHand(b.prod, 'a person edits the blog');
+
+      expect(git(b.prod, ['log', '-1', '--format=%B', sha]), h.hooksLog().slice(logStart)).not.toContain('Origin-Session:');
+      expect(h.hooksLog().slice(logStart)).not.toMatch(/attributed to an ended session/);
     } finally {
       await h.close();
     }

@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import { estimateCost } from '../transcript.js';
 
 // ─── Fast Session State Reader ──────────────────────────────────────────────
 // This command is designed to run in < 50ms.
@@ -10,52 +11,11 @@ import crypto from 'crypto';
 // - Reads session state JSON directly
 // - Optionally tails transcript JSONL for a live cost estimate
 
-// Pricing per 1M tokens (input/output) for common models
-// Used to estimate cost from transcript token counts
-const MODEL_PRICING: Record<string, { input: number; output: number; cacheRead?: number }> = {
-  // Opus 4.5+ is $5/$25; only Opus 4.1 and older were $15/$75.
-  'claude-fable-5': { input: 10, output: 50, cacheRead: 1.0 },
-  'claude-opus-4-8': { input: 5, output: 25, cacheRead: 0.5 },
-  'claude-opus-4-7': { input: 5, output: 25, cacheRead: 0.5 },
-  'claude-opus-4-6': { input: 5, output: 25, cacheRead: 0.5 },
-  'claude-opus-4-5': { input: 5, output: 25, cacheRead: 0.5 },
-  'claude-opus-4-1': { input: 15, output: 75, cacheRead: 1.5 },
-  'claude-opus-4': { input: 15, output: 75, cacheRead: 1.5 },
-  'claude-sonnet-4-6': { input: 3, output: 15, cacheRead: 0.3 },
-  'claude-sonnet-4': { input: 3, output: 15, cacheRead: 0.3 },
-  'claude-sonnet-4-5': { input: 3, output: 15, cacheRead: 0.3 },
-  'claude-sonnet-3-7': { input: 3, output: 15, cacheRead: 0.3 },
-  'claude-sonnet-3-5': { input: 3, output: 15, cacheRead: 0.3 },
-  'claude-haiku-4-5': { input: 1, output: 5, cacheRead: 0.1 },
-  'claude-haiku-3-5': { input: 0.8, output: 4, cacheRead: 0.08 },
-  'claude-haiku-3': { input: 0.25, output: 1.25, cacheRead: 0.03 },
-  'claude-3-opus': { input: 15, output: 75, cacheRead: 1.5 },
-  'claude-3-sonnet': { input: 3, output: 15, cacheRead: 0.3 },
-  'claude-3-haiku': { input: 0.25, output: 1.25, cacheRead: 0.03 },
-};
-
-function estimateCostFromTokens(model: string, inputTokens: number, outputTokens: number, cacheRead = 0, cacheCreation = 0): number {
-  // Normalize model name: strip date suffixes, lower-case
-  const normalized = model.toLowerCase().replace(/-\d{8}$/, '').replace(/^claude-/, 'claude-');
-  // Try exact match then prefix match
-  let pricing = MODEL_PRICING[normalized];
-  if (!pricing) {
-    for (const key of Object.keys(MODEL_PRICING)) {
-      if (normalized.startsWith(key) || key.startsWith(normalized)) {
-        pricing = MODEL_PRICING[key];
-        break;
-      }
-    }
-  }
-  if (!pricing) {
-    // Default: sonnet pricing
-    pricing = { input: 3, output: 15, cacheRead: 0.3 };
-  }
-  const inputCost = (inputTokens / 1_000_000) * pricing.input;
-  const outputCost = (outputTokens / 1_000_000) * pricing.output;
-  const cacheReadCost = (cacheRead / 1_000_000) * (pricing.cacheRead ?? pricing.input * 0.1);
-  const cacheCreateCost = (cacheCreation / 1_000_000) * (pricing.input * 1.25);
-  return inputCost + outputCost + cacheReadCost + cacheCreateCost;
+// Live cost uses the CLI's one price table (transcript.ts), the same rows the
+// API mirrors. This file used to keep its own copy, which stopped at Claude 4.x:
+// Opus 5.5 fell to the Sonnet default and Fable 5.2 to the Fable 5 rate.
+export function estimateCostFromTokens(model: string, inputTokens: number, outputTokens: number, cacheRead = 0, cacheCreation = 0): number {
+  return estimateCost(model, inputTokens, outputTokens, cacheRead, cacheCreation);
 }
 
 // ─── Git Root Detection (no exec) ──────────────────────────────────────────

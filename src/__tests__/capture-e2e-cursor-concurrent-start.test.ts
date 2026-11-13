@@ -172,7 +172,7 @@ function killDaemons(): void {
  * prompt hook launched as soon as the reservation is on disk — i.e. while
  * `session/start` is in flight.
  */
-async function raceOneChat(label: string, delayMs: number, lateSave = false): Promise<{ sessionId: string; stateFile: string; wt: string; conv: string; transcript: string; logFrom: number }> {
+async function raceOneChat(label: string, delayMs: number, lateSave = false, refuseRename = false): Promise<{ sessionId: string; stateFile: string; wt: string; conv: string; transcript: string; logFrom: number }> {
   const COMPOSER = `c0c0c0c0-${label}-4000-8000-000000000001`;
   const CONV = `e2e2e2e2-${label}-4000-8000-000000000002`;
   const main = path.join(tmp, `repo-${label}`);
@@ -215,6 +215,29 @@ async function raceOneChat(label: string, delayMs: number, lateSave = false): Pr
       return rename.call(this, from, to);
     };
   `);
+  // Native Windows refuses a rename over a file another process has open —
+  // a reader outside the state lock, or Defender scanning what was just
+  // written — with EPERM until that handle closes (#1568). Hold the prompt
+  // hook's state file "open" for 300ms from its first save, across both of
+  // its saves, the way a scan on the Windows runner can.
+  const refusal = path.join(tmp, 'rename-refused.cjs');
+  if (refuseRename) fs.writeFileSync(refusal, `
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const rename = fs.renameSync;
+    let heldUntil = 0;
+    fs.renameSync = function(from, to) {
+      if (process.argv.includes('user-prompt-submit') && /^origin-session-.*\\.json$/.test(path.basename(String(to)))) {
+        if (!heldUntil) heldUntil = Date.now() + 300;
+        if (Date.now() < heldUntil) {
+          const err = new Error('EPERM: operation not permitted, rename');
+          err.code = 'EPERM';
+          throw err;
+        }
+      }
+      return rename.call(this, from, to);
+    };
+  `);
   const startP = run('session-start', {
     cwd: main, roots: [main], conversation: COMPOSER, transcript: transcriptFor(COMPOSER), payload: { source: 'startup' }, ...(lateSave ? { preload, barrier } : {}),
   });
@@ -226,7 +249,7 @@ async function raceOneChat(label: string, delayMs: number, lateSave = false): Pr
   if (lateSave) await waitFor(() => fs.existsSync(barrier + '.paused'), 30_000 * WINDOWS_SLOWDOWN, 'registration paused at its final rename');
   say(transcript, 'hello from the worktree');
   const upsP = run('user-prompt-submit', {
-    cwd: wt, roots: [wt], conversation: CONV, transcript, payload: { prompt: 'hello from the worktree' }, ...(lateSave ? { preload, barrier } : {}),
+    cwd: wt, roots: [wt], conversation: CONV, transcript, payload: { prompt: 'hello from the worktree' }, ...(lateSave ? { preload, barrier } : {}), ...(refuseRename ? { preload: refusal } : {}),
   });
   if (lateSave) {
     try {
@@ -290,6 +313,14 @@ async function raceOneChat(label: string, delayMs: number, lateSave = false): Pr
 // fix — paid for it with a red leg. Re-held so the Windows signal means
 // something again, NOT because the test is wrong: the assertion is a lost
 // prompt in the exact scenario this file is named for.
+//
+// #1568 traced it: the prompt hook's rename over the state file was refused
+// with EPERM (Windows, while another process held the file), its save went
+// to the sandbox fallback — keyed by the WORKTREE's cwd, where session-start's
+// fold never looks — and session-start wrote the reservation back with
+// `prompts: []`. The save now retries the rename; the 'refuses for a moment'
+// case below injects the refusal on any OS. Still held until native Windows
+// runs green repeatedly with that fix.
 // Explicit native-Windows probe; normal CI stays held until repeated evidence.
 // PowerShell: $env:ORIGIN_WINDOWS_CAPTURE_PROBE='1'; pnpm exec vitest run src/__tests__/capture-e2e-cursor-concurrent-start.test.ts
 describe.skipIf(!haveDist || (isWindows && process.env.ORIGIN_WINDOWS_CAPTURE_PROBE !== '1'))('cursor: session-start and the first prompt race, one session (built binary)', () => {
@@ -346,5 +377,9 @@ describe.skipIf(!haveDist || (isWindows && process.env.ORIGIN_WINDOWS_CAPTURE_PR
   }, 120_000 * WINDOWS_SLOWDOWN);
   it('a prompt arriving after the final reread survives the registration rename', async () => {
     await raceOneChat('cccc', 0, true);
+  }, 120_000 * WINDOWS_SLOWDOWN);
+  it('a rename Windows refuses for a moment does not send the adopted prompt where session-start cannot see it', async () => {
+    const r = await raceOneChat('dddd', 2_000, false, true);
+    expect(hooksLog().slice(r.logFrom)).toContain('state file rename refused, retrying');
   }, 120_000 * WINDOWS_SLOWDOWN);
 });

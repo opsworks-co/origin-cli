@@ -14,12 +14,66 @@ import {
   posixPathShim,
   shDoubleQuoteEscape,
   isOriginHookCommand,
+  ORIGIN_HOOK_COMMAND_TAIL,
   installCursorHooks,
   HOOK_CONFIG_SPECS,
 } from '../commands/enable.js';
 import { checkHookConfig, repairHookConfig } from '../hook-config-health.js';
 
 const posixOnly = process.platform === 'win32' ? describe.skip : describe;
+
+// Every shape enable writes (posixPathShim, originCmd's Windows branches,
+// originPowershellCmd) plus the legacy `windsurf` id — these must stay Origin's.
+const ORIGIN_FORMS: Array<[string, string, string]> = [
+  ['bare', 'origin hooks cursor stop', 'cursor'],
+  ['old unquoted PATH shim', 'PATH=/opt/homebrew/bin:$PATH origin hooks cursor stop', 'cursor'],
+  ['quoted PATH shim with a space', 'PATH="/Users/John Smith/bin:$PATH" origin hooks claude-code stop', 'claude-code'],
+  ['absolute unix path', '/opt/homebrew/bin/origin hooks gemini session-start', 'gemini'],
+  ['legacy windsurf id', 'PATH="/x/bin:$PATH" origin hooks windsurf stop', 'windsurf'],
+  ['Windows node + entry, short paths',
+    'C:\\PROGRA~1\\nodejs\\node.exe C:\\Users\\jsmith\\AppData\\Roaming\\npm\\node_modules\\@origin\\cli\\dist\\index.js hooks codex stop', 'codex'],
+  ['Windows node + entry, quoted',
+    '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\John Smith\\AppData\\Roaming\\npm\\node_modules\\@origin\\cli\\dist\\index.js" hooks devin stop', 'devin'],
+  ['Windows node + a dev checkout\'s dist', 'C:\\src\\my-fork\\packages\\cli\\dist\\index.js hooks cursor stop', 'cursor'],
+  ['Windows origin.cmd, quoted', '"C:\\Users\\John Smith\\AppData\\Roaming\\npm\\origin.cmd" hooks cursor stop', 'cursor'],
+  ['Windows origin.cmd, unquoted', 'C:\\Users\\jsmith\\AppData\\Roaming\\npm\\origin.cmd hooks antigravity stop', 'antigravity'],
+  ['Windows origin.exe', 'C:\\tools\\origin.exe hooks copilot stop', 'copilot'],
+  ['PowerShell node + entry',
+    "& 'C:\\Program Files\\nodejs\\node.exe' 'C:\\Users\\jsmith\\AppData\\Roaming\\npm\\node_modules\\@origin\\cli\\dist\\index.js' hooks copilot session-start", 'copilot'],
+  ['PowerShell origin path', "& 'C:\\Users\\John Smith\\AppData\\Roaming\\npm\\origin' hooks copilot stop", 'copilot'],
+  ['event-less tail', 'origin hooks cursor', 'cursor'],
+];
+
+// Other tools' hooks that merely say `hooks <agent>`: never Origin's.
+const FOREIGN_FORMS: Array<[string, string]> = [
+  ['entire hooks claude-code stop', 'claude-code'],
+  ['/usr/local/bin/mytool hooks cursor stop', 'cursor'],
+  ['my-origin hooks claude-code x', 'claude-code'],
+  ['originate hooks claude-code x', 'claude-code'],
+  ['"C:\\tools\\mytool.exe" hooks codex stop', 'codex'],
+];
+
+describe('isOriginHookCommand needs Origin\'s launcher before `hooks <agent>`', () => {
+  it.each(ORIGIN_FORMS)('matches %s', (_label, cmd, agent) => {
+    expect(isOriginHookCommand(cmd)).toBe(true);
+    expect(isOriginHookCommand(cmd, agent)).toBe(true);
+    // The tail match starts at `hooks`, so stripLauncherPaths keeps working.
+    expect(cmd.slice(cmd.match(ORIGIN_HOOK_COMMAND_TAIL)!.index)).toMatch(new RegExp(`^hooks ${agent}`));
+    // The health check also scans raw JSON text, where quotes come escaped.
+    expect(ORIGIN_HOOK_COMMAND_TAIL.test(JSON.stringify({ command: cmd }))).toBe(true);
+  });
+
+  it.each(FOREIGN_FORMS)('does NOT match %s', (cmd, agent) => {
+    expect(isOriginHookCommand(cmd)).toBe(false);
+    expect(isOriginHookCommand(cmd, agent)).toBe(false);
+    expect(ORIGIN_HOOK_COMMAND_TAIL.test(JSON.stringify({ command: cmd }))).toBe(false);
+  });
+
+  it('scopes to one agent', () => {
+    expect(isOriginHookCommand('origin hooks cursor stop', 'claude-code')).toBe(false);
+    expect(isOriginHookCommand('origin hooks claude-codex stop', 'claude-code')).toBe(false);
+  });
+});
 
 /** A bin dir at `<tmp>/<name>/bin` holding an `origin` that echoes its argv. */
 function fakeBinDir(root: string, name: string): string {
@@ -86,7 +140,10 @@ posixOnly('hook launcher quotes the bin dir', () => {
       const bare = (sub: string) => ({ command: `PATH=${dir}:$PATH origin hooks cursor ${sub}` });
       fs.writeFileSync(path.join(repo, '.cursor', 'hooks.json'), JSON.stringify({
         version: 1,
-        hooks: { stop: [bare('stop'), { command: 'echo mine' }], sessionStart: [bare('session-start')] },
+        hooks: {
+          stop: [bare('stop'), { command: 'echo mine' }, ...FOREIGN_FORMS.map(([command]) => ({ command }))],
+          sessionStart: [bare('session-start')],
+        },
       }));
     });
     afterEach(() => { process.argv[1] = savedArgv1; });
@@ -97,6 +154,8 @@ posixOnly('hook launcher quotes the bin dir', () => {
       const ours = cfg.hooks.stop.filter((h: any) => isOriginHookCommand(h.command));
       expect(ours).toHaveLength(1);
       expect(cfg.hooks.stop.some((h: any) => h.command === 'echo mine')).toBe(true);
+      // Other tools' `<tool> hooks <agent>` entries survive a re-install.
+      for (const [command] of FOREIGN_FORMS) expect(cfg.hooks.stop.map((h: any) => h.command)).toContain(command);
       expect(ours[0].command).toBe(posixPathShim(dir, 'origin hooks cursor stop'));
       expect(sh(ours[0].command).stdout.trim()).toBe('ran: hooks cursor stop');
     });

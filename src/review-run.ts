@@ -21,8 +21,13 @@ export function isReviewAgent(x: unknown): x is ReviewAgent {
 
 /** Where an agent without structured output writes its answer, inside the worktree. */
 export const REVIEW_RESULT_FILE = '.origin-review-result.json';
-/** Where the answer's schema is written for codex (`--output-schema` takes a file). */
-export const REVIEW_SCHEMA_FILE = '.origin-review-schema.json';
+/**
+ * The answer's schema, for codex (`--output-schema` takes a file). Written in a
+ * temp folder, never the worktree: a file there is dirt the run's session is
+ * credited with (+114 lines nobody's turn wrote — the release gate's
+ * header_exceeds_turns on every reviewer run).
+ */
+export const REVIEW_SCHEMA_FILE = 'origin-review-schema.json';
 
 export const REVIEW_SEVERITIES = ['high', 'medium', 'low'] as const;
 export const REVIEW_CONFIDENCES = ['confirmed', 'plausible'] as const;
@@ -40,12 +45,24 @@ export interface ReviewFinding {
   detail: string;
   failureScenario: string | null;
   confidence: ReviewConfidence;
+  /** The reviewer's earlier finding this repeats ("E2"), when the server listed some. */
+  earlier?: string | null;
+}
+
+/** The reviewer's word on one of its previous round's findings; the server checks the values. */
+export interface ReviewEarlierAnswer {
+  ref: string;
+  status: string;
+  note: string;
 }
 
 export interface ReviewResult {
   verdict: ReviewVerdict;
+  /** 0–100, higher is better; the server checks it. */
+  score?: number;
   summary: string;
   findings: ReviewFinding[];
+  earlier?: ReviewEarlierAnswer[];
 }
 
 /** The answer's shape — what claude's `--json-schema` and codex's `--output-schema` enforce. */
@@ -103,6 +120,33 @@ export function reviewWorktreePath(canonical: string, prNumber: number, runId: s
   return path.join(path.dirname(canonical), `${path.basename(canonical)}-worktrees`, `review-${prNumber}-${runShortId(runId)}`);
 }
 
+// ── The shared .git ─────────────────────────────────────────────────────────
+
+/**
+ * The review's worktree shares its .git with the person's checkout, so a
+ * `git fetch --depth=…` the agent runs there writes .git/shallow for the
+ * checkout too: on 2026-10-28 a reviewer's `git fetch origin main --depth=50`
+ * made ~/Documents/Coding/origin shallow. The CLI fetches the base itself and
+ * says so, and tells the agent not to fetch at all.
+ */
+export function reviewPromptWithGitRules(prompt: string, baseRef: string | null): string {
+  const lines = [prompt.trimEnd(), ''];
+  if (baseRef) lines.push(`The base branch is already fetched: compare against it with \`git diff ${baseRef}...HEAD\`.`);
+  lines.push('Do not run git fetch or git pull. This worktree shares its .git with the person\'s own checkout: a fetch with --depth or --shallow-* truncates their history.');
+  return lines.join('\n');
+}
+
+/**
+ * Commands claude may not run in a review. In plan mode it may still run
+ * Bash, and the base branch is fetched before it starts.
+ */
+export const REVIEW_DISALLOWED_TOOLS = ['Bash(git fetch:*)', 'Bash(git pull:*)'] as const;
+
+/** `git rev-parse --is-shallow-repository` before and after the agent: did the agent make the repo shallow? */
+export function becameShallow(before: string | null, after: string | null): boolean {
+  return before?.trim() === 'false' && after?.trim() === 'true';
+}
+
 // ── argv ────────────────────────────────────────────────────────────────────
 
 export interface ReviewArgvFiles {
@@ -120,7 +164,8 @@ export interface ReviewArgvFiles {
  * session of its own so its cost shows on the PR.
  *   claude -p --permission-mode plan --output-format json --json-schema …
  *                                        plan mode: reads, no edits; the
- *                                        answer comes back as structured output
+ *                                        answer comes back as structured output;
+ *                                        no git fetch/pull (REVIEW_DISALLOWED_TOOLS)
  *   codex exec -s read-only --output-schema <file> -o <file>
  *                                        the sandbox refuses writes; the last
  *                                        message lands in the out file
@@ -139,7 +184,7 @@ export function agentReviewArgv(agent: ReviewAgent, prompt: string, files: Revie
   const model = opts.model?.trim() || null;
   const m = (flag: string) => (model ? [flag, model] : []);
   switch (agent) {
-    case 'claude': return ['claude', '-p', prompt, '--permission-mode', 'plan', '--output-format', 'json', '--json-schema', JSON.stringify(files.schema), ...m('--model')];
+    case 'claude': return ['claude', '-p', prompt, '--permission-mode', 'plan', '--disallowedTools', ...REVIEW_DISALLOWED_TOOLS, '--output-format', 'json', '--json-schema', JSON.stringify(files.schema), ...m('--model')];
     case 'codex': return ['codex', 'exec', '-s', 'read-only', '--skip-git-repo-check', ...m('-m'), '--output-schema', files.schemaFile, '-o', files.outFile, prompt];
     case 'gemini': return ['gemini', '-p', prompt, '--approval-mode', 'default', '--skip-trust', ...m('-m')];
     case 'cursor': return ['cursor-agent', '-p', prompt, '--trust', ...m('--model')];
@@ -172,7 +217,8 @@ function normFinding(v: unknown): ReviewFinding | null {
   else if (typeof f.line === 'string' && /^\d+$/.test(f.line.trim())) line = Number(f.line.trim());
   const detail = str(f.detail) || title;
   const failureScenario = str(f.failureScenario ?? f.failure_scenario) || null;
-  return { path: p, line, severity, title, detail, failureScenario, confidence };
+  const earlier = str(f.earlier) || null;
+  return { path: p, line, severity, title, detail, failureScenario, confidence, ...(earlier ? { earlier } : {}) };
 }
 
 function normResult(v: unknown): ReviewResult | null {
@@ -189,7 +235,13 @@ function normResult(v: unknown): ReviewResult | null {
   const findings = Array.isArray(r.findings) ? r.findings.map(normFinding).filter((f): f is ReviewFinding => !!f) : [];
   const summary = str(r.summary);
   if (!summary && findings.length === 0 && !str(r.verdict)) return null;
-  return { verdict, summary, findings };
+  // Passed through for the server to check (review-run-packet.ts normalizeReviewResult).
+  const earlier = Array.isArray(r.earlier)
+    ? r.earlier.flatMap((e) => (e && typeof e === 'object' && str((e as any).ref) && str((e as any).status)
+      ? [{ ref: str((e as any).ref), status: str((e as any).status), note: str((e as any).note) }] : []))
+    : [];
+  const score = typeof r.score === 'number' && Number.isFinite(r.score) ? r.score : null;
+  return { verdict, ...(score !== null ? { score } : {}), summary, findings, ...(earlier.length ? { earlier } : {}) };
 }
 
 /**

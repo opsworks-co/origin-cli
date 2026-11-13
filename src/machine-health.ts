@@ -18,8 +18,12 @@ import { execFileSync } from 'child_process';
 
 export interface MachineHealthAgent {
   agent: string;
-  /** `global` = ~ install, `repo` = the session's repo. */
-  scope: 'global' | 'repo';
+  /**
+   * `global` = ~ install, `repo` = the session's repo, `fired` = no config
+   * found where we look, but this agent ran one of Origin's hooks on this
+   * machine in the last day (HOOK_FIRED_WINDOW_MS) — proof the wiring works.
+   */
+  scope: 'global' | 'repo' | 'fired';
   state: 'ok' | 'stale' | 'relocated' | 'unreadable';
 }
 
@@ -63,19 +67,96 @@ function cachePath(): string {
   return path.join(os.homedir(), '.origin', 'machine-health.json');
 }
 
+const GIT_READ = { encoding: 'utf-8' as const, stdio: ['ignore', 'pipe', 'ignore'] as ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 2000 };
+
 function readGlobalHooksPath(): string {
   try {
-    return execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], {
-      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 2000,
-    }).trim();
+    // --includes: `--global` alone skips `[include]`/`[includeIf]` files, and a
+    // developer with two git identities keeps per-directory settings in those.
+    return execFileSync('git', ['config', '--global', '--includes', '--get', 'core.hooksPath'], GIT_READ).trim();
   } catch { return ''; }
 }
 
-function repoHasOriginPostCommit(repoPath: string): boolean {
+/**
+ * Does git, committing in this repo, run an Origin post-commit? Asks git for
+ * the hooks dir it actually uses — `rev-parse --git-path hooks` honours a
+ * `core.hooksPath` from any config scope (repo-local, includeIf, system) and a
+ * linked worktree's common dir — instead of assuming `<repo>/.git/hooks`.
+ */
+function repoHasOriginPostCommit(repoPath: string, isOriginHooksPath: (p: string) => boolean): boolean {
+  const dirs: string[] = [];
   try {
-    const hook = fs.readFileSync(path.join(repoPath, '.git', 'hooks', 'post-commit'), 'utf-8');
-    return /\borigin\b/.test(hook);
-  } catch { return false; }
+    const out = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-path', 'hooks'], { ...GIT_READ, cwd: repoPath }).trim();
+    if (out && isOriginHooksPath(out)) return true;
+    if (out) dirs.push(out);
+  } catch { /* not a repo, or a git too old for --path-format */ }
+  dirs.push(path.join(repoPath, '.git', 'hooks'));
+  for (const dir of dirs) {
+    try {
+      const hook = fs.readFileSync(path.join(dir, 'post-commit'), 'utf-8');
+      if (/\borigin\b/.test(hook)) return true;
+    } catch { /* no hook there */ }
+  }
+  return false;
+}
+
+// ─── Hooks that actually fired ────────────────────────────────────────────
+//
+// A config check can only look where we think hooks live. Claude Code alone
+// reads them from ~/.claude/settings.json, settings.local.json at both levels,
+// $CLAUDE_CONFIG_DIR, enterprise managed settings and plugins — and a report
+// that misses the one a developer uses calls a machine that IS capturing
+// "hooks-broken" (Ihor's MacBook, 2026-11-03: the report said no Claude Code
+// hooks 50 ms after a Claude Code hook started his session). So every agent
+// hook stamps that it ran, and a recent stamp counts as installed.
+
+/** A hook stamp younger than this counts as "this agent's hooks work here". */
+export const HOOK_FIRED_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Re-stamp at most this often — hooks fire on every tool call. */
+const HOOK_FIRED_RESTAMP_MS = 10 * 60 * 1000;
+
+function hookFiredDir(): string {
+  return path.join(os.homedir(), '.origin', 'hook-fired');
+}
+
+function readHookFiredAt(agent: string): number {
+  try {
+    return Date.parse(fs.readFileSync(path.join(hookFiredDir(), agent), 'utf-8').trim());
+  } catch { return NaN; }
+}
+
+/** Called by `origin hooks <agent> <event>` before it handles the event. Never throws. */
+export function recordHookFired(agent: string | undefined, now: number = Date.now()): void {
+  if (!agent || !Object.values(TOOL_TO_AGENT).includes(agent)) return;
+  try {
+    const prev = readHookFiredAt(agent);
+    if (Number.isFinite(prev) && now - prev >= 0 && now - prev < HOOK_FIRED_RESTAMP_MS) return;
+    fs.mkdirSync(hookFiredDir(), { recursive: true });
+    fs.writeFileSync(path.join(hookFiredDir(), agent), new Date(now).toISOString());
+  } catch { /* evidence is best-effort */ }
+}
+
+/** Agents whose Origin hooks ran on this machine within HOOK_FIRED_WINDOW_MS. */
+export function agentsWithRecentHookFires(now: number = Date.now()): string[] {
+  return [...new Set(Object.values(TOOL_TO_AGENT))].filter((agent) => {
+    const at = readHookFiredAt(agent);
+    return Number.isFinite(at) && now - at >= -60_000 && now - at < HOOK_FIRED_WINDOW_MS;
+  }).sort();
+}
+
+/**
+ * Claude Code settings files beyond `<base>/.claude/settings.json` that can
+ * carry its hooks: settings.local.json at both levels, and the user dir
+ * `$CLAUDE_CONFIG_DIR` points at instead of ~/.claude.
+ */
+function extraClaudeSettingsFiles(home: string, repo: string | null): Array<[string, 'global' | 'repo']> {
+  const files: Array<[string, 'global' | 'repo']> = [[path.join(home, '.claude', 'settings.local.json'), 'global']];
+  const configDir = process.env.CLAUDE_CONFIG_DIR;
+  if (configDir && path.resolve(configDir) !== path.join(home, '.claude')) {
+    files.push([path.join(configDir, 'settings.json'), 'global'], [path.join(configDir, 'settings.local.json'), 'global']);
+  }
+  if (repo) files.push([path.join(repo, '.claude', 'settings.local.json'), 'repo']);
+  return files;
 }
 
 /** Compute the report now (no cache). Exported for tests and `--fresh` callers. */
@@ -84,7 +165,8 @@ export async function computeMachineHealth(opts: {
   detectedTools?: string[];
   cliVersion?: string;
 } = {}): Promise<MachineHealth> {
-  const { checkHookConfigs } = await import('./hook-config-health.js');
+  const { checkHookConfigs, checkHookConfig } = await import('./hook-config-health.js');
+  const { HOOK_CONFIG_SPECS } = await import('./commands/enable.js');
   const { isOriginHooksPath } = await import('./global-hooks-path.js');
   const cliVersion = opts.cliVersion ?? (await import('./cli-version.js')).cliVersion();
 
@@ -98,6 +180,24 @@ export async function computeMachineHealth(opts: {
       seen.add(report.agent);
       agents.push({ agent: report.agent, scope, state: report.state });
     }
+  }
+  const fired = agentsWithRecentHookFires();
+  const claudeSpec = HOOK_CONFIG_SPECS.find((spec) => spec.agent === 'claude-code');
+  if (claudeSpec) {
+    for (const [file, scope] of extraClaudeSettingsFiles(home, repo)) {
+      const report = checkHookConfig({ ...claudeSpec, filePath: () => file }, path.dirname(path.dirname(file)));
+      if (report.state === 'absent') continue;
+      seen.add(report.agent);
+      // `origin doctor --fix` doesn't rewrite these files, so a drift here is
+      // one the Rollout view's fix can't clear. When the hooks demonstrably
+      // run anyway, report them as working rather than as unfixable drift.
+      agents.push({ agent: report.agent, scope, state: fired.includes(report.agent) ? 'ok' : report.state });
+    }
+  }
+  for (const agent of fired) {
+    if (seen.has(agent)) continue;
+    seen.add(agent);
+    agents.push({ agent, scope: 'fired', state: 'ok' });
   }
 
   let detected = opts.detectedTools;
@@ -121,7 +221,7 @@ export async function computeMachineHealth(opts: {
     },
     gitHooks: {
       global: isOriginHooksPath(readGlobalHooksPath()),
-      repo: repo ? repoHasOriginPostCommit(repo) : null,
+      repo: repo ? repoHasOriginPostCommit(repo, isOriginHooksPath) : null,
     },
   };
 }
@@ -143,6 +243,11 @@ export async function machineHealthForUpload(repoPath?: string | null, now: numb
         && cached.repoPath === (repoPath || null)
         && cached.health.cliVersion === version
         && Number.isFinite(at) && now - at >= 0 && now - at < MACHINE_HEALTH_TTL_MS
+        // A hook that fired since the report was cached is news the report
+        // must carry — otherwise the very session start a hook makes would
+        // upload an hour-old "no hooks" for that agent.
+        && agentsWithRecentHookFires(now).every((agent) =>
+          (cached.health.hooks?.agents || []).some((a: MachineHealthAgent) => a.agent === agent))
       ) {
         return cached.health as MachineHealth;
       }

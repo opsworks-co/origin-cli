@@ -23,7 +23,7 @@
 // If this file stops compiling because `ParsedSession` demands file truth
 // again, that is the regression: the critical path grew an agent-specific
 // dependency back.
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, type TestContext } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -81,14 +81,60 @@ const futureAgent: TranscriptAdapter = {
 
 // ─── the harness ────────────────────────────────────────────────────────────
 
-const waitFor = async (cond: () => boolean, timeoutMs = 10_000): Promise<void> => {
+const waitFor = async (cond: () => boolean, what: string, journalPath: string, timeoutMs = 10_000): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (cond()) return;
     await new Promise((r) => setTimeout(r, 25));
   }
+  let journal = '';
+  try { journal = fs.readFileSync(journalPath, 'utf-8'); } catch (e) { journal = `(no journal: ${String(e)})`; }
+  throw new Error(`timed out waiting for ${what}\n--- journal ---\n${journal}`);
 };
 const pastDebounce = () => new Promise((r) => setTimeout(r, DEBOUNCE_MS + 50));
+
+/** Has the journal recorded a write to `file` after the mark for `turnId`? */
+const wroteInTurn = (journalPath: string, turnId: string, file: string): boolean => {
+  const entries = readJournalEntries(journalPath);
+  const mark = entries.findIndex((e) => e.kind === 'turn' && e.turnId === turnId);
+  return mark >= 0 && entries.slice(mark + 1).some((e) => e.kind === 'write' && e.file === file);
+};
+
+/**
+ * Prove the watcher is live, then hand back an EMPTY journal.
+ *
+ * FSEvents does not deliver events for writes that land before it finishes
+ * arming — those are MISSED, not late — so a probe file is written until one
+ * lands. On a loaded macOS box recursive fs.watch can deliver nothing at all
+ * (a plain 20-line fs.watch script gets 0 events); that is the box, not the
+ * ledger, so the test is skipped with that reason rather than failing later on
+ * a count that never arrives.
+ *
+ * The probe's delete lands inside the debounce window, so its record comes
+ * from a trailing re-read up to DEBOUNCE_MS later — and later still under load.
+ * Truncating before it lands let it count as the first turn's write. Wait for
+ * the journal to go quiet first.
+ */
+const armWatcher = async (ctx: TestContext, repo: string, journalPath: string): Promise<void> => {
+  const writesIn = () => readJournalEntries(journalPath).filter((e) => e.kind === 'write').length;
+  const probe = path.join(repo, '.probe');
+  for (let i = 0; i < 200 && writesIn() === 0; i++) {
+    fs.writeFileSync(probe, String(i));
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  fs.rmSync(probe, { force: true });
+  if (writesIn() === 0) {
+    ctx.skip('recursive fs.watch delivered no event for 5 s — the box\'s file watching is down, not the ledger');
+  }
+  let size = -1;
+  for (let i = 0; i < 40; i++) {
+    await pastDebounce();
+    const now = fs.statSync(journalPath).size;
+    if (now === size) break;
+    size = now;
+  }
+  fs.writeFileSync(journalPath, '');
+};
 
 describe('a new agent with no file-parsing code', () => {
   it('its adapter compiles while supplying only prompts and discovery', () => {
@@ -116,7 +162,7 @@ describe('a new agent with no file-parsing code', () => {
     expect(found[0].sessionId).toBe('fa-session-1');
   });
 
-  it('gets exact per-turn diffs from the ledger alone', async () => {
+  it('gets exact per-turn diffs from the ledger alone', async (ctx) => {
     const repo = path.join(tmp, 'repo');
     fs.mkdirSync(repo, { recursive: true });
     const tag = 'future-agent-day1';
@@ -125,30 +171,20 @@ describe('a new agent with no file-parsing code', () => {
     fs.writeFileSync(journalPath, '');
 
     const watcher = startWriteJournal(repo, journalPath, { snapshotDir });
-    if (!watcher) return; // no recursive watch on this platform
+    if (!watcher) return ctx.skip('watcher unavailable: recursive fs.watch is not supported on this platform');
     try {
-      const writesIn = () => readJournalEntries(journalPath).filter((e) => e.kind === 'write').length;
-      // FSEvents does not deliver events for writes that land before it finishes
-      // arming — those are MISSED, not late — so prove it is live first.
-      const probe = path.join(repo, '.probe');
-      for (let i = 0; i < 200 && writesIn() === 0; i++) {
-        fs.writeFileSync(probe, String(i));
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      fs.unlinkSync(probe);
-      await pastDebounce();
-      fs.writeFileSync(journalPath, '');
+      await armWatcher(ctx, repo, journalPath);
 
       const app = path.join(repo, 'app.py');
 
       markTurn(journalPath, 'fa_turn_1');
       fs.writeFileSync(app, 'def main():\n    pass\n');
-      await waitFor(() => writesIn() >= 1);
+      await waitFor(() => wroteInTurn(journalPath, 'fa_turn_1', 'app.py'), "turn 1's write to app.py", journalPath);
       await pastDebounce();
 
       markTurn(journalPath, 'fa_turn_2');
       fs.writeFileSync(app, 'def main():\n    print("hi")\n');
-      await waitFor(() => writesIn() >= 2);
+      await waitFor(() => wroteInTurn(journalPath, 'fa_turn_2', 'app.py'), "turn 2's write to app.py", journalPath);
 
       // The producer builds mappings from PROMPTS only — everything the
       // adapter knows. It has no file list and no diff to offer.
@@ -192,7 +228,7 @@ describe('a new agent with no file-parsing code', () => {
     }
   });
 
-  it('captures a SHELL write, which no transcript parser would have seen', async () => {
+  it('captures a SHELL write, which no transcript parser would have seen', async (ctx) => {
     // The blind spot every adapter shares: a heredoc or `sed -i` produces no
     // tool call, so editsJson is empty and the turn reads as chat-only. The
     // ledger watches the filesystem, so it does not care how the write happened.
@@ -203,22 +239,14 @@ describe('a new agent with no file-parsing code', () => {
     fs.writeFileSync(journalPath, '');
 
     const watcher = startWriteJournal(repo, journalPath, { snapshotDir });
-    if (!watcher) return;
+    if (!watcher) return ctx.skip('watcher unavailable: recursive fs.watch is not supported on this platform');
     try {
-      const writesIn = () => readJournalEntries(journalPath).filter((e) => e.kind === 'write').length;
-      const probe = path.join(repo, '.probe');
-      for (let i = 0; i < 200 && writesIn() === 0; i++) {
-        fs.writeFileSync(probe, String(i));
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      fs.unlinkSync(probe);
-      await pastDebounce();
-      fs.writeFileSync(journalPath, '');
+      await armWatcher(ctx, repo, journalPath);
 
       markTurn(journalPath, 'fa_shell');
       // Stands in for `cat > notes.md <<'EOF'` — a write with no tool call.
       fs.appendFileSync(path.join(repo, 'notes.md'), '# notes\nwritten by a shell\n');
-      await waitFor(() => writesIn() >= 1);
+      await waitFor(() => wroteInTurn(journalPath, 'fa_shell', 'notes.md'), 'the shell write to notes.md', journalPath);
 
       const mapping: Record<string, unknown> = { promptIndex: 0 };
       applyLedgerToMappings(

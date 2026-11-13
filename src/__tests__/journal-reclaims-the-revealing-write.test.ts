@@ -65,6 +65,107 @@ describe('TurnMark.reclaim', () => {
     expect(b.map((c) => [c.file, c.beforeHash, c.afterHash, c.reclaimed])).toEqual([['notes.md', null, 'h-notes-1', true]]);
   });
 
+  // Linux: the create fires before the bytes land, so one save is two records
+  // — the empty file, then its content after the debounce. Jenkins run 5254.
+  it('a save caught mid-write moves whole: its empty truncate goes with it', () => {
+    const e = (file: string, hash: string, at: number, size: number) => serializeRecord({ file, at, hash, size, retained: true });
+    const split = parseJournalEntries([
+      serializeTurnMark({ at: 1000, turnId: 'A' }),
+      e('app.py', 'h-app-1', 1100, 40),
+      e('notes.md', 'h-empty', 1200, 0),
+      e('notes.md', 'h-notes-1', 1450, 14),
+      serializeTurnMark({ at: 1600, turnId: 'B', reclaim: ['notes.md'] }),
+    ].join(''));
+    expect(turnFileChanges(split, 'A').map((c) => c.file)).toEqual(['app.py']);
+    expect(turnFileChanges(split, 'B').map((c) => [c.file, c.beforeHash, c.afterHash])).toEqual([['notes.md', null, 'h-notes-1']]);
+  });
+
+  it('an empty file the previous turn left long before stays its own', () => {
+    const e = (file: string, hash: string, at: number, size: number) => serializeRecord({ file, at, hash, size, retained: true });
+    const apart = parseJournalEntries([
+      serializeTurnMark({ at: 1000, turnId: 'A' }),
+      e('notes.md', 'h-empty', 1200, 0),
+      e('notes.md', 'h-notes-1', 9000, 14),
+      serializeTurnMark({ at: 9100, turnId: 'B', reclaim: ['notes.md'] }),
+    ].join(''));
+    expect(turnFileChanges(apart, 'A').map((c) => [c.file, c.afterHash])).toEqual([['notes.md', 'h-empty']]);
+    expect(turnFileChanges(apart, 'B').map((c) => [c.beforeHash, c.afterHash])).toEqual([['h-empty', 'h-notes-1']]);
+  });
+
+  // Jenkins 11-06 (e52d3ac), cursor-binary turn 4: an EXISTING 60 KB file was
+  // rewritten, the truncate was recorded empty, and the re-read that recorded
+  // the bytes is a debounce timer — on a saturated box it fires seconds late.
+  // The turn then read the empty record as its before-state: +1501 −0 for a
+  // one-line edit. The kernel's mtimes for the two halves of one save are
+  // milliseconds apart however late the watcher looks.
+  it('a save whose re-read was observed seconds late still moves whole, by its mtimes', () => {
+    const e = (file: string, hash: string, at: number, size: number, mtime: number) => serializeRecord({ file, at, hash, size, mtime, retained: true });
+    const late = parseJournalEntries([
+      serializeTurnMark({ at: 1000, turnId: 'A' }),
+      e('big.py', 'h-big-0', 1100, 60_000, 1099),
+      e('big.py', 'h-empty', 5000, 0, 4998),
+      e('big.py', 'h-big-1', 8200, 60_000, 5001),   // timer 3 s late
+      serializeTurnMark({ at: 8300, turnId: 'B', reclaim: ['big.py'] }),
+    ].join(''));
+    expect(turnFileChanges(late, 'A').map((c) => [c.file, c.afterHash])).toEqual([['big.py', 'h-big-0']]);
+    expect(turnFileChanges(late, 'B').map((c) => [c.beforeHash, c.afterHash])).toEqual([['h-big-0', 'h-big-1']]);
+  });
+
+  it('an empty file written seconds before stays the previous turn\'s, even when the two were observed close together', () => {
+    const e = (file: string, hash: string, at: number, size: number, mtime: number) => serializeRecord({ file, at, hash, size, mtime, retained: true });
+    const apart = parseJournalEntries([
+      serializeTurnMark({ at: 1000, turnId: 'A' }),
+      e('notes.md', 'h-empty', 8800, 0, 1200),       // observed late; written at 1200
+      e('notes.md', 'h-notes-1', 9000, 14, 8990),
+      serializeTurnMark({ at: 9100, turnId: 'B', reclaim: ['notes.md'] }),
+    ].join(''));
+    expect(turnFileChanges(apart, 'A').map((c) => [c.file, c.afterHash])).toEqual([['notes.md', 'h-empty']]);
+    expect(turnFileChanges(apart, 'B').map((c) => [c.beforeHash, c.afterHash])).toEqual([['h-empty', 'h-notes-1']]);
+  });
+
+  // local-ci 2026-11-11 (#3066), cursor-binary turn 4: the watcher read big.py
+  // while one writeFileSync was still copying pages and recorded exactly 24,576
+  // of its 58,906 bytes, then the whole file. The torn record stayed A's and
+  // was B's before-state: +868 -1 for a one-line edit.
+  it('a save the watcher read mid-write moves whole: its torn, shorter record goes with it', () => {
+    const e = (file: string, hash: string, at: number, size: number, mtime: number) => serializeRecord({ file, at, hash, size, mtime, retained: true });
+    const torn = parseJournalEntries([
+      serializeTurnMark({ at: 1000, turnId: 'A' }),
+      e('big.py', 'h-big-0', 1100, 58_907, 1099),
+      e('big.py', 'h-torn', 5000, 24_576, 4999),
+      e('big.py', 'h-big-1', 5600, 58_906, 4999),
+      serializeTurnMark({ at: 5700, turnId: 'B', reclaim: ['big.py'] }),
+    ].join(''));
+    expect(turnFileChanges(torn, 'A').map((c) => [c.file, c.afterHash])).toEqual([['big.py', 'h-big-0']]);
+    expect(turnFileChanges(torn, 'B').map((c) => [c.beforeHash, c.afterHash])).toEqual([['h-big-0', 'h-big-1']]);
+  });
+
+  it('a truncate, a torn read and the bytes of one save all move together', () => {
+    const e = (file: string, hash: string, at: number, size: number, mtime: number) => serializeRecord({ file, at, hash, size, mtime, retained: true });
+    const three = parseJournalEntries([
+      serializeTurnMark({ at: 1000, turnId: 'A' }),
+      e('big.py', 'h-big-0', 1100, 58_907, 1099),
+      e('big.py', 'h-empty', 5000, 0, 4998),
+      e('big.py', 'h-torn', 5001, 24_576, 4999),
+      e('big.py', 'h-big-1', 7000, 58_906, 4999),
+      serializeTurnMark({ at: 7100, turnId: 'B', reclaim: ['big.py'] }),
+    ].join(''));
+    expect(turnFileChanges(three, 'A').map((c) => [c.file, c.afterHash])).toEqual([['big.py', 'h-big-0']]);
+    expect(turnFileChanges(three, 'B').map((c) => [c.beforeHash, c.afterHash])).toEqual([['h-big-0', 'h-big-1']]);
+  });
+
+  it('a shorter save the previous turn made seconds earlier stays its own', () => {
+    const e = (file: string, hash: string, at: number, size: number, mtime: number) => serializeRecord({ file, at, hash, size, mtime, retained: true });
+    const apart = parseJournalEntries([
+      serializeTurnMark({ at: 1000, turnId: 'A' }),
+      e('notes.md', 'h-short', 1200, 10, 1200),
+      e('notes.md', 'h-long', 9000, 40, 8990),
+      serializeTurnMark({ at: 9100, turnId: 'B', reclaim: ['notes.md'] }),
+    ].join(''));
+    expect(turnFileChanges(apart, 'A').map((c) => [c.file, c.afterHash])).toEqual([['notes.md', 'h-short']]);
+    expect(turnFileChanges(apart, 'B').map((c) => [c.beforeHash, c.afterHash])).toEqual([['h-short', 'h-long']]);
+  });
+
   it('a mark without reclaim reads exactly as before', () => {
     const plain = parseJournalEntries([
       serializeTurnMark({ at: 1000, turnId: 'A' }),

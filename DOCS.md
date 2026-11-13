@@ -1179,9 +1179,8 @@ origin config set telemetry true
 | `commitLinking` | `always` \| `prompt` \| `never` | `always` | Add Origin-Session trailers to commits |
 | `pushStrategy` | `auto` \| `prompt` \| `false` | `auto` | When to push origin-sessions branch |
 | `telemetry` | `true` \| `false` | `false` | Enable anonymous telemetry (opt-in) |
-| `autoUpdate` | `true` \| `false` | — | Listed by `config list`, but the CLI does not read it today |
+| `autoUpdate` | `true` \| `false` | `true` | `false` silences the "Update available" notice and skips the version fetch behind it |
 | `secretRedaction` | `true` \| `false` | `true` | Redact secrets before sending to API |
-| `hookChaining` | `true` \| `false` | — | Listed by `config list`, but the CLI does not read it today |
 | `anthropicApiKey` | string | — | Anthropic API key for AI features (`explain --summarize`, `chat`, `ask`, `pre-review`, `session-compare`); `ANTHROPIC_API_KEY` wins |
 | `agentSlugs` | object | `{}` | Per-tool agent slug overrides (e.g., `{"claude-code": "claude-front"}`) |
 | `mode` | `auto` \| `standalone` | `auto` | `standalone` skips the API even when logged in |
@@ -1190,6 +1189,7 @@ origin config set telemetry true
 | `memoryUpdate` | `session-end` \| `commit` \| `both` | `session-end` | When to refresh session memory |
 | `memorySummary` | `heuristic` \| `llm` | `heuristic` | How memory summaries are written |
 | `autoSnapshot` | `true` \| `false` | `false` | Snapshot the working tree before agent file edits |
+| `mcpAllowSelfReview` | `true` \| `false` | `false` | Let an agent approve/reject/flag its own session through the MCP `review_session` tool |
 | `signSnapshots` | `true` \| `false` | — | Sign Origin's own commits (snapshots, session branch) |
 | `desktopNotifications` | `true` \| `false` | `false` | Desktop notification when an agent waits for you or finishes a turn with new commits |
 

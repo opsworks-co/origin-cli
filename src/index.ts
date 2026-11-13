@@ -48,6 +48,8 @@ const recapCommand = lazy(() => import('./commands/recap.js'), 'recapCommand');
 const xrayCommand = lazy(() => import('./commands/xray.js'), 'xrayCommand');
 const enableCommand = lazy(() => import('./commands/enable.js'), 'enableCommand');
 const disableCommand = lazy(() => import('./commands/disable.js'), 'disableCommand');
+const enableCloudCommand = lazy(() => import('./cloud-session.js'), 'enableCloudCommand');
+const cloudBootstrapCommand = lazy(() => import('./cloud-session.js'), 'cloudBootstrapCommand');
 const benchmarkBakeoffCreateCommand = lazy(() => import('./commands/benchmark-bakeoff.js'), 'benchmarkBakeoffCreateCommand');
 const benchmarkRunnerCommand = lazy(() => import('./commands/benchmark-runner.js'), 'benchmarkRunnerCommand');
 const benchmarkKeyCommand = lazy(() => import('./commands/benchmark-runner.js'), 'benchmarkKeyCommand');
@@ -176,6 +178,11 @@ const urlHandlerAction = lazy(() => import('./commands/url-handler.js'), 'urlHan
 const openUrlAction = lazy(() => import('./commands/url-handler.js'), 'openUrlAction');
 const reviewRunAction = lazy(() => import('./commands/review-run.js'), 'reviewRunAction');
 const reviewRunnerAction = lazy(() => import('./commands/review-runner.js'), 'reviewRunnerAction');
+const orchestratorScopeAction = lazy(() => import('./commands/orchestrator-scope.js'), 'orchestratorScopeAction');
+const orchestratorScopesAction = lazy(() => import('./commands/orchestrator-scope.js'), 'orchestratorScopesAction');
+const orchestratorApproveAction = lazy(() => import('./commands/orchestrator-scope.js'), 'orchestratorApproveAction');
+const orchestratorDiscardAction = lazy(() => import('./commands/orchestrator-scope.js'), 'orchestratorDiscardAction');
+const orchestratorSplitAction = lazy(() => import('./commands/orchestrator-scope.js'), 'orchestratorSplitAction');
 const checkForUpdate = lazy(() => import('./version-check.js'), 'checkForUpdate');
 
 const __filename = fileURLToPath(import.meta.url);
@@ -242,7 +249,34 @@ program.command('enable')
   .option('-s, --agent-slug <slug>', 'Override agent slug for this tool (e.g. cursor-frontend). Saved to config.')
   .option('--no-chain', 'Replace existing hooks instead of chaining')
   .option('--no-mcp', 'Skip registering the MCP server with detected agents')
-  .action(enableCommand);
+  .option('--cloud', 'Add hooks to this repo so Claude Code cloud sessions are captured (commit them; they do nothing locally)')
+  .option('--api-url <url>', 'With --cloud: the Origin server cloud sessions report to (default: your login\'s)')
+  .action((opts: any) => (opts.cloud ? enableCloudCommand({ apiUrl: opts.apiUrl }) : enableCommand(opts)));
+program.command('statusline')
+  .description('Claude Code status line that saves plan limits (5-hour / weekly use) for the dashboard; set up by enable, runs your own status line after')
+  .option('--install', 'Make Claude Code run this as its status line again after --uninstall (keeps your current one)')
+  .option('--uninstall', 'Put your previous status line back, and keep enable/upgrade from setting it again')
+  .action(async (opts: { install?: boolean; uninstall?: boolean }) => {
+    const m = await import('./commands/statusline.js');
+    if (opts.install) await m.installStatusLine();
+    else if (opts.uninstall) m.uninstallStatusLine();
+    else m.statuslineCommand();
+  });
+program.command('git-credential', { hidden: true })
+  .description('Internal: git credential helper for Origin-hosted repos (installed by login and enable)')
+  .argument('<action>', 'get, store or erase')
+  .action(async (action: string) => {
+    const m = await import('./commands/git-credential.js');
+    await m.gitCredentialCommand(action);
+    // A stalled socket must not keep git waiting: leave once stdout is flushed.
+    process.stdout.write('', () => process.exit(0));
+  });
+program.command('cloud')
+  .description('Internal: Claude Code cloud session support')
+  .command('bootstrap')
+  .description('Set up a cloud VM for capture: key, git hooks, notes (run by .claude/hooks/origin-cloud.sh)')
+  .option('--api-url <url>', 'Origin server (default: $ORIGIN_API_URL or https://getorigin.io)')
+  .action((opts: { apiUrl?: string }) => cloudBootstrapCommand(opts));
 const benchmark = program.command('benchmark')
   .description('Agent benchmarking helpers');
 benchmark.command('bakeoff')
@@ -388,7 +422,7 @@ program.command('clean')
 // Deprecated aliases — folded under `origin context`. Kept working for muscle
 // memory / scripts but hidden from help and the docs command reference. The
 // `{ hidden: true }` opts form both hides them at runtime AND drops them from
-// the static docs extractor (which only matches `.command('name')`).
+// the static docs extractor (which skips commands marked `hidden: true`).
 const handoff = program.command('handoff', { hidden: true }).description('Deprecated — use `origin context handoff`');
 handoff.action(handoffShowCommand);
 handoff.command('show', { hidden: true })
@@ -431,6 +465,23 @@ todo.command('add <text>')
 todo.command('remove <id>')
   .description('Remove a TODO')
   .action(todoRemoveCommand);
+
+// ─── Pull requests ──────────────────────────────────────────────────────
+
+const pr = program.command('pr').description('Pull requests on Origin');
+pr.command('create')
+  .description('Open a pull request for the current branch and print its Origin link')
+  .requiredOption('-t, --title <title>', 'Pull request title')
+  .option('-b, --body <text>', 'Description')
+  .option('-F, --body-file <file>', 'Read the description from a file (- for stdin)')
+  .option('-B, --base <branch>', 'Branch to merge into (default: the repo\'s default branch)')
+  .option('-H, --head <branch>', 'Branch to open it from (default: the current branch)')
+  .option('-d, --draft', 'Open it as a draft')
+  .option('--json', 'Print the result as JSON')
+  .action(async (opts) => {
+    const { prCreateCommand } = await import('./commands/pr.js');
+    await prCreateCommand(opts);
+  });
 
 // ─── AI Issue Tracker ───────────────────────────────────────────────────
 
@@ -501,6 +552,7 @@ issue.command('start <id>')
   .option('--background', 'Run the agent headless and detached in its worktree (implies --worktree): no terminal, output to a log; see `origin issue runs`')
   .option('--timeout <minutes>', 'With --background: stop the agent if it is still running after this many minutes (default 120; 0 = no limit)')
   .option('--force', 'Start even when someone (or another agent) is already working on the issue')
+  .option('--repo-id <id>', 'Read the issue from this Origin repo instead of the one this checkout\'s captures go to (the orchestrator passes it when the same repo is in two workspaces)')
   .option('--no-publish', 'Leave the work on this machine: by default, when the agent exits cleanly, its branch is pushed and a pull request opened (never merged)')
   .option('--no-preflight', 'With --background: skip the read-only check of the issue against the code that runs first (it asks here, or on the issue, what it can\'t settle)')
   .option('--no-resume', 'With --background: start a fresh agent session, even when the one that stopped on a question could go on with your answer')
@@ -521,7 +573,7 @@ issue.command('run-ended <record>', { hidden: true })
 
 issue.command('cloud <id>')
   .description('Hand an issue to Codex cloud from this machine: submits the task with your own `codex cloud exec` login, reports the run to the issue, and follows the task to its end')
-  .requiredOption('--env <env>', 'The Codex cloud environment to run in (its id, or its name in `codex cloud`)')
+  .option('--env <env>', 'The Codex cloud environment to run in (its id, or its name in `codex cloud`); default: the one Codex has for this repo')
   .option('--runner <runner>', 'The cloud runner (codex)', 'codex')
   .option('--timeout <hours>', 'Stop following the task after this many hours (default 12)')
   .action(issueCloudAction);
@@ -541,6 +593,7 @@ issue.command('race <id>')
   .requiredOption('--agents <list>', '2–4 agents, comma-separated: claude, codex, gemini, cursor, copilot, antigravity')
   .option('--timeout <minutes>', 'Stop an agent still running after this many minutes (default 120; 0 = no limit)')
   .option('--force', 'Start even when someone (or another agent) is already working on the issue')
+  .option('--repo-id <id>', 'Read the issue from this Origin repo instead of the one this checkout\'s captures go to (the orchestrator passes it when the same repo is in two workspaces)')
   .option('--no-publish', 'Leave each arm\'s work on this machine: by default an arm whose agent exits cleanly pushes its branch and opens a pull request (never merged)')
   .action(issueRaceAction);
 
@@ -1127,11 +1180,41 @@ review.command('run <runIds...>')
 // "when a PR opens" / "on every push") have nobody at a keyboard, so a runner
 // on a machine with the checkout claims and runs them (commands/review-runner.ts).
 review.command('runner [action]')
-  .description('Run reviewer runs queued for this machine\'s repos: polls Origin, checks each PR head out in a worktree, runs the reviewer agent read-only, posts findings. install | uninstall | status it as a background service (launchd on macOS, systemd on Linux) that starts at login and survives upgrades')
+  .description('Run reviewer runs queued for this machine\'s repos: polls Origin, checks each PR head out in a worktree, runs the reviewer agent read-only, posts findings. install | uninstall | status it as a background service (launchd on macOS, systemd on Linux) that starts at login and survives upgrades. setup --clone <url...> makes a fresh box a runner: clones the repos, then installs the service (Settings → Runners → Add a host gives the whole command)')
   .option('--once', 'Drain one run and exit')
   .option('--interval <seconds>', 'Poll interval (default 15)')
+  .option('--parallel <n>', 'Runs at once, each in its own worktree (default 1, at most 8); Settings → Runners overrides it')
+  .option('--no-local-ci', 'Never take local checks (the repo\'s test command) — leave them to another runner, e.g. Jenkins')
+  .option('--local-ci-only', 'Take only local checks — no reviewer runs or orchestrator issues (for a CI box)')
   .option('--repo <path...>', 'Checkouts to watch (default: this repo and the ones Origin knows on this machine); put it after the action')
+  .option('--scope <scope>', 'Whom a new runner serves: mine (your own runs and PRs) or workspace (every run in the workspaces you administer). Settings → Runners changes it later')
+  .option('--clone <url...>', 'With setup: git URLs to clone on this box (each into --dir/<owner>/<name>; an existing checkout is fetched instead)')
+  .option('--dir <path>', 'With setup: where the clones go (default ~/origin-runner)')
   .action(reviewRunnerAction);
+
+// The Orchestrator's scopes: a goal split into issues it then works through
+// (commands/orchestrator-scope.ts; the server side is services/orchestrator/scopes.ts).
+const orchestrator = program.command('orchestrator').description('Hand the Orchestrator a scope: it splits it into issues and agents work through them');
+orchestrator.command('scope [text]')
+  .description('Split a scope into tasks for this repo. Who splits and whether you approve first are set on the Orchestrator page')
+  .option('--epic <id>', 'Split this existing epic instead (its title and description are the scope)')
+  .option('--repo-id <id>', 'The Origin repo (default: this checkout\'s)')
+  .option('--json', 'Output as JSON')
+  .action(orchestratorScopeAction);
+orchestrator.command('scopes')
+  .description('List scopes: being split, waiting for your approval, or in progress')
+  .option('--json', 'Output as JSON')
+  .action(orchestratorScopesAction);
+orchestrator.command('approve <scopeId>')
+  .description('Approve a split: its tasks become issues the Orchestrator takes')
+  .action(orchestratorApproveAction);
+orchestrator.command('discard <scopeId>')
+  .description('Drop a scope that has not become issues')
+  .action(orchestratorDiscardAction);
+orchestrator.command('split <scopeId>', { hidden: true })
+  .description('The runner\'s part: run a read-only agent here and post its tasks')
+  .option('--background', 'Return at once; split in a detached process')
+  .action(orchestratorSplitAction);
 
 program.command('review-pr <url>')
   .description('Analyze AI sessions behind a GitHub PR')
@@ -1417,7 +1500,7 @@ context.command('clear')
 const COMMAND_GROUPS: Array<{ label: string; commands: string[] }> = [
   {
     label: 'SETUP',
-    commands: ['login', 'enable', 'status', 'whoami', 'link', 'attach', 'disable', 'url-handler'],
+    commands: ['login', 'enable', 'status', 'whoami', 'link', 'attach', 'disable', 'url-handler', 'statusline', 'cloud'],
   },
   {
     label: 'ATTRIBUTION',
@@ -1429,12 +1512,12 @@ const COMMAND_GROUPS: Array<{ label: string; commands: string[] }> = [
   },
   {
     label: 'REVIEW',
-    commands: ['review', 'review-pr', 'intent-review', 'pre-review'],
+    commands: ['review', 'review-pr', 'pr', 'intent-review', 'pre-review'],
   },
   {
     label: 'TRACKING',
     // `handoff`/`memory` are deprecated aliases folded under `context` — omitted.
-    commands: ['context', 'issue', 'todo', 'trail'],
+    commands: ['context', 'issue', 'orchestrator', 'todo', 'trail'],
   },
   {
     label: 'ANALYTICS',
@@ -1586,6 +1669,9 @@ export function isMachineReadableInvocation(actionCommand?: { name(): string; pa
   // stdout is a JSON document, and it promises to stay offline, so it must not
   // reach getorigin.io for a version check either.
   if (actionCommand?.name() === 'export' && (actionCommand.args?.length ?? 0) > 0) return true;
+  // `origin git-credential` speaks git's credential protocol: git reads stdout
+  // as the answer, so a banner there would be taken for part of it.
+  if (actionCommand?.name() === 'git-credential') return true;
   // Walk to the root command name (`origin hooks antigravity pre-tool-use`
   // dispatches the leaf `pre-tool-use`, whose ancestor is `hooks`).
   let cmd: any = actionCommand;

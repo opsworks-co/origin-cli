@@ -25,22 +25,40 @@
  *     that both reached the checkout are not guessed between — and that
  *     refusal is reported as `ambiguous`, not as "no session", so the commit
  *     hooks do not fall through to a weaker process-detection guess.
+ *
+ * A person may commit that work later, by hand, with the turn long closed. Prod
+ * 08705ba (PR #3076): session db727022 wrote a patch in a sibling checkout, and
+ * an hour on it was committed from PyCharm. So a closed turn still answers when
+ * nothing running does, on evidence: the commit's feature branch is one this
+ * checkout was on when the session reached it (or the session's own), and the
+ * session touched most of the commit's files. A session that has ended answers
+ * through prepare-commit-msg's trailer (pickEndedForeignSessionByFiles).
  */
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { debugLog } from './debug-log.js';
-import { isInsideRepo, samePath } from './paths.js';
-import { getGitCommonDir, getWorkingGitRoot, gitCommonDirFilePath, isSessionAlive } from './session-state.js';
+import { isInsideRepo, samePath, toRepoRelativePath } from './paths.js';
+import { getBranch, getGitCommonDir, getWorkingGitRoot, gitCommonDirFilePath, isSessionAlive } from './session-state.js';
 import type { SessionState } from './session-state.js';
 import { candidateDirsFromCommand } from './session-worktree.js';
 import { fitDiffToBudget } from './diff-budget.js';
 import { MAX_PROMPT_DIFF_LEN, commitLineCounts } from './git-capture.js';
 import { extractCommitDiff } from './history-backfill.js';
-import { turnIdForServerRow } from './turn-index.js';
+import { localTurnForServerRow, turnIdForServerRow } from './turn-index.js';
+import { probeTree, touchedSince } from './shell-command-probe.js';
+import type { ProbeDeps } from './shell-command-probe.js';
+import { commandWritesFiles } from './shell-write-capture.js';
+import type { EndedSessionOwner } from './ended-session-commit-owner.js';
 
 /** Entries kept per session — the newest. */
 export const FOREIGN_TREES_MAX = 12;
+/** Branches kept per checkout — the newest. */
+const BRANCHES_PER_TREE_MAX = 12;
+/** Files kept per checkout — the newest. */
+const FILES_PER_TREE_MAX = 500;
+/** Commands that may be running at once in one checkout. */
+const PROBES_PER_TREE_MAX = 4;
 /** Candidates a single tool call may spend git calls on. */
 const CANDIDATES_PER_CALL = 4;
 /** A commit claim this old no longer says a commit is running. */
@@ -63,10 +81,148 @@ function ownTrees(state: SessionState): string[] {
   return [...trees];
 }
 
+/** Add what `tree` is on now to the entry. Returns whether it was new. */
+function noteTreeBranch(entry: { path: string; branches?: string[] }): boolean {
+  const branch = getBranch(entry.path);
+  if (!branch || branch === 'HEAD' || entry.branches?.includes(branch)) return false;
+  entry.branches = [...(entry.branches || []), branch].slice(-BRANCHES_PER_TREE_MAX);
+  return true;
+}
+
 /** `~/x` → `<home>/x`, so a command written with a tilde names its directory too. */
 function expandTildes(command: string): string {
   const home = os.homedir();
   return command.replace(/(^|[\s=:"'])~(?=\/)/g, (_m, lead: string) => `${lead}${home}`);
+}
+
+/** The directories and files a tool call names. */
+function pathsThisCallNames(input: { command?: string; filePaths?: string[]; cwd?: string }): string[] {
+  const raw: string[] = [];
+  if (input.cwd) raw.push(input.cwd);
+  if (input.command) raw.push(...candidateDirsFromCommand(expandTildes(input.command)));
+  for (const f of input.filePaths || []) {
+    const p = f.startsWith('~/') ? path.join(os.homedir(), f.slice(2)) : f;
+    if (path.isAbsolute(p)) raw.push(p);
+  }
+  return raw;
+}
+
+/**
+ * Fingerprint each recorded checkout a write-shaped command reaches, just before
+ * it runs. What changes by the time it returns is what the command did
+ * (shell-command-probe.ts). A shell write leaves no file record otherwise: prod
+ * session 2419a3eb made 53 Bash calls and 2 Writes in a sibling checkout, and
+ * its commit had nothing to match. Never throws.
+ */
+export function armForeignTreeProbes(
+  state: SessionState,
+  input: { command?: string; cwd?: string; toolCallId?: string },
+  deps: ProbeDeps,
+): void {
+  try {
+    if (!input.command || !commandWritesFiles(input.command)) return;
+    const named = pathsThisCallNames(input);
+    for (const entry of state.foreignTrees || []) {
+      if (!named.some((c) => isInsideRepo(entry.path, c))) continue;
+      const before = probeTree(entry.path, deps);
+      if (before.skipped) continue;
+      entry.probes = [...(entry.probes || []), { toolCallId: input.toolCallId, stamps: before.stamps }].slice(-PROBES_PER_TREE_MAX);
+    }
+  } catch (err: unknown) {
+    debugLog('pre-tool-use', 'foreign tree probe failed (non-fatal)', { message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/**
+ * Close this call's probes: record what it changed in each checkout. Returns
+ * those files as absolute paths. Never throws.
+ */
+export function settleForeignTreeProbes(state: SessionState, toolCallId: string | undefined, deps: ProbeDeps): string[] {
+  const changed: string[] = [];
+  try {
+    for (const entry of state.foreignTrees || []) {
+      const mine = (entry.probes || []).find((p) => p.toolCallId === toolCallId);
+      if (!mine) continue;
+      const rest = (entry.probes || []).filter((p) => p !== mine);
+      if (rest.length > 0) entry.probes = rest;
+      else delete entry.probes;
+      const after = probeTree(entry.path, deps);
+      const touched = touchedSince({ tree: entry.path, stamps: mine.stamps }, after);
+      if (touched.length === 0) continue;
+      const turn = turnOf(state);
+      const kept = (entry.files || []).filter((f) => !touched.includes(f.file));
+      entry.files = [...kept, ...touched.map((file) => ({ file, turn }))].slice(-FILES_PER_TREE_MAX);
+      changed.push(...touched.map((f) => path.join(entry.path, f)));
+    }
+  } catch (err: unknown) {
+    debugLog('post-tool-use', 'foreign tree probe failed (non-fatal)', { message: err instanceof Error ? err.message : String(err) });
+  }
+  return changed;
+}
+
+/**
+ * The files a session is recorded writing in `tree`, a checkout of another
+ * repository, relative to it: an edit tool's write, kept per turn with the home
+ * collapsed to `~`, and what its commands were seen changing. `turn` is local,
+ * null for a row from before this launch.
+ */
+export function filesWrittenInTree(
+  state: {
+    completedPromptMappings?: Array<{ promptIndex?: number; outOfRepoFiles?: string[] }>;
+    foreignTrees?: SessionState['foreignTrees'];
+    promptIndexBase?: number | null;
+  },
+  tree: string,
+): Array<{ file: string; turn: number | null }> {
+  const out: Array<{ file: string; turn: number | null }> = [];
+  for (const m of state.completedPromptMappings || []) {
+    for (const stored of m.outOfRepoFiles || []) {
+      const f = stored === '~' || stored.startsWith('~/') ? path.join(os.homedir(), stored.slice(1)) : stored;
+      if (!path.isAbsolute(f) || !isInsideRepo(tree, f)) continue;
+      const turn = Number.isInteger(m.promptIndex) ? localTurnForServerRow(m.promptIndex as number, state.promptIndexBase) : null;
+      out.push({ file: toRepoRelativePath(tree, f), turn });
+    }
+  }
+  for (const entry of state.foreignTrees || []) {
+    if (samePath(entry.path, tree)) out.push(...(entry.files || []));
+  }
+  return out;
+}
+
+/** main and master are on every clone, so sharing one says nothing. */
+function isSharedBranch(branch: string): boolean {
+  return /^(main|master)$/.test(branch);
+}
+
+/**
+ * The ended session from another repository whose recorded writes in `tree` are
+ * most of this commit, on a feature branch it saw that checkout on — or null when
+ * none is, or two tie. The trailer names one session for the whole commit, so it
+ * must hold more than half of the files. Prod fa5c0f8b: session 2419a3eb wrote them
+ * in a sibling checkout, ended, and a person committed them two hours later.
+ */
+export function pickEndedForeignSessionByFiles(
+  candidates: SessionState[],
+  tree: string,
+  branch: string | null,
+  commitFiles: string[],
+): EndedSessionOwner | null {
+  if (!branch || isSharedBranch(branch) || commitFiles.length === 0) return null;
+  const wanted = new Set(commitFiles);
+  const scored: EndedSessionOwner[] = [];
+  for (const state of candidates) {
+    if (!(state.foreignTrees || []).some((e) => samePath(e.path, tree) && e.branches?.includes(branch))) continue;
+    const hits = filesWrittenInTree(state, tree).filter((w) => wanted.has(w.file));
+    const files = new Set(hits.map((w) => w.file));
+    const promptIndexes = [...new Set(hits.map((w) => w.turn).filter((t): t is number => Number.isInteger(t)))].sort((a, b) => a - b);
+    if (files.size * 2 > wanted.size && promptIndexes.length > 0) {
+      scored.push({ state, promptIndexes, matchedLines: files.size });
+    }
+  }
+  if (scored.length === 0) return null;
+  scored.sort((a, b) => b.matchedLines - a.matchedLines);
+  if (scored.length > 1 && scored[0].matchedLines === scored[1].matchedLines) return null;
+  return scored[0];
 }
 
 /**
@@ -79,13 +235,7 @@ export function recordForeignTrees(
 ): boolean {
   try {
     if (!state.repoPath) return false;
-    const raw: string[] = [];
-    if (input.cwd) raw.push(input.cwd);
-    if (input.command) raw.push(...candidateDirsFromCommand(expandTildes(input.command)));
-    for (const f of input.filePaths || []) {
-      const p = f.startsWith('~/') ? path.join(os.homedir(), f.slice(2)) : f;
-      if (path.isAbsolute(p)) raw.push(p);
-    }
+    const raw = pathsThisCallNames(input);
     const own = ownTrees(state);
     const kept = state.foreignTrees || [];
     const now = new Date().toISOString();
@@ -99,10 +249,11 @@ export function recordForeignTrees(
       seen.add(c);
       // Inside the session's own trees: the common case, settled for free.
       if (own.some((t) => isInsideRepo(t, c))) continue;
-      // Inside a tree already recorded: refresh it, no git call.
+      // Inside a tree already recorded: refresh it. One git call, for the branch.
       const known = kept.find((e) => isInsideRepo(e.path, c));
       if (known) {
         if (known.turn !== turn || known.at !== now) { known.turn = turn; known.at = now; changed = true; }
+        if (noteTreeBranch(known)) changed = true;
         continue;
       }
       if (spent >= CANDIDATES_PER_CALL) continue;
@@ -122,8 +273,10 @@ export function recordForeignTrees(
       if (ownCommon === undefined) ownCommon = getGitCommonDir(state.repoPath);
       if (ownCommon && samePath(ownCommon, commonDir)) continue;
       const existing = kept.find((e) => samePath(e.path, tree));
-      if (existing) { existing.turn = turn; existing.at = now; changed = true; continue; }
-      kept.push({ path: tree, commonDir, at: now, turn });
+      if (existing) { existing.turn = turn; existing.at = now; noteTreeBranch(existing); changed = true; continue; }
+      const entry: NonNullable<SessionState['foreignTrees']>[number] = { path: tree, commonDir, at: now, turn };
+      noteTreeBranch(entry);
+      kept.push(entry);
       changed = true;
       debugLog('pre-tool-use', 'tree of another repository reached', { tree, commonDir, turn });
     }
@@ -192,14 +345,26 @@ export type ForeignSessionLookup =
  * running). At most one: when two qualify, the one that recorded THIS working
  * tree wins over one that recorded only a sibling worktree; otherwise the
  * outcome is `ambiguous`.
+ *
+ * With no such session, one whose turn in that checkout has closed answers
+ * instead when it saw this checkout on this feature branch, or is on it itself,
+ * and `touchedCommitFiles` says it holds most of the commit. A caller that knows no commit files passes
+ * nothing: no evidence.
  */
-export function findSessionWorkingInForeignTree(hookCwd: string, nowMs: number = Date.now()): ForeignSessionLookup {
+export function findSessionWorkingInForeignTree(
+  hookCwd: string,
+  nowMs: number = Date.now(),
+  touchedCommitFiles?: (state: SessionState) => boolean,
+): ForeignSessionLookup {
   const hookTree = getWorkingGitRoot(hookCwd) || hookCwd;
   const hookCommon = getGitCommonDir(hookTree);
   const dir = path.join(os.homedir(), '.origin', 'sessions');
   let entries: string[];
   try { entries = fs.readdirSync(dir); } catch { return { outcome: 'none' }; }
-  const found: Array<{ state: SessionState; exact: boolean }> = [];
+  const running: Array<{ state: SessionState; exact: boolean }> = [];
+  const closed: Array<{ state: SessionState; exact: boolean }> = [];
+  const hookBranch = touchedCommitFiles ? getBranch(hookTree) : null;
+  const featureBranch = hookBranch && !isSharedBranch(hookBranch) ? hookBranch : null;
   const seen = new Set<string>();
   const matchIn = (st: SessionState) => (st.foreignTrees || []).find((e) =>
     samePath(e.path, hookTree) || (!!hookCommon && samePath(e.commonDir, hookCommon)));
@@ -223,14 +388,18 @@ export function findSessionWorkingInForeignTree(hookCwd: string, nowMs: number =
     // The work in that checkout belongs to the turn running now, or the
     // session's own shell is running a commit. A session that was there an
     // hour ago and has since closed its turn says nothing about this commit.
-    const running = runningTurn(state);
-    if (running !== match.turn && !commitClaimLive(state, nowMs)) {
-      passOver(`reached it in turn ${match.turn}; running turn ${running ?? 'none'}`);
+    const turnNow = runningTurn(state);
+    const atWork = turnNow === match.turn || commitClaimLive(state, nowMs);
+    const onThisBranch = !!featureBranch && (state.branch === featureBranch
+      || (state.foreignTrees || []).some((e) => samePath(e.path, hookTree) && e.branches?.includes(featureBranch)));
+    if (!atWork && !(onThisBranch && touchedCommitFiles?.(state))) {
+      passOver(`reached it in turn ${match.turn}; running turn ${turnNow ?? 'none'}`);
       continue;
     }
     Object.defineProperty(state, '__statePath', { value: statePath, enumerable: false });
-    found.push({ state, exact: samePath(match.path, hookTree) });
+    (atWork ? running : closed).push({ state, exact: samePath(match.path, hookTree) });
   }
+  const found = running.length > 0 ? running : closed;
   if (found.length === 0) return { outcome: 'none' };
   if (found.length === 1) {
     debugLog('git-hook-sessions', 'session from another repository worked in this checkout', {

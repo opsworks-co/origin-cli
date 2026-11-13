@@ -1177,6 +1177,14 @@ export function publishAttributionNotes(
       : `deadline exceeded: the publish budget ran out before ${step}`);
 
   const run = budgetedGitRunner(repoPath, deadline, now, exec);
+  const pushed = (attempt: number, merged: boolean): NotesPublishResult => {
+    // The remote took refs/notes/origin: a refusal remembered for it is stale.
+    clearNotesRefused(repoPath, remote, (args) => {
+      const r = run(args, 5_000);
+      return r.kind === 'ok' ? r.out : null;
+    });
+    return { status: 'pushed', remote, attempts: attempt, merged };
+  };
 
   try {
     // 1. Local notes. An ordinary non-zero exit is the answer "no such ref".
@@ -1195,7 +1203,7 @@ export function publishAttributionNotes(
     const maxAttempts = normalizeMaxAttempts(opts.maxAttempts);
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const push = run(['push', '--no-verify', '--quiet', remote, `${live}:${live}`], PUBLISH_COMMAND_TIMEOUT_MS);
-      if (push.kind === 'ok') return { status: 'pushed', remote, attempts: attempt, merged };
+      if (push.kind === 'ok') return pushed(attempt, merged);
       if (push.kind === 'not-started') return outOfTime(push, `push attempt ${attempt}`);
       attempts = attempt;
       if (push.kind === 'timeout') return outOfTime(push, `push attempt ${attempt} was running`);
@@ -1284,9 +1292,11 @@ export interface PrePushRef {
 }
 
 /**
- * pushed / up-to-date: on the remote. rejected: non-fast-forward, still after
- * the retry (or the retry did not fit). refused: the remote declined the ref
- * itself ([remote rejected]). failed: anything else, including a push that
+ * pushed / up-to-date: on the remote. rejected: non-fast-forward — or a
+ * [remote rejected] for a ref that moved under the push (a lost race, see
+ * TRANSIENT_REMOTE_REJECTION) — still after the retry (or the retry did not
+ * fit). refused: the remote declined the ref itself (any other
+ * [remote rejected]). failed: anything else, including a push that
  * never answered. not-attempted: the budget ran out before it was offered.
  */
 export type PrePushRefOutcome = 'pushed' | 'up-to-date' | 'rejected' | 'refused' | 'failed' | 'not-attempted';
@@ -1325,11 +1335,24 @@ export function parsePushPorcelain(out: string): Map<string, { flag: string; sum
   return result;
 }
 
-function classifyPushLine(line: { flag: string; summary: string } | undefined): PrePushRefOutcome {
+/**
+ * A `[remote rejected]` the remote gives when the ref moved under this push:
+ * another push of the same ref (the post-commit auto-push, a second clone) won
+ * the ref lock, or changed it after the advertisement. RhodeCode's git answers
+ * a lost race with `(failed to update ref)` and `cannot lock ref '…': is at X
+ * but expected Y` on stderr. That is a non-fast-forward in effect, not a remote
+ * that declines refs/notes/* — remembering it as one stopped every notes push
+ * to that remote for a day.
+ */
+const TRANSIENT_REMOTE_REJECTION = /failed to update ref|failed to lock|cannot lock ref|incorrect old value/i;
+
+export function classifyPushLine(line: { flag: string; summary: string } | undefined): PrePushRefOutcome {
   if (!line) return 'failed';
   if (line.flag === '=') return 'up-to-date';
   if (line.flag !== '!') return 'pushed';
-  if (line.summary.startsWith('[remote rejected]')) return 'refused';
+  if (line.summary.startsWith('[remote rejected]')) {
+    return TRANSIENT_REMOTE_REJECTION.test(line.summary) ? 'rejected' : 'refused';
+  }
   if (line.summary.startsWith('[rejected]') && /non-fast-forward|fetch first/.test(line.summary)) return 'rejected';
   return 'failed';
 }
@@ -1382,6 +1405,28 @@ function recordNotesRefused(repoPath: string, remote: string, gitOut: GitOut, no
     const all = readNotesRefused(where.file);
     all[where.key] = { at: now, reason: redactRemoteCredentials(reason).slice(0, 200) };
     fs.writeFileSync(where.file, JSON.stringify(all, null, 2) + '\n');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Forget a remembered refusal of `remote`: refs/notes/origin just reached it,
+ * so it does not decline the namespace (any more). Reads nothing beyond the
+ * git dir when there is no refusal file; never throws.
+ */
+function clearNotesRefused(repoPath: string, remote: string, gitOut: GitOut): boolean {
+  try {
+    const common = gitOut(['rev-parse', '--git-common-dir']);
+    if (!common || !fs.existsSync(path.join(path.resolve(repoPath, common), NOTES_REFUSED_FILE))) return false;
+    const where = notesRefusedLocation(repoPath, remote, gitOut);
+    if (!where) return false;
+    const all = readNotesRefused(where.file);
+    if (!(where.key in all)) return false;
+    delete all[where.key];
+    if (Object.keys(all).length === 0) fs.unlinkSync(where.file);
+    else fs.writeFileSync(where.file, JSON.stringify(all, null, 2) + '\n');
     return true;
   } catch {
     return false;
@@ -1477,6 +1522,10 @@ export function publishPrePushRefs(
       }
       const lines = parsePushPorcelain(push.out);
       for (const r of batch) result.outcomes[r.ref] = classifyPushLine(lines.get(r.ref));
+      const landed = result.outcomes['refs/notes/origin'];
+      if (batch.some((r) => r.ref === 'refs/notes/origin') && (landed === 'pushed' || landed === 'up-to-date')) {
+        clearNotesRefused(repoPath, remote, gitOut);
+      }
     };
 
     pushRefs(refs);

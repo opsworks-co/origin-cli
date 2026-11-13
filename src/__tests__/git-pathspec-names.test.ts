@@ -11,6 +11,7 @@ import os from 'os';
 import path from 'path';
 import { fileNamedInCommand } from '../commands/hooks.js';
 import {
+  fileNamedByGitRevisionPathspec,
   fileNamedByGitPathspec,
   filesTurnNamedByGitPathspec,
   gitPathspecsNamed,
@@ -23,6 +24,32 @@ describe('gitPathspecsNamed', () => {
     expect(gitPathspecsNamed('git checkout HEAD~1 -- lib/')).toEqual(['lib']);
     expect(fileNamedByGitPathspec('git checkout HEAD~1 -- lib', 'lib/a.py')).toBe(true);
     expect(fileNamedByGitPathspec('git checkout HEAD~1 -- lib', 'library.py')).toBe(false);
+  });
+
+  it('distinguishes revision materialization from conflict resolution and index restore', () => {
+    expect(fileNamedByGitRevisionPathspec('git checkout refs/pull/2835/head -- package.json', 'package.json')).toBe(true);
+    expect(fileNamedByGitRevisionPathspec('git checkout --theirs -- package.json', 'package.json')).toBe(false);
+    expect(fileNamedByGitRevisionPathspec('git checkout -- package.json', 'package.json')).toBe(false);
+    expect(fileNamedByGitRevisionPathspec('git restore --source=HEAD~2 docs', 'docs/a.md')).toBe(true);
+    expect(fileNamedByGitRevisionPathspec('git restore docs', 'docs/a.md')).toBe(false);
+  });
+
+  it('a revision already in the tree\'s history names nothing as git\'s', () => {
+    const tree = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-revpath-')));
+    const g = (...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@x', '-c', 'commit.gpgsign=false', ...a], { cwd: tree, stdio: 'pipe' });
+    try {
+      g('init', '-q', '-b', 'main', '.');
+      fs.writeFileSync(path.join(tree, 'f.txt'), '1\n'); g('add', '-A'); g('commit', '-q', '-m', 'a');
+      fs.writeFileSync(path.join(tree, 'f.txt'), '2\n'); g('commit', '-q', '-am', 'b');
+      g('checkout', '-q', '-b', 'pr'); fs.writeFileSync(path.join(tree, 'f.txt'), '3\n'); g('commit', '-q', '-am', 'c');
+      g('checkout', '-q', 'main');
+
+      expect(fileNamedByGitRevisionPathspec('git checkout HEAD~1 -- f.txt', 'f.txt', tree)).toBe(false);
+      expect(fileNamedByGitRevisionPathspec('git restore --source=HEAD~1 f.txt', 'f.txt', tree)).toBe(false);
+      expect(fileNamedByGitRevisionPathspec('git checkout pr -- f.txt', 'f.txt', tree)).toBe(true);
+      expect(fileNamedByGitRevisionPathspec('git restore -s pr f.txt', 'f.txt', tree)).toBe(true);
+      expect(fileNamedByGitRevisionPathspec('git checkout no-such-ref -- f.txt', 'f.txt', tree)).toBe(false);
+    } finally { fs.rmSync(tree, { recursive: true, force: true }); }
   });
 
   it('reads rm, mv and restore arguments, and each segment of a compound command', () => {

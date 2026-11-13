@@ -4,6 +4,7 @@
 //   - repo brief        → what the repo IS (opt-in, LLM)
 //   - attribution       → commit-level "X% AI", recent AI activity, top AI files
 //   - session memory    → session-level "what past sessions did" + hot files + TODOs
+//   - open TODOs        → the leftovers, with the ids `[Origin: Closes]` names
 //   - handoff           → the last session's in-progress work
 //
 // Attribution and memory BOTH carry a "recent work" list and a "hot files" list,
@@ -24,6 +25,8 @@ export function assembleRepoContext(blocks: {
   attribution?: string | null;
   memory?: string | null;
   memoryPointer?: string | null;
+  /** Open TODOs with their ids. Stands without memory: closing one needs only the id. */
+  todos?: string | null;
   handoff?: string | null;
   startupCheck?: string | null;
 }): string | null {
@@ -31,6 +34,7 @@ export function assembleRepoContext(blocks: {
   let attribution = (blocks.attribution || '').trim();
   const memory = (blocks.memory || '').trim();
   const memoryPointer = (blocks.memoryPointer || '').trim();
+  const todos = (blocks.todos || '').trim();
   const handoff = (blocks.handoff || '').trim();
   const startupCheck = (blocks.startupCheck || '').trim();
 
@@ -60,7 +64,7 @@ export function assembleRepoContext(blocks: {
   // nothing — it spends a tool call to discover an empty ref.
   const check = pointer ? startupCheck : '';
 
-  const ordered = [brief, attribution, memory, pointer, handoff, check].filter(Boolean);
+  const ordered = [brief, attribution, memory, pointer, todos, handoff, check].filter(Boolean);
   if (ordered.length === 0) return null;
   return ordered.join('\n\n');
 }

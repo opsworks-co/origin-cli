@@ -22,8 +22,8 @@ import { turnIdsInJournal } from './write-journal.js';
 import fs from 'fs';
 import { changedFilesBetween, readFileAtRev, gitIgnoredFiles } from './git-capture.js';
 import { debugLog } from './debug-log.js';
-import { listActiveSessions, type SessionState } from './session-state.js';
-import { detectLiveContention, contentionCoversTurn, noteContendersBack, readContentionTaint } from './checkout-contention.js';
+import { listActiveSessions, loadSessionState, type SessionState } from './session-state.js';
+import { detectContention, detectLiveContention, contentionCoversTurn, noteContendersBack, peerSessionsFrom, readContentionTaint } from './checkout-contention.js';
 import type { TurnObservation } from './resolve-turn.js';
 
 /**
@@ -145,13 +145,15 @@ export interface ProducerLedgerInputs {
 
 /**
  * A producer has only a journal tag, while the state store has the stable
- * session id needed by contention detection.  If its state has not appeared
- * yet, keep the legacy capture rather than guessing that some arbitrary
- * session is ours. Once contention is observed, taint this journal for its
- * remaining lifetime: records already written during the collision cannot
- * become attributable merely because the peer exits before Stop runs.
+ * session id needed by contention detection. A session with no state of its own
+ * (the Codex daemon writes none, the transcript watcher only after its first
+ * poll) is still asked about: every other session listed for the tree is a
+ * possible rival, and a turn start lets one idle through that turn stand aside.
+ * Once contention is observed, taint this journal for its remaining lifetime:
+ * records already written during the collision cannot become attributable merely
+ * because the peer exits before Stop runs.
  */
-export function producerLedgerIsContended(tag: string, workRoot: string): boolean {
+export function producerLedgerIsContended(tag: string, workRoot: string, turnStartMs?: number): boolean {
   if (!tag || !workRoot) return false;
   try {
     const { journalPath } = journalPathsForTag(tag, workRoot);
@@ -164,8 +166,13 @@ export function producerLedgerIsContended(tag: string, workRoot: string): boolea
     // began (contentionCoversTurn). Without our own state the taint stands.
     if (taint && !self) return true;
     if (self && contentionCoversTurn(self, self.currentTurnStartedAt, taint?.peers)) return true;
-    const report = self ? detectLiveContention(self, workRoot, sessions) : null;
-    if (!report?.contested) return false;
+    // The watcher files Antigravity's own state under the bare tag, and the hook
+    // under `agy-<tag>`: that file is this session, not a rival.
+    const bareTag = tag.replace(/^agy-/, '');
+    const report = self
+      ? detectLiveContention(self, workRoot, sessions)
+      : detectContention({ sessionId: '' }, workRoot, peerSessionsFrom(sessions.filter((s) => s.sessionTag !== bareTag)), Date.now(), turnStartMs);
+    if (!report.contested) return false;
     // This is a correctness marker, not a lock: it deliberately survives the
     // peer's exit so contested records cannot be reclaimed on a later poll.
     try {
@@ -229,6 +236,15 @@ export function applyLedgerToProducerRows(
   opts: { observe?: (promptIndex: number, observation: TurnObservation) => void } = {},
 ): number {
   const paths = journalPathsForTag(inputs.tag, inputs.workRoot);
+  // Rows are numbered by the producer's own prompts, so each turn's start comes
+  // from its shadow rather than the hook state's launch-numbered list.
+  const startedAt = new Map((inputs.promptShadows || []).map((s) => [s.promptIndex, s.promptStartedAt]));
+  const latestStart = startedAt.get(inputs.promptTurnIds.length - 1);
+  // Hook-recorded rivals, for the turns before the one in flight. Read directly:
+  // a session that ended is off the active list and its marks still hold.
+  const marks = (() => {
+    try { return loadSessionState(inputs.workRoot, inputs.tag); } catch { return null; }
+  })();
   const state = {
     writeJournalPath: paths.journalPath,
     writeSnapshotDir: paths.snapshotDir,
@@ -236,7 +252,13 @@ export function applyLedgerToProducerRows(
     promptShadows: inputs.promptShadows ? [...inputs.promptShadows] : undefined,
     prePromptSha: inputs.prePromptSha ?? null,
     headShaAtStart: inputs.headShaAtStart ?? null,
-    ledgerContended: producerLedgerIsContended(inputs.tag, inputs.workRoot),
+    ledgerContended: producerLedgerIsContended(inputs.tag, inputs.workRoot, latestStart),
+    contendingSessionIds: marks?.contendingSessionIds,
+    contenderGoneAt: marks?.contenderGoneAt,
+    promptSubmittedAt: inputs.promptTurnIds.map((_, i) => {
+      const ms = startedAt.get(i);
+      return ms ? new Date(ms).toISOString() : '';
+    }),
   };
   const replaced = applyLedgerToMappings(state, rows, {
     readEntries: readJournalEntries,

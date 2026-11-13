@@ -105,6 +105,16 @@ const waitFor = async (cond: () => boolean, timeoutMs = 10_000): Promise<void> =
   throw new Error(`timed out waiting for the journal to record the write\n--- journal ---\n${journal}\n--- hooks.log ---\n${log}`);
 };
 
+const NO_WATCH_EVENTS = 'recursive fs.watch delivered no event for 5 s — the box\'s file watching is down, not the ledger';
+const WATCHER_UNAVAILABLE = 'watcher unavailable: recursive fs.watch is not supported on this platform';
+
+/** Has the journal recorded a write to `file` after the mark for `turnId`? */
+const wroteInTurn = (journalPath: string, turnId: string, file: string): boolean => {
+  const entries = readJournalEntries(journalPath);
+  const mark = entries.findIndex((e) => e.kind === 'turn' && e.turnId === turnId);
+  return mark >= 0 && entries.slice(mark + 1).some((e) => e.kind === 'write' && e.file === file);
+};
+
 beforeEach(() => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-agy-ledger-')));
   home = path.join(root, 'home');
@@ -150,8 +160,8 @@ afterEach(() => {
 });
 
 describe('antigravity hook path + ledger', () => {
-  it('opens the turn at pre-tool-use and takes the Stop row from the write journal', async () => {
-    if (!watcher) return; // no recursive watch on this platform
+  it('opens the turn at pre-tool-use and takes the Stop row from the write journal', async (ctx) => {
+    if (!watcher) ctx.skip(WATCHER_UNAVAILABLE);
     const jp = journalPathsForTag(TAG, repo);
     const writesIn = () => readJournalEntries(jp.journalPath).filter((e) => e.kind === 'write').length;
 
@@ -162,8 +172,9 @@ describe('antigravity hook path + ledger', () => {
       fs.writeFileSync(probe, String(i));
       await new Promise((r) => setTimeout(r, 25));
     }
-    if (writesIn() === 0) return;
-    const probeWrites = writesIn();
+    // Recursive fs.watch can deliver nothing on a loaded macOS box — the box,
+    // not the ledger — so say so instead of passing without asserting anything.
+    if (writesIn() === 0) ctx.skip(NO_WATCH_EVENTS);
     await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 50));
 
     // pre-tool-use: baseline + the turn opens in the journal, BEFORE the write.
@@ -174,7 +185,7 @@ describe('antigravity hook path + ledger', () => {
 
     // The tool's write.
     fs.writeFileSync(path.join(repo, 'app.py'), 'def main():\n    print("new")\n');
-    await waitFor(() => writesIn() > probeWrites);
+    await waitFor(() => wroteInTurn(jp.journalPath, cache.openTurnId, 'app.py'));
     writeTranscript(['change the greeting'], ['app.py']);
 
     await fire('stop');
@@ -224,8 +235,8 @@ describe('antigravity hook path + ledger', () => {
   // on macOS or Linux, and the ledger logic under test is platform-neutral.
   // Skipped there with the diagnostics below kept, so the next person with a
   // Windows box gets the directory listing rather than an empty string.
-  it.skipIf(process.platform === 'win32')('a second turn gets its own mark, and its diff is only its own write', async () => {
-    if (!watcher) return;
+  it.skipIf(process.platform === 'win32')('a second turn gets its own mark, and its diff is only its own write', async (ctx) => {
+    if (!watcher) ctx.skip(WATCHER_UNAVAILABLE);
     const jp = journalPathsForTag(TAG, repo);
     const writesIn = () => readJournalEntries(jp.journalPath).filter((e) => e.kind === 'write').length;
     const probe = path.join(repo, '.probe');
@@ -233,15 +244,15 @@ describe('antigravity hook path + ledger', () => {
       fs.writeFileSync(probe, String(i));
       await new Promise((r) => setTimeout(r, 25));
     }
-    if (writesIn() === 0) return;
-    let seen = writesIn();
+    // Recursive fs.watch can deliver nothing on a loaded macOS box — the box,
+    // not the ledger — so say so instead of passing without asserting anything.
+    if (writesIn() === 0) ctx.skip(NO_WATCH_EVENTS);
     await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 50));
 
     await firePreToolUse();
     const turn0 = readCache().openTurnId;
     fs.writeFileSync(path.join(repo, 'app.py'), 'def main():\n    print("new")\n');
-    await waitFor(() => writesIn() > seen);
-    seen = writesIn();
+    await waitFor(() => wroteInTurn(jp.journalPath, turn0, 'app.py'));
     writeTranscript(['change the greeting'], ['app.py']);
     await fire('stop');
 
@@ -250,7 +261,7 @@ describe('antigravity hook path + ledger', () => {
     expect(turn1).toMatch(/^t_/);
     expect(turn1).not.toBe(turn0);
     fs.writeFileSync(path.join(repo, 'other.py'), 'x = 1\n');
-    await waitFor(() => writesIn() > seen);
+    await waitFor(() => wroteInTurn(jp.journalPath, turn1, 'other.py'));
     writeTranscript(['change the greeting', 'add other'], ['app.py', 'other.py']);
     await fire('stop');
 

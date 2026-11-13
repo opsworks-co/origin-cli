@@ -596,6 +596,8 @@ export function captureGitState(
       // If headBefore is no longer reachable (e.g. rebase), just record headAfter
       commitShas = [headAfter];
     }
+  } else if (!headBefore || !HEX.test(headBefore)) {
+    commitShas = commitsSinceUnbornHead(headAfter, gitOpts);
   }
 
   // 3. Capture per-commit metadata (message, author, files changed)
@@ -645,7 +647,8 @@ export function captureGitState(
         if (Number.isFinite(ct) && ct > 0) committedAt = ct * 1000;
       } catch { /* leave undefined — scoping falls back to keeping the commit */ }
       const filesRaw = git(
-        ['diff-tree', '--no-commit-id', '--name-only', '-r', sha],
+        // --root: a root commit (a repo's first) otherwise lists nothing.
+        ['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', sha],
         gitOpts,
       ).trim();
       // Don't filter filesChanged through shouldIgnoreFile — this list is the
@@ -663,7 +666,7 @@ export function captureGitState(
       try {
         const numstat = git(
           // -M: see commitLineCounts — without it a rename counts whole.
-          ['diff-tree', '--no-commit-id', '--numstat', '-M', '-r', sha],
+          ['diff-tree', '--root', '--no-commit-id', '--numstat', '-M', '-r', sha],
           gitOpts,
         ).trim();
         for (const ln of numstat.split('\n')) {
@@ -1931,6 +1934,29 @@ function pathsInDiffText(diff: string): string[] {
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
+
+/** More than this reachable from HEAD and a missing baseline is not an unborn start. */
+export const UNBORN_START_MAX_COMMITS = 20;
+
+/**
+ * The commits of a range whose start had no HEAD at all: the session (or turn)
+ * began before the repo's first commit, so there was no sha to record, and
+ * every commit now reachable from HEAD was made since. `safeBefore` used to
+ * fall back to HEAD itself, the range came out empty and the agent's first
+ * commit was never recorded — session 7383ad5a, Codex's root commit 60f4002
+ * shown as "uncommitted". Capped: a baseline lost some other way must not
+ * hand the session a repo's whole history. Oldest first, like the range path.
+ */
+function commitsSinceUnbornHead(headAfter: string, gitOpts: Parameters<typeof git>[1]): string[] {
+  try {
+    const count = Number(git(['rev-list', '--count', headAfter], gitOpts).trim());
+    if (!Number.isFinite(count) || count > UNBORN_START_MAX_COMMITS) return [];
+    const log = git(['log', '--reverse', '--format=%H', headAfter], gitOpts).trim();
+    return log ? log.split('\n').filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
 
 function emptyResult(headBefore: string): GitCaptureResult {
   return {

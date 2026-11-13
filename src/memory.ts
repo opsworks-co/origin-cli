@@ -357,11 +357,39 @@ export interface CommitTombstone {
   at: string;
 }
 
-function memoryRootCommit(repoPath: string): string | null {
-  const raw = gitOrNull(['rev-list', '--max-parents=0', 'HEAD'], { cwd: repoPath, timeoutMs: 10_000 });
+/**
+ * The commit the repo's notes (memory, brief) hang on: its root.
+ *
+ * Not `rev-list --max-parents=0` alone: in a SHALLOW repo that answers with the
+ * shallow boundary, so every read found an empty note and every write started
+ * a new one on the wrong commit. On 2026-10-28 a reviewer's `git fetch
+ * --depth=50` in a review worktree made ~/Documents/Coding/origin shallow (the
+ * worktree shares the .git); from then on the 444 KB note on the real root
+ * read as three sessions, and each session's rollup and TODO closures went to
+ * a note nobody reads. So the root is remembered in the .git while the history
+ * is whole, and a shallow repo uses that; one with nothing remembered gets
+ * null — no note — rather than a wrong one.
+ */
+export function notesRootCommit(repoPath: string): string | null {
+  const opts = { cwd: repoPath, timeoutMs: 10_000 };
+  const [shallow, commonDir] = (gitOrNull(['rev-parse', '--is-shallow-repository', '--git-common-dir'], opts) || '').split('\n');
+  const remembered = commonDir ? path.join(path.resolve(repoPath, commonDir), 'origin-root-commit') : null;
+  const isSha = (c: string | null | undefined): c is string => !!c && /^[a-fA-F0-9]{40,64}$/.test(c);
+  if (shallow === 'true') {
+    try { const c = remembered ? fs.readFileSync(remembered, 'utf-8').trim() : null; return isSha(c) ? c : null; } catch { return null; }
+  }
+  const raw = gitOrNull(['rev-list', '--max-parents=0', 'HEAD'], opts);
   const c = raw ? raw.split('\n')[0] : null;
-  return c && /^[a-fA-F0-9]+$/.test(c) ? c : null;
+  if (!c || !/^[a-fA-F0-9]+$/.test(c)) return null;
+  if (remembered && isSha(c)) {
+    try { if (fs.readFileSync(remembered, 'utf-8').trim() !== c) fs.writeFileSync(remembered, c + '\n'); } catch {
+      try { fs.writeFileSync(remembered, c + '\n'); } catch { /* a read-only .git: the next whole-history call tries again */ }
+    }
+  }
+  return c;
 }
+
+const memoryRootCommit = notesRootCommit;
 
 const EMPTY_PAYLOAD = (): MemoryPayload => ({
   version: 2, sessions: [], commits: [], tombstones: [], closedTodos: [], manualTodos: [],
@@ -1482,28 +1510,9 @@ export function buildMemoryContext(repoPath: string): string | null {
     for (const d of decisions.slice(0, 5)) parts.push(`  - ${d}`);
   }
 
-  // Open TODOs carried across substantive sessions.
-  // Ids are printed so a session that deals with one of these can name it in
-  // an [Origin: Closes] marker. Confirmed closures are dropped: re-injecting a
-  // leftover that has already been discharged and landed is how the same ground
-  // gets covered twice.
-  const closedKeys = new Set(
-    (readMemoryPayload(repoPath).closedTodos || [])
-      .filter((c) => c.state === 'closed')
-      .map((c) => c.key),
-  );
-  const todos: { id: string; text: string }[] = [];
-  for (const e of substantive) {
-    for (const t of e.openTodos || []) {
-      if (closedKeys.has(todoClosureKey(t))) continue;
-      if (todos.some((x) => x.text === t)) continue;
-      todos.push({ id: todoDisplayId(t, e.sessionId), text: t });
-    }
-  }
-  if (todos.length) {
-    parts.push('Open TODOs from previous sessions (close one with `[Origin: Closes] <id>`):');
-    for (const t of todos.slice(0, 5)) parts.push(`  - ${t.id}  ${t.text}`);
-  }
+  // Open TODOs are their own block (todo.ts buildOpenTodosContext): this
+  // digest is replaced by the LLM brief whenever one exists, and the ids must
+  // reach the agent either way.
 
   // How to run/confirm the recent work. Bounded to the most recent sessions and
   // reversed (newest first) because verify steps go stale fastest of anything
@@ -1600,6 +1609,9 @@ export interface MemoryBrief {
   // Generated from entries with the prompt text stripped (prompt text off).
   // A brief without it may paraphrase a prompt, so it is dropped before a push.
   promptFree?: boolean;
+  // The sessionIds the brief was written from, oldest first, so the dashboard
+  // can list its real inputs. Absent on briefs written before this field.
+  sourceSessionIds?: string[];
 }
 
 // Fingerprint of the substantive memory, so the brief is only regenerated when
@@ -1611,11 +1623,21 @@ export function memoryBriefSignature(entries: SessionMemoryEntry[]): string {
   return crypto.createHash('sha256').update(JSON.stringify(basis)).digest('hex').slice(0, 16);
 }
 
-function briefRootCommit(repoPath: string): string | null {
-  const raw = gitOrNull(['rev-list', '--max-parents=0', 'HEAD'], { cwd: repoPath, timeoutMs: 10_000 });
-  const c = raw ? raw.split('\n')[0] : null;
-  return c && /^[a-fA-F0-9]+$/.test(c) ? c : null;
+// What the brief is written from: the 12 most recent substantive sessions, as
+// sent to the LLM, plus their ids for the note so the dashboard can name them.
+export const MEMORY_BRIEF_SOURCE_LIMIT = 12;
+export function memoryBriefInputs(entries: SessionMemoryEntry[]) {
+  const source = (entries || []).filter(isSubstantiveMemory).slice(-MEMORY_BRIEF_SOURCE_LIMIT);
+  return {
+    sourceSessionIds: source.map((e) => e.sessionId),
+    sessions: source.map((e) => ({
+      summary: e.summary, agentSlug: e.agentSlug, filesChanged: e.filesChanged, openTodos: e.openTodos, decisions: e.decisions, endedAt: e.endedAt,
+      intent: e.intent, verify: e.verify,
+    })),
+  };
 }
+
+const briefRootCommit = notesRootCommit;
 
 export function writeMemoryBrief(repoPath: string, brief: MemoryBrief): void {
   try {
@@ -1737,10 +1759,8 @@ export function isMemoryBriefStale(brief: MemoryBrief, entries: SessionMemoryEnt
 export function clearSessionMemory(repoPath: string): boolean {
   try {
     const opts = { cwd: repoPath, timeoutMs: 10_000 };
-    const rootRaw = gitOrNull(['rev-list', '--max-parents=0', 'HEAD'], opts);
-    if (!rootRaw) return false;
-    const rootCommit = rootRaw.split('\n')[0];
-    if (!/^[a-fA-F0-9]+$/.test(rootCommit)) return false;
+    const rootCommit = notesRootCommit(repoPath);
+    if (!rootCommit) return false;
     // Remove each note independently — the absence of one (e.g. no brief was
     // ever generated) must not abort removing the other.
     let removed = false;

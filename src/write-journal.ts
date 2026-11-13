@@ -390,6 +390,54 @@ export function fencesInTurn(entries: readonly JournalEntry[], turnId: string): 
 }
 
 /**
+ * How far ahead of a reclaimed write an empty record of the same file can sit
+ * and still be that save's truncate. The watcher re-reads DEBOUNCE_MS (250)
+ * after the first event; the rest is room for a loaded box.
+ */
+const TRUNCATE_SETTLE_MS = 1000;
+
+/**
+ * Is the empty record `trunc` the truncate of the same save as `full`?
+ *
+ * By the files' own mtimes first. The two records' OBSERVATION times are
+ * `trunc.at` and `full.at`, and on a loaded box the gap between them is the
+ * watcher's debounce timer firing late — the re-read that records the bytes
+ * is a setTimeout, and with the CPU saturated it lands seconds after the
+ * truncate. The mtimes are stamped by the kernel at the open(O_TRUNC) and at
+ * the write, which for one save are milliseconds apart however late anyone
+ * looks. Observation time stays as the fallback for records without an mtime.
+ */
+function sameSave(trunc: WriteRecord, full: WriteRecord): boolean {
+  if (typeof trunc.mtime === 'number' && typeof full.mtime === 'number') {
+    const gap = full.mtime - trunc.mtime;
+    return gap >= 0 && gap <= TRUNCATE_SETTLE_MS;
+  }
+  return full.at - trunc.at <= TRUNCATE_SETTLE_MS;
+}
+
+/**
+ * Is `part` the watcher reading `full`'s save while it was still being written?
+ *
+ * A read racing a write sees the bytes copied so far: the page cache fills a
+ * page at a time and i_size grows with it, so the file simply looks shorter.
+ * local-ci 2026-11-11 (#3066, cursor-binary turn 4): one writeFileSync of a
+ * 58,906-byte big.py was recorded at exactly 24,576 bytes (six pages) and
+ * then whole; the torn record stayed the previous turn's and became turn 4's
+ * before-state, so a one-line edit rendered as +868 -1.
+ *
+ * Only by the files' own mtimes — the kernel stamps every chunk of one save
+ * within milliseconds — never by observation time, and only for a strictly
+ * shorter, non-empty record (an empty one is the truncate, see sameSave).
+ */
+function tornReadOf(part: WriteRecord, full: WriteRecord): boolean {
+  if (part.gone || typeof part.size !== 'number' || typeof full.size !== 'number') return false;
+  if (part.size <= 0 || part.size >= full.size) return false;
+  if (typeof part.mtime !== 'number' || typeof full.mtime !== 'number') return false;
+  const gap = full.mtime - part.mtime;
+  return gap >= 0 && gap <= TRUNCATE_SETTLE_MS;
+}
+
+/**
  * The indices of the write records that are a turn's own, ascending.
  *
  * The span by position, then two corrections for marks that RECLAIM a file
@@ -407,6 +455,14 @@ export function turnWriteIndices(entries: readonly JournalEntry[], turnId: strin
   // tree), and the recorder debounces per instance, not across them. One
   // write, one attribution: a duplicate left behind would let the previous
   // turn keep a copy of the write this turn reclaimed.
+  //
+  // The same goes for an EMPTY record just ahead of it: the save's truncate,
+  // caught mid-write. Linux fires on the create (or O_TRUNC) before the bytes
+  // land, the watcher snapshots the empty file at once and re-reads the rest
+  // DEBOUNCE_MS later. Left behind, that empty record stayed the previous
+  // turn's and became this turn's before-state, so a file the turn CREATED
+  // rendered as an edit of an existing empty one (Jenkins run 5254 on #2985,
+  // cursor-binary golden turn 2).
   const lastWriteOf = (file: string, from: number, to: number): number[] => {
     for (let i = to - 1; i >= from; i--) {
       const e = entries[i];
@@ -417,6 +473,16 @@ export function turnWriteIndices(entries: readonly JournalEntry[], turnId: strin
         if (p.kind !== 'write' || p.file !== file) break;
         if ((p.hash ?? null) !== (e.hash ?? null) || !!p.gone !== !!e.gone) break;
         found.unshift(j);
+      }
+      if (!e.gone && e.size !== 0) {
+        for (let j = found[0] - 1; j >= from; j--) {
+          const p = entries[j];
+          if (p.kind !== 'write') break;
+          if (p.file !== file) continue;
+          if (p.size === 0 && !p.gone && sameSave(p, e)) { found.unshift(j); continue; }
+          if (tornReadOf(p, e)) { found.unshift(j); continue; }
+          break;
+        }
       }
       return found;
     }

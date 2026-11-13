@@ -479,6 +479,33 @@ describe('applyLedgerToMappings', () => {
     expect(pm.diffSource).toBeUndefined();
   });
 
+  // Prod 208f153c turn 27 (2026-11-04): a rival session (2419a3eb) was live in
+  // the same checkout while turn 27 ran, so its own Stop declined the ledger.
+  // The rival fell idle, turn 28's prompt stamped it gone, and turn 28's Stop
+  // — no longer contended for ITS turn — rebuilt every row from the journal.
+  // Turn 27's span held the rival's writes (a test it edited, the package
+  // version it bumped), and row 27 went out as +110/-23 the turn never wrote.
+  it('declines a turn the rival covered even after the rival is gone', () => {
+    const log = t('T1', 1000) + w('rival.ts', 1500, put('the rival wrote this\n'))
+      + t('T2', 3000) + w('mine.ts', 3500, put('turn 2 wrote this\n'));
+    const seen: Array<[number, unknown]> = [];
+    const rows: Array<Record<string, unknown>> = [
+      { promptIndex: 0, filesChanged: [], diff: '' },
+      { promptIndex: 1, filesChanged: [], diff: '' },
+    ];
+    applyLedgerToMappings({
+      ...ledgerState(['T1', 'T2']),
+      contendingSessionIds: ['rival'],
+      contenderGoneAt: { rival: 2000 },
+      promptSubmittedAt: [new Date(1000).toISOString(), new Date(3000).toISOString()],
+    }, rows as never, { ...journal(log), observe: (i, o) => seen.push([i, o]) });
+    expect(rows[0]).toMatchObject({ filesChanged: [], diff: '' });
+    expect(rows[0].diffSource).toBeUndefined();
+    expect(seen).toContainEqual([0, { source: 'ledger', outcome: 'declined', reason: 'another live session shared this working tree during the turn' }]);
+    expect(rows[1].filesChanged).toEqual(['mine.ts']);
+    expect(rows[1].diffSource).toBe('ledger');
+  });
+
   it('leaves a mapping untouched when the journal never marked its turn', () => {
     const log = t('T1', 1) + w('f.ts', 2, put('x\n'));
     const pm: Record<string, unknown> = {

@@ -59,6 +59,61 @@ export function turnInProgress(
   return age >= 0 && age <= OPEN_TURN_MAX_MS;
 }
 
+type TurnStamps = { currentTurnStartedAt?: number | null; lastTurnClosedAt?: number | null; implicitTurnStartedAt?: number | null };
+const isStamp = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
+
+// A tool call between a Stop and the next prompt means the agent is working
+// on a turn no prompt opened: Claude Code answers a background job's
+// completion notice with a whole turn but fires no UserPromptSubmit for it,
+// so the dashboard read the agent as waiting for you while it worked. Stamp
+// the first such call as that turn's start; the turn's own Stop then closes it
+// like any other. Returns whether the state changed (the caller saves it).
+export function noteToolActivity(state: TurnStamps, nowMs: number = Date.now()): boolean {
+  const closed = state.lastTurnClosedAt;
+  if (!isStamp(closed)) return false;                                   // no Stop yet: a prompt's turn is open
+  if (isStamp(state.currentTurnStartedAt) && state.currentTurnStartedAt > closed) return false; // a prompt opened this turn
+  if (isStamp(state.implicitTurnStartedAt) && state.implicitTurnStartedAt > closed) return false; // already stamped
+  if (nowMs <= closed) return false;
+  state.implicitTurnStartedAt = nowMs;
+  return true;
+}
+
+// The turn start the heartbeat reports: the prompt's, or a later tool-opened
+// turn's (noteToolActivity).
+export function reportedTurnStartedAt(state: TurnStamps): number | undefined {
+  const a = isStamp(state.currentTurnStartedAt) ? state.currentTurnStartedAt : 0;
+  const b = isStamp(state.implicitTurnStartedAt) ? state.implicitTurnStartedAt : 0;
+  const m = Math.max(a, b);
+  return m > 0 ? m : undefined;
+}
+
+// Which branch the 30s ping may report as this session's branch — the
+// checkout's HEAD, but only while this session can be the one that moved it.
+//
+// A checkout is not owned by one session. The desktop app hands a worktree to
+// the next chat while the last one is still alive and idle, and that chat
+// checks out its own branch. Prod session 9c1f8b8d: its last turn closed at
+// 16:09, chat 6531b13f started in the same worktree at 17:05 and ran
+// `git checkout claude/repo-full-name-display-a3bc9e`, and 9c1f8b8d's heartbeat
+// — still pinging until 17:40 — reported that HEAD every 30s. The server took
+// it, and the session's header showed a branch none of its work was on.
+//
+// So once a session's turns are hook-stamped, only an OPEN turn reports: a
+// switch the agent makes lands inside its own turn, and one made between turns
+// (the user, or another session) is picked up by user-prompt-submit when this
+// session actually works there again. An agent whose hooks never stamp a turn
+// keeps the plain backstop — the ping is its only branch refresh.
+export function branchToReport(
+  state: { currentTurnStartedAt?: number | null; lastTurnClosedAt?: number | null } | null | undefined,
+  headBranch: string | null,
+  nowMs: number = Date.now(),
+): string | null {
+  if (!headBranch) return null;
+  const stamped = typeof state?.currentTurnStartedAt === 'number' && state.currentTurnStartedAt > 0;
+  if (!stamped) return headBranch;
+  return turnInProgress(state, nowMs) ? headBranch : null;
+}
+
 // True when the agent behind this session looks gone (the heartbeat then reaps
 // it after PARENT_DEAD_TICKS_BEFORE_END consecutive true results).
 //

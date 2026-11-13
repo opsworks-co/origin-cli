@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { issueCloudCommand, taskIdFromExecOutput, taskStateFromList, type IssueCloudDeps } from '../commands/issue-cloud.js';
+import { githubRepoOf, issueCloudCommand, pickCodexEnv, taskIdFromExecOutput, taskStateFromList, type IssueCloudDeps } from '../commands/issue-cloud.js';
 import { issueCloudUrl, parseIssueCloudUrl } from '../issue-prompt.js';
 
 const listJson = (status: string, extra: Record<string, unknown> = {}) => JSON.stringify({
@@ -15,8 +15,10 @@ describe('cloud link', () => {
     expect(url).toBe('getorigin://issue/cloud?repo=r1&issue=ISS-12&runner=codex&name=acme%2Fweb&env=env_abc');
     expect(parseIssueCloudUrl(url)).toEqual({ repoId: 'r1', shortId: 'ISS-12', runner: 'codex', env: 'env_abc', repoName: 'acme/web' });
   });
-  it('refuses a link with no env, an unknown runner, or an env that is not a plain name', () => {
-    expect(parseIssueCloudUrl('getorigin://issue/cloud?repo=r1&issue=ISS-12&runner=codex')).toBeNull();
+  it('takes a link with no env: the CLI finds the repo\'s', () => {
+    expect(parseIssueCloudUrl(issueCloudUrl('r1', 'ISS-12', 'codex', 'acme/web'))).toEqual({ repoId: 'r1', shortId: 'ISS-12', runner: 'codex', env: null, repoName: 'acme/web' });
+  });
+  it('refuses an unknown runner, or an env that is not a plain name', () => {
     expect(parseIssueCloudUrl('getorigin://issue/cloud?repo=r1&issue=ISS-12&runner=devin&env=e')).toBeNull();
     expect(parseIssueCloudUrl('getorigin://issue/cloud?repo=r1&issue=ISS-12&runner=codex&env=%24(rm%20-rf)')).toBeNull();
     expect(parseIssueCloudUrl('getorigin://issue/start?repo=r1&issue=ISS-12&agent=codex')).toBeNull();
@@ -35,6 +37,20 @@ describe('reading codex output', () => {
     expect(taskStateFromList(listJson('error'), 'task_e_abc123')?.state).toBe('failed');
     expect(taskStateFromList(listJson('ready'), 'task_other')).toBeNull();
     expect(taskStateFromList('not json', 'x')).toBeNull();
+  });
+});
+
+describe('finding the environment', () => {
+  it('reads owner/repo from a GitHub remote only', () => {
+    expect(githubRepoOf('https://github.com/opsworks-co/origin.git')).toBe('opsworks-co/origin');
+    expect(githubRepoOf('git@github.com:acme/web')).toBe('acme/web');
+    expect(githubRepoOf('https://gitlab.com/acme/web.git')).toBeNull();
+  });
+  it('picks the pinned environment, else the most used; none for an empty list', () => {
+    expect(pickCodexEnv([{ id: 'e1', label: 'a', task_count: 9 }, { id: 'e2', label: 'b', is_pinned: true }])).toEqual({ env: 'e2', label: 'b' });
+    expect(pickCodexEnv({ items: [{ id: 'e1', task_count: 1 }, { id: 'e2', label: 'b', task_count: 5 }] })).toEqual({ env: 'e2', label: 'b' });
+    expect(pickCodexEnv([])).toBeNull();
+    expect(pickCodexEnv({ detail: 'bad request' })).toBeNull();
   });
 });
 
@@ -71,6 +87,7 @@ describe('issueCloudCommand', () => {
       sleep: async () => { t += 60_000; },
       now: () => Date.parse('2026-10-20T12:00:00Z') + t,
       defaultBranch: () => 'main',
+      findEnv: async () => ({ env: 'env_found', label: 'acme web' }),
       ...over,
     };
   };
@@ -117,8 +134,20 @@ describe('issueCloudCommand', () => {
     expect(ends[0]).toMatchObject({ status: 'timed_out', exitCode: 124 });
   });
 
-  it('refuses a missing env, and a machine without codex', async () => {
-    await issueCloudCommand('ISS-12', { env: '' }, deps([]));
+  it('with no env, runs in the one Codex has for the repo', async () => {
+    await issueCloudCommand('ISS-12', {}, deps([{ code: 0, stdout: 'https://chatgpt.com/codex/tasks/task_e_abc123' }, { code: 0, stdout: listJson('ready') }]));
+    expect(calls[0].slice(0, 4)).toEqual(['cloud', 'exec', '--env', 'env_found']);
+  });
+
+  it('with no env and none for the repo, fails the run on the issue with why', async () => {
+    const r = await issueCloudCommand('ISS-12', {}, deps([], { findEnv: async () => ({ env: null, why: 'Codex cloud has no environment for acme/web.' }) }));
+    expect(r.state).toBe('not_started');
+    expect(calls).toEqual([]);
+    expect(ends).toEqual([{ status: 'failed', exitCode: 1, detail: 'Codex cloud has no environment for acme/web.' }]);
+  });
+
+  it('refuses a malformed env, and a machine without codex', async () => {
+    await issueCloudCommand('ISS-12', { env: '$(rm -rf)' }, deps([]));
     expect(process.exitCode).toBe(2);
     process.exitCode = undefined;
     const r = await issueCloudCommand('ISS-12', { env: 'env_abc' }, deps([], { env: { PATH: '' } }));

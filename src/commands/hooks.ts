@@ -60,7 +60,7 @@ import { outOfRepoWrites, samePath as samePathNormalized, isInsideRepo as isInsi
 import { WORKTREE_BOOTSTRAP_MAX_AGE_MS } from '../worktree-bootstrap.js';
 // Moved to ./hooks/git-hooks.ts — imported for the dispatcher, re-exported so
 // every existing `from './commands/hooks.js'` import keeps resolving.
-import { GENERIC_ASSIGNMENT_RULES, PRE_COMMIT_PATTERNS, buildOriginTrailers, commitMessageForPolicy, commitMessageViolations, handleCommitMsg, handleGitPostCheckout, handleGitPostMerge, handlePreCommit, handlePrePush, handlePrepareCommitMsg, isNullRef, mapFindingSeverity, matchGlobPreCommit, parseStagedDiffLines, pickActiveSessionForCommit, policyAppliesToCommit, preCommitBudgetDecision, sessionTouchedFiles, stagedCommitFiles } from './hooks/git-hooks.js';
+import { GENERIC_ASSIGNMENT_RULES, isNonSecretAssignmentFinding, PRE_COMMIT_PATTERNS, buildOriginTrailers, commitMessageForPolicy, commitMessageViolations, handleCommitMsg, handleGitPostCheckout, handleGitPostMerge, handlePreCommit, handlePrePush, handlePrepareCommitMsg, isNullRef, mapFindingSeverity, matchGlobPreCommit, parseStagedDiffLines, pickActiveSessionForCommit, policyAppliesToCommit, preCommitBudgetDecision, sessionTouchedFiles, stagedCommitFiles } from './hooks/git-hooks.js';
 // Moved to ./hooks/post-commit.ts — imported for the dispatcher, re-exported so
 // every existing `from './commands/hooks.js'` import keeps resolving.
 import { RECENCY_TIEBREAK_MARGIN_MS, applyAuthoredTotals, commitAuthoredDelta, commitTurnContentUnit, countDiffSignLines, excludeSessionsFromOtherTrees, filesNamedInDiff, gitCommitDate, handlePostCommit, inFlightEditedFiles, listSessionsForGitHook, listSessionsForGitHookUnscoped, loneSessionMayOwnCommit, pathNamesSession, pickCommitUpdateTargets, pickIdleOwnerByFileEvidence, pickRecentDevinSessionForRepo, pickSessionByFileOverlap, pickSessionForCommit, pinCodexCommitToProducer, renderAuthoredCommits, resolvePromptForCommit, safePgrep, sessionAuthoredSnapshot, sessionDurationMs, sessionToDateCommittedSnapshot, sessionTouchedAnyCommitFile, sessionTrees, uniquePgrepMatch, worksInAnotherTree } from './hooks/post-commit.js';
@@ -97,7 +97,7 @@ export { EDIT_HOOK_TOOL, adoptUnannouncedPrompts, buildLiveEditPromptChanges, cu
 export { RECENCY_TIEBREAK_MARGIN_MS, applyAuthoredTotals, commitAuthoredDelta, commitTurnContentUnit, countDiffSignLines, excludeSessionsFromOtherTrees, filesNamedInDiff, gitCommitDate, handlePostCommit, inFlightEditedFiles, listSessionsForGitHook, listSessionsForGitHookUnscoped, loneSessionMayOwnCommit, pathNamesSession, pickCommitUpdateTargets, pickIdleOwnerByFileEvidence, pickRecentDevinSessionForRepo, pickSessionByFileOverlap, pickSessionForCommit, pinCodexCommitToProducer, renderAuthoredCommits, resolvePromptForCommit, safePgrep, sessionAuthoredSnapshot, sessionDurationMs, sessionToDateCommittedSnapshot, sessionTouchedAnyCommitFile, sessionTrees, uniquePgrepMatch, worksInAnotherTree };
 export type { FileEvidenceSession } from './hooks/post-commit.js';
 
-export { GENERIC_ASSIGNMENT_RULES, PRE_COMMIT_PATTERNS, buildOriginTrailers, commitMessageForPolicy, commitMessageViolations, handleCommitMsg, handleGitPostCheckout, handleGitPostMerge, handlePreCommit, handlePrePush, handlePrepareCommitMsg, isNullRef, mapFindingSeverity, matchGlobPreCommit, parseStagedDiffLines, pickActiveSessionForCommit, policyAppliesToCommit, preCommitBudgetDecision, sessionTouchedFiles, stagedCommitFiles };
+export { GENERIC_ASSIGNMENT_RULES, isNonSecretAssignmentFinding, PRE_COMMIT_PATTERNS, buildOriginTrailers, commitMessageForPolicy, commitMessageViolations, handleCommitMsg, handleGitPostCheckout, handleGitPostMerge, handlePreCommit, handlePrePush, handlePrepareCommitMsg, isNullRef, mapFindingSeverity, matchGlobPreCommit, parseStagedDiffLines, pickActiveSessionForCommit, policyAppliesToCommit, preCommitBudgetDecision, sessionTouchedFiles, stagedCommitFiles };
 import { backfillCodexPromptMappings } from '../codex-prompt-mapping.js';
 import { buildCodexThreadByCwdQuery } from '../codex-thread-query.js';
 import {
@@ -157,10 +157,10 @@ import { writeHandoff, buildHandoffContext, extractTodosFromPrompts, handoffRepr
 import { assembleRepoContext } from '../context-injection.js';
 import { editSourceForAgent } from '../prompt-capture/types.js';
 import { synthesizeSessionSummary, memorySummaryMode } from '../session-summary.js';
-import { writeSessionMemory, writeCommitMemory, enrichDecisionsForSession, buildMemoryContext, buildMemoryPointerContext, buildStartupCheckContext, buildMemoryEscalationContext, buildPromptScopedMemoryContext, isMemoryReadCommand, isMemoryReadToolName, readRecentMemory, readAllSessionMemory, memoryUpdateTrigger, shouldWriteMemoryOnCommit, shouldWriteMemoryOnSessionEnd, summarizeFromCommitSubjects, isSubstantiveMemory, buildMemoryBriefContext, readMemoryBrief, writeMemoryBrief, memoryBriefSignature, withoutPromptText, type SessionMemoryEntry } from '../memory.js';
+import { writeSessionMemory, writeCommitMemory, enrichDecisionsForSession, buildMemoryContext, buildMemoryPointerContext, buildStartupCheckContext, buildMemoryEscalationContext, buildPromptScopedMemoryContext, isMemoryReadCommand, isMemoryReadToolName, readRecentMemory, readAllSessionMemory, memoryUpdateTrigger, shouldWriteMemoryOnCommit, shouldWriteMemoryOnSessionEnd, summarizeFromCommitSubjects, buildMemoryBriefContext, readMemoryBrief, writeMemoryBrief, memoryBriefSignature, memoryBriefInputs, withoutPromptText, type SessionMemoryEntry } from '../memory.js';
 import { buildRepoBriefContext, maybeSpawnBriefGeneration } from '../repo-brief.js';
 import { backfillAcceptanceForSession } from '../acceptance.js';
-import { addTodosFromSession } from '../todo.js';
+import { addTodosFromSession, buildOpenTodosContext } from '../todo.js';
 import {
   capturePromptEdits,
   dropOutOfRepoEdits,
@@ -213,7 +213,7 @@ import {
 import { createSnapshot, condenseSnapshot, listSnapshots, condenseAndCleanupSession, cleanupSessionShadowBranch, type SnapshotMeta } from './snapshot.js';
 import { execFileSync, spawn } from 'child_process';
 import { toRepoRelative } from '../transcript-watch.js';
-import { inheritedBaseline, inheritedBeforeStates, inheritedFileSources, type InheritedWindowDeps } from '../inherited-window-baseline.js';
+import { InheritedTooLarge, inheritedBaseline, inheritedBeforeStates, inheritedFileSources, type InheritedWindowDeps } from '../inherited-window-baseline.js';
 import { gitLeftBlobsForTurn, readBlobContent } from '../git-moved-files.js';
 import { renderFileDiff } from '../write-journal-diff.js';
 import { countDiffLines } from '../transcript-adapters.js';
@@ -2502,6 +2502,8 @@ import type { ParsedTranscript, PromptFileMapping } from '../transcript.js';
 import { AGY_CACHE_MAX_AGE_MS, AGY_WATCH_LOCK_FRESH_MS, MAX_PENDING_PROMPT_CHANGES, agyDetectSessionCommit, agyEvaluatePreTool, agyGlobToRegex, agyOpenTurn, agyRulesCachePath, agySessionTag, agyToolPaths, discoverLatestAgyConversation, dropPhantomNestedRepoDeletions, handleAntigravity, mergePendingPromptChanges, pruneAgyRulesCaches, readAgyRulesCache, registerAgySessionState, spawnAgyContextRefresh, spawnAgyWatcher, writeAgyRulesCache } from './hooks/antigravity.js';
 import { newCaptureStamp } from '../capture-stamp.js';
 import { localCommitterEmail, readCommitOwnershipFactsBatch, type CommitOwnershipFacts } from '../commit-ownership-facts.js';
+import { replayCreatedCommits } from '../commit-replay.js';
+import { recordHookFired } from '../machine-health.js';
 import { attestCommitsMadeWhileEnded } from '../commits-while-ended.js';
 export { localCommitterEmail, readCommitOwnershipFactsBatch, type CommitOwnershipFacts } from '../commit-ownership-facts.js';
 export { AGY_CACHE_MAX_AGE_MS, AGY_WATCH_LOCK_FRESH_MS, MAX_PENDING_PROMPT_CHANGES, agyDetectSessionCommit, agyEvaluatePreTool, agyGlobToRegex, agyOpenTurn, agyRulesCachePath, agySessionTag, agyToolPaths, discoverLatestAgyConversation, dropPhantomNestedRepoDeletions, handleAntigravity, mergePendingPromptChanges, pruneAgyRulesCaches, readAgyRulesCache, registerAgySessionState, spawnAgyContextRefresh, spawnAgyWatcher, writeAgyRulesCache };
@@ -3642,10 +3644,7 @@ async function maybeRefreshMemoryBrief(repoPath: string, connected: boolean, sou
     const sig = memoryBriefSignature(entries);
     const current = readMemoryBrief(repoPath);
     if (current?.signature === sig && (!promptFree || current.promptFree)) return; // unchanged since the last brief
-    const sessionsForBrief = entries.filter(isSubstantiveMemory).slice(-12).map((e) => ({
-      summary: e.summary, agentSlug: e.agentSlug, filesChanged: e.filesChanged, openTodos: e.openTodos, decisions: e.decisions, endedAt: e.endedAt,
-      intent: e.intent, verify: e.verify,
-    }));
+    const { sessions: sessionsForBrief, sourceSessionIds } = memoryBriefInputs(entries);
     if (sessionsForBrief.length === 0) return;
     const boundedDiff = recentDiff ? recentDiff.slice(0, 8000) : undefined;
     const res = await api.generateMemoryBrief({ sessions: sessionsForBrief, recentDiff: boundedDiff }) as { brief?: string | null };
@@ -3654,7 +3653,11 @@ async function maybeRefreshMemoryBrief(repoPath: string, connected: boolean, sou
     // while the org's Anthropic key answered "credit balance is too low".
     if (!brief) debugLog(source, 'memory brief: server returned none (no org LLM key, or the provider refused the call)', {});
     if (brief) {
-      writeMemoryBrief(repoPath, { version: 1, brief, signature: sig, generatedAt: new Date().toISOString(), ...(promptFree ? { promptFree: true } : {}) });
+      writeMemoryBrief(repoPath, {
+        version: 1, brief, signature: sig, generatedAt: new Date().toISOString(),
+        sourceSessionIds,
+        ...(promptFree ? { promptFree: true } : {}),
+      });
       debugLog(source, 'memory continuation brief refreshed', { len: brief.length });
       // The brief lives in its own notes ref; a fresh one is worthless on this
       // machine alone. Push it and let the dashboard re-read it.
@@ -3699,6 +3702,7 @@ export function liveLedgerBytes(state: SessionState): number {
   let n = 0;
   for (const entry of state.liveEdits || []) {
     for (const e of entry.edits) n += editContentBytes(e);
+    n += entry.writePreImage?.length || 0;
   }
   return n;
 }
@@ -3970,6 +3974,29 @@ function shasInWindow(repoPath: string, baselineSha: string | null | undefined, 
   }
 }
 
+/**
+ * Files in a turn's window that git brought in rather than the turn wrote:
+ * what an owned merge absorbed, and what someone else's commits (a pull, a
+ * rebase, a merge this session never recorded) left exactly as they wrote it.
+ *
+ * The same two exclusions recordShellWindowEdits applies, for the write
+ * journal: it runs FIRST and claims files the window then skips, and it never
+ * asked — so an agent with no tool hooks was billed a merge it ran.
+ * Codex session efd40ad9 (2026-10-29) ran `git merge --no-edit origin/main` on
+ * a Dependabot branch: its header (from its commit) read +396/-150, its one
+ * turn +2853/-80 — 43 files, nearly all main's.
+ */
+export function filesGitBroughtIntoWindow(
+  repoPath: string, state: SessionState, baselineSha: string | null | undefined,
+): Set<string> {
+  const absorbed = new Set<string>();
+  for (const sha of mergeShasInWindow(repoPath, state, baselineSha)) {
+    for (const f of mergeAbsorbedFiles(repoPath, sha)) absorbed.add(f);
+  }
+  for (const f of filesLeftByForeignCommits(repoPath, state, baselineSha)) absorbed.add(f);
+  return absorbed;
+}
+
 function mergeShasInWindow(
   repoPath: string, state: SessionState, baselineSha: string | null | undefined,
 ): string[] {
@@ -4181,7 +4208,9 @@ export function inheritedBeforeStatesForTurn(
 ): Map<string, string | null> {
   try {
     return inheritedBeforeStates(baselineSha, inheritedWindowDeps(repoPath, state, promptIndex, [baselineSha]));
-  } catch {
+  } catch (err) {
+    // Too many to read is an answer the ledger must act on, not "nothing inherited".
+    if (err instanceof InheritedTooLarge) throw err;
     return new Map();
   }
 }
@@ -4552,7 +4581,7 @@ export function commitChangedFilesBatch(repoPath: string, shas: string[]): Map<s
   if (wanted.length < 2) return out;
   try {
     const raw = execFileSync('git', [
-      '-c', 'diff.ignoreSubmodules=none', 'log', '--no-walk=unsorted', '--stdin', '--no-show-signature',
+      '-c', 'diff.ignoreSubmodules=none', '-c', 'core.quotePath=false', 'log', '--no-walk=unsorted', '--stdin', '--no-show-signature',
       '--format=%x1e%H', '--name-only', '--no-renames', '--root', '--diff-merges=first-parent',
     ], { ...GIT_READ_OPTS, timeout: READ_BATCH_TIMEOUT_MS, cwd: repoPath, encoding: 'utf-8', input: wanted.join('\n') + '\n', maxBuffer: 256 * 1024 * 1024 });
     const byFull = new Map<string, string[]>();
@@ -4843,6 +4872,24 @@ function inheritedWindowDeps(
     return commitChangedFiles(repoPath, sha);
   };
   const reads = batchedReadAtRev(repoPath);
+  // When this turn began: its prompt shadow's capture time. A shadow cut after
+  // the turn had started (cutAfterTurnStart) is no start time to compare with.
+  const turnShadow = (state.promptShadows || []).find((ps) => ps.promptIndex === promptIndex);
+  const turnStartSec = turnShadow && !turnShadow.cutAfterTurnStart
+    ? Math.floor(Date.parse(turnShadow.capturedAt) / 1000)
+    : NaN;
+  let replays: Map<string, number> | null | undefined;
+  const replayedFromBeforeTurn = (sha: string): boolean => {
+    if (!Number.isFinite(turnStartSec)) return false;
+    if (replays === undefined) replays = replayCreatedCommits(repoPath);
+    if (!replays) return false;
+    const key = sha.toLowerCase();
+    let at = replays.get(key);
+    if (at === undefined && key.length < 40) {
+      for (const [full, t] of replays) if (full.startsWith(key)) { at = t; break; }
+    }
+    return at !== undefined && at < turnStartSec;
+  };
   const factsFor = (sha: string): CommitOwnershipFacts | null => {
     const key = sha.toLowerCase();
     if (!ownershipFacts.has(key)) ownershipFacts.set(key, readCommitOwnershipFacts(repoPath, sha));
@@ -4912,6 +4959,15 @@ function inheritedWindowDeps(
         const committer = facts?.committerEmail || '';
         if (committer && committer !== localEmail) return false;
       }
+      // A replay of work committed before this turn began is not this turn's.
+      // With git hooks installed, post-rewrite's pairs put the copy under the
+      // turn that made the original (commitTurnOf above). Without them the
+      // copy is unattributed and the generous test below called it this
+      // turn's own: prod f0bf6c29 turn 11 rebased v1..v3 onto main and was
+      // billed the whole branch, 14 files +634/-189. The copy keeps the
+      // original's author time; a pick of a commit this same turn made is
+      // authored inside the turn and stays its own.
+      if (replayedFromBeforeTurn(sha)) return false;
       // Unattributed: `commitBelongsToSession` is the generous predicate the
       // rest of this file shares, and generous is the right direction here.
       // Re-baselining PAST work the turn authored would erase it from the
@@ -5215,7 +5271,7 @@ const SHELL_WINDOW_TOOL = 'origin:shell-window';
 function mapFindingType(name: string): string {
   const map: Record<string, string> = {
     'AWS Access Key': 'AWS_SECRET', 'AWS Secret Key': 'AWS_SECRET',
-    'Private Key': 'PRIVATE_KEY', 'GitHub Token': 'API_KEY', 'GitHub PAT': 'API_KEY',
+    'Private Key': 'PRIVATE_KEY', 'GitHub Token': 'API_KEY', 'GitHub PAT': 'API_KEY', 'Origin Git Password': 'PASSWORD',
     'OpenAI Key': 'API_KEY', 'Anthropic Key': 'API_KEY', 'Stripe Key': 'API_KEY',
     'Slack Token': 'API_KEY', 'JWT Token': 'JWT_TOKEN',
     'Connection String': 'CONNECTION_STRING', 'API Key': 'API_KEY',
@@ -5447,6 +5503,7 @@ export function buildDurableContextMessage(repoPath: string, omitRepoContext = f
     attribution: safeCtx(() => buildAttributionContext(repoPath)),
     memory: safeCtx(() => buildMemoryBriefContext(repoPath)) || safeCtx(() => buildMemoryContext(repoPath)),
     memoryPointer: safeCtx(() => buildMemoryPointerContext(repoPath)),
+    todos: safeCtx(() => buildOpenTodosContext(repoPath)),
     handoff: safeCtx(() => buildHandoffContext(repoPath)),
     startupCheck: safeCtx(() => buildStartupCheckContext(repoPath)),
   });
@@ -5734,6 +5791,9 @@ export function detectForeignHookPayload(
 }
 
 export async function hooksCommand(event: string, agentSlug?: string): Promise<void> {
+  // Evidence for the Rollout view's machine health: this agent's hooks DO run
+  // here, wherever its config lives (machine-health.ts, recordHookFired).
+  recordHookFired(agentSlug);
   // FIX 1 — Codex capture hooks must ALWAYS exit 0.
   //
   // Codex reads our stdout for context injection but treats a non-zero exit as

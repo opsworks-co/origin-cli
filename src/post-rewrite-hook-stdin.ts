@@ -32,6 +32,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
+import { DETACH_MARKER, detachedLaunch, hasUnsyncedDetach, indentFragment, syncDetach } from './hook-detach.js';
 
 /** Foreground read of git's pairs. A TTY stdin is someone running the hook by
  *  hand; `cat` would block on it forever. */
@@ -61,6 +62,22 @@ export function backgroundedWithRewrites(cmd: string): string {
   return `{ printf '%s\\n' "$ORIGIN_REWRITES" | ${cmd}${BACKGROUND_TAIL}`;
 }
 
+/**
+ * `cmd` DETACHED, fed the captured pairs. A pipe into a detached child is no
+ * use under an agent that kills what git left running (hook-detach.ts): the
+ * writing side dies with the hook. So the pairs go into a file in the
+ * foreground, and the detached child reads it and deletes it. Where mktemp
+ * fails, the piped background form above.
+ */
+export function detachedWithRewrites(cmd: string): string {
+  return `_origin_rw="$(mktemp 2>/dev/null)"
+if [ -n "$_origin_rw" ] && printf '%s\\n' "$ORIGIN_REWRITES" > "$_origin_rw"; then
+  ${indentFragment(detachedLaunch(`sh -c '"$@" < "$0"; rm -f "$0"' "$_origin_rw" ${cmd}`), '  ')}
+else
+  ${backgroundedWithRewrites(cmd)}
+fi`;
+}
+
 const GLOBAL_MARKER = '# origin-global-post-rewrite';
 // The old invocation, on a line of its own, not already fed by a pipe. The
 // redirect is optional: from 2026-03 until #711 the repo-local block was
@@ -68,28 +85,38 @@ const GLOBAL_MARKER = '# origin-global-post-rewrite';
 // "already installed"). The repaired line always carries it.
 const OLD_LINE = /^([ \t]*)((?:"\$ORIGIN_BIN"|origin) hooks git-post-rewrite "\$@")(?: >\/dev\/null 2>&1)? &[ \t]*$/gm;
 
+// The piped forms: the brace-grouped one (#703) and the interim cut without
+// the group. The capture line is already above them.
+const PIPED_LINE = /^([ \t]*)\{? ?printf '%s\\n' "\$ORIGIN_REWRITES" \| ((?:"\$ORIGIN_BIN"|origin) hooks git-post-rewrite "\$@")(?:; \})?(?: >\/dev\/null 2>&1)? &[ \t]*$/gm;
+
 /**
- * Keyed on the CURRENT backgrounded form, not merely on the capture being
+ * Keyed on the CURRENT form, the detached one, not merely on the capture being
  * there: an earlier cut of this fix piped without the brace group, and a check
  * for `ORIGIN_REWRITES` alone would have left that form on disk for good.
  */
 export function needsStdinRepair(script: string): boolean {
-  return script.includes('hooks git-post-rewrite') && !script.includes(`hooks git-post-rewrite "$@"${BACKGROUND_TAIL}`);
+  return script.includes('hooks git-post-rewrite') && (!script.includes(DETACH_MARKER) || hasUnsyncedDetach(script));
 }
 
 /**
  * Repair a repo-local script in place: each old invocation becomes the capture
- * plus the piped form. Anything else in the file — a user's own hook the block
+ * plus the detached form, and a piped one becomes the detached form. Anything else in the file — a user's own hook the block
  * was appended to — is left alone. Returns null when nothing needs doing.
  */
 export function repairLocalPostRewriteScript(script: string): string | null {
   if (!needsStdinRepair(script)) return null;
+  if (hasUnsyncedDetach(script)) return syncDetach(script);
   let first = true;
-  const out = script.replace(OLD_LINE, (_m, indent: string, cmd: string) => {
-    const capture = first ? `${indent}${CAPTURE_REWRITES}\n` : '';
-    first = false;
-    return `${capture}${indent}${backgroundedWithRewrites(cmd)}`;
-  });
+  const out = script
+    .replace(PIPED_LINE, (_m, indent: string, cmd: string) => {
+      first = false;
+      return `${indent}${indentFragment(detachedWithRewrites(cmd), indent)}`;
+    })
+    .replace(OLD_LINE, (_m, indent: string, cmd: string) => {
+      const capture = first ? `${indent}${CAPTURE_REWRITES}\n` : '';
+      first = false;
+      return `${capture}${indent}${indentFragment(detachedWithRewrites(cmd), indent)}`;
+    });
   return out === script ? null : out;
 }
 

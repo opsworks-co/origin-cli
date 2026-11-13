@@ -2,16 +2,16 @@
 // `origin review run` against a real temp git repo with a fake API and a fake
 // agent (plain `node`) — the worktree on review/<pr>/<run> at the fetched
 // head, the start and result posted, the worktree gone afterwards.
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import {
-  agentReviewArgv, parseReviewLaunchUrl, parseReviewResult, reviewBranchName, reviewLaunchUrl, reviewWorktreePath,
-  REVIEW_RESULT_FILE, REVIEW_RESULT_SCHEMA, type ReviewPacket,
+  agentReviewArgv, becameShallow, parseReviewLaunchUrl, parseReviewResult, reviewBranchName, reviewLaunchUrl, reviewPromptWithGitRules, reviewWorktreePath,
+  REVIEW_DISALLOWED_TOOLS, REVIEW_RESULT_FILE, REVIEW_RESULT_SCHEMA, type ReviewArgvFiles, type ReviewPacket,
 } from '../review-run.js';
-import { remoteFor, reviewRunCommand, reviewWorktree, type ReviewReport, type ReviewRunDeps } from '../commands/review-run.js';
+import { readPacket, remoteFor, reviewRunCommand, reviewWorktree, type ReviewReport, type ReviewRunDeps } from '../commands/review-run.js';
 import { reviewLaunchScript, reviewBackgroundCommandLine, reviewLogFile } from '../url-handler.js';
 
 const RUN = '3f2a9c1e-7b4d-4e8a-9f10-aaaaaaaaaaaa';
@@ -32,6 +32,13 @@ describe('argv', () => {
     expect(JSON.parse(a[a.indexOf('--json-schema') + 1])).toEqual(REVIEW_RESULT_SCHEMA);
     expect(a).not.toContain('--no-session-persistence');
     expect(a.join(' ')).not.toContain('disableAllHooks');
+  });
+  it('claude may not git fetch or git pull: the worktree shares the checkout\'s .git', () => {
+    const a = agentReviewArgv('claude', 'look', FILES)!;
+    const i = a.indexOf('--disallowedTools');
+    expect(a.slice(i + 1, i + 1 + REVIEW_DISALLOWED_TOOLS.length)).toEqual(['Bash(git fetch:*)', 'Bash(git pull:*)']);
+    // The variadic list ends at the next flag.
+    expect(a[i + 1 + REVIEW_DISALLOWED_TOOLS.length]).toMatch(/^--/);
   });
   it('codex: read-only exec with the schema and out files', () => {
     expect(agentReviewArgv('codex', 'look', FILES)).toEqual(['codex', 'exec', '-s', 'read-only', '--skip-git-repo-check', '--output-schema', FILES.schemaFile, '-o', FILES.outFile, 'look']);
@@ -54,7 +61,31 @@ describe('argv', () => {
   });
 });
 
+describe('the shared .git', () => {
+  it('the prompt names the fetched base and forbids fetching', () => {
+    const p = reviewPromptWithGitRules('Review this.\n', 'origin/main');
+    expect(p.startsWith('Review this.\n\n')).toBe(true);
+    expect(p).toContain('git diff origin/main...HEAD');
+    expect(p).toContain('Do not run git fetch or git pull');
+    expect(reviewPromptWithGitRules('Review this.', null)).not.toContain('git diff');
+  });
+  it('becameShallow: only false → true; an unreadable answer is no change', () => {
+    expect(becameShallow('false', 'true\n')).toBe(true);
+    expect(becameShallow('true', 'true')).toBe(false);
+    expect(becameShallow('false', 'false')).toBe(false);
+    expect(becameShallow(null, 'true')).toBe(false);
+    expect(becameShallow('false', null)).toBe(false);
+  });
+});
+
 describe('parseReviewResult', () => {
+  it('passes a score through for the server to check, and leaves it out when there is none', () => {
+    const r = parseReviewResult(JSON.stringify({ verdict: 'approve', score: 82, summary: 's', findings: [] }));
+    expect(r?.score).toBe(82);
+    expect(parseReviewResult(JSON.stringify({ verdict: 'approve', score: 'high', summary: 's', findings: [] }))).not.toHaveProperty('score');
+    expect(parseReviewResult(JSON.stringify({ verdict: 'approve', summary: 's', findings: [] }))).not.toHaveProperty('score');
+  });
+
   const answer = { verdict: 'request_changes', summary: 'one bug', findings: [{ path: 'a.ts', line: 3, severity: 'high', title: 'null deref', detail: 'x', failureScenario: 'y', confidence: 'confirmed' }] };
   it('reads a bare object', () => {
     expect(parseReviewResult(JSON.stringify(answer))).toEqual(answer);
@@ -219,6 +250,57 @@ describe('origin review run', () => {
     expect(fs.readFileSync(path.join(checkout, 'a.txt'), 'utf-8')).toBe('one\n');
   });
 
+  it.each(['claude', 'codex'] as const)('a %s run finds no Origin file in its worktree, so its session is credited with none', async (agent) => {
+    // 2026-11-02: the schema written into the worktree was the session's
+    // "+114" — header_exceeds_turns on every reviewer run at the release gate.
+    const seen: { files: ReviewArgvFiles | null } = { files: null };
+    const d = deps({
+      api: {
+        getReviewRunPacket: async () => ({ ...(await deps().api.getReviewRunPacket(RUN)), reviewer: { id: 'rv-1', name: 'Security', agent, model: null, instructions: 'x', pathFilter: null } }),
+        startReviewRun: async () => ({}),
+        reportReviewRun: async () => ({}),
+      },
+      agentArgvFor: (_a, _p, files) => {
+        seen.files = files;
+        return ['node', '-e', `
+          const fs = require('fs');
+          fs.writeFileSync('dirt.txt', fs.readdirSync('.').filter((f) => f.startsWith('.origin-') || f.startsWith('origin-')).join(','));
+          fs.writeFileSync(${JSON.stringify(files.outFile)}, JSON.stringify({ verdict: 'approve', summary: 'ok', findings: [] }));
+        `];
+      },
+    });
+    const [out] = await reviewRunCommand([RUN], { keepWorktree: true }, d);
+    expect(out.ok).toBe(true);
+    const wt = fs.realpathSync(out.worktree!);
+    expect(fs.readFileSync(path.join(wt, 'dirt.txt'), 'utf-8')).toBe('');
+    expect(path.dirname(seen.files!.schemaFile).startsWith(wt)).toBe(false);
+    expect(path.dirname(seen.files!.outFile).startsWith(wt)).toBe(agent !== 'codex');
+    // The temp folder goes with the run.
+    expect(fs.existsSync(seen.files!.schemaFile)).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')('records the PR head even when another fetch rewrites FETCH_HEAD right after its own', async () => {
+    // A git-notes fetch by a capture hook, landing between the run's fetch and
+    // its read: on 2026-10-30 the run took the notes commit as the PR's head.
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf-8' }).trim();
+    const bin = path.join(tmp, 'bin');
+    fs.mkdirSync(bin);
+    const notesCommit = g(checkout, 'rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(bin, 'git'), `#!/bin/sh\n"${realGit}" "$@"; s=$?\ncase "$1" in fetch) printf '%s\\t\\tnotes\\n' ${notesCommit} > "$("${realGit}" rev-parse --git-dir)/FETCH_HEAD";; esac\nexit $s\n`);
+    fs.chmodSync(path.join(bin, 'git'), 0o755);
+    const pathBefore = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${pathBefore}`;
+    try {
+      const d = deps();
+      const [out] = await reviewRunCommand([RUN], {}, d);
+      expect(out.ok).toBe(true);
+      expect(out.headSha).toBe(g(upstream, 'rev-parse', 'feat/x'));
+      expect(out.headSha).not.toBe(notesCommit);
+    } finally {
+      process.env.PATH = pathBefore;
+    }
+  });
+
   it("the team's API key reaches the agent's environment for the run — and only the key names, never PATH", async () => {
     const seen: NodeJS.ProcessEnv[] = [];
     const base = deps();
@@ -297,6 +379,37 @@ describe('origin review run', () => {
     expect(again.worktree).toBe(out.worktree);
   });
 
+  it('fetches the base for the agent; an agent that makes the shared .git shallow has it undone', async () => {
+    // A few commits on main, so a --depth=1 fetch has history to cut.
+    for (const n of ['b', 'c']) {
+      fs.writeFileSync(path.join(upstream, `${n}.txt`), n);
+      g(upstream, 'add', '.');
+      g(upstream, 'commit', '-q', '-m', n);
+    }
+    const errors: string[] = [];
+    let prompt = '';
+    const d = deps({
+      error: (l) => errors.push(l),
+      // What the reviewer for PR #2733 did: a shallow fetch of the base in its worktree.
+      agentArgvFor: (_agent, p, files) => {
+        prompt = p;
+        return ['sh', '-c', `git fetch -q --depth=1 "file://${upstream}" main && git rev-parse --is-shallow-repository > shallow.txt && echo '{"verdict":"approve","summary":"ok","findings":[]}' > "${files.outFile}"`];
+      },
+    });
+    expect(g(checkout, 'rev-parse', '--is-shallow-repository')).toBe('false');
+    const [out] = await reviewRunCommand([RUN], { keepWorktree: true }, d);
+    expect(out.ok).toBe(true);
+    expect(prompt).toContain('git diff origin/main...HEAD');
+    expect(g(checkout, 'rev-parse', 'origin/main')).toBe(g(upstream, 'rev-parse', 'main'));
+    // The agent did make it shallow...
+    expect(fs.readFileSync(path.join(out.worktree!, 'shallow.txt'), 'utf-8').trim()).toBe('true');
+    // ...and the run restored it, saying so.
+    expect(g(checkout, 'rev-parse', '--is-shallow-repository')).toBe('false');
+    expect(fs.existsSync(path.join(checkout, '.git', 'shallow'))).toBe(false);
+    expect(errors.join('\n')).toContain('made');
+    expect(errors.join('\n')).toContain('shallow clone');
+  });
+
   it('a missing agent binary is the run\'s error, posted, and the next run still goes', async () => {
     const d = deps({ agentArgvFor: () => ['definitely-not-a-real-binary-xyz', 'x'] });
     const outs = await reviewRunCommand([RUN, 'second-run'], {}, d);
@@ -330,5 +443,47 @@ describe('origin review run', () => {
     expect(w.reused).toBe(false);
     expect(g(checkout, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('main');
     expect(fs.existsSync(w.path)).toBe(true);
+  });
+
+  it("reviewWorktree clones the checkout's node_modules into a new worktree", () => {
+    fs.appendFileSync(path.join(checkout, '.git', 'info', 'exclude'), 'node_modules/\n');
+    fs.mkdirSync(path.join(checkout, 'node_modules', 'pkg'), { recursive: true });
+    fs.writeFileSync(path.join(checkout, 'node_modules', 'pkg', 'index.js'), 'canonical\n');
+    const w = reviewWorktree(checkout, 'review/1/deps', path.join(tmp, 'app-worktrees', 'review-1-deps'), g(checkout, 'rev-parse', 'HEAD'));
+    const cloned = path.join(w.path, 'node_modules');
+    if (!fs.existsSync(cloned)) {
+      // This filesystem can't copy-on-write: skipped, with an install hint.
+      expect(w.hydrationWarnings.join('\n')).toMatch(/node_modules: not cloned .*run your package install/);
+      return;
+    }
+    expect(w.hydrationWarnings).toEqual([]);
+    expect(fs.lstatSync(cloned).isSymbolicLink()).toBe(false);
+    expect(fs.readFileSync(path.join(cloned, 'pkg', 'index.js'), 'utf-8')).toBe('canonical\n');
+  });
+});
+
+describe('readPacket', () => {
+  const packet = { run: { id: 'r' } } as unknown as ReviewPacket;
+  const deps = (get: () => Promise<ReviewPacket>) => ({
+    api: { getReviewRunPacket: vi.fn(get) } as unknown as ReviewRunDeps['api'],
+    log: () => {},
+    sleep: async () => {},
+  });
+
+  it('asks once more after a timeout or network failure', async () => {
+    let n = 0;
+    const d = deps(async () => { if (n++ === 0) throw new Error('This operation was aborted'); return packet; });
+    expect(await readPacket(d, 'r')).toBe(packet);
+    expect(d.api.getReviewRunPacket).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry the server\'s own answer (an HTTP status), and gives up after the second failure', async () => {
+    const http = deps(async () => { throw Object.assign(new Error('Review run not found'), { status: 404 }); });
+    await expect(readPacket(http, 'r')).rejects.toThrow('not found');
+    expect(http.api.getReviewRunPacket).toHaveBeenCalledTimes(1);
+
+    const down = deps(async () => { throw new Error('This operation was aborted'); });
+    await expect(readPacket(down, 'r')).rejects.toThrow('aborted');
+    expect(down.api.getReviewRunPacket).toHaveBeenCalledTimes(2);
   });
 });

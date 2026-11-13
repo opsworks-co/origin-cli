@@ -1,7 +1,7 @@
 // `origin review run <runId...>` — run the PR reviews this machine was asked for.
 //
 // For each run: the packet (the PR, the reviewer, the whole prompt) from the
-// API; `git fetch` the PR's head; a worktree of its own on `review/<pr>/<run>`
+// API; `git fetch` the PR's head and base; a worktree of its own on `review/<pr>/<run>`
 // at that head; tell the server the run started here; run the reviewer agent
 // read-only and headless (review-run.ts agentReviewArgv); read its answer
 // (structured output, else the result file in the worktree); post it; print
@@ -17,11 +17,13 @@ import { loadConfig } from '../config.js';
 import { createBackgroundProject, removeBackgroundProject } from '../antigravity-scope.js';
 import { removeCursorScope, writeCursorScope } from '../cursor-scope.js';
 import { launchTarget } from '../windows-shim.js';
+import { killTree } from '../background-supervisor.js';
 import {
-  agentReviewArgv, isReviewAgent, parseReviewResult, REVIEW_RESULT_FILE, REVIEW_RESULT_SCHEMA, REVIEW_SCHEMA_FILE,
-  reviewBranchName, reviewWorktreePath, type ReviewAgent, type ReviewArgvFiles, type ReviewPacket, type ReviewResult,
+  agentReviewArgv, becameShallow, isReviewAgent, parseReviewResult, REVIEW_RESULT_FILE, REVIEW_RESULT_SCHEMA, REVIEW_SCHEMA_FILE,
+  reviewBranchName, reviewPromptWithGitRules, reviewWorktreePath, type ReviewAgent, type ReviewArgvFiles, type ReviewPacket, type ReviewResult,
 } from '../review-run.js';
 import { canonicalRoot, findOnPath, worktreeOfBranch } from './issue-start.js';
+import { hydrateWorktreeIgnoredFiles } from '../worktree-hydration.js';
 
 export interface ReviewRunOptions {
   keepWorktree?: boolean;
@@ -39,9 +41,11 @@ export interface ReviewRunDeps {
     getReviewRunPacket: (runId: string) => Promise<ReviewPacket>;
     /** The team's API key for the run, as env vars; optional so an older server is no failure. */
     getReviewRunCredentials?: (runId: string) => Promise<{ source?: string; env?: Record<string, string> }>;
-    startReviewRun: (runId: string, data: { hostname: string; branch: string; headSha: string | null }) => Promise<unknown>;
+    startReviewRun: (runId: string, data: { hostname: string; branch: string; headSha: string | null; instance?: string }) => Promise<unknown>;
     reportReviewRun: (runId: string, data: ReviewReport) => Promise<unknown>;
   };
+  /** The `origin review runner` process driving this run; unset when run by hand. */
+  runnerInstance?: string;
   /** `reviewerKey` in ~/.origin/config.json: 'machine' never asks for the team's key. Default 'team'. */
   reviewerKey?: 'team' | 'machine';
   /** Runs the agent in the worktree; resolves with its exit code and, when captured, its stdout. */
@@ -70,6 +74,9 @@ function git(args: string[], cwd: string): string {
 function gitOk(args: string[], cwd: string): boolean {
   try { git(args, cwd); return true; } catch { return false; }
 }
+function isShallow(cwd: string): string | null {
+  try { return git(['rev-parse', '--is-shallow-repository'], cwd); } catch { return null; }
+}
 
 /** The remote whose URL names the PR's repo (`owner/name`), else `origin`. */
 export function remoteFor(cwd: string, repoFullName: string | null): string {
@@ -91,12 +98,12 @@ export function remoteFor(cwd: string, repoFullName: string | null): string {
  * reset to the head (a re-run), else a fresh one — a branch left behind
  * without a worktree is dropped first.
  */
-export function reviewWorktree(canonical: string, branch: string, at: string, sha: string): { path: string; reused: boolean } {
+export function reviewWorktree(canonical: string, branch: string, at: string, sha: string, onClone?: (relative: string) => void): { path: string; reused: boolean; hydrationWarnings: string[] } {
   gitOk(['worktree', 'prune'], canonical);
   const existing = worktreeOfBranch(canonical, branch);
   if (existing) {
     git(['reset', '--hard', sha], existing);
-    return { path: existing, reused: true };
+    return { path: existing, reused: true, hydrationWarnings: hydrateWorktreeIgnoredFiles(canonical, existing, onClone) };
   }
   if (gitOk(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], canonical)) git(['branch', '-D', branch], canonical);
   let entries: string[] = [];
@@ -104,7 +111,7 @@ export function reviewWorktree(canonical: string, branch: string, at: string, sh
   if (entries.length > 0) throw new Error(`${at} already exists and is not a worktree of ${branch}.`);
   fs.mkdirSync(path.dirname(at), { recursive: true });
   git(['worktree', 'add', '--no-track', '-b', branch, at, sha], canonical);
-  return { path: at, reused: false };
+  return { path: at, reused: false, hydrationWarnings: hydrateWorktreeIgnoredFiles(canonical, at, onClone) };
 }
 
 function removeWorktree(canonical: string, wt: string, branch: string): void {
@@ -112,16 +119,94 @@ function removeWorktree(canonical: string, wt: string, branch: string): void {
   gitOk(['branch', '-D', branch], canonical);
 }
 
-function defaultRun(exe: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, captureStdout: boolean): Promise<{ code: number; stdout: string }> {
+// The signals that stop `origin review run` / the runner daemon: launchd and
+// systemd send SIGTERM (`launchctl kickstart -k`, a stop, an upgrade restart),
+// a terminal SIGINT or SIGHUP.
+const STOP_SIGNALS: NodeJS.Signals[] = ['SIGTERM', 'SIGINT', 'SIGHUP'];
+const SIGNAL_EXIT: Record<string, number> = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 };
+// Inside launchd's 20 s ExitTimeOut, so the agent is gone before launchd
+// SIGKILLs this process.
+const AGENT_KILL_GRACE_MS = 8_000;
+
+export interface AgentProcessDeps {
+  platform: NodeJS.Platform;
+  /** Calls `onStop` when this process is told to stop; returns the unsubscribe. */
+  onStopSignal: (onStop: (signal: NodeJS.Signals) => void) => () => void;
+  killTree: (pid: number, signal: NodeJS.Signals, platform: NodeJS.Platform) => void;
+  /**
+   * SIGKILL what is left of an exited agent's group: only `-pid`, never the
+   * bare pid, which may be someone else's by now. A group id stays the
+   * group's while any member lives, so it never names a stranger.
+   */
+  killGroup: (pgid: number) => void;
+  exit: (code: number) => void;
+  graceMs: number;
+}
+
+const REAL_AGENT_PROCESS: AgentProcessDeps = {
+  platform: process.platform,
+  onStopSignal: (onStop) => {
+    for (const s of STOP_SIGNALS) process.on(s, onStop);
+    return () => { for (const s of STOP_SIGNALS) process.off(s, onStop); };
+  },
+  killTree,
+  killGroup: (pgid) => { try { process.kill(-pgid, 'SIGKILL'); } catch { /* the group is gone */ } },
+  exit: (code) => process.exit(code),
+  graceMs: AGENT_KILL_GRACE_MS,
+};
+
+/**
+ * Run the reviewer agent; it never outlives this process. A runner restarted
+ * mid-run (`launchctl kickstart -k`) used to leave `claude -p` reviewing for a
+ * dead parent — the run already re-queued for the next daemon, its result
+ * read by nobody, Claude ignoring the SIGTERM. So the agent runs in its own
+ * process group (its MCP servers and tools with it), and a stop signal to
+ * this process stops that group, SIGKILL after a grace, before exiting.
+ */
+export function runAgentProcess(
+  exe: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, captureStdout: boolean,
+  deps: AgentProcessDeps = REAL_AGENT_PROCESS,
+): Promise<{ code: number; stdout: string }> {
   return new Promise((resolve, reject) => {
     // An npm-installed agent on Windows is a .cmd shim: run what it points at (windows-shim.ts).
-    const t = launchTarget(exe, args);
-    const child = spawn(t.file, t.args, { cwd, stdio: ['ignore', captureStdout ? 'pipe' : 'inherit', 'inherit'], shell: false, env, windowsHide: true });
+    const t = launchTarget(exe, args, { platform: deps.platform });
+    const child = spawn(t.file, t.args, {
+      cwd, stdio: ['ignore', captureStdout ? 'pipe' : 'inherit', 'inherit'], shell: false, env, windowsHide: true,
+      // Its own group, so killTree reaches its children. A terminal's Ctrl-C
+      // no longer reaches it directly: the stop handler below forwards it.
+      detached: deps.platform !== 'win32',
+    });
     let stdout = '';
+    let exited = false;
+    let stopping = false;
     child.stdout?.on('data', (d: Buffer) => { stdout += d.toString('utf-8'); });
-    child.on('error', reject);
-    child.on('exit', (code, signal) => resolve({ code: code ?? (signal ? 1 : 0), stdout }));
+    const unsubscribe = deps.onStopSignal((signal) => {
+      if (stopping) return;
+      stopping = true;
+      const exitCode = SIGNAL_EXIT[signal] ?? 1;
+      if (exited || !child.pid) { deps.exit(exitCode); return; }
+      const pid = child.pid;
+      deps.killTree(pid, 'SIGTERM', deps.platform);
+      // SIGKILL the group after the grace; exit once the agent is gone either way.
+      const force = setTimeout(() => deps.killTree(pid, 'SIGKILL', deps.platform), deps.graceMs);
+      child.once('exit', () => {
+        clearTimeout(force);
+        deps.exit(exitCode);
+      });
+    });
+    child.on('error', (err) => { unsubscribe(); reject(err); });
+    child.on('exit', (code, signal) => {
+      exited = true;
+      // An MCP server or tool the agent started may still hold its group.
+      if (child.pid && deps.platform !== 'win32') deps.killGroup(child.pid);
+      if (!stopping) unsubscribe();
+      resolve({ code: code ?? (signal ? 1 : 0), stdout });
+    });
   });
+}
+
+function defaultRun(exe: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, captureStdout: boolean): Promise<{ code: number; stdout: string }> {
+  return runAgentProcess(exe, args, cwd, env, captureStdout);
 }
 
 export async function defaultReviewRunDeps(): Promise<ReviewRunDeps> {
@@ -177,6 +262,22 @@ function describe(f: ReviewResult['findings'][number]): string {
 }
 
 /** One run, start to finish. Never throws: every failure is the run's error. */
+/**
+ * The run's packet, asked for again once after a network failure or a
+ * timeout (no HTTP status) — a busy server, not an answer. A 4xx/5xx is the
+ * server's answer and is not retried.
+ */
+export async function readPacket(deps: Pick<ReviewRunDeps, 'api' | 'log'> & { sleep?: (ms: number) => Promise<void> }, runId: string): Promise<ReviewPacket> {
+  try {
+    return await deps.api.getReviewRunPacket(runId);
+  } catch (err: any) {
+    if (err?.status) throw err;
+    deps.log(chalk.gray(`  reading the run failed (${err?.message || err}); trying once more`));
+    await (deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(3000);
+    return deps.api.getReviewRunPacket(runId);
+  }
+}
+
 export async function runOneReview(runId: string, opts: ReviewRunOptions, deps: ReviewRunDeps): Promise<ReviewRunOutcome> {
   const out: ReviewRunOutcome = { runId, ok: false, branch: null, worktree: null, headSha: null, result: null, error: null };
   const fail = async (error: string): Promise<ReviewRunOutcome> => {
@@ -189,7 +290,7 @@ export async function runOneReview(runId: string, opts: ReviewRunOptions, deps: 
   };
 
   let packet: ReviewPacket;
-  try { packet = await deps.api.getReviewRunPacket(runId); } catch (err: any) {
+  try { packet = await readPacket(deps, runId); } catch (err: any) {
     out.error = `could not read the run: ${err?.message || err}`;
     deps.error(chalk.red(`✗ ${runId.slice(0, 8)}: ${out.error}`));
     return out;
@@ -204,41 +305,60 @@ export async function runOneReview(runId: string, opts: ReviewRunOptions, deps: 
   const canonical = canonicalRoot(top);
 
   // The PR's head, fetched now: the review is of what is on the PR, not of a
-  // local branch that may be behind it.
+  // local branch that may be behind it. Read from a ref of its own, not
+  // FETCH_HEAD: every fetch in the checkout rewrites that one file, and on
+  // 2026-10-30 a git-notes fetch landing in between made a run record a notes
+  // commit as the PR's head, so its verdict counted as one on an older head.
   const remote = remoteFor(canonical, pr.repoFullName);
-  try { git(['fetch', '--quiet', remote, pr.headBranch], canonical); } catch (err: any) {
+  const headRef = `refs/remotes/${remote}/${pr.headBranch}`;
+  try { git(['fetch', '--quiet', remote, `+refs/heads/${pr.headBranch}:${headRef}`], canonical); } catch (err: any) {
     return fail(`could not fetch ${pr.headBranch} from ${remote}: ${String(err?.stderr || err?.message || err).trim().split('\n').pop()}`);
   }
   let headSha: string;
-  try { headSha = git(['rev-parse', 'FETCH_HEAD'], canonical); } catch { return fail('could not read the fetched head'); }
+  try { headSha = git(['rev-parse', '--verify', `${headRef}^{commit}`], canonical); } catch { return fail('could not read the fetched head'); }
   out.headSha = headSha;
+  // The base too, so the agent has it and need not fetch (review-run.ts
+  // reviewPromptWithGitRules). A failure only leaves the ref as it was.
+  const baseRef = `${remote}/${pr.baseBranch}`;
+  const baseFetched = gitOk(['fetch', '--quiet', remote, `+refs/heads/${pr.baseBranch}:refs/remotes/${baseRef}`], canonical)
+    || gitOk(['rev-parse', '--verify', '--quiet', `refs/remotes/${baseRef}`], canonical);
 
   const branch = reviewBranchName(pr.number, runId);
   out.branch = branch;
   let wt: string;
-  try { wt = reviewWorktree(canonical, branch, reviewWorktreePath(canonical, pr.number, runId), headSha).path; } catch (err: any) {
+  let hydrationWarnings: string[];
+  try { ({ path: wt, hydrationWarnings } = reviewWorktree(canonical, branch, reviewWorktreePath(canonical, pr.number, runId), headSha,
+    (relative) => deps.log(chalk.gray(`  cloning ${relative} into the worktree…`)))); } catch (err: any) {
     return fail(`could not add a worktree: ${err?.message || err}`);
   }
   out.worktree = wt;
   deps.log(`${chalk.bold(reviewer.name)} (${agent}) reviewing PR #${pr.number} ${chalk.gray(pr.title)}`);
   deps.log(chalk.gray(`  ${wt} on ${branch} at ${headSha.slice(0, 8)}`));
+  for (const warning of hydrationWarnings) deps.log(chalk.gray(`  could not hydrate ${warning}`));
 
-  try { await deps.api.startReviewRun(runId, { hostname: deps.hostname, branch, headSha }); } catch (err: any) {
+  try { await deps.api.startReviewRun(runId, { hostname: deps.hostname, branch, headSha, ...(deps.runnerInstance ? { instance: deps.runnerInstance } : {}) }); } catch (err: any) {
     deps.error(chalk.gray(`  (could not report the start: ${err?.message || err})`));
   }
 
-  const schemaFile = path.join(wt, REVIEW_SCHEMA_FILE);
-  const outFile = path.join(wt, packet.resultFile || REVIEW_RESULT_FILE);
+  // Origin's own files stay out of the worktree (REVIEW_SCHEMA_FILE): the
+  // schema always, and codex's answer too, which its CLI writes (`-o`), not
+  // the agent. An agent without structured output writes the answer itself,
+  // where the prompt says: in the worktree.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-review-'));
+  const schemaFile = path.join(tmp, REVIEW_SCHEMA_FILE);
+  const outFile = agent === 'codex' ? path.join(tmp, REVIEW_RESULT_FILE) : path.join(wt, packet.resultFile || REVIEW_RESULT_FILE);
   const schema = packet.resultSchema || REVIEW_RESULT_SCHEMA;
   let cursorScope: string | null = null;
   let agyProject: { id: string; file: string } | null = null;
+  const shallowBefore = isShallow(canonical);
   try {
     fs.writeFileSync(schemaFile, JSON.stringify(schema, null, 2));
     try { fs.rmSync(outFile, { force: true }); } catch { /* absent */ }
     if (agent === 'cursor') cursorScope = writeCursorScope(wt);
     if (agent === 'antigravity') agyProject = createBackgroundProject(wt, `Origin review: PR #${pr.number}`);
 
-    const argv = deps.agentArgvFor(agent, packet.prompt, { schemaFile, outFile, schema }, { antigravityProject: agyProject?.id, model: packet.reviewer.model });
+    const prompt = reviewPromptWithGitRules(packet.prompt, baseFetched ? baseRef : null);
+    const argv = deps.agentArgvFor(agent, prompt, { schemaFile, outFile, schema }, { antigravityProject: agyProject?.id, model: packet.reviewer.model });
     if (!argv) return await fail(`${agent} has no headless mode here`);
     const exe = findOnPath(argv[0], deps.env, deps.platform);
     if (!exe) return await fail(`${argv[0]} is not installed on this machine (not on PATH)`);
@@ -273,9 +393,17 @@ export async function runOneReview(runId: string, opts: ReviewRunOptions, deps: 
     for (const f of result.findings) deps.log(describe(f));
     return out;
   } finally {
+    // The worktree shares the checkout's .git: an agent's `git fetch --depth`
+    // made the person's own repo shallow. Undo it.
+    if (becameShallow(shallowBefore, isShallow(canonical))) {
+      deps.error(chalk.yellow(`  ⚠ ${reviewer.name} made ${canonical} a shallow clone; restoring its history (git fetch --unshallow ${remote})`));
+      if (!gitOk(['fetch', '--quiet', '--unshallow', remote], canonical)) {
+        deps.error(chalk.yellow(`  ⚠ could not restore it — run: git -C ${canonical} fetch --unshallow ${remote}`));
+      }
+    }
     removeCursorScope(cursorScope);
     removeBackgroundProject(agyProject?.file);
-    try { fs.rmSync(schemaFile, { force: true }); } catch { /* fine */ }
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* fine */ }
     if (opts.keepWorktree) deps.log(chalk.gray(`  worktree kept: ${wt}`));
     else removeWorktree(canonical, wt, branch);
   }

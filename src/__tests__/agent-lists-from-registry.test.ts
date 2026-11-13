@@ -60,7 +60,7 @@ describe('agent lists derived from the registry', () => {
     for (const agent of REGISTRY) {
       const id = toolIdOf(agent);
       expect(CANONICAL_AGENT_IDS, agent.slug).toContain(id);
-      expect(ORIGIN_HOOK_COMMAND_TAIL.test(`hooks ${id} stop`), agent.slug).toBe(!!agent.hooks);
+      expect(ORIGIN_HOOK_COMMAND_TAIL.test(`origin hooks ${id} stop`), agent.slug).toBe(!!agent.hooks);
     }
   });
 });

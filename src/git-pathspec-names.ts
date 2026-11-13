@@ -7,7 +7,8 @@
  * (`ls src`, `cd src`) must not claim a sibling session's writes under it.
  *
  * A git command that rewrites paths is different: it touches exactly the paths
- * it names. `git checkout HEAD~1 -- package.json` names the root file;
+ * it names. `git checkout HEAD~1 -- package.json` names the root file (while
+ * the revision classification below records that git supplied its bytes);
  * `git checkout HEAD~1 -- lib` and `git rm -r src/legacy` name every file under
  * the directory; `git revert --no-commit HEAD` names the files of the commit it
  * reverts. Review of #1684: without this an interrupted turn running those went
@@ -36,6 +37,7 @@ const TAKES_VALUE: Record<string, Set<string>> = {
 const GLOBAL_TAKES_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path']);
 
 const cache = new Map<string, string[]>();
+const materializedCache = new Map<string, string[]>();
 
 function segments(command: string): string[][] {
   const out: string[][] = [];
@@ -155,6 +157,88 @@ export function gitPathspecsNamed(command: string, tree?: string): string[] {
   return result;
 }
 
+/**
+ * Paths a command explicitly replaces with bytes from a revision this branch
+ * never had.
+ *
+ * These paths are named, but naming is not authorship: a reviewer running
+ * `git checkout <pr-ref> -- a.ts b.ts` is asking git to materialize somebody
+ * else's tree (session 16ec04f9, +5622 lines billed). A revision already in
+ * the branch's history stays the turn's — `git checkout HEAD~1 -- f` is the
+ * turn reverting its own file (#1812). Given `tree`, a revision that is an
+ * ancestor of its HEAD, or that does not resolve, names nothing here; without
+ * one there is nothing to ask. Conflict-side selection stays out deliberately —
+ * `git checkout --ours/--theirs -- f` is the turn resolving `f`.
+ */
+/**
+ * Is `revision` an ancestor of (or equal to) `tree`'s HEAD? A revision that
+ * does not resolve counts as in history, so the #1812 rule keeps the path.
+ */
+function inBranchHistory(revision: string, tree: string): boolean {
+  if (revision.startsWith('-')) return true;
+  const sha = readQuiet(['rev-parse', '--verify', '--quiet', `${revision}^{commit}`], tree).trim();
+  if (!sha) return true;
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], { cwd: tree, stdio: 'ignore', timeout: 5_000, windowsHide: true });
+    return true;
+  } catch (e: any) {
+    // Exit 1 is git's "not an ancestor"; anything else is an unanswered question.
+    return e?.status !== 1;
+  }
+}
+
+export function gitRevisionPathspecsNamed(command: string, tree?: string): string[] {
+  if (!command || !/\bgit\b/.test(command)) return [];
+  const key = `${tree || ''}\0${command}`;
+  const hit = materializedCache.get(key);
+  if (hit) return hit;
+  const out = new Set<string>();
+  for (const words of segments(command.replace(/\\/g, '/'))) {
+    let i = 0;
+    while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i++;
+    if (words[i] === 'sudo' || words[i] === 'command' || words[i] === 'exec') i++;
+    if (i >= words.length || path.posix.basename(words[i]) !== 'git') continue;
+    i++;
+    while (i < words.length && words[i].startsWith('-')) {
+      i += GLOBAL_TAKES_VALUE.has(words[i]) && !words[i].includes('=') ? 2 : 1;
+    }
+    const sub = words[i];
+    if (sub !== 'checkout' && sub !== 'restore') continue;
+    const rest = words.slice(i + 1);
+    if (rest.includes('--ours') || rest.includes('--theirs')) continue;
+    const dashes = rest.indexOf('--');
+    if (sub === 'checkout' && (dashes < 0 || dashes === rest.length - 1)) continue;
+    const before = dashes >= 0 ? rest.slice(0, dashes) : rest;
+    let revision = '';
+    if (sub === 'checkout') {
+      for (let k = 0; k < before.length; k++) {
+        const w = before[k];
+        if (w.startsWith('-')) { if (TAKES_VALUE.checkout.has(w) && !w.includes('=')) k++; continue; }
+        revision ||= w;
+      }
+    } else {
+      for (let k = 0; k < before.length; k++) {
+        const w = before[k];
+        if ((w === '-s' || w === '--source') && before[k + 1]) revision = before[k + 1];
+        else if (w.startsWith('--source=')) revision = w.slice('--source='.length);
+      }
+    }
+    if (!revision) continue;
+    if (tree && inBranchHistory(revision, tree)) continue;
+    for (const p of gitPathspecsNamed(words.map((w) => JSON.stringify(w)).join(' '), tree)) out.add(p);
+  }
+  const result = [...out];
+  if (materializedCache.size > 256) materializedCache.clear();
+  materializedCache.set(key, result);
+  return result;
+}
+
+export function fileNamedByGitRevisionPathspec(command: string, file: string, tree?: string): boolean {
+  const rel = file.replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!rel) return false;
+  return gitRevisionPathspecsNamed(command, tree).some((p) => p === '' || p === rel || rel.startsWith(`${p}/`));
+}
+
 /** Does a mutating git command in `command` name `file` (repo-relative) or a directory it lives under? */
 export function fileNamedByGitPathspec(command: string, file: string, tree?: string): boolean {
   const rel = file.replace(/\\/g, '/').replace(/^\.\//, '');
@@ -165,7 +249,7 @@ export function fileNamedByGitPathspec(command: string, file: string, tree?: str
 /** Paths per turn kept in state; a turn naming more is kept to its first N. */
 const MAX_PATHSPECS_PER_TURN = 200;
 
-type PathspecState = { gitPathspecsByTurn?: Array<{ promptIndex: number; paths: string[] }> };
+type PathspecState = { gitPathspecsByTurn?: Array<{ promptIndex: number; paths: string[]; revisionPaths?: string[] }> };
 
 /**
  * Record, against LOCAL turn `promptIndex`, the paths a mutating git command
@@ -180,13 +264,27 @@ export function recordGitPathspecs(state: PathspecState, promptIndex: number, co
     if (!Number.isInteger(promptIndex) || promptIndex < 0) return;
     const named = gitPathspecsNamed(command, tree);
     if (named.length === 0) return;
+    const revisionNamed = gitRevisionPathspecsNamed(command, tree);
     // Carried rows are re-checked on every later Stop, so earlier turns keep
     // their record; only the oldest go once the list is long.
     const keep = (state.gitPathspecsByTurn || []).filter((e) => e.promptIndex !== promptIndex).slice(-63);
     const prev = (state.gitPathspecsByTurn || []).find((e) => e.promptIndex === promptIndex)?.paths || [];
+    const prevRevision = (state.gitPathspecsByTurn || []).find((e) => e.promptIndex === promptIndex)?.revisionPaths || [];
     const paths = [...new Set([...prev, ...named])].slice(0, MAX_PATHSPECS_PER_TURN);
-    state.gitPathspecsByTurn = [...keep, { promptIndex, paths }];
+    const revisionPaths = [...new Set([...prevRevision, ...revisionNamed])].slice(0, MAX_PATHSPECS_PER_TURN);
+    state.gitPathspecsByTurn = [...keep, { promptIndex, paths, ...(revisionPaths.length > 0 ? { revisionPaths } : {}) }];
   } catch { /* records nothing */ }
+}
+
+/** Files a turn explicitly materialized from a git revision. */
+export function filesTurnNamedByGitRevisionPathspec(state: PathspecState, promptIndex: number, files: Iterable<string>): Set<string> {
+  const out = new Set<string>();
+  const specs = (state.gitPathspecsByTurn || []).find((e) => e.promptIndex === promptIndex)?.revisionPaths || [];
+  for (const f of files) {
+    const rel = String(f || '').replace(/\\/g, '/').replace(/^\.\//, '');
+    if (rel && specs.some((p) => p === '' || p === rel || rel.startsWith(`${p}/`))) out.add(f);
+  }
+  return out;
 }
 
 /** Files among `files` a mutating git command of LOCAL turn `promptIndex` named. */

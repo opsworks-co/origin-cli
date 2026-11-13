@@ -206,6 +206,9 @@ export async function request(path: string, opts: RequestInit = {}, timeoutMs?: 
 
 export const api = {
   getPolicies: () => request('/api/mcp/policies'),
+  // Origin-hosted repos: the hosting host, and the caller's own git sign-in (CLI credential helper).
+  getHostingStatus: () => request('/api/hosting/status', {}, 10_000),
+  getGitCredential: () => request('/api/hosting/git-credential', {}, 10_000),
   registerMachine: (data: any) => request('/api/machines', { method: 'POST', body: JSON.stringify(data) }),
   getMachines: () => request('/api/machines'),
   // Settings → Agents: which agents are installed here and who they are signed in as (agent-setup.ts).
@@ -234,8 +237,13 @@ export const api = {
   // using the org's AI-provider LLM key. Returns { brief: string | null }.
   generateMemoryBrief: (data: unknown) => request('/api/mcp/sessions/memory-brief', { method: 'POST', body: JSON.stringify(data) }, LLM_CALL_TIMEOUT_MS),
   // Agent benchmarking — code-survival sync (see commands/benchmark.ts).
-  getSurvivalTargets: (repoFullName: string) =>
-    request(`/api/mcp/benchmarks/survival/targets?repoFullName=${encodeURIComponent(repoFullName)}`),
+  // repoPath + repoUrl let the server route to the org the sessions went to
+  // (a personal key working on a team repo), like session/start does.
+  getSurvivalTargets: (repoFullName: string, checkout?: { repoPath: string; repoUrl: string }) => {
+    const params = new URLSearchParams({ repoFullName });
+    if (checkout) { params.set('repoPath', checkout.repoPath); params.set('repoUrl', checkout.repoUrl); }
+    return request(`/api/mcp/benchmarks/survival/targets?${params.toString()}`);
+  },
   postSurvival: (data: unknown) =>
     request('/api/mcp/benchmarks/survival', { method: 'POST', body: JSON.stringify(data) }),
   // Origin Why: provenance for a single line — which session/prompt authored it.
@@ -268,36 +276,66 @@ export const api = {
   // Closed issues whose PR merged, with its merge commit (`origin benchmark replay-tasks`).
   getIssueReplayCandidates: (repoId: string, ids?: string[] | null) =>
     request(`/api/repos/${encodeURIComponent(repoId)}/issues/replay-candidates${ids && ids.length ? `?ids=${encodeURIComponent(ids.join(','))}` : ''}`),
+  // `origin issue create`: the same issue on Origin, under the id it got here.
+  createIssue: (repoId: string, data: { shortId: string; title: string; description?: string; type: string; priority: number; labels: string[]; deps: string[] }) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/issues`, { method: 'POST', body: JSON.stringify(data) }),
   getIssue: (repoId: string, shortId: string) =>
     request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}`),
   updateIssue: (repoId: string, shortId: string, data: Record<string, unknown>) =>
     request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}`, { method: 'PATCH', body: JSON.stringify(data) }),
   // An agent run on the issue, for the Start dialog's live status: reported
   // when the agent launches, and again when it exits.
-  startIssueRun: (repoId: string, shortId: string, data: { agent: string; branch: string | null; background: boolean; hostname: string }, timeoutMs = 5000) =>
+  startIssueRun: (repoId: string, shortId: string, data: { agent: string; branch: string | null; background: boolean; hostname: string; status?: 'not_started'; detail?: string }, timeoutMs = 5000) =>
     request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}/runs`, { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
   endIssueRun: (repoId: string, shortId: string, runId: string, data: { status: 'done' | 'failed' | 'timed_out'; exitCode: number; detail: string | null }, timeoutMs = 5000) =>
     request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}/runs/${encodeURIComponent(runId)}`, { method: 'PATCH', body: JSON.stringify(data) }, timeoutMs),
   // Reviewer agents (`origin review run`, review-run.ts): the run's packet —
   // the PR, the reviewer and the whole prompt — then its start here and its
   // findings. Same auth as everything else: the person's own key.
-  getReviewRunPacket: (runId: string) =>
-    request(`/api/reviewers/runs/${encodeURIComponent(runId)}/packet`),
+  // 30 s, not the 8 s default: the server reads the PR's diff from the host
+  // and the repo's memory (up to 1 MB) to build it, and right after a deploy
+  // that took longer than 8 s for two runs claimed together.
+  getReviewRunPacket: (runId: string, timeoutMs = 30000) =>
+    request(`/api/reviewers/runs/${encodeURIComponent(runId)}/packet`, {}, timeoutMs),
   // The team's Anthropic / OpenAI key for this run (Agents page), as the
   // environment variables the agent reads; `env` is empty when there is none.
   getReviewRunCredentials: (runId: string, timeoutMs = 10000) =>
     request(`/api/reviewers/runs/${encodeURIComponent(runId)}/credentials`, {}, timeoutMs),
-  startReviewRun: (runId: string, data: { hostname: string; branch: string; headSha: string | null }, timeoutMs = 10000) =>
+  startReviewRun: (runId: string, data: { hostname: string; branch: string; headSha: string | null; instance?: string }, timeoutMs = 10000) =>
     request(`/api/reviewers/runs/${encodeURIComponent(runId)}/start`, { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
   reportReviewRun: (runId: string, data: Record<string, unknown>, timeoutMs = 30000) =>
     request(`/api/reviewers/runs/${encodeURIComponent(runId)}/result`, { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
   // `origin review runner`: claim the oldest queued run for one of this
   // machine's checkouts (owner/name full names); null when nothing is queued.
-  claimReviewRun: (data: { machineId: string; repos: string[] }, timeoutMs = 10000) =>
+  claimReviewRun: (data: { machineId: string; instance?: string; repos: string[] }, timeoutMs = 10000) =>
     request('/api/reviewers/runner/claim', { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
+  // The runner says it is alive and what it is (Settings → Runners) and learns
+  // how many runs at once the dashboard allows. A 404 from an older server.
+  runnerHello: (data: { machineId: string; version: string | null; parallel: number; mode: 'all' | 'no_local_ci' | 'local_ci_only'; repos: string[]; scope?: 'mine' | 'workspace'; host?: { label: string; url?: string } }, timeoutMs = 10000) =>
+    request('/api/runners/hello', { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
+  // The runner process is still driving its run (so another daemon's claim leaves it alone).
+  heartbeatReviewRunner: (data: { machineId: string; instance: string }, timeoutMs = 10000) =>
+    request('/api/reviewers/runner/heartbeat', { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
   // Local CI (commands/local-ci.ts): claim a repo's queued test command for
   // one of these checkouts, and report how it went.
-  claimLocalCheck: (data: { machineId: string; repos: string[] }, timeoutMs = 10000) =>
+  // The Orchestrator's live mode: the runner daemon claims a queued issue and says how its launch went.
+  claimOrchestratorRun: (data: { machineId: string; repos: string[] }, timeoutMs = 10000) =>
+    request('/api/orchestrator-runner/claim', { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
+  reportOrchestratorLaunch: (runId: string, data: { ok: boolean; output: string }, timeoutMs = 15000) =>
+    request(`/api/orchestrator-runner/runs/${encodeURIComponent(runId)}/launched`, { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
+  // Scopes (commands/orchestrator-scope.ts): the runner's split, and the person's commands.
+  getSplitPacket: (scopeId: string) =>
+    request(`/api/orchestrator-runner/scopes/${encodeURIComponent(scopeId)}/packet`),
+  postSplitResult: (scopeId: string, data: { ok: boolean; result?: unknown; error?: string }) =>
+    request(`/api/orchestrator-runner/scopes/${encodeURIComponent(scopeId)}/result`, { method: 'POST', body: JSON.stringify(data) }, 30000),
+  createScope: (data: { repoId: string; text: string | null; epicShortId: string | null }) =>
+    request('/api/orchestrator/scopes', { method: 'POST', body: JSON.stringify(data) }, 30000),
+  listScopes: () => request('/api/orchestrator/scopes'),
+  approveScope: (scopeId: string) =>
+    request(`/api/orchestrator/scopes/${encodeURIComponent(scopeId)}/approve`, { method: 'POST' }, 30000),
+  discardScope: (scopeId: string) =>
+    request(`/api/orchestrator/scopes/${encodeURIComponent(scopeId)}/discard`, { method: 'POST' }),
+  claimLocalCheck: (data: { machineId: string; repos: string[]; host?: { label: string; url?: string } }, timeoutMs = 10000) =>
     request('/api/ci/local/claim', { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
   reportLocalCheck: (checkId: string, data: Record<string, unknown>, timeoutMs = 30000) =>
     request(`/api/ci/local/${encodeURIComponent(checkId)}/result`, { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
@@ -306,7 +344,7 @@ export const api = {
     request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}/runs/${encodeURIComponent(runId)}`, { method: 'PATCH', body: JSON.stringify({ status: 'started', detail }) }, timeoutMs),
   // What `origin issue start`'s pre-start pass asked (and any answers typed in the terminal),
   // and a person's answer to an agent's question (`origin issue answer`).
-  postIssueQuestions: (repoId: string, shortId: string, data: { questions: Array<{ question: string; answer: string | null }>; agent: string }, timeoutMs = 10000) =>
+  postIssueQuestions: (repoId: string, shortId: string, data: { questions: Array<{ question: string; answer: string | null; suggestion?: string | null }>; agent: string }, timeoutMs = 10000) =>
     request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}/questions`, { method: 'POST', body: JSON.stringify(data) }, timeoutMs),
   answerIssueQuestion: (repoId: string, shortId: string, data: { answer: string; id?: string | null }) =>
     request(`/api/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(shortId)}/answer`, { method: 'POST', body: JSON.stringify(data) }),
@@ -331,6 +369,9 @@ export const api = {
   // instead of guessing from the key. A dry run: the server creates nothing.
   previewRoute: (data: { repoPath: string; repoUrl?: string; recentShas?: string[] }) =>
     request('/api/mcp/route-preview', { method: 'POST', body: JSON.stringify(data) }),
+  // `origin pr create`: the server opens it on the repo's host and answers { id, number, url }.
+  openPullRequest: (repoId: string, data: { head: string; base?: string; title: string; body: string; draft: boolean }) =>
+    request(`/api/repos/${encodeURIComponent(repoId)}/pull-requests`, { method: 'POST', body: JSON.stringify(data) }, 60_000),
   // Tell the server how many sessions from a PREVIOUS account are sitting
   // unimported locally, so the dashboard can show an import/forget banner.
   // Returns { pendingAction: 'import' | 'forget' | null } — the web-initiated

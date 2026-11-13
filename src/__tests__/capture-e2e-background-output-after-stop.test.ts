@@ -38,6 +38,12 @@ describe.skipIf(!haveDist)('a background job that outlives its turn\'s Stop, thr
       h.reply('Started the generator.');
       await h.stop();
       expect(h.rows().find((r: any) => r.promptIndex === 0)?.filesChanged).toEqual([MINE]);
+      // TODO 3e34e7d7: the launch is on the state, so after this Stop a sibling
+      // in the tree still sees this session as writing.
+      const st = JSON.parse(fs.readFileSync(path.join(h.repo, '.git', 'origin-session-e2e-bg-outpu.json'), 'utf-8'));
+      expect(st.backgroundJobs?.map((j: any) => j.tool)).toEqual(['Bash']);
+      const { peerIdleSinceMs } = await import('../checkout-contention.js');
+      expect(peerIdleSinceMs(st)).toBeUndefined();
 
       // The job finishes after Stop: no hook fires.
       fs.writeFileSync(path.join(h.repo, GEN), numbered('client', 20));

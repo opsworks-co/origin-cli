@@ -617,7 +617,13 @@ class Fixture {
   }
   private patchLocal(hook: string) {
     const src = fs.readFileSync(hook, 'utf-8');
-    const patched = src.replace(/(?:PATH=\S+ )?origin hooks /g, `"${this.wrapper}" hooks `);
+    let patched = src.replace(/(?:PATH=\S+ )?origin hooks /g, `"${this.wrapper}" hooks `);
+    // The rewrite hooks launch the preamble's "$ORIGIN_BIN": resolve it to the built CLI.
+    const start = patched.indexOf('ORIGIN_BIN=""');
+    if (start >= 0) {
+      const end = patched.indexOf('\nfi\n', start);
+      patched = patched.slice(0, start) + `ORIGIN_BIN="${this.wrapper}"` + patched.slice(end + '\nfi'.length);
+    }
     expect(patched).not.toBe(src);
     fs.writeFileSync(hook, patched, { mode: 0o755 });
   }

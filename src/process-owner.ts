@@ -196,6 +196,29 @@ export function resolveAgentOwner(agentSlug: string | null | undefined): Process
   }
 }
 
+/**
+ * Is the recorded agent process still running — the same pid with the same
+ * start time, on this host and boot? False when it is gone, recycled, recorded
+ * elsewhere, or cannot be read (Windows). Never throws.
+ *
+ * Lets a caller about to END a session for being stale tell an idle agent from
+ * a dead one: a Codex or Claude window left open for an afternoon touches no
+ * Origin file, yet its session is very much alive.
+ */
+export function ownerProcessRunning(
+  owner: ProcessIdentity | null | undefined,
+  env: WalkEnv | null = defaultEnv(),
+): boolean {
+  try {
+    if (!env || !owner || !Number.isInteger(owner.pid) || owner.pid <= 1 || !owner.start) return false;
+    if (owner.host && env.host && owner.host !== env.host) return false;
+    if ((owner.boot || env.boot) && owner.boot !== env.boot) return false;
+    return env.stat(owner.pid)?.start === owner.start;
+  } catch {
+    return false;
+  }
+}
+
 /** A walked chain of ancestors, nearest first. */
 export interface Ancestry {
   host?: string;

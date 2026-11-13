@@ -221,6 +221,26 @@ export function candidateCheckouts(sessionsDir = path.join(ORIGIN_DIR, 'sessions
   return [...seen.entries()].sort((a, b) => b[1] - a[1]).map(([p]) => p).filter(isGitCheckout);
 }
 
+/**
+ * Checkouts in the folders that hold the ones Origin knows — a clone into
+ * `~/Documents` sits next to `~/Documents/other-repo` — so a fresh clone,
+ * with no session and nothing remembering it yet, is still found.
+ */
+export function nearbyCheckouts(roots: string[]): string[] {
+  const parents = new Set(roots.map((r) => path.dirname(r)).filter((p) => p !== path.dirname(p)));
+  const out: string[] = [];
+  for (const parent of parents) {
+    let names: string[] = [];
+    try { names = fs.readdirSync(parent); } catch { continue; }
+    for (const name of names) {
+      if (name.startsWith('.')) continue;
+      const dir = path.join(parent, name);
+      if (!roots.includes(dir) && !out.includes(dir) && isGitCheckout(dir)) out.push(dir);
+    }
+  }
+  return out;
+}
+
 export function remoteUrl(dir: string): string {
   try {
     return execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: dir, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
@@ -237,6 +257,8 @@ export function remoteNames(url: string, name: string): boolean {
 export interface FindCheckoutDeps {
   known: () => Record<string, string>;
   candidates: () => string[];
+  /** Checkouts next to these roots (`nearbyCheckouts`); none when absent. */
+  nearby?: (roots: string[]) => string[];
   remote: (dir: string) => string;
   /** The API's repo id for a checkout (route-preview), or null when it can't tell. */
   repoIdOf: (dir: string, remote: string) => Promise<string | null>;
@@ -263,6 +285,19 @@ export async function findCheckout(req: Pick<IssueLaunchRequest, 'repoId' | 'rep
   if (byName) return byName;
   const rest = await ask(all.filter((d) => !named.includes(d)).slice(0, 12));
   if (rest) return rest;
+  // A fresh clone: look next to the known checkouts, at those whose remote
+  // names the repo — only now, it costs a `git remote` per folder there.
+  if (req.repoName && deps.nearby) {
+    const known = Object.values(deps.known()).filter((v): v is string => typeof v === 'string' && !!v);
+    for (const d of deps.nearby([...new Set([...known, ...all])])) {
+      if (remotes.has(d)) continue;
+      const r = deps.remote(d);
+      remotes.set(d, r);
+      if (remoteNames(r, req.repoName)) named.push(d);
+    }
+    const near = await ask(named.filter((d) => !all.includes(d)).slice(0, 12));
+    if (near) return near;
+  }
   // Offline: one checkout whose remote names the repo is a fair guess.
   return named.length === 1 ? named[0] : null;
 }
@@ -272,6 +307,7 @@ export async function defaultFindDeps(): Promise<FindCheckoutDeps> {
   return {
     known: readKnown,
     candidates: () => candidateCheckouts(),
+    nearby: nearbyCheckouts,
     remote: remoteUrl,
     repoIdOf: async (dir, remote) => {
       if (!isConnectedMode()) return null;
@@ -330,7 +366,7 @@ export function reviewLaunchScript(dir: string | null, req: ReviewLaunchRequest,
     `echo ${shQuote(`Origin could not find a checkout of ${what} on this machine.`)}`,
     `echo ${shQuote('cd into it and run:')}`,
     `echo ${shQuote(`  ${reviewRunCommandText(req.runIds)}`)}`,
-    `echo ${shQuote('Once a checkout has run that (or `origin url-handler install` inside it), Run reviewers finds it.')}`,
+    `echo ${shQuote('To have Run reviewers find it next time, run `origin url-handler install` inside it once.')}`,
   );
   lines.push('exec "${SHELL:-/bin/sh}" -il', '');
   return lines.join('\n');
@@ -415,12 +451,12 @@ export function loginShell(env: NodeJS.ProcessEnv = process.env): string {
  * handler log, and macOS shows a notification saying where the run is.
  */
 function startInBackground(dir: string, req: IssueLaunchRequest, self: [string, string], platform: NodeJS.Platform): void {
-  const start = `${shQuote(self[0])} ${shQuote(self[1])} issue start ${shQuote(req.shortId)} --agent ${shQuote(req.agent)}${modeFlag(req)}`;
+  const start = backgroundStartLine(req, self);
   fs.mkdirSync(ORIGIN_DIR, { recursive: true });
   const out = fs.openSync(LOG_FILE, 'a');
   try {
     const child = platform === 'win32'
-      ? spawn(self[0], [self[1], 'issue', 'start', req.shortId, '--agent', req.agent, '--background', ...(req.force ? ['--force'] : [])], { cwd: dir, detached: true, stdio: ['ignore', out, out], env: freshAgentEnv(process.env), windowsHide: true })
+      ? spawn(self[0], [self[1], 'issue', 'start', req.shortId, '--agent', req.agent, '--background', ...(req.force ? ['--force'] : []), '--repo-id', req.repoId], { cwd: dir, detached: true, stdio: ['ignore', out, out], env: freshAgentEnv(process.env), windowsHide: true })
       : spawn(loginShell(), ['-ilc', start], { cwd: dir, detached: true, stdio: ['ignore', out, out], env: freshAgentEnv(process.env), windowsHide: true });
     child.on('error', () => { /* logged below by the exit path */ });
     child.unref();
@@ -432,6 +468,16 @@ function startInBackground(dir: string, req: IssueLaunchRequest, self: [string, 
     const msg = `${req.agent} is working on ${req.shortId} in the background. origin issue runs shows it.`;
     try { spawnSync('osascript', ['-e', `display notification ${asString(msg)} with title "Origin"`], { stdio: 'ignore', timeout: 3000 }); } catch { /* optional */ }
   }
+}
+
+/**
+ * The command a background start runs, as a shell line (macOS / Linux).
+ * --repo-id: the link names the issue's repo, so the start skips the route
+ * lookup (slow on a cold server) and can report a stop to the issue even when
+ * that lookup would have failed.
+ */
+export function backgroundStartLine(req: IssueLaunchRequest, self: [string, string]): string {
+  return `${shQuote(self[0])} ${shQuote(self[1])} issue start ${shQuote(req.shortId)} --agent ${shQuote(req.agent)}${modeFlag(req)} --repo-id ${shQuote(req.repoId)}`;
 }
 
 /** The command a race link runs, as a shell line (macOS / Linux). */
@@ -485,7 +531,7 @@ async function openRaceUrl(url: string, req: IssueRaceRequest, injected?: Partia
 
 /** The command a cloud link runs, as a shell line (macOS / Linux). */
 export function cloudCommandLine(req: IssueCloudRequest, self: [string, string]): string {
-  return `${shQuote(self[0])} ${shQuote(self[1])} issue cloud ${shQuote(req.shortId)} --runner ${shQuote(req.runner)} --env ${shQuote(req.env)}`;
+  return `${shQuote(self[0])} ${shQuote(self[1])} issue cloud ${shQuote(req.shortId)} --runner ${shQuote(req.runner)}${req.env ? ` --env ${shQuote(req.env)}` : ''}`;
 }
 
 /**
@@ -502,7 +548,7 @@ async function openCloudUrl(url: string, req: IssueCloudRequest, injected?: Part
   const dir = await findCheckout(req, deps);
   if (!dir) {
     log(`cloud ${req.runner} on ${req.shortId}: no checkout of ${req.repoName || req.repoId} found`);
-    notify(`Origin could not find a checkout of ${req.repoName || req.repoId}. cd into it and run: origin issue cloud ${req.shortId} --env ${req.env}`, process.platform);
+    notify(`Origin could not find a checkout of ${req.repoName || req.repoId}. cd into it and run: origin issue cloud ${req.shortId}${req.env ? ` --env ${req.env}` : ''}`, process.platform);
     process.exitCode = 1;
     return;
   }
@@ -512,7 +558,7 @@ async function openCloudUrl(url: string, req: IssueCloudRequest, injected?: Part
   const out = fs.openSync(LOG_FILE, 'a');
   try {
     const child = process.platform === 'win32'
-      ? spawn(self[0], [self[1], 'issue', 'cloud', req.shortId, '--runner', req.runner, '--env', req.env], { cwd: dir, detached: true, stdio: ['ignore', out, out], env: freshAgentEnv(process.env), windowsHide: true })
+      ? spawn(self[0], [self[1], 'issue', 'cloud', req.shortId, '--runner', req.runner, ...(req.env ? ['--env', req.env] : [])], { cwd: dir, detached: true, stdio: ['ignore', out, out], env: freshAgentEnv(process.env), windowsHide: true })
       : spawn(loginShell(), ['-ilc', cloudCommandLine(req, self)], { cwd: dir, detached: true, stdio: ['ignore', out, out], env: freshAgentEnv(process.env), windowsHide: true });
     child.on('error', () => { /* logged below */ });
     child.unref();
@@ -523,7 +569,7 @@ async function openCloudUrl(url: string, req: IssueCloudRequest, injected?: Part
   } finally {
     fs.closeSync(out);
   }
-  log(`cloud ${req.runner} on ${req.shortId} (env ${req.env}) from ${dir}`);
+  log(`cloud ${req.runner} on ${req.shortId} (env ${req.env ?? 'the repo\'s own'}) from ${dir}`);
   notify(`Codex cloud is taking ${req.shortId}. Origin follows the task and shows how it ends on the issue.`, process.platform);
 }
 
@@ -719,7 +765,7 @@ export function runEpicLaunchScript(dir: string | null, req: IssueRunEpicRequest
     `echo ${shQuote(`Origin could not find a checkout of ${what} on this machine.`)}`,
     `echo ${shQuote('cd into it and run:')}`,
     `echo ${shQuote(`  ${issueRunEpicCommandLine(req.shortId, { agent: req.agent, max: req.max })}`)}`,
-    `echo ${shQuote('Once a checkout has run that (or `origin url-handler install` inside it), Run epic finds it.')}`,
+    `echo ${shQuote('To have Run epic find it next time, run `origin url-handler install` inside it once.')}`,
   );
   lines.push('exec "${SHELL:-/bin/sh}" -il', '');
   return lines.join('\n');

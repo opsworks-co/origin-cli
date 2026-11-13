@@ -239,8 +239,9 @@ function healHookConfigsWithInstalledCode(): void {
       timeout: 30_000,
     });
     // `hooks repair` already prints one line per config it touched; only echo
-    // it when it actually did something, so a clean upgrade stays quiet.
-    if (/✓|⚠|✗/.test(out) && !/All \d+ hook config/.test(out)) {
+    // it when it actually did something (fixed a config, or set the Claude Code
+    // status line), so a clean upgrade stays quiet.
+    if (/✓|⚠|✗/.test(out) && (!/All \d+ hook config/.test(out) || /status line/.test(out))) {
       process.stdout.write(out);
     }
   } catch {
@@ -439,6 +440,24 @@ export function trustedDownloadUrl(raw: unknown): string | null {
 
 // ─── Installation ──────────────────────────────────────────────────────────
 
+// The tarball is several MB; 30s failed a real upgrade right after a deploy.
+const DOWNLOAD_TIMEOUT_MS = 120_000;
+
+/**
+ * One line saying why an upgrade step failed. The catch below used to print
+ * nothing but "Upgrade failed", so a download that timed out read the same as
+ * a server error or a broken install. Pure.
+ */
+export function upgradeFailureReason(err: any): string {
+  if (err?.killed || err?.code === 'ETIMEDOUT' || err?.signal === 'SIGTERM') {
+    return `the download took longer than ${DOWNLOAD_TIMEOUT_MS / 1000}s`;
+  }
+  const stderr = typeof err?.stderr === 'string' ? err.stderr : Buffer.isBuffer(err?.stderr) ? err.stderr.toString('utf-8') : '';
+  const message = typeof err?.message === 'string' ? err.message : typeof err === 'string' ? err : '';
+  const line = (stderr.trim() || message).split('\n').map((l: string) => l.trim()).filter(Boolean).pop();
+  return line || 'unknown error';
+}
+
 function downloadAndInstall(url: string, expectedSha256: string, expectedVersion: string): boolean {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-cli-'));
   const tgzPath = path.join(tmpDir, 'origin-cli-latest.tgz');
@@ -449,7 +468,7 @@ function downloadAndInstall(url: string, expectedSha256: string, expectedVersion
     execFileSync('curl', ['-fsSL', url, '-o', tgzPath], { windowsHide: true,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 30_000,
+      timeout: DOWNLOAD_TIMEOUT_MS,
     });
 
     // Verify SHA-256 integrity
@@ -485,6 +504,8 @@ function downloadAndInstall(url: string, expectedSha256: string, expectedVersion
     if (process.platform !== 'win32' && err.message?.includes('EACCES')) {
       console.log(chalk.yellow('\n  Permission denied. Please run manually with elevated permissions:'));
       console.log(chalk.gray(`    sudo npm install -g ${TARBALL_URL}\n`));
+    } else {
+      console.log(chalk.red(`\n  ${upgradeFailureReason(err)}`));
     }
 
     return false;

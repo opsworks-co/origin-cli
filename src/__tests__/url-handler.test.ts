@@ -6,7 +6,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { issueLaunchUrl, parseIssueLaunchUrl } from '../issue-prompt.js';
-import { candidateCheckouts, findCheckout, isRepeatLaunch, launchScript, raceCommandLine, cloudCommandLine, remoteNames, selfCommand, type FindCheckoutDeps } from '../url-handler.js';
+import { candidateCheckouts, findCheckout, isRepeatLaunch, nearbyCheckouts, launchScript, backgroundStartLine, raceCommandLine, cloudCommandLine, remoteNames, selfCommand, type FindCheckoutDeps } from '../url-handler.js';
 
 function gitDir(): string {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-launch-'));
@@ -75,6 +75,24 @@ describe('finding the checkout', () => {
     expect(await findCheckout({ repoId: 'r3', repoName: 'acme/zzz' }, d)).toBeNull();
   });
 
+  it('finds a fresh clone next to a known checkout by its remote', async () => {
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-near-'));
+    const known = path.join(parent, 'other'); const clone = path.join(parent, 'app'); const stray = path.join(parent, 'notes');
+    for (const d of [known, clone]) fs.mkdirSync(path.join(d, '.git'), { recursive: true });
+    fs.mkdirSync(stray);
+    expect(nearbyCheckouts([known])).toEqual([clone]);
+    const remote = (d: string) => (d === clone ? 'https://code.example.com/internal/app' : 'https://code.example.com/internal/other');
+    const asked: string[] = [];
+    const found = await findCheckout({ repoId: 'r4', repoName: 'internal/app' }, deps({
+      known: () => ({ rOther: known }), nearby: nearbyCheckouts, remote,
+      repoIdOf: async (d) => { asked.push(d); return d === clone ? 'r4' : null; },
+    }));
+    expect(found).toBe(clone);
+    expect(asked).toEqual([clone]);
+    // Offline, the one clone naming the repo still wins.
+    expect(await findCheckout({ repoId: 'r4', repoName: 'internal/app' }, deps({ known: () => ({ rOther: known }), nearby: nearbyCheckouts, remote }))).toBe(clone);
+  });
+
   it('lists checkouts from session state files, main checkout over worktree, newest first', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-sessions-'));
     const main = gitDir(); const other = gitDir();
@@ -141,6 +159,12 @@ describe('the command the handler runs', () => {
 });
 
 describe('a race link', () => {
+  it('a background start names the issue\'s repo, so it skips the route lookup', () => {
+    expect(backgroundStartLine({ repoId: 'cmrepo1', shortId: 'fix-0694', agent: 'claude', repoName: null, worktree: true, background: true }, ['/usr/bin/node', '/opt/origin/index.js']))
+      .toBe("'/usr/bin/node' '/opt/origin/index.js' issue start 'fix-0694' --agent 'claude' --background --repo-id 'cmrepo1'");
+    expect(backgroundStartLine({ repoId: 'r', shortId: 'x1', agent: 'codex', repoName: null, worktree: true, background: true, force: true }, ['n', 'o'])).toMatch(/--background --force --repo-id 'r'$/);
+  });
+
   it('runs origin issue race with the agents, quoted, and --force only when asked', () => {
     expect(raceCommandLine({ repoId: 'r', shortId: 'ISS-7', agents: ['claude', 'codex'], repoName: null }, ['/usr/bin/node', "/opt/it's/index.js"]))
       .toBe("'/usr/bin/node' '/opt/it'\\''s/index.js' issue race 'ISS-7' --agents 'claude,codex'");
@@ -152,5 +176,8 @@ describe('a cloud link', () => {
   it('runs origin issue cloud with the runner and env quoted — an env with spaces stays one argument', () => {
     expect(cloudCommandLine({ repoId: 'r', shortId: 'ISS-7', runner: 'codex', env: 'acme web', repoName: null }, ['/usr/bin/node', '/opt/index.js']))
       .toBe("'/usr/bin/node' '/opt/index.js' issue cloud 'ISS-7' --runner 'codex' --env 'acme web'");
+  });
+  it('leaves --env off a link without one, so the CLI finds the repo\'s', () => {
+    expect(cloudCommandLine({ repoId: 'r', shortId: 'ISS-7', runner: 'codex', env: null, repoName: null }, ['n', 'o'])).toBe("'n' 'o' issue cloud 'ISS-7' --runner 'codex'");
   });
 });

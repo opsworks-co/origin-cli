@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { randomBytes } from 'crypto';
 import { redactSecrets, containsSecrets } from '../redaction.js';
 
 const REDACTED = '[REDACTED]';
@@ -23,6 +24,25 @@ describe('redactSecrets', () => {
     expect(r.redacted).not.toContain(secret);
     expect(r.redacted).toContain(REDACTED);
     expect(r.foundCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it('redacts a generated git password', () => {
+    const pw = 'ogp_' + 'A1b-'.repeat(10) + 'xyz';
+    const line = ['password', pw].join('=');
+    const r = redactSecrets(line);
+    expect(r.redacted).not.toContain(pw);
+    expect(r.redacted).toContain(REDACTED);
+  });
+
+  it('redacts a generated-shape git password in a URL and at a sentence end, also when it ends in a dash', () => {
+    const real = 'ogp_' + randomBytes(32).toString('base64url');
+    const dashed = 'ogp_' + 'Z9_'.repeat(13) + 'abc-';
+    for (const pw of [real, dashed]) {
+      expect(pw).toHaveLength(47);
+      const url = `https://origin-abc:${pw}@code.example.com/origin/x.git`;
+      expect(redactSecrets(url).redacted).not.toContain(pw.slice(4));
+      expect(redactSecrets(`note ${pw}.`).redacted).not.toContain(pw.slice(4));
+    }
   });
 
   it('redacts GitHub personal access tokens', () => {

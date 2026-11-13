@@ -12,10 +12,16 @@
 //
 // Codex works on a diff in its own cloud; a pull request is made from
 // ChatGPT, on a `codex/…` branch — the issue's Attempts pair the run with it.
+//
+// With no --env it finds the repo's environment the way the Codex TUI does:
+// ChatGPT's environments-by-repo lookup for the GitHub remote, on the
+// person's own codex login (findCodexEnv). So Start needs no typing.
 
 import chalk from 'chalk';
 import { execFile, execFileSync } from 'child_process';
+import fs from 'fs';
 import os from 'os';
+import path from 'path';
 import { buildIssuePrompt, CLOUD_ENV, CLOUD_RUNNERS, type CloudRunner } from '../issue-prompt.js';
 import { canonicalRoot, defaultMemoryLines, findOnPath, loadMemoryModules, resolveIssue, type IssueStartDeps } from './issue-start.js';
 
@@ -42,6 +48,50 @@ export interface IssueCloudDeps extends Pick<IssueStartDeps, 'cwd' | 'env' | 'pl
   now: () => number;
   /** The repo's default branch, for the task to start from; null = let Codex pick. */
   defaultBranch: (cwd: string) => string | null;
+  /** The Codex cloud environment for the repo at cwd, when none was given. */
+  findEnv: (cwd: string) => Promise<FoundEnv>;
+}
+
+export type FoundEnv = { env: string; label: string } | { env: null; why: string };
+
+const CODEX_ENVS_PAGE = 'https://chatgpt.com/codex/settings/environments';
+
+/** owner/repo of a GitHub remote URL; null for any other host. Pure. */
+export function githubRepoOf(remote: string): string | null {
+  const m = /github\.com[:/]([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(remote.trim());
+  return m ? `${m[1]}/${m[2]}` : null;
+}
+
+/** The environment to run in, from ChatGPT's environment list: the pinned one, else the most used. Pure. */
+export function pickCodexEnv(body: unknown): { env: string; label: string } | null {
+  const list: any[] = Array.isArray(body) ? body : Array.isArray((body as any)?.items) ? (body as any).items : [];
+  const envs = list.filter((e) => typeof e?.id === 'string' && CLOUD_ENV.test(e.id));
+  if (!envs.length) return null;
+  const best = envs.find((e) => e.is_pinned) ?? [...envs].sort((a, b) => (b.task_count ?? 0) - (a.task_count ?? 0))[0];
+  return { env: best.id, label: typeof best.label === 'string' && best.label ? best.label : best.id };
+}
+
+/** The repo's environment, looked up on the person's own codex login (~/.codex/auth.json), as the Codex TUI does. */
+export async function findCodexEnv(cwd: string): Promise<FoundEnv> {
+  let remote = '';
+  try { remote = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* no remote */ }
+  const repo = githubRepoOf(remote);
+  if (!repo) return { env: null, why: 'Codex cloud runs GitHub repos only, and this checkout has no GitHub remote.' };
+  let tokens: { access_token?: string; account_id?: string } = {};
+  try {
+    const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+    tokens = JSON.parse(fs.readFileSync(path.join(home, 'auth.json'), 'utf-8'))?.tokens || {};
+  } catch { /* not signed in */ }
+  if (!tokens.access_token) return { env: null, why: 'Codex is not signed in to ChatGPT here: run `codex login`.' };
+  const headers: Record<string, string> = { Authorization: `Bearer ${tokens.access_token}`, 'User-Agent': 'origin-cli' };
+  if (tokens.account_id) headers['ChatGPT-Account-Id'] = tokens.account_id;
+  try {
+    const res = await fetch(`https://chatgpt.com/backend-api/wham/environments/by-repo/github/${repo}`, { headers, signal: AbortSignal.timeout(20_000) });
+    if (res.status === 401 || res.status === 403) return { env: null, why: 'Codex\'s ChatGPT login has expired: run `codex login`, or type the environment.' };
+    const found = res.ok ? pickCodexEnv(await res.json()) : null;
+    if (found) return found;
+  } catch { /* offline, or ChatGPT changed: say so below */ }
+  return { env: null, why: `Codex cloud has no environment for ${repo}. Create one at ${CODEX_ENVS_PAGE}, then Start again.` };
 }
 
 export type CloudTaskState = 'pending' | 'done' | 'failed';
@@ -108,6 +158,7 @@ async function defaultCloudDeps(): Promise<IssueCloudDeps> {
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     now: () => Date.now(),
     defaultBranch: defaultBranchOf,
+    findEnv: findCodexEnv,
   };
 }
 
@@ -123,8 +174,8 @@ export async function issueCloudCommand(id: string, opts: IssueCloudOptions, inj
     process.exitCode = 2;
     return notStarted;
   }
-  const env = (opts.env || '').trim();
-  if (!CLOUD_ENV.test(env)) {
+  let env = (opts.env || '').trim();
+  if (env && !CLOUD_ENV.test(env)) {
     deps.error(chalk.red('--env is the Codex cloud environment to run in (its id, or its name in `codex cloud`).'));
     process.exitCode = 2;
     return notStarted;
@@ -168,6 +219,19 @@ export async function issueCloudCommand(id: string, opts: IssueCloudOptions, inj
     if (!runId) return;
     try { await api.endIssueRun?.(repoId, issue.shortId, runId, { status, exitCode, detail }); } catch { /* the server's deadline ends it */ }
   };
+
+  if (!env) {
+    // Found after the run is reported, so a repo with no environment says why on the issue.
+    const found = await deps.findEnv(canonical);
+    if (found.env === null) {
+      deps.error(chalk.red(found.why));
+      await end('failed', found.why, 1);
+      process.exitCode = 1;
+      return notStarted;
+    }
+    env = found.env;
+    deps.log(chalk.dim(`Codex cloud environment: ${found.label}`));
+  }
 
   const base = deps.defaultBranch(canonical);
   const sub = await deps.exec(codex, ['cloud', 'exec', '--env', env, ...(base ? ['--branch', base] : []), prompt], canonical);

@@ -14,6 +14,7 @@ import { execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { remoteFor } from './review-run.js';
+import { hydrateWorktreeIgnoredFiles } from '../worktree-hydration.js';
 
 export interface ClaimedLocalCheck {
   id: string;
@@ -38,6 +39,12 @@ export interface LocalCheckReport {
 export const LOG_TAIL_BYTES = 64 * 1024;
 
 const ENV_KEPT = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'SystemRoot', 'ComSpec', 'PATHEXT', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA'];
+
+/** The CI host this runner runs inside, read from the variables its job sets; undefined on an ordinary machine. Pure. */
+export function runnerHostFromEnv(env: NodeJS.ProcessEnv): { label: string; url?: string } | undefined {
+  if (!env.JENKINS_URL && !env.JENKINS_HOME) return undefined;
+  return env.BUILD_URL ? { label: 'Jenkins', url: env.BUILD_URL } : { label: 'Jenkins' };
+}
 
 /** The command's environment: a few basics from ours, and CI=true. Pure. */
 export function localCheckEnv(from: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -156,6 +163,9 @@ export async function runLocalCheck(check: ClaimedLocalCheck, canonical: string,
     return send({ exitCode: null, error: `could not make a worktree: ${String(err?.stderr || err?.message || err).trim().split('\n').pop()}` });
   }
   deps.log(chalk.gray(`  ${wt} at ${check.headSha.slice(0, 8)}: ${check.command}`));
+  // The check's command (tests, a build) needs the dependencies: clone them in
+  // rather than make every check install first.
+  for (const warning of hydrateWorktreeIgnoredFiles(canonical, wt, (relative) => deps.log(chalk.gray(`  cloning ${relative} into the worktree…`)))) deps.log(chalk.gray(`  could not hydrate ${warning}`));
   try {
     let r: RunCommandResult;
     try {

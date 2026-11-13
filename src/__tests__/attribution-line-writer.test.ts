@@ -618,14 +618,31 @@ describe('Codex end to end: rollout capture -> shared path -> note', () => {
     expect(validateFull(record).ok).toBe(true);
   });
 
-  it('an apply_patch Add File in a non-root commit stays commit-level (possible_rename)', async () => {
+  it('an apply_patch Add File in a non-root commit is a line claim when nothing was renamed onto it (OR-38 B1)', async () => {
     const body = ['alpha', 'bravo', 'charlie'];
     write('stav.txt', body.map((l) => `${l}\n`).join(''));
     const sha = commit('Add stav');
     const caps = await rolloutCapture(`*** Begin Patch\n*** Add File: stav.txt\n${body.map((l) => `+${l}`).join('\n')}\n*** End Patch`, sha);
     expect(caps.flatMap((c) => c.edits).some((e) => e.file === 'stav.txt')).toBe(true);
-    expect(decide(repo, 'codex', attestedState(sha) as any, [sha], caps))
-      .toEqual({ [sha]: { status: 'degraded', reason: 'possible_rename' } });
+    expect(provenOf(decide(repo, 'codex', attestedState(sha) as any, [sha], caps)))
+      .toEqual({ [sha]: [{ path: 'stav.txt', ranges: [{ start_line: 1, end_line: 3, iteration_index: 0 }] }] });
+  });
+
+  it('an apply_patch Add File that git pairs with a moved file claims none of the moved lines', async () => {
+    const body = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`);
+    write('moved-from.txt', body.map((l) => `${l}\n`).join(''));
+    commit('A file someone will move');
+    fs.rmSync(path.join(repo, 'moved-from.txt'));
+    write('stav.txt', body.map((l) => `${l}\n`).join(''));
+    const sha = commit('Move it to stav');
+    const caps = await rolloutCapture(`*** Begin Patch\n*** Add File: stav.txt\n${body.map((l) => `+${l}`).join('\n')}\n*** End Patch`, sha);
+    // Git pairs the two paths (here already in the commit's own patch, which
+    // names the deleted side: an exact move adds no line), so the agent's
+    // "new" file proves nothing. The rename-check reasons themselves are
+    // pinned in attribution-line-ranges.test.ts.
+    const decision = decide(repo, 'codex', attestedState(sha) as any, [sha], caps);
+    expect(decision[sha]).toMatchObject({ status: 'degraded' });
+    expect(provenOf(decision)).toEqual({});
   });
 });
 
@@ -983,5 +1000,86 @@ describe('accepted underclaim (checkpoint 6.8)', () => {
     expect(decisions[b]).toEqual({ status: 'degraded', reason: 'replay_mismatch' });
     // And the Row 8 line is not handed to B some other way.
     expect(provenOf(decisions)).toEqual({});
+  });
+});
+
+describe('Claude Code Write over an existing file (OR-38 B2): tool_response.originalFile is the pre-image', () => {
+  const sighting = (sha: string) => ({ promptTurnIds: ['t0'], commitTurns: [{ sha, turnId: 't0', at: '2026-10-16T10:00:00Z', via: 'post-commit' }] });
+  /** Claude Code's PostToolUse for `Write`: the agent wrote `content` over the file. */
+  const postToolUseWrite = async (content: string, originalFile: unknown, agentSlug = 'claude-code') => {
+    const { recordLiveEdits } = await import('../commands/hooks/tool-use.js');
+    const file_path = path.join(repo, 'a.ts');
+    write('a.ts', content);
+    const state: any = { agentSlug, repoPath: repo, prompts: ['rewrite a.ts'], promptTurnIds: ['t0'] };
+    recordLiveEdits(state, {
+      tool_name: 'Write',
+      tool_input: { file_path, content },
+      tool_response: { type: 'update', filePath: file_path, content, structuredPatch: [], originalFile },
+    }, repo);
+    return state;
+  };
+  const project = (state: any) => {
+    const sha = commit('agent write');
+    state.commitTurns = sighting(sha).commitTurns;
+    return { sha, decisions: decide(repo, 'claude-code', state, [sha], editCapturesFromLiveLedger(state)) };
+  };
+  const agentRewrite = rows(1, 10).replace('Row 4\n', 'Row four\n');
+
+  it('a clean rewrite is proven on post-commit: only the lines the write changed', async () => {
+    const state = await postToolUseWrite(agentRewrite, rows(1, 10));
+    const { sha, decisions } = project(state);
+    expect(provenOf(decisions)).toEqual({ [sha]: [{ path: 'a.ts', ranges: [{ start_line: 4, end_line: 4, iteration_index: 0 }] }] });
+  });
+
+  it('a human\'s uncommitted line in the pre-image is replay_mismatch: no line for the agent', async () => {
+    // The human edited Row 9 and did not commit; the agent read the file and wrote it back with its own change.
+    const human = rows(1, 10).replace('Row 9\n', 'Row nine (human)\n');
+    write('a.ts', human);
+    const state = await postToolUseWrite(human.replace('Row 4\n', 'Row four\n'), human);
+    const { sha, decisions } = project(state);
+    expect(decisions).toEqual({ [sha]: { status: 'degraded', reason: 'replay_mismatch' } });
+  });
+
+  it('without originalFile (absent, null, empty) it stays ambiguous_replay, as before', async () => {
+    for (const originalFile of [undefined, null, '']) {
+      const state = await postToolUseWrite(agentRewrite, originalFile);
+      expect(state.liveEdits[0].writePreImage).toBeUndefined();
+      const { sha, decisions } = project(state);
+      expect(decisions).toEqual({ [sha]: { status: 'degraded', reason: 'ambiguous_replay' } });
+      git('reset', '-q', '--hard', 'HEAD~1');
+    }
+  });
+
+  it('a pre-image over the per-edit ceiling is not kept: ambiguous_replay', async () => {
+    // Each side alone fits LIVE_EDIT_CONTENT_MAX (96 KiB); together they do not.
+    const big = Array.from({ length: 3000 }, (_, i) => `Row ${i + 1} ${'x'.repeat(12)}`).join('\n') + '\n';
+    write('a.ts', big);
+    commit('big base');
+    const state = await postToolUseWrite(big.replace('Row 4 ', 'Row four '), big);
+    expect(state.liveEdits).toHaveLength(1);
+    expect(state.liveEdits[0].writePreImage).toBeUndefined();
+    const { sha, decisions } = project(state);
+    expect(decisions).toEqual({ [sha]: { status: 'degraded', reason: 'ambiguous_replay' } });
+  });
+
+  it('Claude Code only: another agent\'s Write keeps no pre-image', async () => {
+    const state = await postToolUseWrite(agentRewrite, rows(1, 10), 'cursor');
+    expect(state.liveEdits[0].writePreImage).toBeUndefined();
+  });
+
+  it('the pre-image stays local: never in the edit that is uploaded and merged', async () => {
+    const { buildCapturesFromLedger } = await import('../prompt-capture/index.js');
+    // The human's uncommitted line is only in the pre-image: the agent's write dropped it,
+    // so nothing else that is uploaded (newContent) carries it.
+    const human = rows(1, 10).replace('Row 9\n', 'SECRET uncommitted line\n');
+    write('a.ts', human);
+    const state = await postToolUseWrite(agentRewrite, human);
+    expect(state.liveEdits[0].writePreImage).toBe(human);
+    expect(state.liveEdits[0].edits[0].oldContent).toBeUndefined();
+    // What Stop / session-end merge and upload as editsJson (applyLiveLedger → buildCapturesFromLedger).
+    expect(JSON.stringify(buildCapturesFromLedger(state.liveEdits))).not.toContain('SECRET');
+    // The projection's copy does not write back into the ledger.
+    editCapturesFromLiveLedger(state);
+    expect(state.liveEdits[0].edits[0].oldContent).toBeUndefined();
   });
 });

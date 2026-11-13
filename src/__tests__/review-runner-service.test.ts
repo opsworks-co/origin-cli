@@ -83,6 +83,11 @@ describe('where the service lives', () => {
   it('the daemon arguments make --repo absolute (the service does not run in the shell\'s cwd) and pass the interval', () => {
     expect(runnerServiceArgs({}, '/x')).toEqual(['review', 'runner']);
     expect(runnerServiceArgs({ repo: ['../lib', '/abs/app'], interval: '20' }, '/x/app')).toEqual(['review', 'runner', '--repo', '/x/lib', '/abs/app', '--interval', '20']);
+    expect(runnerServiceArgs({ parallel: '3' }, '/x')).toEqual(['review', 'runner', '--parallel', '3']);
+    expect(runnerServiceArgs({ localCi: false }, '/x')).toEqual(['review', 'runner', '--no-local-ci']);
+    expect(runnerServiceArgs({ localCi: true, localCiOnly: true }, '/x')).toEqual(['review', 'runner', '--local-ci-only']);
+    expect(runnerServiceArgs({ scope: 'workspace' }, '/x')).toEqual(['review', 'runner', '--scope', 'workspace']);
+    expect(runnerServiceArgs({ scope: 'all' }, '/x')).toEqual(['review', 'runner']);
   });
 });
 

@@ -6,6 +6,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { acquireJournalLock, frontOfLine, joinLine } from './journal-lock.js';
 import { debugLog } from './debug-log.js';
+import { renameRetryingTransient, retryTransient } from './transient-fs.js';
 
 /**
  * How long a save waits for the state lock before writing WITHOUT it.
@@ -133,12 +134,17 @@ export function withSessionStateLock<T>(statePath: string, action: () => T, time
  */
 export function patchSessionStateFile(statePath: string, patch: (state: Record<string, any>) => boolean): boolean {
   return withSessionStateLock(statePath, () => {
-    const state = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+    const state = JSON.parse(retryTransient(() => fs.readFileSync(statePath, 'utf-8')));
     if (!state || typeof state !== 'object' || Array.isArray(state)) return false;
     if (!patch(state)) return false;
     const tmp = `${statePath}.tmp.${process.pid}`;
     fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
-    fs.renameSync(tmp, statePath);
+    try {
+      renameRetryingTransient(tmp, statePath);
+    } catch (err) {
+      try { fs.unlinkSync(tmp); } catch { /* already renamed or removed */ }
+      throw err;
+    }
     return true;
   });
 }

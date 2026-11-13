@@ -24,7 +24,7 @@ import os from 'os';
 import path from 'path';
 import { execFileSync, spawn } from 'child_process';
 import { getCurrentVersion, shouldRestartForUpgrade } from './version-check.js';
-import { transcriptIdleWindowMs, HOOK_DRIVEN_IDLE_MS, turnInProgress } from './heartbeat-liveness.js';
+import { transcriptIdleWindowMs, HOOK_DRIVEN_IDLE_MS, turnInProgress, branchToReport, reportedTurnStartedAt } from './heartbeat-liveness.js';
 import { pruneRetiredStateFiles } from './session-state.js';
 import { patchSessionStateFile } from './session-state-lock.js';
 import { changedFilesBetween, createShadowCommit, filesChangedSinceShadow, filesChangedSinceShadowOrNull, readFileAtRev, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN, captureGitState, startDirtReader } from './git-capture.js';
@@ -321,6 +321,27 @@ function isTurnInProgress(): boolean {
   }
 }
 
+// The hooks' turn stamps, sent on every ping so the dashboard can tell an
+// agent working on a prompt from one waiting for you (the Orchestrator's
+// "Agents now" panel). Raw values: the server decides, with the same 90-min
+// cap turnInProgress applies, so a turn that died without a Stop lapses.
+function turnStamps(): { turnStartedAt?: number; turnEndedAt?: number } {
+  if (!stateFile) return {};
+  try {
+    const st = JSON.parse(fs.readFileSync(stateFile, 'utf-8')) as {
+      currentTurnStartedAt?: number; lastTurnClosedAt?: number; implicitTurnStartedAt?: number;
+    };
+    const ok = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
+    const started = reportedTurnStartedAt(st);
+    return {
+      ...(started !== undefined && { turnStartedAt: started }),
+      ...(ok(st.lastTurnClosedAt) && { turnEndedAt: st.lastTurnClosedAt }),
+    };
+  } catch {
+    return {};
+  }
+}
+
 /**
  * Read the agent's current git branch from the session's repo path.
  * Hooks fire on prompt-submit which Gemini/Codex/etc don't always trigger,
@@ -331,9 +352,12 @@ function getCurrentBranch(): string | null {
   if (!stateFile) return null;
   try {
     const raw = fs.readFileSync(stateFile, 'utf-8');
-    const state = JSON.parse(raw) as { repoPath?: string };
+    const state = JSON.parse(raw) as { repoPath?: string; currentTurnStartedAt?: number; lastTurnClosedAt?: number };
     const repoPath = state.repoPath;
     if (!repoPath) return null;
+    // Between this session's turns the checkout may belong to another session
+    // — see branchToReport. Not even worth the git call then.
+    if (!branchToReport(state, 'HEAD')) return null;
     return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
       encoding: 'utf-8',
       cwd: repoPath,
@@ -1939,7 +1963,7 @@ async function ping() {
           'X-API-Key': apiKey,
           ...CAPABILITY_HEADERS,
         },
-        body: JSON.stringify({ branch: getCurrentBranch() }),
+        body: JSON.stringify({ branch: getCurrentBranch(), ...turnStamps() }),
       });
       const data = await resp.json() as {
         ok: boolean;

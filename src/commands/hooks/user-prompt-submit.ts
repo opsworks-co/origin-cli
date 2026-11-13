@@ -11,7 +11,7 @@ import { isSpecificModel, sessionMatchesAgent } from '../../agents/registry.js';
 import { api, readAuthStatus } from '../../api.js';
 import { buildAttributionContext } from '../../attribution.js';
 import { BUDGET_BLOCKING_AGENTS, buildBudgetWarningBanner } from '../../budget-breach.js';
-import { contentionAdvice, detectContention, neverRanATurn, noteContendersBack, noteContendersGone, peerIdleSinceMs, peerIdleThroughTurn, peerLastActivityMs } from '../../checkout-contention.js';
+import { contentionAdvice, detectContention, neverRanATurn, noteContendersBack, noteContendersGone, peerIdleSinceMs, peerLastActivityMs } from '../../checkout-contention.js';
 import { ensureConfigDir, isConnectedMode, loadAgentConfig, loadConfig, loadRepoConfig, saveAgentConfig } from '../../config.js';
 import { assembleRepoContext } from '../../context-injection.js';
 import { debugLog } from '../../debug-log.js';
@@ -26,6 +26,7 @@ import { applyLateRegistrationClaim, DEFAULT_CLAIM_MAX_AGE_MS } from '../../clai
 import { listRecentShas } from '../../history-backfill.js';
 import { matchIgnoredRepo } from '../../ignore-repos.js';
 import { buildMemoryBriefContext, buildMemoryContext, buildMemoryEscalationContext, buildMemoryPointerContext, buildPromptScopedMemoryContext, buildStartupCheckContext } from '../../memory.js';
+import { buildOpenTodosContext, buildSessionTodosContext } from '../../todo.js';
 import { samePath as samePathNormalized } from '../../paths.js';
 import { redactSecrets } from '../../redaction.js';
 import { buildRepoBriefContext } from '../../repo-brief.js';
@@ -2488,6 +2489,7 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
           attribution: safeCtx(() => buildAttributionContext(repoPath)),
           memory: safeCtx(() => buildMemoryBriefContext(repoPath)) || safeCtx(() => buildMemoryContext(repoPath)),
           memoryPointer: safeCtx(() => buildMemoryPointerContext(repoPath)),
+          todos: safeCtx(() => buildOpenTodosContext(repoPath)),
           handoff: safeCtx(() => buildHandoffContext(repoPath)),
           // Only while it is still unanswered. The directive says "do this
           // BEFORE your first substantive action", which is a statement about
@@ -2538,6 +2540,20 @@ export async function handleUserPromptSubmit(input: Record<string, any>, agentSl
         debugLog('user-prompt-submit', 'prompt-scoped memory injected', { hits: scoped.keys.length, keys: scoped.keys });
       }
     } catch { /* best-effort — retrieval must never break the turn */ }
+
+    // ── The TODOs this session opened ─────────────────────────────────────
+    // Under the id session end will list them by, so a session that finishes
+    // its own leftover a few turns later can close it. Shown when the list
+    // changes, not every turn.
+    try {
+      const own = buildSessionTodosContext(state.sessionId, state.promptResponses);
+      const shown = own ?? '';
+      if (shown !== (state.sessionTodosShown ?? '')) {
+        if (own) systemMsg += '\n\n' + own;
+        state.sessionTodosShown = shown;
+        try { saveSessionState(state, state.repoPath || hookCwd, state.sessionTag); } catch { /* shows again next prompt */ }
+      }
+    } catch { /* best-effort */ }
 
     // ── Escalate when the startup check was ignored ───────────────────────
     // The directive injected at session start is a request, and a request with
@@ -2634,10 +2650,17 @@ export function noteCheckoutContention(state: SessionState): boolean {
     // still listed but idle — its last turn closed, nothing since, all before
     // this turn began — is gone in the same sense: it writes nothing until its
     // next prompt, and that prompt makes it a rival again (noteContendersBack).
-    const live = new Set<string>();
-    for (const p of peers) if (!peerIdleThroughTurn(p, turnStart)) live.add(p.sessionId);
-    const gone = noteContendersGone(state, live, turnStart);
+    //
+    // "Live" is exactly what detectContention counts as a rival for this turn,
+    // not "not idle" alone. A peer whose last turn launched a background job is
+    // never idle (peerIdleSinceMs), so the idle test alone kept it live until
+    // it ENDED: session 5fe66a3c's rival 13961ea1 was last seen 15:26:11Z,
+    // 38 s before turn 0, yet was stamped gone only at 17:48:37Z. Every Stop
+    // in between declined the ledger, and turn 0 shipped 1 file of its 7.
+    // PEER_ACTIVE_WINDOW_MS is the stated limit for such a peer.
     const report = detectContention(state, tree, peers, Date.now(), turnStart);
+    const live = new Set(report.peers.map((p) => p.sessionId));
+    const gone = noteContendersGone(state, live, turnStart);
     if (!report.contested) return gone;
 
     const ids = new Set(state.contendingSessionIds || []);

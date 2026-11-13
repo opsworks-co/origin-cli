@@ -2658,7 +2658,7 @@ export async function reconcileSession(
     // FIRST to write, it asks git for `<baseline>:<file>`. With no baseline
     // that read never happens and every existing file renders as a CREATION
     // (+4219/-0 on seven files, none of them new; prod d731ff09, bd3c110a).
-    promptShadows: promptShadows.map((s) => ({ promptIndex: s.promptIndex, shadowSha: s.baselineSha })),
+    promptShadows: promptShadows.map((s) => ({ promptIndex: s.promptIndex, shadowSha: s.baselineSha, promptStartedAt: s.promptStartedAt })),
     prePromptSha: sessionStartShadowSha || null,
     headShaAtStart: headShaAtStart || null,
   }, promptChanges as any, 'transcript-watch', { observe: observer.observe });

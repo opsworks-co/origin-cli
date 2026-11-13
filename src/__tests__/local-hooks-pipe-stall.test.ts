@@ -88,10 +88,15 @@ describe('repo-local hooks: redirect + PATH shim', () => {
     const setCaptureDuration = (sleepSecs: number) => {
       const bin = path.join(dir, 'fake-capture');
       const sleep = sleepSecs > 0 ? `sleep ${sleepSecs}\n` : '';
-      fs.writeFileSync(bin, `#!/bin/sh\necho working\n: > "${ran}"\n${sleep}`);
-      fs.chmodSync(bin, '755');
+      // Write beside it and rename over it: the baseline's backgrounded capture
+      // may still be executing the old stub, and Linux refuses to open a running
+      // binary for writing (ETXTBSY). A rename never touches the running file.
+      fs.writeFileSync(`${bin}.next`, `#!/bin/sh\necho working\n: > "${ran}"\n${sleep}`);
+      fs.chmodSync(`${bin}.next`, '755');
+      fs.renameSync(`${bin}.next`, bin);
       const src = fs.readFileSync(hookPath, 'utf-8');
-      fs.writeFileSync(hookPath, src.replace(/^.*hooks git-post-commit/m, `"${bin}"`));
+      // Both launches — the detached one and its plain-& fallback (detachedLaunch).
+      fs.writeFileSync(hookPath, src.replace(/ORIGIN_COMMIT_SHA="\$_origin_commit_sha" [^\n]*?hooks git-post-commit/g, `"${bin}"`));
       fs.chmodSync(hookPath, '755');
     };
     const timePipedHook = (): number => {

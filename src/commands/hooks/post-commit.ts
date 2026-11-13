@@ -22,6 +22,7 @@ export { COMMIT_INGEST_PATCH_LIMIT, ingestPatchForCommit };
 import { sessionNetDiff } from '../../session-net-diff.js';
 import { MAX_PROMPT_DIFF_LEN, capCommitMessage, captureGitState, commitLineCounts, sameSha } from '../../git-capture.js';
 import { writeGitNotes } from '../../git-notes.js';
+import { ownerProcessRunning } from '../../process-owner.js';
 import { shouldIncludePromptText } from '../../prompt-privacy.js';
 import { attributionSourceFromState } from '../../attribution-note.js';
 import { editCapturesFromLiveLedger, lineClaimsForCommits } from '../../attribution-line-claims.js';
@@ -37,7 +38,7 @@ import { commitEvidence, commitTurnDecisions, commitTurnMarkersFor, committedSes
 import type { OriginMarkers } from '../../origin-markers.js';
 import { applyRewritePairsToState, currentTurnIndex, getBranch, getGitCommonDir, getGitRoot, getHeadSha, getWorkingGitRoot, isSessionAlive, listActiveSessions, listMirroredSessionsForTree, markSessionEnded, recordAmendByAnotherTurn, saveSessionState, stampCaptured } from '../../session-state.js';
 import { takeHeldRewritesFor } from '../../held-rewrites.js';
-import { commitIsInAnotherRepo, findSessionWorkingInForeignTree } from '../../foreign-trees.js';
+import { commitIsInAnotherRepo, filesWrittenInTree, findSessionWorkingInForeignTree } from '../../foreign-trees.js';
 import type { ForeignSessionLookup } from '../../foreign-trees.js';
 import type { SessionState } from '../../session-state.js';
 import { samePath } from '../../session-worktree.js';
@@ -52,8 +53,8 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import { copilotRunningTurnProof, gitCommitDirChains, shellChangesDirectory } from '../../copilot-turn-proof.js';
 import path from 'path';
-import { serverRowForLocalTurn, turnIdForServerRow, turnStartFields } from '../../turn-index.js';
-import { applyLedgerCaptures, buildMemoryEntry, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitTrailerBelongsToSession, durableUpdate, isInsideRepo, repoRemoteUrl, ownedRangeCommitShas, rewrittenCommitsPayload, sameDir, scheduleMemoryBriefRefresh, scopedCommitForTurn, sessionAbandonedCommits, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, trailerNamesAKnownSession, turnIdFor, withDerivedLineCounts } from '../hooks.js';
+import { localTurnForServerRow, serverRowForLocalTurn, turnIdForServerRow, turnStartFields } from '../../turn-index.js';
+import { applyLedgerCaptures, buildMemoryEntry, buildPromptNoteEntries, buildSessionWriteData, captureStamp, commitTrailerBelongsToSession, durableUpdate, isInsideRepo, repoRemoteUrl, ownedRangeCommitShas, dropDiffSectionsForFiles, preSessionDirtCommittedUnchanged, rewrittenCommitsPayload, sameDir, scheduleMemoryBriefRefresh, scopedCommitForTurn, sessionAbandonedCommits, sessionRepoRoots, sessionScopedCommittedDiff, summarizePromptPayload, trailerNamesAKnownSession, turnIdFor, withDerivedLineCounts } from '../hooks.js';
 
 
 /**
@@ -215,6 +216,10 @@ export function sessionAuthoredSnapshot(
   let committed = '';
   let source: SessionAuthoredSnapshot['source'] = 'none';
   let commitShas: string[] = [];
+  // Whether the owned render below ran to an answer. An empty answer from a
+  // session that recorded commits is that answer (nothing of its own in
+  // them), not a missed hook — see the trailer walk.
+  let ownedRendered = false;
   try {
     // A session-start baseline lets the scoped renderer ask Git for one net
     // patch when the complete window is ours. Without it, two session commits
@@ -230,15 +235,29 @@ export function sessionAuthoredSnapshot(
     // and silently retired the invariant that prod 192cdf12 (turn 3 claiming
     // 244 = 119 + 125 lines across 13 files) was the cost of learning.
     committed = sessionScopedCommittedDiff(repoPath, state);
+    ownedRendered = true;
   } catch { /* range unreadable — fall through to the trailer walk */ }
+  const recorded = (state.sessionCommitShas || []).filter((s) => /^[a-fA-F0-9]{7,40}$/.test(s));
   if (committed) {
     source = 'owned';
-    commitShas = (state.sessionCommitShas || []).filter((s) => /^[a-fA-F0-9]{7,40}$/.test(s));
-  } else {
+    commitShas = recorded;
+  } else if (!(ownedRendered && recorded.length > 0 && recorded.every((s) => reachableFromHead(repoPath, s)))) {
     // Codex bypasses .git/hooks/post-commit on some installs, so the recorded
     // list can be empty for a session that really did commit. The commits in
     // range whose trailer names this session are still ours — render those,
     // each by its OWN contribution, never `git show` on a merge.
+    //
+    // Only when nothing was recorded. A recorded commit that renders empty
+    // carried no work of the session's: session 7585fda6 (2026-11-02) resumed
+    // an issue and committed 12 files that were all dirty, byte-identical, at
+    // its start. The owned render dropped them as pre-session dirt, this walk
+    // then rendered the same commit whole, and the header read +402/-18 over
+    // a turn of +0/-0 (header_exceeds_turns).
+    //
+    // A recorded commit HEAD no longer reaches renders empty because it is
+    // gone, not because it was empty: the session's PR commit after GitHub
+    // squash-merged it and `git pull` brought back the squash, which nobody's
+    // post-commit recorded. Its trailer still names the session, so walk.
     let trailerOwned: string[] = [];
     try { trailerOwned = ownedRangeCommitShas(repoPath, state); } catch { trailerOwned = []; }
     const parts: string[] = [];
@@ -248,8 +267,15 @@ export function sessionAuthoredSnapshot(
         if (own.diff) parts.push(own.diff);
       } catch { /* a sha a rebase removed */ }
     }
-    if (parts.length > 0) {
-      committed = parts.join('\n').trim();
+    // The same pre-session-dirt rule the owned render applies: a file dirty
+    // at session start and committed byte-identical is not the session's.
+    let walked = parts.join('\n').trim();
+    if (walked) {
+      const unchanged = preSessionDirtCommittedUnchanged(repoPath, state, filesNamedInDiff(walked));
+      if (unchanged.size > 0) walked = dropDiffSectionsForFiles(walked, unchanged).trim();
+    }
+    if (walked) {
+      committed = walked;
       source = 'trailer';
       commitShas = trailerOwned;
     }
@@ -660,12 +686,17 @@ export function lookupSessionsForGitHook(
       }
     }
     const closed: string[] = [];
+    const idle: string[] = [];
     for (const s of stale) {
       if (s === revived) continue; // don't bury a session we just credited
+      // Stale files are not a dead agent. OR-23 v1 (3265d18a3): this closed the
+      // sessions of agents still open, and the ended-session fallback then gave
+      // the commit to one of them. Leave it out of this commit, but open.
+      if (ownerProcessRunning(s.ownerProcess)) { idle.push(s.sessionId.slice(0, 12)); continue; }
       try { if (markSessionEnded(s)) closed.push(s.sessionId.slice(0, 12)); } catch { /* best effort */ }
     }
-    if (closed.length) {
-      debugLog('git-hook-sessions', 'auto-closed stale sessions', { closed, kept: live.map((s) => s.sessionId.slice(0, 12)) });
+    if (closed.length || idle.length) {
+      debugLog('git-hook-sessions', 'auto-closed stale sessions', { closed, idle, kept: live.map((s) => s.sessionId.slice(0, 12)) });
     }
     sessions = live;
   }
@@ -677,7 +708,15 @@ export function lookupSessionsForGitHook(
   // above read. It recorded this checkout when its tool call reached it
   // (foreign-trees.ts). Bypasses the tree narrowing on purpose: by every rule
   // there, a session whose home is another repository "works in another tree".
-  const foreign = findSessionWorkingInForeignTree(hookCwd);
+  const commitFiles = opts?.commitFiles;
+  const hookTree = getWorkingGitRoot(hookCwd) || hookCwd;
+  const foreign = findSessionWorkingInForeignTree(
+    hookCwd,
+    Date.now(),
+    commitFiles?.length
+      ? (s) => sessionHoldsMostOfCommit(s, commitFiles, hookTree)
+      : undefined,
+  );
   return { sessions: foreign.outcome === 'unique' ? [foreign.session] : [], foreign, live: sessions };
 }
 
@@ -1128,7 +1167,8 @@ export function resolvePromptForCommit(
 
 /** A session's file evidence, whether or not its turn has finished. */
 export type FileEvidenceSession = {
-  completedPromptMappings?: Array<{ filesChanged?: string[] }>;
+  completedPromptMappings?: Array<{ filesChanged?: string[]; outOfRepoFiles?: string[] }>;
+  foreignTrees?: SessionState['foreignTrees'];
   activeTurn?: { index: number } | null;
   liveEdits?: Array<{ promptIndex?: number; edits?: Array<{ file?: string }> }> | null;
   pendingWrites?: Array<{ file?: string }> | null;
@@ -1139,6 +1179,16 @@ export type FileEvidenceSession = {
  * background and may read a commit claim after its call returned; the claim
  * counts only if it was live at THIS moment.
  */
+/** Whether HEAD still reaches `sha`; false when git can't say (a sha a rebase or gc removed). */
+function reachableFromHead(cwd: string, sha: string): boolean {
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], {
+      windowsHide: true, cwd, encoding: 'utf-8', timeout: 5_000, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    return true;
+  } catch { return false; }
+}
+
 function commitTimeMs(cwd: string, sha: string): number | undefined {
   try {
     const sec = Number(execFileSync('git', ['log', '-1', '--format=%ct', sha], {
@@ -1392,6 +1442,7 @@ export function copilotCommandCommitsCheckout(
 export function loneSessionMayOwnCommit<T extends FileEvidenceSession & { prompts?: string[] }>(
   session: T,
   commitFiles: string[],
+  commitTree?: string,
 ): { ok: boolean; why: string } {
   if (!commitFiles || commitFiles.length === 0) return { ok: true, why: 'no files to weigh' };
   const open = session.activeTurn;
@@ -1402,7 +1453,64 @@ export function loneSessionMayOwnCommit<T extends FileEvidenceSession & { prompt
   const mappings = session.completedPromptMappings || [];
   if (mappings.length === 0) return { ok: true, why: 'no recorded turns to contradict' };
   if (sessionTouchedAnyCommitFile(session, commitFiles)) return { ok: true, why: 'a recorded turn touched a committed file' };
+  if (commitTree && sessionWroteCommitFileInTree(session, commitFiles, commitTree)) {
+    return { ok: true, why: 'a recorded turn wrote a committed file in this checkout' };
+  }
   return { ok: false, why: 'no open turn and no recorded turn touched any committed file' };
+}
+
+/**
+ * Did a recorded turn write one of these files in `tree`, a checkout outside
+ * the session's own repository? Such a write is kept as an absolute path in
+ * `outOfRepoFiles`, not in `filesChanged`, so the path itself is compared:
+ * same directory, same name.
+ */
+export function sessionWroteCommitFileInTree<T extends FileEvidenceSession>(
+  session: T, commitFiles: string[], tree: string,
+): boolean {
+  const wanted = new Set(commitFiles);
+  return filesWrittenInTree(session, tree).some((w) => wanted.has(w.file));
+}
+
+/**
+ * Has this session touched more than half of a commit's files? The trailer names
+ * one session for the whole commit, so a closed turn from another repository
+ * needs that much: one shared file does not make a person's commit its work.
+ */
+function sessionHoldsMostOfCommit(session: SessionState, commitFiles: string[], tree: string): boolean {
+  const held = commitFiles.filter((f) => sessionTouchedAnyCommitFile(session, [f]) || sessionWroteCommitFileInTree(session, [f], tree));
+  return held.length * 2 > commitFiles.length;
+}
+
+/**
+ * The turn a commit in another repository belongs to. While a turn runs, it is
+ * that turn (resolvePromptForCommit). With none running, the commit is a
+ * person's, made later: it belongs to the newest recorded turn that wrote one of
+ * its files, not to whatever the session did last. Prod PR #3076: the patch was
+ * written hours and several turns before it was committed.
+ */
+export function crossRepoTurnForCommit(
+  state: SessionState,
+  repoPath: string,
+  commitTimestampMs: number,
+  commitFiles: string[],
+  commitTree: string,
+): { promptIndex: number; promptText: string; total: number } {
+  const resolved = resolvePromptForCommit(state, repoPath, commitTimestampMs);
+  if (Number.isInteger(state.activeTurn?.index)) return resolved;
+  const wanted = new Set(commitFiles);
+  const turns = filesWrittenInTree(state, commitTree)
+    .filter((w) => wanted.has(w.file))
+    .map((w) => w.turn)
+    .filter((t): t is number => Number.isInteger(t));
+  const byName = [...(state.completedPromptMappings || [])].reverse()
+    .find((m) => sessionTouchedAnyCommitFile({ completedPromptMappings: [m] }, commitFiles));
+  const promptIndex = turns.length > 0
+    ? Math.max(...turns)
+    : byName ? localTurnForServerRow(byName.promptIndex, state.promptIndexBase) : null;
+  if (promptIndex === null) return resolved;
+  const promptText = livePrompts(state)[promptIndex] || byName?.promptText || resolved.promptText;
+  return { promptIndex, promptText, total: resolved.total };
 }
 
 /**
@@ -1545,9 +1653,25 @@ export function pickSessionForCommit<
      * it: it is where a session's last hook fired, not who made the commit.
      */
     hookCwd?: string | null;
+    /** The commit's working tree, for loneSessionMayOwnCommit's out-of-repo writes. Defaults to hookCwd. */
+    commitTree?: string | null;
   } = {},
-): { session: T | null; reason: 'trailer' | 'only' | 'process' | 'branch' | 'file-overlap' | 'cwd' | 'recency' | 'ambiguous' | 'none' } {
+): { session: T | null; reason: 'trailer' | 'only' | 'process' | 'branch' | 'file-overlap' | 'cwd' | 'recency' | 'ambiguous' | 'no-evidence' | 'none' } {
   if (activeSessions.length === 0) return { session: null, reason: 'none' };
+
+  // Process, branch, cwd and recency say which session is NEAREST, not which
+  // one made the commit. A pick by one of them has to pass the check a lone
+  // session passes (a turn open, or a recorded turn on a committed file): two
+  // idle sessions side by side are no more evidence than one. test2 2694a61b:
+  // a Claude Code shell committed PR_CREATE_CHECK.md, and recency handed it to
+  // an idle Codex chat whose turns had only written examples/*.
+  const weak = (session: T, reason: 'process' | 'branch' | 'cwd' | 'recency') => {
+    const tree = opts.commitTree || opts.hookCwd || undefined;
+    if (!loneSessionMayOwnCommit(session as T & { prompts?: string[] }, opts.commitFiles || [], tree).ok) {
+      return { session: null, reason: 'no-evidence' as const };
+    }
+    return { session, reason };
+  };
 
   // Rung 0 — the commit's own trailer, which outranks every rung below it.
   //
@@ -1577,13 +1701,13 @@ export function pickSessionForCommit<
     const matched = candidates.filter((s) => sessionMatchesAgent(s, opts.detectedSlug!));
     if (matched.length > 0) candidates = matched;
   }
-  if (candidates.length === 1) return { session: candidates[0], reason: 'process' };
+  if (candidates.length === 1) return weak(candidates[0], 'process');
 
   if (candidates.length > 1 && opts.currentBranch) {
     const onBranch = candidates.filter((s) => s.branch && s.branch === opts.currentBranch);
     if (onBranch.length >= 1 && onBranch.length < candidates.length) candidates = onBranch;
   }
-  if (candidates.length === 1) return { session: candidates[0], reason: 'branch' };
+  if (candidates.length === 1) return weak(candidates[0], 'branch');
 
   const commitFiles = opts.commitFiles || [];
   if (candidates.length > 1 && commitFiles.length > 0) {
@@ -1597,7 +1721,7 @@ export function pickSessionForCommit<
   // (e1095412: the committing session sat in packages/cli).
   if (candidates.length > 1 && opts.hookCwd) {
     const atCwd = candidates.filter((s) => sameDir((s as { lastCwd?: string }).lastCwd, opts.hookCwd as string));
-    if (atCwd.length === 1) return { session: atCwd[0], reason: 'cwd' };
+    if (atCwd.length === 1) return weak(atCwd[0], 'cwd');
   }
 
   // Last resort — recency. A fresh commit belongs to the session actively
@@ -1613,7 +1737,7 @@ export function pickSessionForCommit<
     );
     const sorted = [...candidates].sort((a, b) => recency(b) - recency(a));
     if (recency(sorted[0]) - recency(sorted[1]) >= RECENCY_TIEBREAK_MARGIN_MS) {
-      return { session: sorted[0], reason: 'recency' };
+      return weak(sorted[0], 'recency');
     }
   }
   return { session: null, reason: 'ambiguous' };
@@ -2080,7 +2204,7 @@ export async function handlePostCommit(): Promise<void> {
     });
   } else if (activeSessions.length === 1) {
     const only = activeSessions[0];
-    const verdict = loneSessionMayOwnCommit(only, filesChanged);
+    const verdict = loneSessionMayOwnCommit(only, filesChanged, getWorkingGitRoot(hookCwd) || hookCwd);
     if (verdict.ok) {
       state = only;
     } else {
@@ -2108,6 +2232,7 @@ export async function handlePostCommit(): Promise<void> {
       commitFiles: filesChanged,
       commitMessage,
       hookCwd,
+      commitTree: getWorkingGitRoot(hookCwd) || hookCwd,
     });
     state = picked.session;
     if (state) {
@@ -2140,7 +2265,11 @@ export async function handlePostCommit(): Promise<void> {
   // or a `unique` session from another repository. The session check looked and
   // said no; a matching process is weaker evidence and must not overrule it.
   const foreignAmbiguous = sessionLookup.foreign?.outcome === 'ambiguous';
-  const noCandidateSessions = candidateCount === 0 && !foreignAmbiguous;
+  // A commit whose trailer already names a session (one that ended, stamped by
+  // prepare-commit-msg on its recorded work) has its answer. A matching process
+  // is weaker evidence, and would put a `detected-*` note next to that trailer.
+  const trailerNamesASession = /^Origin-Session:/m.test(commitMessage || '');
+  const noCandidateSessions = candidateCount === 0 && !foreignAmbiguous && !trailerNamesASession;
   if (!state && !noCandidateSessions) {
     debugLog('post-commit', foreignAmbiguous
       ? 'no process fallback — sessions from other repositories are ambiguous for this commit'
@@ -2286,7 +2415,7 @@ export async function handlePostCommit(): Promise<void> {
       // The turn it belongs to, by the same rule the incremental update below
       // stamps it: Stop rebuilds rows from the session's own repo and would
       // otherwise send that turn empty (applyCrossRepoCommits).
-      const turnId = turnIdFor(state, resolvePromptForCommit(state, repoPath, Date.now()).promptIndex);
+      const turnId = turnIdFor(state, crossRepoTurnForCommit(state, repoPath, Date.now(), filesChanged, getWorkingGitRoot(hookCwd) || hookCwd).promptIndex);
       state.crossRepoCommits.push({ sha: commitSha, repoPath, at: new Date().toISOString(), ...(turnId ? { turnId } : {}) });
       state.crossRepoCommits = state.crossRepoCommits.slice(-200);
       try { saveSessionState(state, state.repoPath || hookCwd, state.sessionTag); } catch { /* non-fatal */ }
@@ -2812,7 +2941,9 @@ export async function handlePostCommit(): Promise<void> {
         // and picks the latest prompt timestamped at-or-before this
         // commit. Fixes "all commits attributed to prompt #1" for
         // Codex sessions with multiple prompts.
-        const resolved = resolvePromptForCommit(s, repoPath, commitTimestampMs);
+        const resolved = crossRepo
+          ? crossRepoTurnForCommit(s, repoPath, commitTimestampMs, filesChanged, getWorkingGitRoot(hookCwd) || hookCwd)
+          : resolvePromptForCommit(s, repoPath, commitTimestampMs);
         const latestPromptIdx = resolved.promptIndex;
         const latestPromptText = resolved.promptText;
         // Scope the commit to THIS prompt's contribution. The raw commit stat

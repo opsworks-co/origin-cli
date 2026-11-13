@@ -2,6 +2,7 @@
 //
 // Moved out of commands/hooks.ts mechanically: the text is unchanged, only its
 // home is. Shared helpers still live in hooks.ts and are imported from there.
+import { noteToolActivity } from '../../heartbeat-liveness.js';
 import { variantAllowsFileCards } from '../../context-variant.js';
 import { api } from '../../api.js';
 import { buildFileAttributionContext } from '../../attribution.js';
@@ -20,11 +21,11 @@ import { probeTree, touchedSince } from '../../shell-command-probe.js';
 import type { TreeProbe } from '../../shell-command-probe.js';
 import { commandWritesFiles, isShellTool, shellCommandText } from '../../shell-write-capture.js';
 import { commandMakesCommit, gitAliasResolver } from '../../commit-command-in-flight.js';
-import { recordGitPathspecs } from '../../git-pathspec-names.js';
+import { fileNamedByGitRevisionPathspec, recordGitPathspecs } from '../../git-pathspec-names.js';
 import { blobsOfWorkingFiles, commandMovesTree, filesMovedByCommand, filesOfStoppedOperation, gitLeftBlobsForTurn, markReflog, recordGitLeftFiles, recordGitMovedFiles } from '../../git-moved-files.js';
 import { isSubagentSpawnTool } from '../../subagent-tools.js';
 import { recordWriteTree } from '../../session-write-trees.js';
-import { recordForeignTrees } from '../../foreign-trees.js';
+import { armForeignTreeProbes, recordForeignTrees, settleForeignTreeProbes } from '../../foreign-trees.js';
 import { spawn } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -265,6 +266,12 @@ export async function handlePreToolUse(rawInput: Record<string, any>, agentSlug?
     state.lastCwd = hookCwd;
   }
 
+  // A tool call after the last Stop with no prompt since is a turn Claude Code
+  // opened without UserPromptSubmit (a background job's completion notice).
+  // Stamped so the dashboard shows the agent working, not waiting for you.
+  // Persisted by the unconditional save at the end of this hook.
+  noteToolActivity(state);
+
   // A shell command can name a worktree the harness never told us about
   // (`cd /path/to/wt && …`). Snapshot a baseline there BEFORE the command
   // runs, so its writes are attributable instead of invisible.
@@ -272,6 +279,12 @@ export async function handlePreToolUse(rawInput: Record<string, any>, agentSlug?
   // Fingerprint the trees BEFORE the command runs — the other half is taken at
   // post-tool-use, and the difference is what this command provably wrote.
   beginShellProbe(state, input);
+  // A job launched in the background outlives this call and maybe the turn:
+  // note it, so a sibling does not take our Stop for idleness. On disk NOW —
+  // a policy block below can exit before the save at the end of this hook.
+  if (noteBackgroundJob(state, input)) {
+    try { saveSessionState(state, saveCwd, state.sessionTag); } catch { /* non-fatal */ }
+  }
 
   // Extract file paths once — used for both lazy repo attach and policy enforcement.
   const toolInput = input.tool_input || {};
@@ -287,6 +300,13 @@ export async function handlePreToolUse(rawInput: Record<string, any>, agentSlug?
     command: isShellTool(input.tool_name || '') ? shellCommandText(toolInput) : undefined,
     filePaths: isShellTool(input.tool_name || '') ? [] : filePaths,
   });
+  if (isShellTool(input.tool_name || '')) {
+    armForeignTreeProbes(state, {
+      cwd: hookCwd,
+      command: shellCommandText(toolInput),
+      toolCallId: input.tool_call_id || input.tool_use_id || undefined,
+    }, probeDepsFor());
+  }
 
   // ── Did this session read its memory? ───────────────────────────────────
   // Session-start hands the agent a directive to read the repo's Origin memory
@@ -647,6 +667,37 @@ export function geminiToolSucceeded(input: Record<string, any>): boolean {
   return !!res && typeof res === 'object' && !Array.isArray(res) && 'llmContent' in res;
 }
 
+/**
+ * The content a Claude Code `Write` replaced, from its PostToolUse
+ * `tool_response.originalFile`, or undefined. Claude Code reports the file's
+ * exact prior content there (null for a newly created file), so post-commit can
+ * prove a whole-file rewrite against the replayed state instead of declining it
+ * as `ambiguous_replay`. Only a single captured write, only for this path, and
+ * only within the same per-edit ceiling as the edit content itself
+ * (LIVE_EDIT_CONTENT_MAX, counted together with it): over it, no pre-image —
+ * the write stays as before. Never put into the edit: see
+ * SessionState.liveEdits[].writePreImage.
+ */
+export function claudeWritePreImage(
+  toolName: string,
+  input: Record<string, any>,
+  toolInput: Record<string, any>,
+  edits: Array<{ op: string; oldContent?: string; newContent?: string }>,
+): string | undefined {
+  if (toolName !== 'Write' || edits.length !== 1 || edits[0].op !== 'write') return undefined;
+  const res = input.tool_response;
+  if (!res || typeof res !== 'object' || Array.isArray(res)) return undefined;
+  const original = res.originalFile;
+  if (typeof original !== 'string' || original === '') return undefined;
+  // The response names the file it wrote; one that is not the call's own file
+  // is a payload we do not understand.
+  if (typeof res.filePath === 'string' && typeof toolInput.file_path === 'string' && res.filePath !== toolInput.file_path) {
+    return undefined;
+  }
+  if (editContentBytes(edits[0]) + original.length > LIVE_EDIT_CONTENT_MAX) return undefined;
+  return original;
+}
+
 export function recordLiveEdits(state: SessionState, input: Record<string, any>, repoPath: string): boolean {
   if (!liveCaptureEnabled()) return false;
   try {
@@ -744,12 +795,17 @@ export function recordLiveEdits(state: SessionState, input: Record<string, any>,
       debugLog('post-tool-use', 'live ledger full, deferring to transcript', { entries: state.liveEdits.length });
       return false;
     }
+    // Claude Code only: the other agents' payloads carry no such field.
+    const writePreImage = state.agentSlug === 'claude-code'
+      ? claudeWritePreImage(toolName, input, toolInput, edits)
+      : undefined;
     state.liveEdits.push({
       promptIndex,
       toolName,
       capturedAt: new Date().toISOString(),
       edits,
       ...(samePath(workRoot, repoPath) ? {} : { tree: workRoot }),
+      ...(writePreImage !== undefined && { writePreImage }),
     });
     debugLog('post-tool-use', 'live edit captured', { promptIndex, tool: toolName, edits: edits.length });
     return true;
@@ -909,6 +965,15 @@ export async function handlePostToolUse(rawInput: Record<string, any>, agentSlug
     saveSessionState(state, saveCwd, state.sessionTag);
   }
 
+  // What this command changed in a checkout of another repository. Attach that
+  // repository as an edit tool's write would: the server links a commit's
+  // trailer only to a session that repository knows.
+  const changedElsewhere = settleForeignTreeProbes(state, input.tool_call_id || input.tool_use_id || undefined, probeDepsFor());
+  if (changedElsewhere.length > 0) {
+    saveSessionState(state, saveCwd, state.sessionTag);
+    try { await attachReposForFiles(state, changedElsewhere, saveCwd); } catch { /* non-fatal */ }
+  }
+
   const probesBefore = state.shellProbes?.length || 0;
   const probed = endShellProbe(state, input);
   const probeClosed = (state.shellProbes?.length || 0) < probesBefore;
@@ -939,6 +1004,22 @@ export async function handlePostToolUse(rawInput: Record<string, any>, agentSlug
  *
  * Exported for testing.
  */
+export const BACKGROUND_JOBS_MAX = 16;
+
+/**
+ * Record a tool call that launches work running past its own return — Claude
+ * Code's `run_in_background: true` on Bash or Agent. Nothing in a hook reports
+ * when such a job ends, so this is a launch stamp only; checkout-contention.ts
+ * reads it as "may still be writing". Returns whether anything was recorded.
+ */
+export function noteBackgroundJob(state: SessionState, input: Record<string, any>, now: number = Date.now()): boolean {
+  const toolInput = input.tool_input;
+  if (!toolInput || typeof toolInput !== 'object' || toolInput.run_in_background !== true) return false;
+  state.backgroundJobs = [...(state.backgroundJobs || []), { at: now, tool: String(input.tool_name || '') }]
+    .slice(-BACKGROUND_JOBS_MAX);
+  return true;
+}
+
 export function noteWrittenTree(state: SessionState, input: Record<string, any>, hookCwd: string): boolean {
   try {
     if (!liveCaptureEnabled()) return false;
@@ -1261,14 +1342,17 @@ export function endShellProbe(state: SessionState, input: Record<string, any>): 
       // merge/pick is applying. `echo x > notes.md && git checkout main` keeps
       // notes.md. A file the command NAMED stays the turn's too — `git
       // checkout --theirs f` is its own act — and a moved file that ends at
-      // the turn's start still clears an earlier edit.
+      // the turn's start still clears an earlier edit. Explicit paths copied
+      // from a revision this branch never had (a PR head) are git's despite
+      // being named; `HEAD~1 -- f` and `--ours/--theirs` stay the turn's.
       let gitsOnly: Set<string> | undefined;
       if (before.headBefore) {
         const byHeads = filesMovedByCommand(before.tree, before.headBefore, getHeadSha(before.tree), before.reflogMark);
         const stopped = touched.length > 0 ? filesOfStoppedOperation(before.tree) : [];
         const gitBrought = new Set([...byHeads, ...stopped]);
+        const materialized = new Set(touched.filter((f) => fileNamedByGitRevisionPathspec(before.command || '', f, before.tree)));
         gitsOnly = new Set(touched.filter((f) =>
-          gitBrought.has(f) && !fileNamedInCommand(before.command || '', f, before.tree)));
+          materialized.has(f) || (gitBrought.has(f) && !fileNamedInCommand(before.command || '', f, before.tree))));
         const moved = [...touched, ...byHeads];
         if (moved.length > 0) {
           recordGitMovedFiles(state, before.promptIndex, before.tree, moved);
@@ -1287,6 +1371,22 @@ export function endShellProbe(state: SessionState, input: Record<string, any>): 
         // shadow by the probe, the shell window and the ledger. A file the
         // command NAMED is not recorded: `git checkout --theirs f` choosing a
         // side is the turn's act, measured from what the conflict left.
+        // The same for paths copied from a revision this branch never had
+        // (`git checkout <pr-head> -- f`, reviewer session 16ec04f9): HEAD
+        // never moves, so no commit window re-baselines them, and every
+        // producer measured the PR's files from the turn's start. From what
+        // git wrote, a file the turn only read nets to nothing and an edit
+        // on top counts as just that edit.
+        if (materialized.size > 0) {
+          const left = blobsOfWorkingFiles(before.tree, materialized);
+          if (left.size > 0) {
+            recordGitLeftFiles(state, before.promptIndex, before.tree, left);
+            changed = true;
+            debugLog('post-tool-use', 'paths checked out from a foreign revision — what git wrote recorded', {
+              promptIndex: before.promptIndex, tree: before.tree, files: left.size,
+            });
+          }
+        }
         if (stopped.length > 0 && gitsOnly.size > 0) {
           const left = blobsOfWorkingFiles(before.tree, gitsOnly);
           if (left.size > 0) {

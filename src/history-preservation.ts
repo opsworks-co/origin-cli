@@ -1,5 +1,6 @@
 import { execFileSync, execSync } from 'child_process';
-import { CAPTURE_REWRITES, backgroundedWithRewrites, repairLocalPostRewriteScript } from './post-rewrite-hook-stdin.js';
+import { CAPTURE_REWRITES, detachedWithRewrites, repairLocalPostRewriteScript } from './post-rewrite-hook-stdin.js';
+import { DETACH_MARKER, detachedLaunch, hasUnsyncedDetach, indentFragment, syncDetach } from './hook-detach.js';
 import { REWRITE_NOTE_KEY, rebuildRewrittenNote, type RewriteWarning } from './history-rewrite.js';
 import { projectRewriteLineClaims, type ProjectedRewriteLine } from './rewrite-line-projection.js';
 import { noteLockWaitOverride, withNoteWriteLock, type NoteLease, type NoteLockOptions } from './note-write-lock.js';
@@ -9,12 +10,7 @@ import { insertHookBlockAfterShebang } from './utils/hook-insert.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-
-// Prepend common npm/node/brew bin dirs so a hook invoked by a GUI git client
-// (which doesn't source the login shell profile) can still resolve `origin`.
-// Mirrors the PATH export the global core.hooksPath hooks use.
-const HOOK_PATH_SHIM =
-  'export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:$PATH"';
+import { KEYCHAIN_GUARD_MARKER, hookShimPreamble, upgradeLocalHookPreamble } from './commands/enable.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -317,6 +313,42 @@ export function parseRewriteInput(input: string): RewriteMapping[] {
 // ─── Hook Installation ─────────────────────────────────────────────────────
 
 /**
+ * The CLI the shared preamble resolved (hookShimPreamble), like every other
+ * hook: `origin` by name is whatever comes first on the PATH the preamble
+ * builds, /opt/homebrew/bin first, which need not be the CLI `enable` chose.
+ */
+const POST_REWRITE_CMD = '"$ORIGIN_BIN" hooks git-post-rewrite "$@"';
+const POST_CHECKOUT_CMD = '"$ORIGIN_BIN" hooks git-post-checkout "$@"';
+
+// A launch of Origin's rewrite hooks by name, as written before they used the
+// resolved CLI: on a line of its own, after a pipe, or as an argument of the
+// detached launch (`env origin hooks …`, `"$_origin_rw" origin hooks …`).
+const BARE_REWRITE_LAUNCH = /(^|[ \t|;(])origin hooks (git-post-rewrite|git-post-checkout) "\$@"/gm;
+
+/**
+ * Point an installed rewrite-hook block that launches `origin` by name at
+ * "$ORIGIN_BIN". Only Origin's block is touched: from its marker line (the
+ * last one, as upgradeLocalHookPreamble finds it) to the first `fi` at column
+ * 0, or the end of the file. A script without the shared preamble has no
+ * ORIGIN_BIN and is left alone. Null when nothing needs doing.
+ */
+export function useResolvedOriginBin(script: string, originMarker: string): string | null {
+  if (!script.includes(KEYCHAIN_GUARD_MARKER)) return null;
+  const lines = script.split('\n');
+  let start = -1;
+  lines.forEach((line, i) => { if (line.trimEnd() === originMarker) start = i; });
+  if (start < 0) return null;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^fi[ \t]*$/.test(lines[i])) { end = i + 1; break; }
+  }
+  const block = lines.slice(start, end).join('\n');
+  const migrated = block.replace(BARE_REWRITE_LAUNCH, (_m, lead: string, hook: string) => `${lead}"$ORIGIN_BIN" hooks ${hook} "$@"`);
+  if (migrated === block) return null;
+  return [...lines.slice(0, start), migrated, ...lines.slice(end)].join('\n');
+}
+
+/**
  * Install git hooks that preserve Origin attribution through history rewrites.
  * Creates post-rewrite and post-checkout hooks in .git/hooks/.
  *
@@ -345,39 +377,90 @@ function installPostRewriteHook(hooksDir: string): void {
 
   const hookScript = [
     '#!/bin/sh',
+    // PATH shim so GUI git clients (Tower/Sourcetree/VS Code) that don't source
+    // the login profile can still find `origin` — otherwise the hook silently
+    // no-ops and rebase/amend loses attribution. Before the marker, like every
+    // other install path writes it.
+    hookShimPreamble(),
     ORIGIN_MARKER,
     '# Preserve Origin attribution notes when commits are rewritten',
     '# Receives old-sha new-sha pairs on stdin (from git rebase/amend)',
-    // PATH shim so GUI git clients (Tower/Sourcetree/VS Code) that don't source
-    // the login profile can still find `origin` — otherwise the hook silently
-    // no-ops and rebase/amend loses attribution. Redirect so the backgrounded
-    // child doesn't stall a `git commit --amend | tee` pipe.
-    HOOK_PATH_SHIM,
-    // The pairs arrive on stdin and `&` detaches stdin: read them in the
-    // foreground, pipe them in. See post-rewrite-hook-stdin.ts.
+    // The pairs arrive on stdin and a detached child has none: read them in
+    // the foreground, hand them over. See post-rewrite-hook-stdin.ts.
     CAPTURE_REWRITES,
-    backgroundedWithRewrites('origin hooks git-post-rewrite "$@"'),
+    'if [ -n "$ORIGIN_BIN" ]; then',
+    `  ${indentFragment(detachedWithRewrites(POST_REWRITE_CMD), '  ')}`,
+    'fi',
   ].join('\n') + '\n';
 
   if (fs.existsSync(hookPath)) {
-    const existing = fs.readFileSync(hookPath, 'utf-8');
+    let existing = fs.readFileSync(hookPath, 'utf-8');
     if (existing.includes(ORIGIN_MARKER)) {
+      if (upgradeLocalHookPreamble(hookPath, ORIGIN_MARKER)) {
+        existing = fs.readFileSync(hookPath, 'utf-8');
+      }
       // Already installed — but a block written before the stdin fix never
-      // receives git's pairs. Repair it in place.
-      const repaired = repairLocalPostRewriteScript(existing);
-      if (repaired) fs.writeFileSync(hookPath, repaired);
+      // receives git's pairs, and one written before POST_REWRITE_CMD runs
+      // `origin` by name. Repair it in place.
+      const repaired = repairLocalPostRewriteScript(existing) ?? existing;
+      const resolved = useResolvedOriginBin(repaired, ORIGIN_MARKER) ?? repaired;
+      if (resolved !== existing) fs.writeFileSync(hookPath, resolved);
       return;
     }
     // Appended, unlike the other hooks (which go after the shebang): this
     // block reads git's stdin pairs, and run first it would starve the
     // user's own lines of them.
-    fs.appendFileSync(hookPath, '\n' + ORIGIN_MARKER + '\n' + HOOK_PATH_SHIM + '\n' + CAPTURE_REWRITES + '\n'
-      + backgroundedWithRewrites('origin hooks git-post-rewrite "$@"') + '\n');
+    fs.appendFileSync(hookPath, '\n' + hookShimPreamble() + '\n' + ORIGIN_MARKER + '\n' + CAPTURE_REWRITES + '\n'
+      + 'if [ -n "$ORIGIN_BIN" ]; then\n'
+      + `  ${indentFragment(detachedWithRewrites(POST_REWRITE_CMD), '  ')}\n`
+      + 'fi\n');
   } else {
     fs.writeFileSync(hookPath, hookScript);
   }
 
   fs.chmodSync(hookPath, '755');
+}
+
+/**
+ * Rewrite the backgrounded launch of a repo-local post-checkout block written
+ * before the detached one; the user's own lines are left alone. Null when
+ * nothing needs doing.
+ */
+export function repairLocalPostCheckoutScript(script: string): string | null {
+  if (hasUnsyncedDetach(script)) return syncDetach(script);
+  if (script.includes(DETACH_MARKER) || !script.includes('hooks git-post-checkout')) return null;
+  const out = script
+    .replace(/^([ \t]*)\( (export PATH="[^"\n]*"); origin hooks git-post-checkout "\$@" >\/dev\/null 2>&1 & \)[ \t]*$/gm,
+      (_m, indent: string, shim: string) => `${indent}( ${shim}\n${indent}  ${indentFragment(detachedLaunch('origin hooks git-post-checkout "$@"'), `${indent}  `)}\n${indent})`)
+    .replace(/^([ \t]*)origin hooks git-post-checkout "\$@" >\/dev\/null 2>&1 &[ \t]*$/gm,
+      (_m, indent: string) => `${indent}${indentFragment(detachedLaunch('origin hooks git-post-checkout "$@"'), indent)}`);
+  return out === script ? null : out;
+}
+
+/**
+ * Repair the repo's own post-checkout, from session start: an upgrade rewrites
+ * no hook file, and `origin enable` is the only other path here, so without
+ * this the old launch stays on disk for as long as nobody re-runs enable. Hooks
+ * live in the main repo's `.git`, hence the common dir, from a linked worktree
+ * too. Cheap and never throws. Returns the path it rewrote.
+ */
+export function repairInstalledLocalPostCheckoutHook(repoPath: string): string[] {
+  try {
+    const common = execFileSync('git', ['rev-parse', '--git-common-dir'], {
+      cwd: repoPath, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'],
+      // Runs on every session start: no console flash under a Windows GUI
+      // agent, and never a hung git holding the hook.
+      windowsHide: true, timeout: 5_000,
+    }).trim();
+    const hook = path.join(path.resolve(repoPath, common), 'hooks', 'post-checkout');
+    if (!fs.existsSync(hook)) return [];
+    const fixed = repairLocalPostCheckoutScript(fs.readFileSync(hook, 'utf-8'));
+    if (!fixed) return [];
+    fs.writeFileSync(hook, fixed);
+    return [hook];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -390,31 +473,39 @@ function installPostCheckoutHook(hooksDir: string): void {
 
   const hookScript = [
     '#!/bin/sh',
+    hookShimPreamble(),
     ORIGIN_MARKER,
     '# Fresh-clone notes fetch; fences write journals across a checkout',
     '# $1=prev-HEAD, $2=new-HEAD, $3=flag (1=branch checkout, 0=file checkout)',
-    HOOK_PATH_SHIM,
-    'if [ "$3" = "1" ]; then',
-    '  origin hooks git-post-checkout "$@" >/dev/null 2>&1 &',
+    'if [ "$3" = "1" ] && [ -n "$ORIGIN_BIN" ]; then',
+    `  ${indentFragment(detachedLaunch(POST_CHECKOUT_CMD), '  ')}`,
     'fi',
   ].join('\n') + '\n';
 
   if (fs.existsSync(hookPath)) {
-    const existing = fs.readFileSync(hookPath, 'utf-8');
+    let existing = fs.readFileSync(hookPath, 'utf-8');
     if (existing.includes(ORIGIN_MARKER)) {
-      // Already installed
+      if (upgradeLocalHookPreamble(hookPath, ORIGIN_MARKER)) {
+        existing = fs.readFileSync(hookPath, 'utf-8');
+      }
+      // Already installed — a block from before the detached launch dies with
+      // an agent that kills what git left running, and one from before
+      // POST_CHECKOUT_CMD runs `origin` by name. Repair it in place.
+      const repaired = repairLocalPostCheckoutScript(existing) ?? existing;
+      const resolved = useResolvedOriginBin(repaired, ORIGIN_MARKER) ?? repaired;
+      if (resolved !== existing) fs.writeFileSync(hookPath, resolved);
       return;
     }
     // Insert after the shebang: a user hook ending in `exit 0` never reaches
-    // an appended line. The subshell keeps the PATH shim out of the user's
-    // own lines that now run after it.
+    // an appended line. The shared preamble applies to the user's lines too,
+    // so any Node hook they chain is protected by the same Keychain guard.
     const block = [
       ORIGIN_MARKER,
-      'if [ "$3" = "1" ]; then',
-      `  ( ${HOOK_PATH_SHIM}; origin hooks git-post-checkout "$@" >/dev/null 2>&1 & )`,
+      'if [ "$3" = "1" ] && [ -n "$ORIGIN_BIN" ]; then',
+      `  ${indentFragment(detachedLaunch(POST_CHECKOUT_CMD), '  ')}`,
       'fi',
     ].join('\n') + '\n';
-    fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing, block));
+    fs.writeFileSync(hookPath, insertHookBlockAfterShebang(existing, hookShimPreamble() + '\n' + block));
   } else {
     fs.writeFileSync(hookPath, hookScript);
   }

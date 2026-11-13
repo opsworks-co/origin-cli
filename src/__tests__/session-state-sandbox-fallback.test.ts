@@ -14,6 +14,7 @@ import {
   getStatePath,
   getGlobalFallbackStatePath,
 } from '../session-state.js';
+import { TransientFsRetryExhaustedError } from '../transient-fs.js';
 
 describe('session-state sandbox fallback (.git read-only → ~/.origin/sessions)', () => {
   afterEach(() => vi.restoreAllMocks());
@@ -68,5 +69,82 @@ describe('session-state sandbox fallback (.git read-only → ~/.origin/sessions)
     saveSessionState(state, repo, tag);
     expect(fs.existsSync(getStatePath(repo, tag))).toBe(true); // primary .git path used
     expect(loadSessionState(repo, tag)?.sessionId).toBe('sess-ok-999');
+  });
+
+  it('does not route exhausted state-file rename contention to the cwd-keyed fallback', () => {
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-home-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(tmpHome);
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-busy-'));
+    execSync('git init -q', { cwd: repo });
+    const tag = 'busytag1';
+    const statePath = getStatePath(repo, tag);
+    const fallbackPath = getGlobalFallbackStatePath(repo, tag);
+    const realRename = fs.renameSync.bind(fs);
+    vi.spyOn(fs, 'renameSync').mockImplementation(((from: any, to: any) => {
+      if (to === statePath) throw Object.assign(new Error('EPERM: target remains held'), { code: 'EPERM' });
+      return realRename(from, to);
+    }) as any);
+    let now = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => (now += 600));
+    const state: any = { sessionId: 'sess-busy-123', claudeSessionId: 'agent-busy', sessionTag: tag, prompts: [] };
+
+    expect(() => saveSessionState(state, repo, tag)).toThrow(TransientFsRetryExhaustedError);
+    expect(fs.existsSync(fallbackPath)).toBe(false);
+    expect(fs.existsSync(statePath + '.tmp.' + process.pid)).toBe(false);
+  });
+
+  it('retries a transient refusal while replacing the sandbox fallback file', () => {
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-home-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(tmpHome);
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-fallback-busy-'));
+    execSync('git init -q', { cwd: repo });
+    const tag = 'fallbackbusy1';
+    const statePath = getStatePath(repo, tag);
+    const fallbackPath = getGlobalFallbackStatePath(repo, tag);
+    const realWrite = fs.writeFileSync.bind(fs);
+    vi.spyOn(fs, 'writeFileSync').mockImplementation(((file: any, ...args: any[]) => {
+      if (typeof file === 'string' && file.startsWith(statePath)) {
+        throw Object.assign(new Error('sandbox denied .git write'), { code: 'EACCES' });
+      }
+      return (realWrite as any)(file, ...args);
+    }) as any);
+    const realRename = fs.renameSync.bind(fs);
+    let refusals = 0;
+    vi.spyOn(fs, 'renameSync').mockImplementation(((from: any, to: any) => {
+      if (to === fallbackPath && refusals++ < 2) throw Object.assign(new Error('held by Defender'), { code: 'EPERM' });
+      return realRename(from, to);
+    }) as any);
+    const state: any = { sessionId: 'sess-fallback-busy', claudeSessionId: 'agent', sessionTag: tag, prompts: [] };
+
+    expect(() => saveSessionState(state, repo, tag)).not.toThrow();
+    expect(loadSessionState(repo, tag)?.sessionId).toBe('sess-fallback-busy');
+    expect(refusals).toBe(3);
+  });
+
+  it('removes the fallback temp file when replacement contention outlasts the retry budget', () => {
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-home-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(tmpHome);
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-fallback-stuck-'));
+    execSync('git init -q', { cwd: repo });
+    const tag = 'fallbackstuck1';
+    const statePath = getStatePath(repo, tag);
+    const fallbackPath = getGlobalFallbackStatePath(repo, tag);
+    const realWrite = fs.writeFileSync.bind(fs);
+    vi.spyOn(fs, 'writeFileSync').mockImplementation(((file: any, ...args: any[]) => {
+      if (typeof file === 'string' && file.startsWith(statePath)) {
+        throw Object.assign(new Error('sandbox denied .git write'), { code: 'EACCES' });
+      }
+      return (realWrite as any)(file, ...args);
+    }) as any);
+    vi.spyOn(fs, 'renameSync').mockImplementation(((from: any, to: any) => {
+      if (to === fallbackPath) throw Object.assign(new Error('target remains held'), { code: 'EBUSY' });
+      return fs.renameSync(from, to);
+    }) as any);
+    let now = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => (now += 600));
+    const state: any = { sessionId: 'sess-fallback-stuck', claudeSessionId: 'agent', sessionTag: tag, prompts: [] };
+
+    expect(() => saveSessionState(state, repo, tag)).toThrow(TransientFsRetryExhaustedError);
+    expect(fs.existsSync(fallbackPath + '.tmp.' + process.pid)).toBe(false);
   });
 });

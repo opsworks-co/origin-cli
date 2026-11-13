@@ -21,6 +21,8 @@ import { ensureOwnerStamp } from './session-owner.js';
 import { debugLog } from './debug-log.js';
 import { isManuallyEnded } from './manual-session-end.js';
 import { withSessionStateLock } from './session-state-lock.js';
+import type { FileStamp } from './shell-command-probe.js';
+import { renameRetryingTransient, retryTransient, TransientFsRetryExhaustedError } from './transient-fs.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -183,6 +185,9 @@ export interface SessionState {
   // prompt — real context spent to tell the agent something it was told a turn
   // ago, and the fastest way to train it to skim past this block.
   memoryHitsInjected?: string[];
+  // This session's own open TODOs as last put in its context (the prompt
+  // hook's "TODOs you opened" block), so it shows again only when they change.
+  sessionTodosShown?: string;
   // Repo-relative files this session was already looked up for a per-file
   // history card (file-card.ts), whether or not one was produced. Capped by
   // FILE_CARDS_CHECKED_PER_SESSION.
@@ -274,6 +279,13 @@ export interface SessionState {
   // working even when its transcript sits untouched (Cursor writes its
   // transcript only when a generation ends). Hook-written only.
   lastTurnClosedAt?: number;
+  // First tool call after the last Stop, when no prompt opened a turn: Claude
+  // Code runs a turn on a background job's completion notice without firing
+  // UserPromptSubmit, so currentTurnStartedAt stays put while the agent works.
+  // Reported to the dashboard as the turn's start (Agents now panel) only —
+  // capture and liveness keep reading currentTurnStartedAt. See
+  // noteToolActivity in heartbeat-liveness.ts.
+  implicitTurnStartedAt?: number;
   // Stamped on the archived copy when the heartbeat dropped the session
   // because the SERVER said it was archived or deleted. Archive recovery must
   // not bring such a row back on the chat's next prompt.
@@ -408,7 +420,9 @@ export interface SessionState {
   //   trailer      the session was ended by hand when its sub-agent committed,
   //                so post-commit recorded nothing; on resume, a commit with
   //                this session's trailer whose files a turn's own recorded
-  //                edits wrote in that tree (commits-while-ended.ts).
+  //                edits wrote in that tree (commits-while-ended.ts). Also a
+  //                commit whose post-commit never ran, when its trailer names
+  //                this session and its `turn N` (hook-missed-trailer-commits.ts).
   commitTurns?: Array<{ sha: string; turnId: string; at: string; via: 'post-commit' | 'transcript' | 'trailer' }>;
   /**
    * What each turn committed before a squash ACROSS turns — or an amend by
@@ -558,6 +572,16 @@ export interface SessionState {
      * prefer-shadow-range.ts.
      */
     tree?: string;
+    /**
+     * Claude Code `Write` over an existing file: the file's exact content
+     * before the write, from PostToolUse `tool_response.originalFile`. Local
+     * only — it may hold a human's uncommitted lines, so it never joins
+     * `edits[].oldContent` (which is uploaded in editsJson and keys the
+     * ledger/transcript merge). Read solely by the post-commit line
+     * projection (editCapturesFromLiveLedger), where it is the pre-image the
+     * whole-file replay must match byte for byte.
+     */
+    writePreImage?: string;
   }>;
   // Files this session is ABOUT to write, claimed by the PRE-tool-use hook
   // before the tool runs.
@@ -584,7 +608,20 @@ export interface SessionState {
   // git dir that identifies the repository. A commit there finds no session
   // state in its own .git; the commit hooks read this from the mirror to find
   // the session that made it. See foreign-trees.ts.
-  foreignTrees?: Array<{ path: string; commonDir: string; at: string; turn: number }>;
+  // `branches`: what that checkout was on each time a tool call reached it. The
+  // session's own `branch` is its own checkout's and says nothing about this one.
+  // `files`: what its commands were seen changing there (armForeignTreeProbes),
+  // the only record of a write made through the shell. `turn` is local.
+  // `probes`: fingerprints of commands still running.
+  foreignTrees?: Array<{
+    path: string;
+    commonDir: string;
+    at: string;
+    turn: number;
+    branches?: string[];
+    files?: Array<{ file: string; turn: number }>;
+    probes?: Array<{ toolCallId?: string; stamps: FileStamp[] }>;
+  }>;
   // Commits this session made in another repository (foreignTrees). Kept out
   // of sessionCommitShas, whose every reader runs git in the session's own
   // repo and cannot see them.
@@ -613,6 +650,11 @@ export interface SessionState {
   // Real sub-agent spawns (Task tool only) — the honest "N sub-agents" count,
   // distinct from the `subagents` tool-call ring buffer above.
   subagentSpawns?: SubagentSpawn[];
+  // Tool calls that launched work which keeps running after the call returns
+  // (`run_in_background: true` on a shell or Agent call). Such a job can write
+  // into the tree after this session's Stop, so a sibling must not read the
+  // Stop as "idle" — see peerIdleSinceMs. Last BACKGROUND_JOBS_MAX kept.
+  backgroundJobs?: Array<{ at: number; tool: string }>;
   tabCompletions?: TabCompletionStats;
   agentSystemPrompt?: string; // Cached agent system prompt for session resume
   activePolicies?: string[];  // Cached active policies for session resume
@@ -1834,7 +1876,7 @@ function rememberOwnWrite(state: SessionState, file: string): void {
   } catch { /* best-effort */ }
 }
 
-/** See keepCommitRecordsSavedMeanwhile. Never throws: a failed read keeps today's write. */
+/** See keepCommitRecordsSavedMeanwhile. Transient read exhaustion aborts rather than losing a peer's write. */
 /**
  * The closed-turn marker Stop put on disk ahead of its own save
  * (markTurnClosedOnDisk), when this state has not caught up with it. Returned
@@ -1865,7 +1907,7 @@ function keepCommitsRecordedSinceRead(state: SessionState, statePath: string): n
     const st = fs.statSync(statePath);
     const mine = lastWriteByState.get(state);
     if (mine && mine.file === statePath && mine.mtimeMs === st.mtimeMs && mine.size === st.size) return null;
-    const onDisk = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+    const onDisk = JSON.parse(retryTransient(() => fs.readFileSync(statePath, 'utf-8')));
     keepWriteTreesSavedMeanwhile(state, onDisk);
     const kept = keepCommitRecordsSavedMeanwhile(state, onDisk);
     if (kept) {
@@ -1875,7 +1917,10 @@ function keepCommitsRecordedSinceRead(state: SessionState, statePath: string): n
     }
     keepCommitClaimSavedMeanwhile(state, onDisk);
     return closedTurnMarkedMeanwhile(state, onDisk);
-  } catch { return null; /* no file yet, or unreadable — write as before */ }
+  } catch (err) {
+    if (err instanceof TransientFsRetryExhaustedError) throw err;
+    return null; /* no file yet, or unreadable — write as before */
+  }
 }
 
 /** States whose `commitCommandInFlight` was set or cleared by the tool hooks in THIS process. */
@@ -1944,7 +1989,7 @@ export function markTurnClosedOnDisk(
   try {
     const statePath = getStatePath(cwd, sessionTag);
     return withSessionStateLock(statePath, () => {
-      const onDisk = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+      const onDisk = JSON.parse(retryTransient(() => fs.readFileSync(statePath, 'utf-8')));
       if (!onDisk || typeof onDisk !== 'object' || Array.isArray(onDisk)) return false;
       const prev = Number.isInteger(onDisk.lastClosedTurnIndex) ? onDisk.lastClosedTurnIndex as number : -1;
       if (prev >= localTurn) return true;
@@ -1952,7 +1997,12 @@ export function markTurnClosedOnDisk(
       onDisk.stopClosing = { turn: localTurn, at };
       const tmp = statePath + '.tmp.' + process.pid;
       fs.writeFileSync(tmp, JSON.stringify(onDisk, null, 2), { mode: 0o600 });
-      fs.renameSync(tmp, statePath);
+      try {
+        renameRetryingTransient(tmp, statePath);
+      } catch (err) {
+        try { fs.unlinkSync(tmp); } catch { /* already renamed or removed */ }
+        throw err;
+      }
       return true;
     });
   } catch {
@@ -1970,14 +2020,19 @@ export function markStopSentOnDisk(cwd: string | undefined, sessionTag: string |
   try {
     const statePath = getStatePath(cwd, sessionTag);
     return withSessionStateLock(statePath, () => {
-      const onDisk = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+      const onDisk = JSON.parse(retryTransient(() => fs.readFileSync(statePath, 'utf-8')));
       if (!onDisk || typeof onDisk !== 'object' || Array.isArray(onDisk)) return false;
       const prev = Number.isInteger(onDisk.stopSentTurnIndex) ? onDisk.stopSentTurnIndex as number : -1;
       if (prev >= localTurn) return true;
       onDisk.stopSentTurnIndex = localTurn;
       const tmp = statePath + '.tmp.' + process.pid;
       fs.writeFileSync(tmp, JSON.stringify(onDisk, null, 2), { mode: 0o600 });
-      fs.renameSync(tmp, statePath);
+      try {
+        renameRetryingTransient(tmp, statePath);
+      } catch (err) {
+        try { fs.unlinkSync(tmp); } catch { /* already renamed or removed */ }
+        throw err;
+      }
       return true;
     });
   } catch {
@@ -2014,12 +2069,31 @@ function saveSessionStateLocked(state: SessionState, statePath: string, cwd?: st
   const carried = closedTurnCarriedByState.get(state);
   const ownClosed = Number.isInteger(state.lastClosedTurnIndex) ? state.lastClosedTurnIndex as number : -1;
   const toWrite = carried !== undefined && carried > ownClosed ? { ...state, lastClosedTurnIndex: carried } : state;
+  const tmpStatePath = statePath + '.tmp.' + process.pid;
   try {
-    const tmpStatePath = statePath + '.tmp.' + process.pid;
     fs.writeFileSync(tmpStatePath, JSON.stringify(toWrite, null, 2), { mode: 0o600 });
-    fs.renameSync(tmpStatePath, statePath);
+    // The tmp file is in .git, so this is not the sandbox below: it is native
+    // Windows refusing a rename over a file someone has open (a hook reading
+    // it unlocked, Defender scanning the last write), which clears in
+    // milliseconds. Falling back on it put the row in a file keyed by THIS
+    // hook's cwd: Cursor's worktree prompt adopted session-start's
+    // reservation, its save landed there, session-start's fold — keyed by
+    // the main checkout — read the reservation from .git and wrote it back
+    // with `prompts: []`. The prompt was lost (#1568, 1 Windows run in 3).
+    renameRetryingTransient(tmpStatePath, statePath, (err) => {
+      debugLog('session-state', 'state file rename refused, retrying', {
+        statePath, code: (err as NodeJS.ErrnoException)?.code,
+      });
+    });
     rememberOwnWrite(state, statePath);
   } catch (err: any) {
+    try { fs.unlinkSync(tmpStatePath); } catch { /* never written, or already gone */ }
+    if (err instanceof TransientFsRetryExhaustedError) {
+      debugLog('session-state', 'state file rename remained refused after retry budget', {
+        statePath, code: err.code,
+      });
+      throw err;
+    }
     // Sandboxed agents (Codex's workspace-write) forbid writes INSIDE .git →
     // EPERM/EACCES. A thrown save aborts the whole Stop hook, which the agent
     // then surfaces as "hook timed out after 10s". Persist to the sandbox-safe
@@ -2029,7 +2103,12 @@ function saveSessionStateLocked(state: SessionState, statePath: string, cwd?: st
       if (fb !== statePath) {
         const tmpFb = fb + '.tmp.' + process.pid;
         fs.writeFileSync(tmpFb, JSON.stringify(toWrite, null, 2), { mode: 0o600 });
-        fs.renameSync(tmpFb, fb);
+        try {
+          renameRetryingTransient(tmpFb, fb);
+        } catch (fallbackErr) {
+          try { fs.unlinkSync(tmpFb); } catch { /* already renamed or removed */ }
+          throw fallbackErr;
+        }
       }
     } else {
       throw err;
@@ -2214,10 +2293,13 @@ export function preferRegisteredSessionId(
 export function readStateAtTag(cwd?: string, sessionTag?: string): SessionState | null {
   const tryRead = (p: string): SessionState | null => {
     try {
-      const parsed = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      // A file Windows is mid-replace on refuses the open for a moment; read
+      // as "no file", session-start's fold skipped an adopter it should merge.
+      const parsed = JSON.parse(retryTransient(() => fs.readFileSync(p, 'utf-8')));
       if (!parsed || typeof parsed !== 'object' || typeof parsed.sessionId !== 'string' || !parsed.sessionId) return null;
       return parsed as SessionState;
-    } catch {
+    } catch (err) {
+      if (err instanceof TransientFsRetryExhaustedError) throw err;
       return null;
     }
   };
@@ -2582,8 +2664,8 @@ function foldCommitRecordsToSurvivors(
  * Returns what was added, or null when nothing was. Does not save.
  */
 export function keepCommitRecordsSavedMeanwhile(
-  state: Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits' | 'preSquashCommitTurns' | 'foldedCommitTurns' | 'replayedCommits'>,
-  onDisk: Partial<Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits' | 'preSquashCommitTurns' | 'foldedCommitTurns' | 'replayedCommits'>> | null | undefined,
+  state: Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits' | 'preSquashCommitTurns' | 'foldedCommitTurns' | 'replayedCommits' | 'crossRepoCommits'>,
+  onDisk: Partial<Pick<SessionState, 'sessionId' | 'sessionCommitShas' | 'commitTurns' | 'rewrittenCommits' | 'preSquashCommitTurns' | 'foldedCommitTurns' | 'replayedCommits' | 'crossRepoCommits'>> | null | undefined,
 ): { shas: string[]; turns: number; pairs: number } | null {
   if (!onDisk || !state?.sessionId || onDisk.sessionId !== state.sessionId) return null;
   const same = (a: string, b: string) => {
@@ -2618,6 +2700,17 @@ export function keepCommitRecordsSavedMeanwhile(
   const addReplayed = (Array.isArray(onDisk.replayedCommits) ? onDisk.replayedCommits : []).filter((sha) =>
     typeof sha === 'string' && sha.length > 0 && !ownReplayed.some((own) => typeof own === 'string' && same(own, sha)));
   if (addReplayed.length > 0) state.replayedCommits = [...ownReplayed, ...addReplayed];
+  // A commit the session made in ANOTHER repository is recorded only here, by
+  // the post-commit that ran in that repository (in the background). The
+  // agent's next tool hook, holding a copy read before it, wrote it back
+  // without the entry: local-ci 2026-11-11, capture-e2e-commit-in-another-repo,
+  // `crossRepoCommits` empty right after the commit's own PATCH carried it.
+  // Merged before the early return, like replayedCommits: no sha in
+  // sessionCommitShas comes with it.
+  const ownCross = Array.isArray(state.crossRepoCommits) ? state.crossRepoCommits : [];
+  const addCross = (Array.isArray(onDisk.crossRepoCommits) ? onDisk.crossRepoCommits : []).filter((c) =>
+    c?.sha && c.repoPath && !ownCross.some((own) => own?.sha && same(own.sha, c.sha)));
+  if (addCross.length > 0) state.crossRepoCommits = [...ownCross, ...addCross].slice(-200);
   if (addPairs.length === 0 && addShas.length === 0 && addTurns.length === 0) return null;
   const pairs = [...ownPairs, ...addPairs];
   if (addPairs.length > 0) state.rewrittenCommits = pairs;
@@ -2708,7 +2801,12 @@ export function clearSessionState(cwd?: string, sessionTag?: string): void {
       const archivePath = path.join(archiveDir, `${state.sessionId.slice(0, 12)}.json`);
       const tmpArchivePath = archivePath + '.tmp.' + process.pid;
       fs.writeFileSync(tmpArchivePath, JSON.stringify(state), { mode: 0o600 });
-      fs.renameSync(tmpArchivePath, archivePath);
+      try {
+        renameRetryingTransient(tmpArchivePath, archivePath);
+      } catch (err) {
+        try { fs.unlinkSync(tmpArchivePath); } catch { /* already renamed or removed */ }
+        throw err;
+      }
     }
   } catch { /* corrupt state — fall through to plain delete */ }
   // Remove the active state file from both possible locations.

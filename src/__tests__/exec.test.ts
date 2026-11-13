@@ -122,3 +122,18 @@ describe('ensureUnderRoot', () => {
     expect(out).toBe('/tmp/foo');
   });
 });
+
+describe('runDetailed with output past maxBuffer', () => {
+  it.skipIf(process.platform === 'win32')('is never a success, even when the child exits 0 before it can be killed', () => {
+    // The shell writes everything and exits at once: Node reports ENOBUFS with status 0.
+    const script = 'printf %s "$(head -c 3000 /dev/zero | tr "\\0" x)"';
+    const statuses = new Set(Array.from({ length: 40 }, () => runDetailed('sh', ['-c', script], { maxBuffer: 256 }).status));
+    expect(statuses.has(0)).toBe(false);
+  });
+
+  it('leaves output inside the limit, and a real exit code, alone', () => {
+    expect(runDetailed(process.execPath, ['-e', "process.stdout.write('ok')"], { maxBuffer: 256 })).toMatchObject({ status: 0, stdout: 'ok' });
+    expect(runDetailed(process.execPath, ['-e', 'process.exit(3)'], { maxBuffer: 256 }).status).toBe(3);
+  });
+});
+

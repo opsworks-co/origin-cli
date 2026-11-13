@@ -68,7 +68,37 @@ describe('publishIssueBranch', () => {
     const r = repo('issue/e31db5e2-slug', 2);
     const { exec, ghCalls } = execWith(() => ({ ok: true, stdout: 'https://github.com/o/r/pull/9' }), 'git@github.com:o/r.git');
     expect(publishIssueBranch(input(r.work), exec)).toEqual({ kind: 'pr', url: 'https://github.com/o/r/pull/9', created: false });
-    expect(ghCalls.map((a) => a[1])).toEqual(['list']);
+    expect(ghCalls.map((a) => a[1])).toEqual(['list', 'list']);
+  });
+
+  it('does nothing when the branch head is already merged (a squash merge leaves its commit "beyond main")', () => {
+    // #2855 merged mid-run; at the end the run opened #2856 on the same commit.
+    const r = repo('issue/e31db5e2-slug', 1);
+    const head = git(r.work, 'rev-parse', 'HEAD');
+    const { exec, ghCalls } = execWith((args) => args.includes('merged') ? { ok: true, stdout: head } : { ok: true, stdout: '' }, 'https://github.com/o/r.git');
+    expect(publishIssueBranch(input(r.work), exec)).toEqual({ kind: 'skipped', reason: 'issue/e31db5e2-slug has nothing beyond its merged pull request' });
+    expect(() => git(r.bare, 'rev-parse', '--verify', 'refs/heads/issue/e31db5e2-slug')).toThrow();
+    expect(ghCalls.some((a) => a[1] === 'create')).toBe(false);
+  });
+
+  it('still opens a pull request for commits made after the branch merged', () => {
+    const r = repo('issue/e31db5e2-slug', 1);
+    const mergedHead = git(r.work, 'rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(r.work, 'later.txt'), 'later\n');
+    git(r.work, 'add', '.');
+    git(r.work, 'commit', '-m', 'follow-up after the merge');
+    const { exec } = execWith((args) => args.includes('merged') ? { ok: true, stdout: mergedHead }
+      : args[1] === 'list' ? { ok: true, stdout: '' } : { ok: true, stdout: 'https://github.com/o/r/pull/13' }, 'https://github.com/o/r.git');
+    expect(publishIssueBranch(input(r.work), exec)).toEqual({ kind: 'pr', url: 'https://github.com/o/r/pull/13', created: true });
+  });
+
+  it('does nothing when the commits change no files (an agent that found the work already done)', () => {
+    const r = repo('issue/e31db5e2-slug', 0);
+    git(r.work, 'commit', '--allow-empty', '-m', 'chore: close e31db5e2 as already fixed');
+    const { exec, ghCalls } = execWith(() => ({ ok: true, stdout: '' }), 'https://github.com/o/r.git');
+    expect(publishIssueBranch(input(r.work), exec)).toEqual({ kind: 'skipped', reason: 'the commits on issue/e31db5e2-slug change no files' });
+    expect(() => git(r.bare, 'rev-parse', '--verify', 'refs/heads/issue/e31db5e2-slug')).toThrow();
+    expect(ghCalls).toEqual([]);
   });
 
   it('does nothing when the agent committed nothing', () => {

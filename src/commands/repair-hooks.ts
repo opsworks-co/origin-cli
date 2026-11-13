@@ -40,11 +40,13 @@ export async function repairHooksCommand(opts: { check?: boolean; quiet?: boolea
   let drifted = 0;
   let repaired = 0;
   const failures: string[] = [];
+  let claudeCode = false;
 
   for (const base of hookConfigBases()) {
     for (const report of checkHookConfigs(base)) {
       if (report.state === 'absent') continue;
       installed++;
+      if (report.agent === 'claude-code') claudeCode = true;
       if (!isRepairable(report.state)) continue;
       drifted++;
 
@@ -62,6 +64,21 @@ export async function repairHooksCommand(opts: { check?: boolean; quiet?: boolea
       } catch (err: any) {
         failures.push(`${location}: ${err?.message || err}`);
       }
+    }
+  }
+
+  // A machine enabled before Origin read Claude Code plan limits gets the
+  // status line here, which is how `origin upgrade` reaches it.
+  if (claudeCode && !opts.check) {
+    const { ensureStatusLine } = await import('./statusline.js');
+    const { originCmd } = await import('./enable.js');
+    try {
+      if (ensureStatusLine(originCmd('origin statusline'))) {
+        say(chalk.green('  ✓ Claude Code plan limits — Origin now reads them via the status line'));
+        say(chalk.gray('    yours still shows; origin statusline --uninstall to stop'));
+      }
+    } catch (err: any) {
+      failures.push(`Claude Code status line: ${err?.message || err}`);
     }
   }
 

@@ -48,6 +48,9 @@ export interface CodexSessionData {
   // fallback, which has no split.
   modelUsage?: ModelUsage[];
   turnUsage?: Array<{ promptIndex: number; modelUsage: ModelUsage[] }>;
+  // The plan and how much of its usage windows are used, as Codex last
+  // reported them (subscription logins only; an API-key run has none).
+  planLimits?: CodexPlanLimits;
 }
 
 /**
@@ -287,6 +290,7 @@ export function discoverCodexSessionData(
         transcript: rolloutResult.transcript,
         ...(rolloutResult.modelUsage && { modelUsage: rolloutResult.modelUsage, turnUsage: rolloutResult.turnUsage }),
         ...(rolloutResult.subagentSpawns && { subagentSpawns: rolloutResult.subagentSpawns }),
+        ...(rolloutResult.planLimits && { planLimits: rolloutResult.planLimits }),
         cwd: threadCwd || undefined,
         rolloutPath: absRolloutPath || undefined,
       };
@@ -2145,12 +2149,56 @@ function sessionMetaId(event: any): string | undefined {
   return typeof id === 'string' && id ? id : undefined;
 }
 
+export interface CodexPlanLimits {
+  planType?: string;
+  // When Codex reported it: the event's timestamp.
+  capturedAt: string;
+  // Codex's primary and secondary windows (e.g. 5 hours and a week), in order.
+  windows: Array<{ usedPercent: number; windowMinutes?: number; resetsAt?: string }>;
+}
+
+/**
+ * The newest plan-usage report in a rollout. On a ChatGPT login every
+ * `token_count` event carries `rate_limits`: the plan type and, per usage
+ * window, the share used and when it resets. That is the only place a
+ * subscription's usage is readable — OpenAI has no API for it.
+ */
+export function codexPlanLimits(lines: readonly string[]): CodexPlanLimits | undefined {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].includes('"rate_limits"')) continue;
+    let event: any;
+    try { event = JSON.parse(lines[i]); } catch { continue; }
+    const rl = event?.payload?.type === 'token_count' ? event.payload.rate_limits : undefined;
+    if (!rl || typeof rl !== 'object') continue;
+    const windows: CodexPlanLimits['windows'] = [];
+    for (const w of [rl.primary, rl.secondary]) {
+      const used = Number(w?.used_percent);
+      if (!w || !Number.isFinite(used)) continue;
+      const minutes = Number(w.window_minutes);
+      const resets = Number(w.resets_at);
+      windows.push({
+        usedPercent: used,
+        ...(Number.isFinite(minutes) && minutes > 0 && { windowMinutes: minutes }),
+        ...(Number.isFinite(resets) && resets > 0 && { resetsAt: new Date(resets * 1000).toISOString() }),
+      });
+    }
+    const at = Date.parse(String(event.timestamp ?? ''));
+    if (windows.length === 0 || Number.isNaN(at)) continue;
+    return {
+      ...(typeof rl.plan_type === 'string' && rl.plan_type && { planType: rl.plan_type }),
+      capturedAt: new Date(at).toISOString(),
+      windows,
+    };
+  }
+  return undefined;
+}
+
 export function parseCodexRollout(
   codexDir: string,
   rolloutPath: string,
   threadId: string,
   opts: { verbose?: boolean } = {},
-): { tokensUsed: number; inputTokens: number; outputTokens: number; cacheReadTokens?: number; model?: string; turnCount: number; toolCalls: number; transcript?: string; userPrompts?: string[]; modelUsage?: ModelUsage[]; turnUsage?: Array<{ promptIndex: number; modelUsage: ModelUsage[] }>; subagentSpawns?: CodexSubagentSpawn[] } | null {
+): { tokensUsed: number; inputTokens: number; outputTokens: number; cacheReadTokens?: number; model?: string; turnCount: number; toolCalls: number; transcript?: string; userPrompts?: string[]; modelUsage?: ModelUsage[]; turnUsage?: Array<{ promptIndex: number; modelUsage: ModelUsage[] }>; subagentSpawns?: CodexSubagentSpawn[]; planLimits?: CodexPlanLimits } | null {
   try {
     // Try to resolve the rollout file
     let rolloutFile = '';
@@ -2490,6 +2538,7 @@ export function parseCodexRollout(
       userPrompts: userPrompts.length > 0 ? userPrompts : undefined,
       ...(subagentSpawns.length > 0 && { subagentSpawns }),
       ...split,
+      planLimits: codexPlanLimits(lines),
     };
   } catch (err) {
     debugLog('codex', 'parseCodexRollout error', { error: String(err) });

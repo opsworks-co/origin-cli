@@ -50,8 +50,10 @@ describe('a repo-local core.hooksPath that shadows Origin\'s global hooks', () =
       const src = fs.readFileSync(p, 'utf-8');
       const start = src.indexOf('ORIGIN_BIN=""');
       const end = src.indexOf('\nfi\n', start);
-      // post-commit backgrounds the CLI; run it in the foreground so the log is ordered.
+      // post-commit detaches the CLI; run it in the foreground so the log is
+      // ordered: never take the perl double fork, and drop the fallback's `&`.
       const body = (src.slice(0, start) + `ORIGIN_BIN=${JSON.stringify(stub)}` + src.slice(end + '\nfi'.length))
+        .replace('if [ "$OS" != "Windows_NT" ] && command -v perl', 'if false && command -v perl')
         .replace(/\s&\s*$/gm, '\n');
       fs.writeFileSync(p, body);
       fs.chmodSync(p, '755');

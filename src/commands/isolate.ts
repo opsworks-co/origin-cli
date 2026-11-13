@@ -14,6 +14,7 @@ import { execFileSync } from 'child_process';
 import * as path from 'path';
 import chalk from 'chalk';
 import { getWorkingGitRoot, getCanonicalRepoPath } from '../session-state.js';
+import { hydrateWorktreeIgnoredFiles } from '../worktree-hydration.js';
 
 export interface IsolateOptions {
   /** Branch for the new worktree. Defaults to a name derived from the tree. */
@@ -43,6 +44,10 @@ export async function isolateCommand(opts: IsolateOptions = {}): Promise<void> {
   } catch (err: unknown) {
     console.log(chalk.red(`  Could not create the worktree: ${err instanceof Error ? err.message : String(err)}`));
     return;
+  }
+
+  for (const warning of hydrateWorktreeIgnoredFiles(repo, target, (relative) => console.log(chalk.gray(`  Cloning ${relative} into the worktree…`)))) {
+    console.log(chalk.yellow(`  Could not hydrate ignored worktree entry ${warning}`));
   }
 
   console.log('');

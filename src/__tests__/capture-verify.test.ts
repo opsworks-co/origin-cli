@@ -354,6 +354,33 @@ describe('verifySession', () => {
     expect(v.some((x) => x.code === 'duplicate_file_section')).toBe(true);
   });
 
+  // Session 3b9133fb turn 9 committed on two PR branches that each bumped
+  // packages/cli/package.json from the same base. The commit patch keeps one
+  // section per branch on purpose (normalizeTurnDiff's `commitPieces`).
+  it('does not flag a file repeated across the branches of a multi-commit patch', () => {
+    const turn: VerifiableTurn = {
+      promptIndex: 0, filesChanged: ['src/a.ts'], diff: MODIFY + MODIFY,
+      commitPatch: true, patchCommits: ['aaaaaaa', 'bbbbbbb'],
+    };
+    expect(verifyTurn(turn).some((x) => x.code === 'duplicate_file_section')).toBe(false);
+  });
+
+  it('still flags a repeated file in a single-commit patch', () => {
+    const turn: VerifiableTurn = {
+      promptIndex: 0, filesChanged: ['src/a.ts'], diff: MODIFY + MODIFY,
+      commitPatch: true, patchCommits: ['aaaaaaa'],
+    };
+    expect(verifyTurn(turn).some((x) => x.code === 'duplicate_file_section')).toBe(true);
+  });
+
+  it('still flags a repeated file in the uncommitted half of a multi-commit patch row', () => {
+    const turn: VerifiableTurn = {
+      promptIndex: 0, filesChanged: ['src/a.ts'], diff: '', uncommittedDiff: MODIFY + MODIFY,
+      commitPatch: true, patchCommits: ['aaaaaaa', 'bbbbbbb'],
+    };
+    expect(verifyTurn(turn).some((x) => x.code === 'duplicate_file_section')).toBe(true);
+  });
+
   it('summarises contradictions and suspects separately', () => {
     const turns: VerifiableTurn[] = [
       { promptIndex: 0, filesChanged: ['src/a.ts'], diff: MODIFY },

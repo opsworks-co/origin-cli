@@ -2,7 +2,7 @@
 // its final save. A heartbeat tick that began in between read "open", carried
 // a newer stamp, and replaced Stop's row. markTurnClosedOnDisk records the
 // close first, touching nothing else in the state file.
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -22,7 +22,10 @@ function repoWithState(state: Record<string, unknown>): { repo: string; statePat
 }
 const read = (p: string) => JSON.parse(fs.readFileSync(p, 'utf-8'));
 
-afterEach(() => { for (const dir of roots.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const dir of roots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
 
 describe('markTurnClosedOnDisk', () => {
   it('a tick reading the state after the mark sees the turn closed; nothing else moved', () => {
@@ -48,6 +51,34 @@ describe('markTurnClosedOnDisk', () => {
     const { repo, statePath } = repoWithState({ sessionId: 's-1', lastClosedTurnIndex: 4 });
     expect(markTurnClosedOnDisk(repo, 'tag-0001', 2)).toBe(true);
     expect(read(statePath).lastClosedTurnIndex).toBe(4);
+  });
+
+  it('retries a transient Windows refusal while replacing the state file', () => {
+    const { repo, statePath } = repoWithState({ sessionId: 's-1', lastClosedTurnIndex: 0 });
+    const realRename = fs.renameSync.bind(fs);
+    let refusals = 0;
+    vi.spyOn(fs, 'renameSync').mockImplementation(((from: any, to: any) => {
+      if (to === statePath && refusals++ < 2) throw Object.assign(new Error('held by Defender'), { code: 'EPERM' });
+      return realRename(from, to);
+    }) as any);
+
+    expect(markTurnClosedOnDisk(repo, 'tag-0001', 1)).toBe(true);
+    expect(read(statePath).lastClosedTurnIndex).toBe(1);
+    expect(refusals).toBe(3);
+  });
+
+  it('retries a transient Windows refusal while reading the state file', () => {
+    const { repo, statePath } = repoWithState({ sessionId: 's-1', lastClosedTurnIndex: 0 });
+    const realRead = fs.readFileSync.bind(fs);
+    let refusals = 0;
+    vi.spyOn(fs, 'readFileSync').mockImplementation(((file: any, ...args: any[]) => {
+      if (file === statePath && refusals++ < 2) throw Object.assign(new Error('held by Defender'), { code: 'EACCES' });
+      return (realRead as any)(file, ...args);
+    }) as any);
+
+    expect(markTurnClosedOnDisk(repo, 'tag-0001', 1)).toBe(true);
+    expect(read(statePath).lastClosedTurnIndex).toBe(1);
+    expect(refusals).toBe(4); // three mark reads, then this assertion's read
   });
 
   it('answers false and writes nothing when there is no state file or no turn', () => {

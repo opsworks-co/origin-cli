@@ -122,13 +122,31 @@ export function editCapturesFromEditsJson(byIndex: ReadonlyMap<number, string> |
   return out.sort((a, b) => a.promptIndex - b.promptIndex);
 }
 
+type LiveLedgerEntry = NonNullable<SessionState['liveEdits']>[number];
+
+/**
+ * A Claude Code `Write` entry with its captured pre-image put where the replay
+ * reads it: `oldContent` of the one whole-file write. A copy — the ledger keeps
+ * the pre-image out of `edits`, because those are uploaded and merged. The
+ * replay still proves it (applyEdit): a pre-image that is not byte for byte
+ * the replayed state is `replay_mismatch`, never a claim. Anything other than
+ * a single content-less-before write is left exactly as captured.
+ */
+function withWritePreImage(entry: LiveLedgerEntry): LiveLedgerEntry {
+  const pre = entry.writePreImage;
+  if (typeof pre !== 'string' || pre === '' || entry.edits?.length !== 1) return entry;
+  const [only] = entry.edits;
+  if (!only || only.op !== 'write' || (typeof only.oldContent === 'string' && only.oldContent !== '')) return entry;
+  return { ...entry, edits: [{ ...only, oldContent: pre }] };
+}
+
 /**
  * Captures from the live PostToolUse ledger — all post-commit has, since it
  * runs before any transcript is parsed. Entries written in another worktree
  * (a sub-agent's) are relative to that tree, not this repo, and are left out.
  */
 export function editCapturesFromLiveLedger(state: Pick<SessionState, 'liveEdits' | 'promptIndexBase'>): SessionEditCapture[] {
-  const entries = (state.liveEdits ?? []).filter((e) => e && !e.tree);
+  const entries = (state.liveEdits ?? []).filter((e) => e && !e.tree).map(withWritePreImage);
   const caps = rebaseToServerRows(buildCapturesFromLedger(entries as any), state.promptIndexBase);
   return caps.map((c) => ({ promptIndex: c.promptIndex, edits: c.edits }));
 }
@@ -199,6 +217,19 @@ export function canonicalCommitSha(repoPath: string, sha: string, deadline?: Pro
  * `degraded` and gets a commit-level note.
  */
 export const LINE_CLAIM_BUDGET_MS = 500;
+
+/**
+ * The budget for a producer that runs AFTER the user's command returned — Stop
+ * and SessionEnd. post-commit keeps LINE_CLAIM_BUDGET_MS because it holds the
+ * user's `git commit`; when it runs out it writes a commit-level note and
+ * leaves the lines to Stop, which re-projects exactly those notes
+ * (planStopNoteWrites). With the same 500 ms, Stop ran out too on any box
+ * where a git spawn costs a few hundred ms under load, and the commit kept its
+ * commit-level note for good: Jenkins 11-03 (973b287a), cursor-binary turn 3,
+ * `[line-claims] projection dropped claims {"reasons":{"timeout":1}}` from both
+ * hooks. Stop's own cost is tens of seconds; a few more for the lines is cheap.
+ */
+export const LINE_CLAIM_LATE_BUDGET_MS = 5_000;
 
 export interface LineClaimOptions {
   /** Default LINE_CLAIM_BUDGET_MS. */

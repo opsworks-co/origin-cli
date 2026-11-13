@@ -8,6 +8,7 @@ import {
   sortByDateAsc, todoClosureKey, todoDisplayId, type TodoClosure,
 } from './memory.js';
 import { samePath } from './paths.js';
+import { parseOriginMarkers } from './origin-markers.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -180,6 +181,77 @@ export function readMemoryTodos(repoPath: string): TodoItem[] {
     });
   }
   return items;
+}
+
+/**
+ * Did this session itself say it closed `item` with `[Origin: Closes]`?
+ *
+ * The marker was meant for an EARLIER session's leftover, but a session closes
+ * its own too: it writes an Open, finishes the work two turns later and says
+ * so. The entry then listed both — the item as open and the claim that it was
+ * done. Matched by text, or by the id `origin todo` shows for it
+ * (todoDisplayId of the text and this session).
+ */
+export function closedBySameSession(item: string, sessionId: string, closes: readonly string[] | undefined): boolean {
+  if (!closes || closes.length === 0) return false;
+  const key = todoClosureKey(item);
+  const id = todoDisplayId(item, sessionId).toLowerCase();
+  return closes.some((c) => {
+    const ck = todoClosureKey(c);
+    return ck === key || new RegExp(`(^|[^0-9a-f])${id}([^0-9a-f]|$)`).test(ck);
+  });
+}
+
+// ─── In the agent's context ────────────────────────────────────────────────
+//
+// `[Origin: Closes] <id>` is how a TODO closes, and the framework tells agents
+// to name "the open TODOs listed above". Nothing listed them: the ids were in
+// the deterministic memory digest only, which the LLM brief replaces whenever
+// one exists, and that digest read live sessions only, not the archive where
+// most TODOs sit. So agents finished work and never closed it — this session
+// opened b694b1b4 ("Phase 3 …"), built it in #2755, and the orchestrator later
+// spent a run finding it done (2026-10-29). These two blocks put the ids where
+// the agent reads.
+
+/** At most this many open TODOs go into an agent's context. */
+export const CONTEXT_TODOS = 8;
+
+const oneLine = (text: string, max: number) => {
+  const t = text.replace(/\s+/g, ' ').trim();
+  return t.length <= max ? t : `${t.slice(0, max - 1)}…`;
+};
+
+/**
+ * The repo's open TODOs, newest first, with the ids an agent closes them by —
+ * the list `origin todo list` prints, so a Closes marker naming one resolves.
+ * One a session already claimed (pending its merge) is left out.
+ */
+export function buildOpenTodosContext(repoPath: string): string | null {
+  const open = readMemoryTodos(repoPath).filter((t) => !t.pending);
+  if (open.length === 0) return null;
+  return [
+    'Open TODOs in this repo, newest first. When your work finishes one, or you find it already done, say so with `[Origin: Closes] <id> — <what did it>`:',
+    ...open.slice(0, CONTEXT_TODOS).map((t) => `  - ${t.id}  ${oneLine(t.text, 160)}`),
+    ...(open.length > CONTEXT_TODOS ? [`  …and ${open.length - CONTEXT_TODOS} more (\`origin todo list\`)`] : []),
+  ].join('\n');
+}
+
+/**
+ * The TODOs this session opened with `[Origin: Open]` and has not closed,
+ * under the ids they will be listed by (todoDisplayId of the text and this
+ * session). Session end drops one the session closed by that id — see
+ * closedBySameSession — so naming it is enough when the work gets done later
+ * in the same session.
+ */
+export function buildSessionTodosContext(sessionId: string, responses: readonly string[] | undefined): string | null {
+  const markers = parseOriginMarkers((responses || []).join('\n'));
+  const open = [...new Set((markers?.open || []).map((t) => t.trim()).filter(Boolean))]
+    .filter((t) => !closedBySameSession(t, sessionId, markers?.closes));
+  if (open.length === 0) return null;
+  return [
+    'TODOs you opened in this session. If you finish one here, close it with `[Origin: Closes] <id>`:',
+    ...open.slice(0, CONTEXT_TODOS).map((t) => `  - ${todoDisplayId(t, sessionId)}  ${oneLine(t, 160)}`),
+  ].join('\n');
 }
 
 export function addTodosFromSession(
